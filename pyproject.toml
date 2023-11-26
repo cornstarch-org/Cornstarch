@@ -1,0 +1,34 @@
+[project]
+name = "pipeline-template"
+description = "A library that provides heterogeneous pipeline templates and instantiation."
+readme = "README.md"
+requires-python = ">=3.10"
+version = "0.0.1"
+authors = [
+    {name = "Insu Jang", email = "insujang@umich.edu"}
+]
+maintainers = [
+    {name = "Insu Jang", email = "insujang@umich.edu"}
+]
+dependencies = [
+    "torch",
+    "transformers",
+    "colossalai",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "black>=23.0",
+    "isort>=5.12",
+    "pytest",
+    "pytest-mock",
+]
+
+[tool.ruff]
+# Never enforce `E501` (line length violations).
+ignore = ["E501"]
+
+[build-system]
+requires = ["setuptools>=63.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
