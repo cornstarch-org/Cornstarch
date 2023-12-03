@@ -1,8 +1,8 @@
 from typing import List
 import torch.distributed as dist
+import numpy as np
 
 from colossalai.pipeline.stage_manager import PipelineStageManager
-from torch.distributed import ProcessGroup
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 
 
@@ -75,14 +75,22 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
 
     @property
     def num_stages(self) -> int:
-        pass
+        group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)
+        assert group is not None
+        return len(self.pg_mesh.get_ranks_in_group(group))
 
     @property
     def stage(self) -> int:
-        pass
+        group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)
+        assert group is not None
+        ranks_in_group = self.pg_mesh.get_ranks_in_group(group)
+        return ranks_in_group.index(self.get_rank())
 
     def init_process_group_by_stages(self, stages: list[int]) -> dist.ProcessGroup:
-        pass
+        raise NotImplementedError(
+            "init_process_group_by_stages has been removed."
+            "Use init_process_group_by_layers instead."
+        )
 
     # Inherited functions from PipelineStageManager
     # is_first_stage()

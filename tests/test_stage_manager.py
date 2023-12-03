@@ -58,6 +58,38 @@ tp_template_ranks = [
 
 
 @pytest.mark.parametrize(
+    "pipeline_templates, tp_size, ranks, expected_num_stages, expected_stages",
+    [
+        [no_tp_templates, 1, [0, 1], 2, [0, 1]],
+        [no_tp_templates, 1, [2, 3], 2, [0, 1]],
+        [no_tp_templates, 1, [4, 5, 6], 3, [0, 1, 2]],
+        [tp_templates, 2, [0, 2], 2, [0, 1]],
+        [tp_templates, 2, [1, 3], 2, [0, 1]],
+        [tp_templates, 2, [4, 6, 8], 3, [0, 1, 2]],
+        [tp_templates, 2, [5, 7, 9], 3, [0, 1, 2]],
+        [tp_templates, 2, [10, 12, 14], 3, [0, 1, 2]],
+        [tp_templates, 2, [11, 13, 15], 3, [0, 1, 2]],
+    ],
+    ids=[f"no_tp_pipeline{i}" for i in range(3)]
+    + [f"tp_pipeline{i}" for i in range(3 * 2)],
+)
+def test_pipeline_num_stages(
+    pipeline_templates: dict[PipelineTemplate, int],
+    tp_size: int,
+    ranks: list[int],
+    expected_num_stages: int,
+    expected_stages: list[int],
+):
+    for rank, expected_stage in zip(ranks, expected_stages):
+        init_process_group(rank)
+        pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
+        stage_manager = HeterogeneousPipelineStageManager(pg_mesh, 1)
+        assert stage_manager.num_stages == expected_num_stages
+        assert stage_manager.stage == expected_stage
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
     "pipeline_templates, tp_size, rank, p2p_ranks",
     [
         [no_tp_templates, 1, 0, [(0, 1)]],
