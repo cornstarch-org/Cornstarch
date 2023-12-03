@@ -111,6 +111,24 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
 
         gc.collect()
 
+    @property
+    def coords(self) -> list[tuple[int, ...]]:
+        """The process coordinates.
+
+        Returns:
+            list[tuple[int, ...]]: The process coordinates.
+        """
+        return self._coords
+
+    @property
+    def mesh(self) -> np.array:
+        """The process rank mesh.
+
+        Returns:
+            np.array: The process rank mesh.
+        """
+        return self._mesh
+
     # Inherit self.shape, self.rank, self.ravel.
 
     @staticmethod
