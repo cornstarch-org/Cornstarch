@@ -1,11 +1,15 @@
 from torch.testing._internal.distributed.fake_pg import FakeStore
 import torch.distributed as dist
+from torch.distributed.distributed_c10d import GroupMember
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
 
 import pytest
+from pytest_mock import MockerFixture
 import numpy as np
+from collections import defaultdict
+import gc
 
 
 def init_process_group(rank: int):
@@ -55,6 +59,75 @@ tp_template_ranks = [
     [[4, 5], [6, 7], [6, 7], [6, 7], [8, 9], [8, 9]],
     [[10, 11], [12, 13], [12, 13], [12, 13], [14, 15], [14, 15]],
 ]
+
+
+# def test_colossal_stage_manager_group_call_order_match(
+#     mocker: MockerFixture,
+# ):
+#     from colossalai.pipeline import PipelineStageManager
+#     from colossalai.cluster import ProcessGroupMesh
+
+#     recorded_new_group_calls: dict[int, list[list[int]]] = defaultdict(list)
+
+#     def record_new_group_call(ranks: int, *args, **kwargs):
+#         # Append ranks to the list so that
+#         # the list represents the order of creating new groups.
+#         recorded_new_group_calls[dist.get_rank()].append(ranks)
+
+#     mock = mocker.patch(
+#         "test_stage_manager.dist.new_group", side_effect=record_new_group_call
+#     )
+#     pp_axis = 1
+#     for rank in range(16):
+#         init_process_group(rank)
+#         pg_mesh = ProcessGroupMesh(4, 2, 2)
+#         stage_manager = PipelineStageManager(pg_mesh, pp_axis)
+#         del pg_mesh
+#         del stage_manager
+#         gc.collect()
+
+#     # The order of calling new_group must be the same across all ranks
+#     for rank in range(16):
+#         assert recorded_new_group_calls[0] == recorded_new_group_calls[rank]
+
+
+@pytest.mark.parametrize(
+    "pipeline_templates, tp_size, ranks",
+    [
+        [no_tp_templates, 1, list(range(7))],
+        [tp_templates, 2, list(range(16))],
+    ],
+)
+def test_stage_manager_group_call_order_match(
+    pipeline_templates: dict[PipelineTemplate, int],
+    tp_size: int,
+    ranks: list[int],
+    mocker: MockerFixture,
+):
+    recorded_new_group_calls: dict[int, list[list[int]]] = defaultdict(list)
+
+    def record_new_group_call(ranks: int, *args, **kwargs):
+        # Append ranks to the list so that
+        # the list represents the order of creating new groups.
+        recorded_new_group_calls[dist.get_rank()].append(ranks)
+
+    mock = mocker.patch(
+        "test_stage_manager.dist.new_group", side_effect=record_new_group_call
+    )
+    pp_axis = 1
+    for rank in ranks:
+        init_process_group(rank)
+        pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
+        stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
+        del pg_mesh
+        del stage_manager
+        gc.collect()
+
+    # The order of calling new_group must be the same across all ranks
+    for rank in ranks:
+        assert (
+            recorded_new_group_calls[ranks[0]] == recorded_new_group_calls[rank]
+        ), f"new_group calls are not in the same order for rank {rank}"
 
 
 @pytest.mark.parametrize(
@@ -129,6 +202,48 @@ def test_ranks_in_p2p_groups(
     pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
     stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
     assert np.array_equal(list(stage_manager.p2p_groups.keys()), p2p_ranks)
+
+
+@pytest.mark.parametrize(
+    "pipeline_templates, tp_size, ranks, stages",
+    [
+        [no_tp_templates, 1, [0, 1], [0, 1]],
+        [no_tp_templates, 1, [2, 3], [0, 1]],
+        [no_tp_templates, 1, [4, 5, 6], [0, 1]],
+        [no_tp_templates, 1, [4, 5, 6], [0, 2]],
+        [no_tp_templates, 1, [4, 5, 6], [1, 2]],
+        [tp_templates, 2, [0, 2], [0, 1]],
+        [tp_templates, 2, [1, 3], [0, 1]],
+        [tp_templates, 2, [4, 6, 8], [0, 1]],
+        [tp_templates, 2, [4, 6, 8], [0, 2]],
+        [tp_templates, 2, [4, 6, 8], [1, 2]],
+        [tp_templates, 2, [5, 7, 9], [0, 1]],
+        [tp_templates, 2, [5, 7, 9], [0, 2]],
+        [tp_templates, 2, [5, 7, 9], [1, 2]],
+    ],
+)
+def test_init_process_group_by_stages(
+    pipeline_templates: dict[PipelineTemplate, int],
+    tp_size: int,
+    ranks: list[int],
+    stages: list[int],
+):
+    pp_axis = 1
+    for rank in ranks:
+        init_process_group(rank)
+        pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
+        stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
+        group = stage_manager.init_process_group_by_stages(stages)
+        if stage_manager.stage in stages:
+            assert rank in dist.get_process_group_ranks(group)
+        else:
+            # assert False
+            # assert group is None
+            assert group == GroupMember.NON_GROUP_MEMBER
+
+        del pg_mesh
+        del stage_manager
+        gc.collect()
 
 
 @pytest.mark.parametrize(
