@@ -5,6 +5,7 @@ from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
 
+from unittest import mock
 import pytest
 from pytest_mock import MockerFixture
 import numpy as np
@@ -213,45 +214,85 @@ def test_ranks_in_p2p_groups(
 
 
 @pytest.mark.parametrize(
-    "pipeline_templates, tp_size, ranks, stages",
+    "pipeline_templates, tp_size, ranks, layers",
     [
-        [no_tp_templates, 1, [0, 1], [0, 1]],
-        [no_tp_templates, 1, [2, 3], [0, 1]],
-        [no_tp_templates, 1, [4, 5, 6], [0, 1]],
-        [no_tp_templates, 1, [4, 5, 6], [0, 2]],
-        [no_tp_templates, 1, [4, 5, 6], [1, 2]],
-        [tp_templates, 2, [0, 2], [0, 1]],
-        [tp_templates, 2, [1, 3], [0, 1]],
-        [tp_templates, 2, [4, 6, 8], [0, 1]],
-        [tp_templates, 2, [4, 6, 8], [0, 2]],
-        [tp_templates, 2, [4, 6, 8], [1, 2]],
-        [tp_templates, 2, [5, 7, 9], [0, 1]],
-        [tp_templates, 2, [5, 7, 9], [0, 2]],
-        [tp_templates, 2, [5, 7, 9], [1, 2]],
+        [no_tp_templates, 1, [4, 5], [0, 1]],
+        [no_tp_templates, 1, [0, 1, 2, 3, 4, 5], [0, 2]],
+        [no_tp_templates, 1, [0, 1, 2, 3, 4, 6], [0, 5]],
+        [no_tp_templates, 1, [0, 1, 2, 3], [1, 2]],
+        [no_tp_templates, 1, [0, 1, 2, 3, 5, 6], [1, 4]],
+        [no_tp_templates, 1, [], [2, 3]],
     ],
 )
-def test_init_process_group_by_stages(
+def test_init_process_group_by_layers(
     pipeline_templates: dict[PipelineTemplate, int],
     tp_size: int,
     ranks: list[int],
-    stages: list[int],
+    layers: list[int],
 ):
     pp_axis = 1
     for rank in ranks:
         init_process_group(rank)
         pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
         stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
-        group = stage_manager.init_process_group_by_stages(stages)
-        if stage_manager.stage in stages:
+
+        group = stage_manager.init_process_group_by_layers(layers)
+        if rank in ranks:
+            assert group is not None
             assert rank in dist.get_process_group_ranks(group)
         else:
-            # assert False
-            # assert group is None
-            assert group == GroupMember.NON_GROUP_MEMBER
+            assert group is None
 
         del pg_mesh
         del stage_manager
+        dist.destroy_process_group()
         gc.collect()
+
+
+# @pytest.mark.parametrize(
+#     "pipeline_templates, tp_size, ranks, layers, expected_group_ranks",
+#     [
+#         [no_tp_templates, 1, [0, 1], [0, 4], [0, 1]],
+#         [no_tp_templates, 1, [0, 1], [0, 1], None],
+#         [no_tp_templates, 1, [2, 3], [0, 1], None],
+#         [no_tp_templates, 1, [2, 3], [3, 4], None],
+#         [no_tp_templates, 1, [2, 3], [0, 5], [2, 3]],
+#         [no_tp_templates, 1, [4, 5, 6], [0, 1], [4, 5]],
+#         [no_tp_templates, 1, [4, 5, 6], [0, 5], [4, 6]],
+#         [no_tp_templates, 1, [4, 5, 6], [3, 4], [5, 6]],
+#         # [tp_templates, 2, 16, [0, 1], []],
+#         # [tp_templates, 2, 16, [0, 1], []],
+#         # [tp_templates, 2, 16, [0, 1], []],
+#         # [tp_templates, 2, 16, [0, 2], []],
+#         # [tp_templates, 2, 16, [1, 2], []],
+#         # [tp_templates, 2, 16, [0, 1], []],
+#         # [tp_templates, 2, 16, [0, 2], []],
+#         # [tp_templates, 2, 16, [1, 2], []],
+#     ],
+# )
+# def test_init_process_group_by_layers(
+#     pipeline_templates: dict[PipelineTemplate, int],
+#     tp_size: int,
+#     ranks: list[int],
+#     layers: list[int],
+#     expected_group_ranks: list[int] | None,
+# ):
+#     pp_axis = 1
+#     for rank in ranks:
+#         init_process_group(rank)
+#         pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
+#         stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
+
+#         group = stage_manager.init_process_group_by_layers(layers)
+#         if expected_group_ranks is None or rank not in expected_group_ranks:
+#             assert group is None
+#         else:
+#             assert expected_group_ranks == dist.get_process_group_ranks(group)
+
+#         del pg_mesh
+#         del stage_manager
+#         dist.destroy_process_group()
+#         gc.collect()
 
 
 @pytest.mark.parametrize(
