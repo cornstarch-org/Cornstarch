@@ -149,6 +149,27 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         indices = np.where(mesh == rank)
         return list(zip(*indices))
 
+    def get_group(
+        self, ranks_in_group: list[int], backend: str | None = None
+    ) -> dist.ProcessGroup:
+        """Get the process group with the given ranks. It the process group doesn't exist, it will be created.
+        Patch the bug that checks if ranks_in_group in self._group_to_ranks;
+        it is supposed to check with self._ranks_to_group.
+
+        Args:
+            ranks_in_group (List[int]): Ranks in the process group.
+            backend (Optional[str], optional): Backend of the process group. Defaults to None.
+
+        Returns:
+            ProcessGroup: The process group with the given ranks.
+        """
+        ranks_in_group = sorted(ranks_in_group)
+        if tuple(ranks_in_group) not in self._ranks_to_group:
+            group = dist.new_group(ranks_in_group, backend=backend)
+            self._ranks_to_group[tuple(ranks_in_group)] = group
+            self._group_to_ranks[group] = tuple(ranks_in_group)
+        return self._ranks_to_group[tuple(ranks_in_group)]
+
     def create_group_along_axis(
         self, axis: int, indices_at_axis: list[int], backend: str | None = None
     ) -> dist.ProcessGroup:

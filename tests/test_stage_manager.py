@@ -214,24 +214,44 @@ def test_ranks_in_p2p_groups(
 
 
 @pytest.mark.parametrize(
-    "pipeline_templates, tp_size, ranks, layers",
+    "pipeline_templates, tp_size, num_ranks, ranks, layers",
     [
-        [no_tp_templates, 1, [4, 5], [0, 1]],
-        [no_tp_templates, 1, [0, 1, 2, 3, 4, 5], [0, 2]],
-        [no_tp_templates, 1, [0, 1, 2, 3, 4, 6], [0, 5]],
-        [no_tp_templates, 1, [0, 1, 2, 3], [1, 2]],
-        [no_tp_templates, 1, [0, 1, 2, 3, 5, 6], [1, 4]],
-        [no_tp_templates, 1, [], [2, 3]],
+        [no_tp_templates, 1, 7, [4, 5], [0, 1]],
+        [no_tp_templates, 1, 7, [0, 1, 2, 3, 4, 5], [0, 2]],
+        [no_tp_templates, 1, 7, [0, 1, 2, 3, 4, 6], [0, 5]],
+        [no_tp_templates, 1, 7, [0, 1, 2, 3], [1, 2]],
+        [no_tp_templates, 1, 7, [0, 1, 2, 3, 5, 6], [1, 4]],
+        [tp_templates, 2, 16, [0, 1, 2, 3], [1, 2]],
+        [tp_templates, 2, 16, [4, 5, 6, 7, 10, 11, 12, 13], [0, 1]],
+        [tp_templates, 2, 16, [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 14, 15], [0, 5]],
+        [tp_templates, 2, 16, [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13], [0, 3]],
+        [tp_templates, 2, 16, [6, 8, 7, 9, 12, 14, 13, 15], [3, 5]],
     ],
 )
 def test_init_process_group_by_layers(
     pipeline_templates: dict[PipelineTemplate, int],
     tp_size: int,
     ranks: list[int],
+    num_ranks: int,
     layers: list[int],
 ):
+    """Test init_process_group_by_layers, to create a proccess group
+    for sharded layers.
+
+    Args:
+        pipeline_templates (dict[PipelineTemplate, int]): Pipeline templates.
+        tp_size (int): Tensor parallelism size.
+        ranks (list[int]): Ranks to be initialized. This should be the same with
+            all ranks in the pipeline template.
+        num_ranks (int): For specific layer pair, an expected list of ranks that
+            has a process group. For ranks not in this list, they should not have
+            a process group.
+            This also should not include ranks with length == 1; meaning,
+            if given layers are held by the same rank, it should not be included.
+        layers (list[int]): Layer indices to be sharded.
+    """
     pp_axis = 1
-    for rank in ranks:
+    for rank in range(num_ranks):
         init_process_group(rank)
         pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
         stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
@@ -241,58 +261,12 @@ def test_init_process_group_by_layers(
             assert group is not None
             assert rank in dist.get_process_group_ranks(group)
         else:
-            assert group is None
+            assert group is None or group == GroupMember.NON_GROUP_MEMBER
 
         del pg_mesh
         del stage_manager
         dist.destroy_process_group()
         gc.collect()
-
-
-# @pytest.mark.parametrize(
-#     "pipeline_templates, tp_size, ranks, layers, expected_group_ranks",
-#     [
-#         [no_tp_templates, 1, [0, 1], [0, 4], [0, 1]],
-#         [no_tp_templates, 1, [0, 1], [0, 1], None],
-#         [no_tp_templates, 1, [2, 3], [0, 1], None],
-#         [no_tp_templates, 1, [2, 3], [3, 4], None],
-#         [no_tp_templates, 1, [2, 3], [0, 5], [2, 3]],
-#         [no_tp_templates, 1, [4, 5, 6], [0, 1], [4, 5]],
-#         [no_tp_templates, 1, [4, 5, 6], [0, 5], [4, 6]],
-#         [no_tp_templates, 1, [4, 5, 6], [3, 4], [5, 6]],
-#         # [tp_templates, 2, 16, [0, 1], []],
-#         # [tp_templates, 2, 16, [0, 1], []],
-#         # [tp_templates, 2, 16, [0, 1], []],
-#         # [tp_templates, 2, 16, [0, 2], []],
-#         # [tp_templates, 2, 16, [1, 2], []],
-#         # [tp_templates, 2, 16, [0, 1], []],
-#         # [tp_templates, 2, 16, [0, 2], []],
-#         # [tp_templates, 2, 16, [1, 2], []],
-#     ],
-# )
-# def test_init_process_group_by_layers(
-#     pipeline_templates: dict[PipelineTemplate, int],
-#     tp_size: int,
-#     ranks: list[int],
-#     layers: list[int],
-#     expected_group_ranks: list[int] | None,
-# ):
-#     pp_axis = 1
-#     for rank in ranks:
-#         init_process_group(rank)
-#         pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
-#         stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
-
-#         group = stage_manager.init_process_group_by_layers(layers)
-#         if expected_group_ranks is None or rank not in expected_group_ranks:
-#             assert group is None
-#         else:
-#             assert expected_group_ranks == dist.get_process_group_ranks(group)
-
-#         del pg_mesh
-#         del stage_manager
-#         dist.destroy_process_group()
-#         gc.collect()
 
 
 @pytest.mark.parametrize(
