@@ -1,9 +1,6 @@
-from typing import List
 import torch.distributed as dist
-import numpy as np
 
 from colossalai.pipeline.stage_manager import PipelineStageManager
-from torch.distributed import ProcessGroup
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 
 
