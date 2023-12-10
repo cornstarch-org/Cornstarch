@@ -112,7 +112,7 @@ def test_stage_manager_group_call_order_match(
         def wrapper(*args, **kwargs):
             # Append ranks to the list so that
             # the list represents the order of creating new groups.
-            recorded_new_group_calls[dist.get_rank()].append(ranks)
+            recorded_new_group_calls[dist.get_rank()].append(args[0])
             return func(*args, **kwargs)
 
         return wrapper
@@ -128,6 +128,7 @@ def test_stage_manager_group_call_order_match(
         stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
         del pg_mesh
         del stage_manager
+        dist.destroy_process_group()
         gc.collect()
 
     # The order of calling new_group must be the same across all ranks

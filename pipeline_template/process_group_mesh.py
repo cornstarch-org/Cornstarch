@@ -111,10 +111,6 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
                 continue
             dist.destroy_process_group(group)
 
-        dist.destroy_process_group()
-
-        gc.collect()
-
     @property
     def coords(self) -> list[tuple[int, ...]]:
         """The process coordinates.
@@ -179,6 +175,8 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             ranks_in_group = tuple(
                 set([self._mesh[coord] for coord in coords_in_group])
             )
+            if len(ranks_in_group) == 1:
+                continue
             group = self.get_group(ranks_in_group, backend=backend)
             if self._rank in ranks_in_group:
                 target_group = group
@@ -209,8 +207,6 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             self._coords[0], axis, indices_at_axis
         )
         ranks_in_group = tuple(set([self._mesh[coord] for coord in coords_in_group]))
-        if len(ranks_in_group) == 1:
-            return None
 
         if ranks_in_group not in self._ranks_to_group:
             # no need to cache it explicitely, since it will be cached in `create_group_along_axis`
