@@ -10,6 +10,7 @@ from pytest_mock import MockerFixture
 import numpy as np
 from collections import defaultdict
 import gc
+import functools
 
 
 def init_process_group(rank: int):
@@ -106,13 +107,19 @@ def test_stage_manager_group_call_order_match(
 ):
     recorded_new_group_calls: dict[int, list[list[int]]] = defaultdict(list)
 
-    def record_new_group_call(ranks: int, *args, **kwargs):
-        # Append ranks to the list so that
-        # the list represents the order of creating new groups.
-        recorded_new_group_calls[dist.get_rank()].append(ranks)
+    def record_new_group_call_decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Append ranks to the list so that
+            # the list represents the order of creating new groups.
+            recorded_new_group_calls[dist.get_rank()].append(ranks)
+            return func(*args, **kwargs)
+
+        return wrapper
 
     mock = mocker.patch(
-        "test_stage_manager.dist.new_group", side_effect=record_new_group_call
+        "test_stage_manager.dist.new_group",
+        wraps=record_new_group_call_decorator(dist.new_group),
     )
     pp_axis = 1
     for rank in ranks:
