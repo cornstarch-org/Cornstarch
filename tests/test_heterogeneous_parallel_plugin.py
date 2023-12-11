@@ -31,7 +31,7 @@ class TestHeterogeneousParallelPluginClass(MultiThreadedTestCase):
         self._spawn_threads()
 
     @parametrize(
-        "pipeline_templates, expected_mesh",
+        "pipeline_templates, expected_mesh, expected_num_stages",
         [
             [
                 homogeneous_templates,
@@ -40,6 +40,7 @@ class TestHeterogeneousParallelPluginClass(MultiThreadedTestCase):
                     [[6, 7], [8, 9], [8, 9], [8, 9], [10, 11], [10, 11]],
                     [[12, 13], [14, 15], [14, 15], [14, 15], [16, 17], [16, 17]],
                 ],
+                {tuple(list(range(18))): 3},
             ],
             [
                 heterogeneous_templates,
@@ -49,9 +50,10 @@ class TestHeterogeneousParallelPluginClass(MultiThreadedTestCase):
                     [[10, 11], [10, 11], [12, 13], [12, 13], [12, 13], [12, 13]],
                     [[14, 15], [14, 15], [16, 17], [16, 17], [16, 17], [16, 17]],
                 ],
+                {tuple(list(range(6))): 3, tuple(list(range(6, 18))): 2},
             ],
         ],
-        name_fn=lambda pipeline_templates, world_size: "homogeneous"
+        name_fn=lambda pipeline_templates, expected_mesh, expected_num_stages: "homogeneous"
         if len(pipeline_templates) == 1
         else "heterogeneous",
     )
@@ -59,6 +61,7 @@ class TestHeterogeneousParallelPluginClass(MultiThreadedTestCase):
         self,
         pipeline_templates: dict[PipelineTemplate, int],
         expected_mesh: list,
+        expected_num_stages: dict[tuple[int], int],
     ):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
@@ -72,6 +75,14 @@ class TestHeterogeneousParallelPluginClass(MultiThreadedTestCase):
             and plugin.shard_config.tensor_parallel_size == 2
         )
         assert np.array_equal(plugin.stage_manager.pg_mesh.mesh, expected_mesh)
+        assert (
+            expected_num_stages[
+                next(
+                    ranks for ranks in expected_num_stages.keys() if self.rank in ranks
+                )
+            ]
+            == plugin.stage_manager.num_stages
+        )
 
 
 instantiate_parametrized_tests(TestHeterogeneousParallelPluginClass)
