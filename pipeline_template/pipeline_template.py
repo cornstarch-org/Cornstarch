@@ -20,6 +20,10 @@ class PipelineTemplate:
         self.modules_per_stage = modules_per_stage
         self.num_layers = sum([len(modules) for modules in modules_per_stage])
 
+    @property
+    def num_gpus(self):
+        return sum(self.gpus_per_stage)
+
     @staticmethod
     def create_pipeline_template(
         node_ids: list[str],
