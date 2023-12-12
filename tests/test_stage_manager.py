@@ -1,15 +1,15 @@
+import numpy as np
 import torch.distributed as dist
 from torch.distributed.distributed_c10d import GroupMember
-from pipeline_template.pipeline_template import PipelineTemplate
-from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
-from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
 from torch.testing._internal.common_distributed import MultiThreadedTestCase
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-import numpy as np
 
+from pipeline_template.pipeline_template import PipelineTemplate
+from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
+from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
 
 no_tp_templates = {
     PipelineTemplate(
