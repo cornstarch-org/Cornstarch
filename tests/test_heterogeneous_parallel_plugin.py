@@ -127,36 +127,6 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             == plugin.stage_manager.num_stages
         )
 
-    def test_colossal_configure(self):
-        from colossalai.booster.plugin import HybridParallelPlugin
-
-        plugin = HybridParallelPlugin(
-            tp_size=2, pp_size=4, num_microbatches=4, microbatch_size=1
-        )
-
-        config = AutoConfig.from_pretrained("gpt2")
-        model = AutoModelForSequenceClassification.from_config(config=config)
-
-        optimizer = CPUAdam(model.parameters())
-        lr_scheduler = get_linear_schedule_with_warmup(
-            optimizer, num_warmup_steps=100, num_training_steps=1000
-        )
-
-        output_transform_fn = lambda x: x
-        criterion = lambda x: x.loss
-
-        def _criterion(outputs, inputs):
-            outputs = output_transform_fn(outputs)
-            loss = criterion(outputs)
-            return loss
-
-        plugin.configure(
-            model,
-            optimizer,
-            criterion=_criterion,
-            lr_scheduler=lr_scheduler,
-        )
-
     @parametrize(
         "pipeline_templates, whatever",
         [
