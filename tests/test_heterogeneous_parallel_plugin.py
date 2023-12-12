@@ -1,17 +1,27 @@
-from torch.testing._internal.common_distributed import MultiThreadedTestCase
+import sys
+
+import numpy as np
+import torch.distributed as dist
+from colossalai.nn.optimizer import CPUAdam
+from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
 from torch.testing._internal.common_utils import (
+    FILE_SCHEMA,
     instantiate_parametrized_tests,
     parametrize,
 )
+from transformers import (
+    AutoConfig,
+    AutoModelForSequenceClassification,
+    get_linear_schedule_with_warmup,
+)
 
-import numpy as np
+from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.plugin.heterogeneous_parallel_plugin import (
     HeterogeneousParallelPlugin,
 )
-from pipeline_template.pipeline_template import PipelineTemplate
 
 homogeneous_templates = {
-    PipelineTemplate(["0"], [2, 2, 2], [[None], [None, None, None], [None, None]]): 3,
+    PipelineTemplate(["0"], [2, 2, 2], [[None], [None, None, None], [None, None]]): 3
 }
 heterogeneous_templates = {
     PipelineTemplate(["0"], [2, 2, 2], [[None], [None, None, None], [None, None]]): 1,
@@ -19,7 +29,7 @@ heterogeneous_templates = {
 }
 
 
-class TestHeterogeneousParallelPluginClass(MultiThreadedTestCase):
+class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
     pp_axis = 1
 
     @property
@@ -28,7 +38,40 @@ class TestHeterogeneousParallelPluginClass(MultiThreadedTestCase):
 
     def setUp(self):
         super().setUp()
-        self._spawn_threads()
+        self._spawn_processes()
+
+    @property
+    def init_method(self):
+        return f"{FILE_SCHEMA}{self.file_name}"
+
+    @classmethod
+    def _run(cls, rank: int, test_name: str, file_name: str, parent_pipe):
+        self = cls(test_name)
+        self.rank = rank
+        self.file_name = file_name
+
+        print(f"dist init r={self.rank}, world={self.world_size}")
+        backend = "gloo"
+
+        try:
+            dist.init_process_group(
+                init_method=self.init_method,
+                backend=backend,
+                world_size=int(self.world_size),
+                rank=self.rank,
+            )
+        except RuntimeError as e:
+            if "recompile" in e.args[0]:
+                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
+
+            raise
+
+        dist.barrier()
+
+        self.run_test(test_name, parent_pipe)
+
+        dist.barrier()
+        dist.destroy_process_group()
 
     @parametrize(
         "pipeline_templates, expected_mesh, expected_num_stages",
@@ -82,6 +125,71 @@ class TestHeterogeneousParallelPluginClass(MultiThreadedTestCase):
                 )
             ]
             == plugin.stage_manager.num_stages
+        )
+
+    def test_colossal_configure(self):
+        from colossalai.booster.plugin import HybridParallelPlugin
+
+        plugin = HybridParallelPlugin(
+            tp_size=2, pp_size=4, num_microbatches=4, microbatch_size=1
+        )
+
+        config = AutoConfig.from_pretrained("gpt2")
+        model = AutoModelForSequenceClassification.from_config(config=config)
+
+        optimizer = CPUAdam(model.parameters())
+        lr_scheduler = get_linear_schedule_with_warmup(
+            optimizer, num_warmup_steps=100, num_training_steps=1000
+        )
+
+        output_transform_fn = lambda x: x
+        criterion = lambda x: x.loss
+
+        def _criterion(outputs, inputs):
+            outputs = output_transform_fn(outputs)
+            loss = criterion(outputs)
+            return loss
+
+        plugin.configure(
+            model,
+            optimizer,
+            criterion=_criterion,
+            lr_scheduler=lr_scheduler,
+        )
+
+    @parametrize(
+        "pipeline_templates, whatever",
+        [
+            [homogeneous_templates, 0],
+            [heterogeneous_templates, 0],
+        ],
+        name_fn=lambda pipeline_templates, _: "homogeneous"
+        if len(pipeline_templates) == 1
+        else "heterogeneous",
+    )
+    def test_plugin_configure(
+        self,
+        pipeline_templates: dict[PipelineTemplate, int],
+        whatever: int,
+    ):
+        plugin = HeterogeneousParallelPlugin(
+            tp_size=2,
+            microbatch_size=1,
+            num_microbatches=[3] * sum(pipeline_templates.values()),
+        )
+        plugin.set_pipeline_templates(pipeline_templates)
+
+        config = AutoConfig.from_pretrained("gpt2")
+        model = AutoModelForSequenceClassification.from_config(config).cuda()
+
+        optimizer = CPUAdam(model.parameters())
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
+
+        plugin.configure(
+            model,
+            optimizer,
+            criterion=lambda outputs, inputs: outputs.loss,
+            lr_scheduler=lr_scheduler,
         )
 
 

@@ -25,7 +25,6 @@ class ModelParallelModule(HybridParallelModule):
         module: torch.nn.Module,
         precision: str,
         shard_config: ShardConfig,
-        tp_group: dist.ProcessGroup,
         custom_policy: Policy,
     ):
         super().__init__(
@@ -33,7 +32,6 @@ class ModelParallelModule(HybridParallelModule):
             precision=precision,
             shard_config=shard_config,
             dp_group=None,
-            tp_group=tp_group,
             use_ddp=False,
             ddp_config=None,
             custom_policy=custom_policy,

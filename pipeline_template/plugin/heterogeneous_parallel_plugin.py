@@ -232,7 +232,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                 model,
                 self.precision,
                 self.shard_config,
-                self.tp_groupa,
                 self.custom_policy,
             )
 
