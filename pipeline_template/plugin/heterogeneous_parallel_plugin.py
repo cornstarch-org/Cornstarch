@@ -24,7 +24,9 @@ from colossalai.shardformer.policies.base_policy import Policy
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
-from pipeline_template.plugin.model_parallel_module import ModelParallelModule
+from pipeline_template.plugin.heterogeneous_parallel_module import (
+    HeterogeneousParallelModule,
+)
 
 
 class HeterogeneousParallelPlugin(HybridParallelPlugin):
@@ -226,9 +228,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         param_info = get_param_info(optimizer)
 
-        # param_info = get_param_info(optimizer)
         if not isinstance(model, ModelWrapper):
-            model = ModelParallelModule(
+            model = HeterogeneousParallelModule(
                 model,
                 self.precision,
                 self.shard_config,
@@ -295,4 +296,4 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         return_loss: bool = True,
         return_outputs: bool = False,
     ) -> dict:
-        pass
+        raise NotImplementedError()

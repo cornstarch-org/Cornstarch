@@ -1,32 +1,26 @@
 """
-Code is adopted from ColossalAI HybridParallelModule, but without DP.
+Code is adopted from ColossalAI HybridParallelModule
 """
 
-from colossalai.interface import ModelWrapper
-from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelModule
 
-# from colossalai.interface import ModelWrapper
 from colossalai.shardformer import ShardConfig
 from colossalai.shardformer.policies.base_policy import Policy
 
 
-class ModelParallelModule(HybridParallelModule):
-    """A parallel module that includes model parallelism, without data parallelism.
-
-    Due to heterogeneity in parallel modules, gradient synchronization and data parallelism
-    is handled in `HeterogeneousParallelPlugin` instead of `ModelParallelModule`.
-    """
-
+class HeterogeneousParallelModule(HybridParallelModule):
     def __init__(
         self,
         module: torch.nn.Module,
+        dp_groups: dict[str, dist.ProcessGroup],
         precision: str,
         shard_config: ShardConfig,
         custom_policy: Policy,
     ):
+        assert all(module.get_submodule(name) is not None for name in dp_groups.keys())
+
         super().__init__(
             module=module,
             precision=precision,
@@ -37,10 +31,18 @@ class ModelParallelModule(HybridParallelModule):
             custom_policy=custom_policy,
         )
 
-        self.require_grad_sync = False
+        self.dp_groups = dp_groups
+
+    def sync_shared_params(self):
+        super().sync_shared_params()
 
     def sync_grads(self):
         # sync grad across data parallel
-        raise NotImplementedError(
-            "sync_grads has been removed from ModelParallelModule."
-        )
+        if len(self.dp_groups) == 1:
+            return
+
+        for module_name, dp_group in self.dp_groups.items():
+            module = self.module.get_submodule(module_name)
+            for param in module.parameters():
+                dist.all_reduce(param.grad.data, group=dp_group)
+                param.grad.div_(dp_group.size())
