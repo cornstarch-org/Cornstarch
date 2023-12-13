@@ -9,11 +9,14 @@ from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 
 
 @pytest.fixture(autouse=True)
-def init_process_group():
-    store = FakeStore()
-    dist.init_process_group(backend="fake", store=store, rank=0, world_size=4)
-    yield
-    dist.destroy_process_group()
+def init_process_group(request: pytest.FixtureRequest):
+    if "noautofixture" in request.keywords:
+        yield
+    else:
+        store = FakeStore()
+        dist.init_process_group(backend="fake", store=store, rank=0, world_size=8)
+        yield
+        dist.destroy_process_group()
 
 
 # Simulating 4-stage pipeline with different number of modules per stage.
@@ -187,10 +190,59 @@ def test_heterogeneous_pipelines(
     np.array_equal(mesh._mesh, expected_mesh)
 
 
-# def test_heterogeneous_pipelines(
-#     pipeline_template: list[PipelineTemplate],
-#     num_pipelines: list[int],
-#     tp_size: int,
-#     expected_mesh: list,
-# ):
-#     pass
+@pytest.mark.parametrize(
+    "pipeline_templates, tp_size, expected_ranks",
+    [
+        [
+            {
+                PipelineTemplate(["0"], [2, 2], [[None, None], [None]]): 4,
+            },
+            2,
+            [
+                [0, 4, 8, 12],
+                [1, 5, 9, 13],
+                [2, 6, 10, 14],
+                [3, 7, 11, 15],
+            ],
+        ],
+        [
+            {
+                PipelineTemplate(
+                    ["0"], [2, 2, 2, 2], [[None], [None], [None, None], [None]]
+                ): 1,
+                PipelineTemplate(["0"], [2, 2], [[None, None, None], [None, None]]): 2,
+            },
+            2,
+            [
+                [0, 8, 12],
+                [1, 9, 13],
+                [2, 8, 12],
+                [3, 9, 13],
+                [4, 8, 12],
+                [5, 9, 13],
+                [4, 10, 14],
+                [5, 11, 15],
+                [6, 10, 14],
+                [7, 11, 15],
+            ],
+        ],
+    ],
+)
+@pytest.mark.noautofixture
+def test_get_dp_groups(
+    pipeline_templates: dict[PipelineTemplate, int],
+    tp_size: int,
+    expected_ranks: list[list[int]],
+):
+    for rank in range(8):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=16
+        )
+        mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
+        groups = mesh.get_group_along_axis(0)
+
+        for group in groups:
+            ranks = dist.get_process_group_ranks(group)
+            assert ranks in expected_ranks
+
+        dist.destroy_process_group()

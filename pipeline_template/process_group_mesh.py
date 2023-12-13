@@ -208,7 +208,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         axis: int,
         indices_at_axis: list[int] | None = None,
         backend: str | None = None,
-    ) -> ProcessGroup:
+    ) -> list[ProcessGroup]:
         """Get the process group along the given axis which the current process belongs to.
         If the process group doesn't exist, it will be created.
 
@@ -218,18 +218,30 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             backend (Optional[str], optional): Backend of the process group. Defaults to None.
 
         Returns:
-            ProcessGroup: The process group along the given axis which the current process belongs to.
+            list[ProcessGroup]: The process group along the given axis which the current process belongs to.
+            If there are multiple process groups for this rank due to heterogeneous pipelines,
+            return all of them.
         """
         indices_at_axis = indices_at_axis or list(range(self._shape[axis]))
         # Getting coordinates and getting ranks from the coordinates are not the same.
         # self._coords might have multiple coordinates for the same rank.
         # But regardless of which one is used, ranks in the group should be the same.
-        coords_in_group = self.get_coords_along_axis(
-            self._coords[0], axis, indices_at_axis
-        )
-        ranks_in_group = tuple(set([self._mesh[coord] for coord in coords_in_group]))
 
-        if ranks_in_group not in self._ranks_to_group:
-            # no need to cache it explicitely, since it will be cached in `create_group_along_axis`
-            return self.create_group_along_axis(axis, indices_at_axis, backend=backend)
-        return self._ranks_to_group[ranks_in_group]
+        groups: list[dist.ProcessGroup] = []
+
+        for coords in self._coords:
+            coords_in_group = self.get_coords_along_axis(coords, axis, indices_at_axis)
+            ranks_in_group = tuple(
+                set([self._mesh[coord] for coord in coords_in_group])
+            )
+
+            if ranks_in_group not in self._ranks_to_group:
+                # no need to cache it explicitely, since it will be cached in `create_group_along_axis`
+                group = self.create_group_along_axis(
+                    axis, indices_at_axis, backend=backend
+                )
+            else:
+                group = self._ranks_to_group[ranks_in_group]
+            groups.append(group)
+
+        return groups
