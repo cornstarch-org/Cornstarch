@@ -16,6 +16,7 @@ from transformers import (
 )
 
 from pipeline_template.pipeline_template import PipelineTemplate
+from colossalai.interface import ModelWrapper
 from pipeline_template.plugin.heterogeneous_parallel_plugin import (
     HeterogeneousParallelPlugin,
 )
@@ -155,12 +156,15 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         optimizer = CPUAdam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
 
-        plugin.configure(
+        model, optimizer, _, _, lr_scheduler = plugin.configure(
             model,
             optimizer,
             criterion=lambda outputs, inputs: outputs.loss,
             lr_scheduler=lr_scheduler,
         )
+
+        # TODO: check whether model is split as pipeline template intended
+        assert isinstance(model, ModelWrapper)
 
 
 instantiate_parametrized_tests(TestHeterogeneousParallelPluginClass)
