@@ -41,8 +41,45 @@ class PipelineTemplate:
     def num_gpus(self) -> int:
         return sum(self.gpus_per_stage)
 
+    def verify_all_modules_in_stage(
+        self, model: torch.nn.Module, stage_index: int
+    ) -> bool:
+        """Verify that all modules are included in a stage of the pipeline template.
+
+        This is for integrity check of the pipeline template of specific model
+        after partitioning.
+        """
+        all_params = {name for name, _ in model.named_parameters()}
+
+        # Iterate over the module names
+        for module_name in self.module_names_per_stage[stage_index]:
+            try:
+                submodule = model.get_submodule(module_name)
+            except AttributeError as e:
+                raise ValueError(
+                    f"Module {module_name} is not found in the model."
+                ) from e
+
+            # Remove the parameters of this submodule from the set
+            for name, _ in submodule.named_parameters(recurse=True):
+                prefixed_name = f"{module_name}.{name}" if module_name else name
+                all_params.discard(prefixed_name)
+
+        # If all_params is not empty, meaning some parameters are not covered by
+        # the pipeline template
+        if all_params:
+            raise ValueError(
+                f"Following parameters are not covered by the pipeline template: "
+                f"{all_params}."
+            )
+
+        return True
+
     def verify_all_modules_in_template(self, model: torch.nn.Module) -> bool:
-        """Verify that all modules are included in the pipeline template."""
+        """Verify that all modules are included in the pipeline template.
+
+        This is for integrity check of the pipeline template of specific model.
+        """
         all_params = {name for name, _ in model.named_parameters()}
 
         # Iterate over the module names

@@ -19,7 +19,10 @@ class HeterogeneousParallelModule(HybridParallelModule):
         shard_config: ShardConfig,
         custom_policy: Policy,
     ):
-        assert all(module.get_submodule(name) is not None for name in dp_groups.keys())
+        for module_name in dp_groups.keys():
+            assert (
+                module.get_submodule(module_name) is not None
+            ), f"Submodule {module_name} is not found in module list."
 
         super().__init__(
             module=module,

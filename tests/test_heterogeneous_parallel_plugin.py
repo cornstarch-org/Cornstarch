@@ -231,10 +231,25 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         )
 
     @parametrize(
-        "pipeline_templates, whatever",
+        "pipeline_templates, expected_pipeline_index",
         [
-            [homogeneous_templates, 0],
-            [heterogeneous_templates, 0],
+            [
+                homogeneous_templates,
+                {
+                    tuple(list(range(0, 6))): 0,
+                    tuple(list(range(6, 12))): 1,
+                    tuple(list(range(12, 18))): 2,
+                },
+            ],
+            [
+                heterogeneous_templates,
+                {
+                    tuple(list(range(0, 6))): 0,
+                    tuple(list(range(6, 10))): 1,
+                    tuple(list(range(10, 14))): 2,
+                    tuple(list(range(14, 18))): 3,
+                },
+            ],
         ],
         name_fn=lambda pipeline_templates, _: "homogeneous"
         if len(pipeline_templates) == 1
@@ -243,7 +258,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
     def test_plugin_configure(
         self,
         pipeline_templates: dict[PipelineTemplate, int],
-        whatever: int,
+        expected_pipeline_index: dict[tuple[int], int],
     ):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
@@ -266,6 +281,17 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         )
 
         # TODO: check whether model is split as pipeline template intended
+        pipeline_index = expected_pipeline_index[
+            next(
+                ranks for ranks in expected_pipeline_index.keys() if self.rank in ranks
+            )
+        ]
+        assert plugin._pipeline_index == pipeline_index
+
+        assert plugin._pipeline_index_to_pipeline[
+            plugin._pipeline_index
+        ].verify_all_modules_in_stage(model, plugin.stage_manager.stage)
+
         assert isinstance(model, ModelWrapper)
 
 
