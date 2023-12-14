@@ -6,6 +6,9 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
+from pytest_mock import MockerFixture
+import functools
+from collections import defaultdict
 
 
 @pytest.fixture(autouse=True)
@@ -198,12 +201,24 @@ def test_heterogeneous_pipelines(
                 PipelineTemplate(["0"], [2, 2], [[None, None], [None]]): 4,
             },
             2,
-            [
-                [0, 4, 8, 12],
-                [1, 5, 9, 13],
-                [2, 6, 10, 14],
-                [3, 7, 11, 15],
-            ],
+            {
+                0: [[0, 4, 8, 12]],
+                1: [[1, 5, 9, 13]],
+                2: [[2, 6, 10, 14]],
+                3: [[3, 7, 11, 15]],
+                4: [[0, 4, 8, 12]],
+                5: [[1, 5, 9, 13]],
+                6: [[2, 6, 10, 14]],
+                7: [[3, 7, 11, 15]],
+                8: [[0, 4, 8, 12]],
+                9: [[1, 5, 9, 13]],
+                10: [[2, 6, 10, 14]],
+                11: [[3, 7, 11, 15]],
+                12: [[0, 4, 8, 12]],
+                13: [[1, 5, 9, 13]],
+                14: [[2, 6, 10, 14]],
+                15: [[3, 7, 11, 15]],
+            },
         ],
         [
             {
@@ -213,18 +228,24 @@ def test_heterogeneous_pipelines(
                 PipelineTemplate(["0"], [2, 2], [[None, None, None], [None, None]]): 2,
             },
             2,
-            [
-                [0, 8, 12],
-                [1, 9, 13],
-                [2, 8, 12],
-                [3, 9, 13],
-                [4, 8, 12],
-                [5, 9, 13],
-                [4, 10, 14],
-                [5, 11, 15],
-                [6, 10, 14],
-                [7, 11, 15],
-            ],
+            {
+                0: [[0, 8, 12]],
+                1: [[1, 9, 13]],
+                2: [[2, 8, 12]],
+                3: [[3, 9, 13]],
+                4: [[4, 8, 12], [4, 10, 14]],
+                5: [[5, 9, 13], [5, 11, 15]],
+                6: [[6, 10, 14]],
+                7: [[7, 11, 15]],
+                8: [[0, 8, 12], [2, 8, 12], [4, 8, 12]],
+                9: [[1, 9, 13], [3, 9, 13], [5, 9, 13]],
+                10: [[4, 10, 14], [6, 10, 14]],
+                11: [[5, 11, 15], [7, 11, 15]],
+                12: [[0, 8, 12], [2, 8, 12], [4, 8, 12]],
+                13: [[1, 9, 13], [3, 9, 13], [5, 9, 13]],
+                14: [[4, 10, 14], [6, 10, 14]],
+                15: [[5, 11, 15], [7, 11, 15]],
+            },
         ],
     ],
 )
@@ -232,9 +253,27 @@ def test_heterogeneous_pipelines(
 def test_get_dp_groups(
     pipeline_templates: dict[PipelineTemplate, int],
     tp_size: int,
-    expected_ranks: list[list[int]],
+    expected_ranks: dict[int, list[list[int]]],
+    mocker: MockerFixture,
 ):
-    for rank in range(8):
+    recorded_new_group_calls: dict[int, list] = defaultdict(list)
+
+    def record_new_group_call_decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Append ranks to the list so that
+            # the list represents the order of creating new groups.
+            recorded_new_group_calls[dist.get_rank()].append(args[0])
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    mock = mocker.patch(
+        "test_process_group_mesh.dist.new_group",
+        wraps=record_new_group_call_decorator(dist.new_group),
+    )
+
+    for rank in range(16):
         dist.init_process_group(
             backend="fake", store=FakeStore(), rank=rank, world_size=16
         )
@@ -244,8 +283,18 @@ def test_get_dp_groups(
         if isinstance(groups, dist.ProcessGroup):
             groups = [groups]
 
-        for group in groups:
+        assert len(groups) == len(expected_ranks[rank])
+        for group, expected_rank in zip(groups, expected_ranks[rank]):
             ranks = dist.get_process_group_ranks(group)
-            assert ranks in expected_ranks
+            assert (
+                ranks == expected_rank
+            ), f"[rank : {rank}] Expected: {expected_rank}, Got: {ranks}"
 
+        del mesh
         dist.destroy_process_group()
+
+    for rank in range(1, 16):
+        assert recorded_new_group_calls[0] == recorded_new_group_calls[rank], (
+            f"Expected: {recorded_new_group_calls[0]}, "
+            f"Got: {recorded_new_group_calls[rank]}"
+        )

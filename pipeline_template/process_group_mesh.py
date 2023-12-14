@@ -171,7 +171,11 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         return self._ranks_to_group[tuple(ranks_in_group)]
 
     def create_group_along_axis(
-        self, axis: int, indices_at_axis: list[int], backend: str | None = None
+        self,
+        axis: int,
+        indices_at_axis: list[int],
+        target_ranks_in_group: tuple[int],
+        backend: str | None = None,
     ) -> dist.ProcessGroup:
         """Create all process groups along the given axis, and return the one which the current process belongs to.
 
@@ -199,7 +203,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             if len(ranks_in_group) == 1:
                 continue
             group = self.get_group(ranks_in_group, backend=backend)
-            if self._rank in ranks_in_group:
+            if ranks_in_group == target_ranks_in_group:
                 target_group = group
         return target_group
 
@@ -238,7 +242,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             if ranks_in_group not in self._ranks_to_group:
                 # no need to cache it explicitely, since it will be cached in `create_group_along_axis`
                 group = self.create_group_along_axis(
-                    axis, indices_at_axis, backend=backend
+                    axis, indices_at_axis, ranks_in_group, backend=backend
                 )
             else:
                 group = self._ranks_to_group[ranks_in_group]
