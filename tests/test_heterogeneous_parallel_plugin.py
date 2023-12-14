@@ -21,12 +21,44 @@ from pipeline_template.plugin.heterogeneous_parallel_plugin import (
     HeterogeneousParallelPlugin,
 )
 
+
+# templates are currently based on GPT-2.
+# TODO: test more models
+config = AutoConfig.from_pretrained("gpt2")
+config.num_hidden_layers = 4
+
 homogeneous_templates = {
-    PipelineTemplate(["0"], [2, 2, 2], [[None], [None, None, None], [None, None]]): 3
+    PipelineTemplate(
+        ["0"],
+        [2, 2, 2],
+        [
+            [f"transformer.{emb}" for emb in ["wte", "wpe", "drop"]]
+            + [f"transformer.h.0"],
+            [f"transformer.h.{i}" for i in range(1, 4)],
+            ["transformer.ln_f", "lm_head"],
+        ],
+    ): 3
 }
 heterogeneous_templates = {
-    PipelineTemplate(["0"], [2, 2, 2], [[None], [None, None, None], [None, None]]): 1,
-    PipelineTemplate(["0"], [2, 2], [[None, None], [None, None, None, None]]): 3,
+    PipelineTemplate(
+        ["0"],
+        [2, 2, 2],
+        [
+            [f"transformer.{emb}" for emb in ["wte", "wpe", "drop"]]
+            + [f"transformer.h.0"],
+            [f"transformer.h.{i}" for i in range(1, 4)],
+            ["transformer.ln_f", "lm_head"],
+        ],
+    ): 1,
+    PipelineTemplate(
+        ["0"],
+        [2, 2],
+        [
+            [f"transformer.{emb}" for emb in ["wte", "wpe", "drop"]],
+            [f"transformer.h.{i}" for i in range(0, 4)]
+            + ["transformer.ln_f", "lm_head"],
+        ],
+    ): 3,
 }
 
 
@@ -80,19 +112,89 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             [
                 homogeneous_templates,
                 [
-                    [[0, 1], [2, 3], [2, 3], [2, 3], [4, 5], [4, 5]],
-                    [[6, 7], [8, 9], [8, 9], [8, 9], [10, 11], [10, 11]],
-                    [[12, 13], [14, 15], [14, 15], [14, 15], [16, 17], [16, 17]],
+                    [
+                        [0, 1],
+                        [0, 1],
+                        [0, 1],
+                        [0, 1],
+                        [2, 3],
+                        [2, 3],
+                        [2, 3],
+                        [4, 5],
+                        [4, 5],
+                    ],
+                    [
+                        [6, 7],
+                        [6, 7],
+                        [6, 7],
+                        [6, 7],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                        [10, 11],
+                        [10, 11],
+                    ],
+                    [
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [14, 15],
+                        [14, 15],
+                        [14, 15],
+                        [16, 17],
+                        [16, 17],
+                    ],
                 ],
                 {tuple(list(range(18))): 3},
             ],
             [
                 heterogeneous_templates,
                 [
-                    [[0, 1], [2, 3], [2, 3], [2, 3], [4, 5], [4, 5]],
-                    [[6, 7], [6, 7], [8, 9], [8, 9], [8, 9], [8, 9]],
-                    [[10, 11], [10, 11], [12, 13], [12, 13], [12, 13], [12, 13]],
-                    [[14, 15], [14, 15], [16, 17], [16, 17], [16, 17], [16, 17]],
+                    [
+                        [0, 1],
+                        [0, 1],
+                        [0, 1],
+                        [0, 1],
+                        [2, 3],
+                        [2, 3],
+                        [2, 3],
+                        [4, 5],
+                        [4, 5],
+                    ],
+                    [
+                        [6, 7],
+                        [6, 7],
+                        [6, 7],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                    ],
+                    [
+                        [10, 11],
+                        [10, 11],
+                        [10, 11],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                    ],
+                    [
+                        [14, 15],
+                        [14, 15],
+                        [14, 15],
+                        [16, 17],
+                        [16, 17],
+                        [16, 17],
+                        [16, 17],
+                        [16, 17],
+                        [16, 17],
+                    ],
                 ],
                 {tuple(list(range(6))): 3, tuple(list(range(6, 18))): 2},
             ],

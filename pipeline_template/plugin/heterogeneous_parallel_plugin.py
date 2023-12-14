@@ -224,18 +224,23 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         torch.optim.lr_scheduler.LRScheduler,
     ]:
         """Instantiate pipeline templates and initialize distributed process groups."""
-        assert self.pipeline_templates, "Call set_pipeline_templates() first."
+        assert self.pipeline_templates, "Pipeline templates are not set."
 
-        param_info = get_param_info(optimizer)
+        for pipeline_template in self.pipeline_templates.keys():
+            assert pipeline_template.verify_all_modules_in_template(
+                [name for name, _ in model.named_children()]
+            ), "All modules must be included in the pipeline template."
 
         if not isinstance(model, ModelWrapper):
             model = HeterogeneousParallelModule(
-                model,
-                self.precision,
-                self.shard_config,
-                self.custom_policy,
+                module=model,
+                dp_groups=self.pg_mesh.get_groups_along_axis(DP_AXIS),
+                precision=self.precision,
+                shard_config=self.shard_config,
+                custom_policy=self.custom_policy,
             )
 
+        param_info = get_param_info(optimizer)
         if optimizer is not None and not isinstance(optimizer, OptimizerWrapper):
             if self.zero_stage == 0:
                 if self.precision in ["fp16", "bf16"]:
