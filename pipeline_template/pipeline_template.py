@@ -13,22 +13,58 @@ class PipelineTemplate:
         self,
         node_ids: list[str],
         gpus_per_stage: list[int],
-        modules_per_stage: list[list[torch.nn.Module]],
+        module_names_per_stage: list[list[str]],
     ):
         self.node_ids = node_ids
         self.gpus_per_stage = gpus_per_stage
-        self.modules_per_stage = modules_per_stage
-        self.num_layers = sum([len(modules) for modules in modules_per_stage])
+        self.module_names_per_stage = module_names_per_stage
+        self.num_layers = sum([len(modules) for modules in module_names_per_stage])
 
     @property
-    def num_gpus(self):
+    def num_stages(self) -> int:
+        return len(self.gpus_per_stage)
+
+    @property
+    def num_gpus(self) -> int:
         return sum(self.gpus_per_stage)
+
+    def verify_all_modules_in_template(self, model: torch.nn.Module) -> bool:
+        """Verify that all modules are included in the pipeline template."""
+        all_params = {name for name, _ in model.named_parameters()}
+
+        # Iterate over the module names
+        for module_name in [
+            module_name
+            for modules in self.module_names_per_stage
+            for module_name in modules
+        ]:
+            try:
+                submodule = model.get_submodule(module_name)
+            except AttributeError as e:
+                raise ValueError(
+                    f"Module {module_name} is not found in the model."
+                ) from e
+
+            # Remove the parameters of this submodule from the set
+            for name, _ in submodule.named_parameters(recurse=True):
+                prefixed_name = f"{module_name}.{name}" if module_name else name
+                all_params.discard(prefixed_name)
+
+        # If all_params is not empty, meaning some parameters are not covered by
+        # the pipeline template
+        if all_params:
+            raise ValueError(
+                f"Following parameters are not covered by the pipeline template: "
+                f"{all_params}."
+            )
+
+        return True
 
     @staticmethod
     def create_pipeline_template(
         node_ids: list[str],
         gpus_per_stage: list[int],
-        modules: list[torch.nn.Module],
+        module_names: list[str],
     ):
         """Create a pipeline template.
 

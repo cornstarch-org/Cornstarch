@@ -93,7 +93,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             for _ in range(num_template):
                 pipeline_ranks = np.empty((template.num_layers, tp_size), dtype=object)
                 next_layer_index = 0
-                for modules in template.modules_per_stage:
+                for modules in template.module_names_per_stage:
                     ranks_per_stage = list(range(rank, rank + tp_size))
                     for _ in range(len(modules)):
                         pipeline_ranks[next_layer_index] = ranks_per_stage
