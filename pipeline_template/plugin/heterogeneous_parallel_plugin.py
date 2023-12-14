@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 from logging import getLogger
 
+import itertools
 from types import MethodType
 from typing import Iterator, Callable, Any
 
@@ -82,7 +83,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.schedule: PipelineSchedule = None
         self.num_microbatches = num_microbatches
         self.microbatch_size = microbatch_size
-        self.custom_policy = custom_policy
 
         logger = getLogger(__name__)
 
@@ -195,6 +195,17 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.dp_group = self.pg_mesh.get_group_along_axis(DP_AXIS)
         self.pp_group = self.pg_mesh.get_group_along_axis(PP_AXIS)
 
+        self._pipeline_index_to_pipeline = {
+            index: pipeline_template
+            for index, pipeline_template in enumerate(
+                itertools.chain.from_iterable(
+                    itertools.repeat(pipeline_template, num_pipelines)
+                    for pipeline_template, num_pipelines in pipeline_templates.items()
+                )
+            )
+        }
+        self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
+
         self.shard_config = ShardConfig(
             tensor_parallel_process_group=self.tp_group,
             pipeline_stage_manager=self.stage_manager,
@@ -232,9 +243,19 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             ), "All modules must be included in the pipeline template."
 
         if not isinstance(model, ModelWrapper):
+            dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
+            template = self._pipeline_index_to_pipeline[self._pipeline_index]
+            module_names = template.module_names_per_stage[self.stage_manager.stage]
+            assert isinstance(dp_groups, list) and len(dp_groups) == len(
+                module_names
+            ), "Number of dp groups does not match the number of modules in the stage."
+
             model = HeterogeneousParallelModule(
                 module=model,
-                dp_groups=self.pg_mesh.get_group_along_axis(DP_AXIS),
+                dp_groups={
+                    module_name: dp_group
+                    for module_name, dp_group in zip(module_names, dp_groups)
+                },
                 precision=self.precision,
                 shard_config=self.shard_config,
                 custom_policy=self.custom_policy,

@@ -12,7 +12,7 @@ from torch.testing._internal.common_utils import (
 )
 from transformers import (
     AutoConfig,
-    AutoModelForSequenceClassification,
+    AutoModelForCausalLM,
     get_linear_schedule_with_warmup,
 )
 
@@ -252,8 +252,8 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         )
         plugin.set_pipeline_templates(pipeline_templates)
 
-        config = AutoConfig.from_pretrained("gpt2")
-        model = AutoModelForSequenceClassification.from_config(config)
+        global config
+        model = AutoModelForCausalLM.from_config(config)
 
         optimizer = CPUAdam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)

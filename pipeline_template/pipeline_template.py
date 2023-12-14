@@ -1,4 +1,17 @@
+from __future__ import annotations
+
 import torch
+
+
+class Pipeline:
+    """A pipeline class that is instantiated from a pipeline template."""
+
+    def __init__(self, pipeline_template: PipelineTemplate, ranks: list[int]):
+        assert len(ranks) == pipeline_template.num_gpus * len(
+            pipeline_template.node_ids
+        )
+        self.pipeline_template = pipeline_template
+        self.ranks = ranks
 
 
 class PipelineTemplate:
@@ -12,7 +25,7 @@ class PipelineTemplate:
     def __init__(
         self,
         node_ids: list[str],
-        gpus_per_stage: list[int],
+        gpus_per_stage: int,
         module_names_per_stage: list[list[str]],
     ):
         self.node_ids = node_ids

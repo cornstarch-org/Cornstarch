@@ -4,6 +4,8 @@ from torch.distributed.distributed_c10d import GroupMember
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 
+import numpy as np
+
 
 class HeterogeneousPipelineStageManager(PipelineStageManager):
     """PipelineStageManager is a helper class to manage pipeline stages.
@@ -89,7 +91,7 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
         return ranks_in_group.index(self.get_rank())
 
     def init_process_group_by_layers(self, layers: list[int]) -> dist.ProcessGroup:
-        """Get the process group of the given stages.
+        """Get the process group of the given layers.
         This is used to initialize a process group for shared parameters.
 
         Args:
@@ -101,7 +103,25 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
         return self.pg_mesh.get_group_along_axis(self.pipeline_axis, layers)
 
     def init_process_group_by_stages(self, stages: list[int]) -> dist.ProcessGroup:
-        raise NotImplementedError(
-            "init_process_group_by_stages has been removed."
-            "Use init_process_group_by_layers instead."
-        )
+        """Get the process group of the given stages.
+        This is used to initialize a process group for shared parameters.
+
+        As each stage may include several layers but `stages` argument doesn't include
+        layer information, we use the index of the first layer in each stage.
+
+        TDOO: deprecate it and use init_process_group_by_layers instead.
+              This need to modify ShardFormer policy, as current policy returns stage indices
+              as a key.
+        """
+        group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)
+        assert isinstance(group, dist.ProcessGroup)
+        ranks_in_group = self.pg_mesh.get_ranks_in_group(group)
+        ranks_in_stages = [ranks_in_group[stage] for stage in stages]
+
+        # Get indices of ranks along the pp axis
+        indices_of_ranks = [
+            list(zip(*np.where(self.pg_mesh.mesh == rank)))[0][self.pipeline_axis]
+            for rank in ranks_in_stages
+        ]
+
+        return self.pg_mesh.get_group_along_axis(self.pipeline_axis, indices_of_ranks)
