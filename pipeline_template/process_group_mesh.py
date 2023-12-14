@@ -222,6 +222,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             backend (Optional[str], optional): Backend of the process group. Defaults to None.
 
         Returns:
+            ProcessGroup: if the axis is not DP_AXIS, there must be only one process group.
             list[ProcessGroup]: The process group along the given axis which the current process belongs to.
             If there are multiple process groups for this rank due to heterogeneous pipelines,
             return all of them.
@@ -231,7 +232,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         # self._coords might have multiple coordinates for the same rank.
         # But regardless of which one is used, ranks in the group should be the same.
 
-        groups: dict[tuple[int, ...], dist.ProcessGroup] = {}
+        groups: list[dist.ProcessGroup] = []
 
         for coords in self._coords:
             coords_in_group = self.get_coords_along_axis(coords, axis, indices_at_axis)
@@ -248,8 +249,15 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
                 group = self._ranks_to_group[ranks_in_group]
 
             if group and group != GroupMember.NON_GROUP_MEMBER:
-                groups.setdefault(ranks_in_group, group)
+                groups.append(group)
 
         if not groups:
             return None
-        return list(groups.values()) if len(groups) > 1 else groups.popitem()[1]
+
+        if axis != DP_AXIS:
+            assert (
+                len(set(groups)) == 1
+            ), "There must be only one process group along the axis."
+            return groups[0]
+        else:
+            return groups

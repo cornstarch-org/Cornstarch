@@ -228,13 +228,13 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         for pipeline_template in self.pipeline_templates.keys():
             assert pipeline_template.verify_all_modules_in_template(
-                [name for name, _ in model.named_children()]
+                model
             ), "All modules must be included in the pipeline template."
 
         if not isinstance(model, ModelWrapper):
             model = HeterogeneousParallelModule(
                 module=model,
-                dp_groups=self.pg_mesh.get_groups_along_axis(DP_AXIS),
+                dp_groups=self.pg_mesh.get_group_along_axis(DP_AXIS),
                 precision=self.precision,
                 shard_config=self.shard_config,
                 custom_policy=self.custom_policy,
