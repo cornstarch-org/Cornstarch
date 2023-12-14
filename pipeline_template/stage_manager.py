@@ -1,4 +1,5 @@
 import torch.distributed as dist
+from torch.distributed.distributed_c10d import GroupMember
 
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
@@ -65,6 +66,9 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
             group = self.pg_mesh.get_group_along_axis(self.pipeline_axis, [prev, cur])
             # If this rank does not belong to the group, group is None
             if group:
+                assert group == GroupMember.NON_GROUP_MEMBER or isinstance(
+                    group, dist.ProcessGroup
+                )
                 ranks_in_group = self.pg_mesh.get_ranks_in_group(group)
                 # This means both layers belong to a single rank without p2p
                 if len(ranks_in_group) == 1:
@@ -74,13 +78,13 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
     @property
     def num_stages(self) -> int:
         group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)
-        assert group is not None
+        assert isinstance(group, dist.ProcessGroup)
         return len(self.pg_mesh.get_ranks_in_group(group))
 
     @property
     def stage(self) -> int:
         group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)
-        assert group is not None
+        assert isinstance(group, dist.ProcessGroup)
         ranks_in_group = self.pg_mesh.get_ranks_in_group(group)
         return ranks_in_group.index(self.get_rank())
 

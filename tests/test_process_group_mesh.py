@@ -241,6 +241,9 @@ def test_get_dp_groups(
         mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
         groups = mesh.get_group_along_axis(0)
 
+        if isinstance(groups, dist.ProcessGroup):
+            groups = [groups]
+
         for group in groups:
             ranks = dist.get_process_group_ranks(group)
             assert ranks in expected_ranks

@@ -1,11 +1,17 @@
+import functools
+from collections import defaultdict
+
 import numpy as np
+import pytest
 import torch.distributed as dist
+from pytest_mock import MockerFixture
 from torch.distributed.distributed_c10d import GroupMember
 from torch.testing._internal.common_distributed import MultiThreadedTestCase
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
+from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
@@ -46,6 +52,61 @@ tp_template_ranks = [
     [[4, 5], [6, 7], [6, 7], [6, 7], [8, 9], [8, 9]],
     [[10, 11], [12, 13], [12, 13], [12, 13], [14, 15], [14, 15]],
 ]
+
+
+@pytest.mark.parametrize(
+    "pipeline_templates, tp_size, world_size",
+    [
+        [
+            no_tp_templates,
+            1,
+            7,
+        ],
+        [
+            tp_templates,
+            2,
+            16,
+        ],
+    ],
+)
+def test_stage_manager_process_group_init_order_matches(
+    pipeline_templates: dict[PipelineTemplate, int],
+    tp_size: int,
+    world_size: int,
+    mocker: MockerFixture,
+):
+    recorded_new_group_calls: dict[int, list] = defaultdict(list)
+
+    def record_new_group_call_decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Append ranks to the list so that
+            # the list represents the order of creating new groups.
+            recorded_new_group_calls[dist.get_rank()].append(args[0])
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    mock = mocker.patch(
+        "test_stage_manager.dist.new_group",
+        wraps=record_new_group_call_decorator(dist.new_group),
+    )
+
+    pp_axis = 1
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        pg_mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
+        stage_manager = HeterogeneousPipelineStageManager(pg_mesh, pp_axis)
+        del pg_mesh
+        del stage_manager
+        dist.destroy_process_group()
+
+    for rank in range(1, world_size):
+        assert (
+            recorded_new_group_calls[0] == recorded_new_group_calls[rank]
+        ), f"new_group calls are not in the same order for rank {rank}"
 
 
 class TestStageManagerClass(MultiThreadedTestCase):
@@ -273,7 +334,7 @@ class TestStageManagerClass(MultiThreadedTestCase):
         assert np.array_equal(
             list(stage_manager.p2p_groups.keys()),
             ranks_to_expected_p2p_ranks[self.rank],
-        )
+        ), f"rank {self.rank} has wrong p2p groups"
 
 
 instantiate_parametrized_tests(TestStageManagerClass)

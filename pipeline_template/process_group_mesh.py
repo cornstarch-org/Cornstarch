@@ -1,8 +1,8 @@
 import torch.distributed as dist
-import gc
 import numpy as np
 import itertools
 
+from torch.distributed.distributed_c10d import GroupMember
 from colossalai.cluster.process_group_mesh import ProcessGroupMesh
 from torch.distributed import ProcessGroup
 from pipeline_template.pipeline_template import PipelineTemplate
@@ -208,7 +208,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         axis: int,
         indices_at_axis: list[int] | None = None,
         backend: str | None = None,
-    ) -> list[ProcessGroup]:
+    ) -> ProcessGroup | list[ProcessGroup]:
         """Get the process group along the given axis which the current process belongs to.
         If the process group doesn't exist, it will be created.
 
@@ -227,7 +227,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         # self._coords might have multiple coordinates for the same rank.
         # But regardless of which one is used, ranks in the group should be the same.
 
-        groups: list[dist.ProcessGroup] = []
+        groups: dict[tuple[int, ...], dist.ProcessGroup] = {}
 
         for coords in self._coords:
             coords_in_group = self.get_coords_along_axis(coords, axis, indices_at_axis)
@@ -242,6 +242,10 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
                 )
             else:
                 group = self._ranks_to_group[ranks_in_group]
-            groups.append(group)
 
-        return groups
+            if group and group != GroupMember.NON_GROUP_MEMBER:
+                groups.setdefault(ranks_in_group, group)
+
+        if not groups:
+            return None
+        return list(groups.values()) if len(groups) > 1 else groups.popitem()[1]
