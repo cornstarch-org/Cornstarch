@@ -10,6 +10,8 @@ from pytest_mock import MockerFixture
 import functools
 from collections import defaultdict
 
+from transformers import PretrainedConfig
+
 
 @pytest.fixture(autouse=True)
 def init_process_group(request: pytest.FixtureRequest):
@@ -35,57 +37,27 @@ modules_per_stage: list[list[torch.nn.Module]] = [
     "pipeline_templates, tp_size, expected_mesh",
     [
         [
-            {
-                PipelineTemplate(
-                    ["0"],
-                    [1],
-                    [[None, None]],
-                ): 1
-            },
+            {PipelineTemplate(None, ["0"], [1], [[None, None]]): 1},
             1,
             [[[0], [0]]],
         ],
         [
-            {
-                PipelineTemplate(
-                    ["0"],
-                    [1],
-                    [[None, None, None]],
-                ): 2
-            },
+            {PipelineTemplate(None, ["0"], [1], [[None, None, None]]): 2},
             1,
             [[[0], [0], [0]], [[1], [1], [1]]],
         ],
         [
-            {
-                PipelineTemplate(
-                    ["0"],
-                    [1, 1],
-                    [[None], [None, None]],
-                ): 2
-            },
+            {PipelineTemplate(None, ["0"], [1, 1], [[None], [None, None]]): 2},
             1,
             [[[0], [1], [1]], [[2], [3], [3]]],
         ],
         [
-            {
-                PipelineTemplate(
-                    ["0"],
-                    [2],
-                    [[None, None]],
-                ): 1
-            },
+            {PipelineTemplate(None, ["0"], [2], [[None, None]]): 1},
             2,
             [[[0, 1], [0, 1]]],
         ],
         [
-            {
-                PipelineTemplate(
-                    ["0"],
-                    [4, 4],
-                    [[None], [None, None]],
-                ): 2
-            },
+            {PipelineTemplate(None, ["0"], [4, 4], [[None], [None, None]]): 2},
             4,
             [
                 [[0, 1, 2, 3], [4, 5, 6, 7], [4, 5, 6, 7]],
@@ -108,48 +80,24 @@ def test_homogeneous_pipelines(
     [
         [
             {
-                PipelineTemplate(
-                    ["0"],
-                    [1, 1],
-                    [[None], [None, None]],
-                ): 1,
-                PipelineTemplate(
-                    ["0"],
-                    [1],
-                    [[None, None, None]],
-                ): 1,
+                PipelineTemplate(None, ["0"], [1, 1], [[None], [None, None]]): 1,
+                PipelineTemplate(None, ["0"], [1], [[None, None, None]]): 1,
             },
             1,
             [[[0], [1], [1]], [[2], [2], [2]]],
         ],
         [
             {
-                PipelineTemplate(
-                    ["0"],
-                    [1, 1],
-                    [[None], [None, None]],
-                ): 1,
-                PipelineTemplate(
-                    ["0"],
-                    [1],
-                    [[None, None, None]],
-                ): 2,
+                PipelineTemplate(None, ["0"], [1, 1], [[None], [None, None]]): 1,
+                PipelineTemplate(None, ["0"], [1], [[None, None, None]]): 2,
             },
             1,
             [[[0], [1], [1]], [[2], [2], [2]], [[3], [3], [3]]],
         ],
         [
             {
-                PipelineTemplate(
-                    ["0"],
-                    [4, 4],
-                    [[None], [None]],
-                ): 2,
-                PipelineTemplate(
-                    ["0"],
-                    [4],
-                    [[None, None]],
-                ): 2,
+                PipelineTemplate(None, ["0"], [4, 4], [[None], [None]]): 2,
+                PipelineTemplate(None, ["0"], [4], [[None, None]]): 2,
             },
             4,
             [
@@ -162,15 +110,9 @@ def test_homogeneous_pipelines(
         [
             {
                 PipelineTemplate(
-                    ["0"],
-                    [2, 2, 2],
-                    [[None], [None], [None, None]],
+                    None, ["0"], [2, 2, 2], [[None], [None], [None, None]]
                 ): 2,
-                PipelineTemplate(
-                    ["0"],
-                    [2, 2],
-                    [[None, None, None], [None]],
-                ): 1,
+                PipelineTemplate(None, ["0"], [2, 2], [[None, None, None], [None]]): 1,
             },
             2,
             [
@@ -198,24 +140,24 @@ def test_heterogeneous_pipelines(
     [
         [
             {
-                PipelineTemplate(["0"], [2, 2], [[None, None], [None]]): 4,
+                PipelineTemplate(None, ["0"], [2, 2], [[None, None], [None]]): 4,
             },
             2,
             {
-                0: [[0, 4, 8, 12]],
-                1: [[1, 5, 9, 13]],
+                0: [[0, 4, 8, 12], [0, 4, 8, 12]],
+                1: [[1, 5, 9, 13], [1, 5, 9, 13]],
                 2: [[2, 6, 10, 14]],
                 3: [[3, 7, 11, 15]],
-                4: [[0, 4, 8, 12]],
-                5: [[1, 5, 9, 13]],
+                4: [[0, 4, 8, 12], [0, 4, 8, 12]],
+                5: [[1, 5, 9, 13], [1, 5, 9, 13]],
                 6: [[2, 6, 10, 14]],
                 7: [[3, 7, 11, 15]],
-                8: [[0, 4, 8, 12]],
-                9: [[1, 5, 9, 13]],
+                8: [[0, 4, 8, 12], [0, 4, 8, 12]],
+                9: [[1, 5, 9, 13], [1, 5, 9, 13]],
                 10: [[2, 6, 10, 14]],
                 11: [[3, 7, 11, 15]],
-                12: [[0, 4, 8, 12]],
-                13: [[1, 5, 9, 13]],
+                12: [[0, 4, 8, 12], [0, 4, 8, 12]],
+                13: [[1, 5, 9, 13], [1, 5, 9, 13]],
                 14: [[2, 6, 10, 14]],
                 15: [[3, 7, 11, 15]],
             },
@@ -223,9 +165,11 @@ def test_heterogeneous_pipelines(
         [
             {
                 PipelineTemplate(
-                    ["0"], [2, 2, 2, 2], [[None], [None], [None, None], [None]]
+                    None, ["0"], [2, 2, 2, 2], [[None], [None], [None, None], [None]]
                 ): 1,
-                PipelineTemplate(["0"], [2, 2], [[None, None, None], [None, None]]): 2,
+                PipelineTemplate(
+                    None, ["0"], [2, 2], [[None, None, None], [None, None]]
+                ): 2,
             },
             2,
             {
