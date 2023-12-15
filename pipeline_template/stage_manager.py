@@ -28,6 +28,7 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
         self.prev_rank: int | None = None
         self.next_rank: int | None = None
         self.p2p_groups: dict[tuple[int, int], dist.ProcessGroup] = {}
+        self.is_interleave = False
 
         if is_virtual:
             raise NotImplementedError("Virtual pipeline is not supported.")

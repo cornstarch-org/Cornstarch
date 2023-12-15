@@ -21,7 +21,11 @@ from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
 from colossalai.shardformer import ShardConfig, ShardFormer
 from colossalai.shardformer.policies.base_policy import Policy
+from colossalai.shardformer.policies.auto_policy import get_autopolicy
 
+from pipeline_template.shardformer.pipeline_template_policy import (
+    PipelineTemplatePolicyWrapper,
+)
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
@@ -71,11 +75,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         cpu_offload: bool = False,
         communication_dtype: torch.dtype | None = None,
         overlap_communication: bool = True,
-        custom_policy: Policy | None = None,
     ):
         super(PipelinePluginBase).__init__()
 
-        self.custom_policy = custom_policy
         self.precision = precision
         self.zero_stage = zero_stage
         self.stage_manager: HeterogeneousPipelineStageManager = None
@@ -97,18 +99,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             enable_sequence_parallelism=False,
             enable_sequence_overlap=False,
         )
-
-        # self.shard_config = ShardConfig(
-        #     tensor_parallel_process_group=self.tp_group,
-        #     pipeline_stage_manager=self.stage_manager,
-        #     enable_tensor_parallelism=self.tp_size > 1,
-        #     enable_all_optimization=self.enable_all_optimization,
-        #     enable_fused_normalization=self.enable_fused_normalization,
-        #     enable_flash_attention=self.enable_flash_attention,
-        #     enable_jit_fused=self.enable_jit_fused,
-        #     enable_sequence_parallelism=enable_sequence_parallelism,
-        #     enable_sequence_overlap=enable_sequence_overlap,
-        # )
 
         self.amp_config = dict(
             initial_scale=initial_scale,
@@ -250,15 +240,19 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                 module_names
             ), "Number of dp groups does not match the number of modules in the stage."
 
+            policy = get_autopolicy(model)
+            policy = PipelineTemplatePolicyWrapper(template).wrap(policy)
+
             model = HeterogeneousParallelModule(
                 module=model,
                 dp_groups={
                     module_name: dp_group
                     for module_name, dp_group in zip(module_names, dp_groups)
                 },
+                tp_group=self.tp_group,
                 precision=self.precision,
                 shard_config=self.shard_config,
-                custom_policy=self.custom_policy,
+                custom_policy=policy,
             )
 
         param_info = get_param_info(optimizer)

@@ -38,6 +38,13 @@ homogeneous_templates = {
             [f"transformer.h.{i}" for i in range(1, 4)],
             ["transformer.ln_f", "lm_head"],
         ],
+        [
+            "transformer.wte",
+            "transformer.wpe",
+            "transformer.drop",
+            "transformer.ln_f",
+            "lm_head",
+        ],
     ): 3
 }
 heterogeneous_templates = {
@@ -51,6 +58,13 @@ heterogeneous_templates = {
             [f"transformer.h.{i}" for i in range(1, 4)],
             ["transformer.ln_f", "lm_head"],
         ],
+        [
+            "transformer.wte",
+            "transformer.wpe",
+            "transformer.drop",
+            "transformer.ln_f",
+            "lm_head",
+        ],
     ): 1,
     PipelineTemplate(
         config,
@@ -60,6 +74,13 @@ heterogeneous_templates = {
             [f"transformer.{emb}" for emb in ["wte", "wpe", "drop"]],
             [f"transformer.h.{i}" for i in range(0, 4)]
             + ["transformer.ln_f", "lm_head"],
+        ],
+        [
+            "transformer.wte",
+            "transformer.wpe",
+            "transformer.drop",
+            "transformer.ln_f",
+            "lm_head",
         ],
     ): 3,
 }
@@ -291,11 +312,10 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         ]
         assert plugin._pipeline_index == pipeline_index
 
+        assert isinstance(model, ModelWrapper)
         assert plugin._pipeline_index_to_pipeline[
             plugin._pipeline_index
-        ].verify_all_modules_in_stage(model, plugin.stage_manager.stage)
-
-        assert isinstance(model, ModelWrapper)
+        ].verify_all_modules_in_stage(model.module, plugin.stage_manager.stage)
 
 
 instantiate_parametrized_tests(TestHeterogeneousParallelPluginClass)

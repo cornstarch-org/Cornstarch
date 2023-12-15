@@ -29,11 +29,13 @@ class PipelineTemplate:
         node_ids: list[str],
         gpus_per_stage: int,
         module_names_per_stage: list[list[str]],
+        module_names_not_distributable: list[str] | None = None,
     ):
         self.model_config = model_config
         self.node_ids = node_ids
         self.gpus_per_stage = gpus_per_stage
         self.module_names_per_stage = module_names_per_stage
+        self.module_names_not_distributable = module_names_not_distributable
         self.num_layers = sum([len(modules) for modules in module_names_per_stage])
 
     @property

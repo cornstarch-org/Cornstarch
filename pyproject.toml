@@ -24,6 +24,7 @@ dev = [
     "isort>=5.12",
     "pytest",
     "pytest-mock",
+    "expecttest",
 ]
 
 [tool.ruff]
