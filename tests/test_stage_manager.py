@@ -16,14 +16,17 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
+from transformers import PretrainedConfig
 
 no_tp_templates = {
     PipelineTemplate(
+        PretrainedConfig(name_or_path="fake-model"),
         ["0"],
         [1, 1],
         [[None, None], [None, None, None, None]],
     ): 2,
     PipelineTemplate(
+        PretrainedConfig(name_or_path="fake-model"),
         ["0"],
         [1, 1, 1],
         [[None], [None, None, None], [None, None]],
@@ -37,11 +40,13 @@ no_tp_template_ranks = [
 
 tp_templates = {
     PipelineTemplate(
+        "fake_model",
         ["0"],
         [2, 2],
         [[None, None], [None, None, None, None]],
     ): 1,
     PipelineTemplate(
+        "fake_model",
         ["0"],
         [2, 2, 2],
         [[None], [None, None, None], [None, None]],

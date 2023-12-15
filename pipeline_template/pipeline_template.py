@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from transformers import PretrainedConfig
 
 
 class Pipeline:
@@ -24,10 +25,12 @@ class PipelineTemplate:
 
     def __init__(
         self,
+        model_config: PretrainedConfig,
         node_ids: list[str],
         gpus_per_stage: int,
         module_names_per_stage: list[list[str]],
     ):
+        self.model_config = model_config
         self.node_ids = node_ids
         self.gpus_per_stage = gpus_per_stage
         self.module_names_per_stage = module_names_per_stage

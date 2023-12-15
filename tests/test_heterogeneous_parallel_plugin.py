@@ -29,6 +29,7 @@ config.num_hidden_layers = 4
 
 homogeneous_templates = {
     PipelineTemplate(
+        config,
         ["0"],
         [2, 2, 2],
         [
@@ -41,6 +42,7 @@ homogeneous_templates = {
 }
 heterogeneous_templates = {
     PipelineTemplate(
+        config,
         ["0"],
         [2, 2, 2],
         [
@@ -51,6 +53,7 @@ heterogeneous_templates = {
         ],
     ): 1,
     PipelineTemplate(
+        config,
         ["0"],
         [2, 2],
         [
