@@ -1,13 +1,13 @@
 import itertools
+import random
 from logging import getLogger
 from types import MethodType
 from typing import Any, Callable
 
 import numpy as np
-import random
 import torch
-import torch.utils.data
 import torch.distributed as dist
+import torch.utils.data
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
     DP_AXIS,
     PP_AXIS,

@@ -1,9 +1,8 @@
 # Coda copied from colossalai/examples/language/gpt/hybridparallelism/data.py
 
 import datasets
-from transformers import AutoTokenizer, PreTrainedTokenizer
-
 from colossalai.booster.plugin.dp_plugin_base import DPPluginBase
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 
 class GLUEDataBuilder:
