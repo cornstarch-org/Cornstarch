@@ -13,17 +13,12 @@ class HeterogeneousParallelModule(HybridParallelModule):
     def __init__(
         self,
         module: torch.nn.Module,
-        dp_groups: dict[torch.nn.Module, dist.ProcessGroup],
+        dp_groups: dict[str, dist.ProcessGroup],
         tp_group: dist.ProcessGroup,
         precision: str,
         shard_config: ShardConfig,
         custom_policy: Policy,
     ):
-        # for module in dp_groups.keys():
-        #     assert (
-        #         module.get_submodule(module) is not None
-        #     ), f"Submodule {module} is not found in module list."
-
         super().__init__(
             module=module,
             precision=precision,
@@ -40,13 +35,27 @@ class HeterogeneousParallelModule(HybridParallelModule):
     def sync_shared_params(self):
         super().sync_shared_params()
 
-    def sync_grads(self):
-        # sync grad across data parallel
+    def sync_dp_grads(self):
+        r"""
+        Synchronize gradients across data parallelism (DP) if the DP group size is greater than 1.
+        This function performs an all-reduce operation to combine gradients from different devices in the DP group.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+
         if len(self.dp_groups) == 1:
             return
 
+        print("Syncing DP grads")
+        return
+
         for module_name, dp_group in self.dp_groups.items():
             module = self.module.get_submodule(module_name)
+            # TODO (insujang): flatten parameters
             for param in module.parameters():
                 dist.all_reduce(param.grad.data, group=dp_group)
                 param.grad.div_(dp_group.size())

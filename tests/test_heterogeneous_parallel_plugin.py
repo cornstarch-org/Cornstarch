@@ -1,4 +1,3 @@
-import functools
 import itertools
 import sys
 
@@ -23,6 +22,7 @@ from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.plugin.heterogeneous_parallel_plugin import (
     HeterogeneousParallelPlugin,
 )
+from data_builder import GLUEDataBuilder
 
 # templates are currently based on GPT-2.
 # TODO: test more models
@@ -273,7 +273,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
             microbatch_size=1,
-            num_microbatches=[3] * sum(pipeline_templates.values()),
+            num_microbatches=[0] * sum(pipeline_templates.values()),
         )
         plugin.set_pipeline_templates(pipeline_templates)
 
@@ -290,7 +290,6 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             lr_scheduler=lr_scheduler,
         )
 
-        # TODO: check whether model is split as pipeline template intended
         pipeline_index = expected_pipeline_index[
             next(
                 ranks for ranks in expected_pipeline_index.keys() if self.rank in ranks
@@ -326,6 +325,51 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         # check forward is patched
         assert (
             model.module.forward.func is GPT2PipelineForwards.gpt2_lmhead_model_forward
+        )
+
+    @parametrize(
+        "pipeline_templates, unused",
+        [[homogeneous_templates, 0], [heterogeneous_templates, 0]],
+        name_fn=lambda pipeline_templates, _: "homogeneous"
+        if len(pipeline_templates) == 1
+        else "heterogeneous",
+    )
+    def test_execute_pipeline(
+        self, pipeline_templates: dict[PipelineTemplate, int], unused
+    ):
+        plugin = HeterogeneousParallelPlugin(
+            tp_size=2,
+            microbatch_size=1,
+            num_microbatches=[4] * sum(pipeline_templates.values()),
+        )
+        plugin.set_pipeline_templates(pipeline_templates)
+
+        global config
+        model = AutoModelForCausalLM.from_config(config)
+
+        optimizer = CPUAdam(model.parameters())
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
+
+        model, optimizer, criterion, _, lr_scheduler = plugin.configure(
+            model,
+            optimizer,
+            criterion=lambda outputs, inputs: outputs.loss,
+            lr_scheduler=lr_scheduler,
+        )
+
+        dataloader = GLUEDataBuilder(
+            "gpt2",
+            plugin,
+            train_batch_size=16,
+        ).train_dataloader()
+
+        plugin.execute_pipeline(
+            iter(dataloader),
+            model,
+            criterion,
+            optimizer,
+            return_loss=True,
+            return_outputs=True,
         )
 
 
