@@ -28,6 +28,10 @@ class PipelineTemplate:
         return sum(len(stage) for stage in self.modules_per_stage)
 
     @property
+    def num_stages(self) -> int:
+        return len(self.modules_per_stage)
+
+    @property
     def num_gpus(self) -> int:
         return self.num_nodes * self.gpus_per_node
 
