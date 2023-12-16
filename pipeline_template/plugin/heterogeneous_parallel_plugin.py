@@ -1,37 +1,36 @@
+import itertools
+from logging import getLogger
+from types import MethodType
+from typing import Any, Callable, Iterator
+
 import torch
 import torch.distributed as dist
-from logging import getLogger
-
-import itertools
-from types import MethodType
-from typing import Iterator, Callable, Any
-
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
-    HybridParallelPlugin,
-    get_param_info,
     DP_AXIS,
     PP_AXIS,
     TP_AXIS,
     HybridParallelAMPOptimizer,
     HybridParallelNaiveOptimizer,
+    HybridParallelPlugin,
     HybridParallelZeroOptimizer,
+    get_param_info,
 )
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
 from colossalai.shardformer import ShardConfig, ShardFormer
-from colossalai.shardformer.policies.base_policy import Policy
 from colossalai.shardformer.policies.auto_policy import get_autopolicy
+from colossalai.shardformer.policies.base_policy import Policy
 
-from pipeline_template.shardformer.pipeline_template_policy import (
-    PipelineTemplatePolicyWrapper,
-)
-from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
 from pipeline_template.pipeline_template import PipelineTemplate
-from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
 from pipeline_template.plugin.heterogeneous_parallel_module import (
     HeterogeneousParallelModule,
 )
+from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
+from pipeline_template.shardformer.pipeline_template_policy import (
+    PipelineTemplatePolicyWrapper,
+)
+from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
 
 
 class HeterogeneousParallelPlugin(HybridParallelPlugin):
