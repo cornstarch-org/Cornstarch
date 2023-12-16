@@ -72,7 +72,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         ), "At least one pipeline template must be given."
         assert all(
             pt.num_layers == next(iter(pipeline_templates)).num_layers
-            for pt in pipeline_templates
+            for pt, num_template in pipeline_templates.items()
         ), "All pipeline templates must have the same number of layers."
 
         # # Sort pipeline templates in terms of number of nodes used.

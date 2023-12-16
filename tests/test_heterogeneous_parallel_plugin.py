@@ -1,5 +1,6 @@
 import sys
 
+import itertools
 import numpy as np
 import torch.distributed as dist
 from colossalai.interface import ModelWrapper
@@ -26,7 +27,6 @@ from pipeline_template.plugin.heterogeneous_parallel_plugin import (
 # TODO: test more models
 config = AutoConfig.from_pretrained("gpt2")
 config.num_hidden_layers = 4
-model = AutoModelForCausalLM.from_config(config)
 
 homogeneous_templates = {
     PipelineTemplate(
@@ -34,13 +34,13 @@ homogeneous_templates = {
         2,
         [
             [
-                model.transformer.wte,
-                model.transformer.wpe,
-                model.transformer.drop,
-                model.transformer.h[0],
+                "transformer.wte",
+                "transformer.wpe",
+                "transformer.drop",
+                "transformer.h.0",
             ],
-            [model.transformer.h[i] for i in range(1, 4)],
-            [model.transformer.ln_f, model.lm_head],
+            [f"transformer.h.{i}" for i in range(1, 4)],
+            ["transformer.ln_f", "lm_head"],
         ],
     ): 3
 }
@@ -50,26 +50,22 @@ heterogeneous_templates = {
         2,
         [
             [
-                model.transformer.wte,
-                model.transformer.wpe,
-                model.transformer.drop,
-                model.transformer.h[0],
+                "transformer.wte",
+                "transformer.wpe",
+                "transformer.drop",
+                "transformer.h.0",
             ],
-            [model.transformer.h[i] for i in range(1, 4)],
-            [model.transformer.ln_f, model.lm_head],
+            [f"transformer.h.{i}" for i in range(1, 4)],
+            ["transformer.ln_f", "lm_head"],
         ],
     ): 1,
     PipelineTemplate(
         2,
         2,
         [
-            [
-                model.transformer.wte,
-                model.transformer.wpe,
-                model.transformer.drop,
-            ],
-            [model.transformer.h[i] for i in range(0, 4)]
-            + [model.transformer.ln_f, model.lm_head],
+            ["transformer.wte", "transformer.wpe", "transformer.drop"],
+            [f"transformer.h.{i}" for i in range(0, 4)]
+            + [f"transformer.ln_f", "lm_head"],
         ],
     ): 3,
 }
@@ -302,6 +298,29 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         assert plugin._pipeline_index == pipeline_index
 
         assert isinstance(model, ModelWrapper)
+
+        # Check whether the model is split as pipeline template intended
+        param_names = list(name for name, _ in model.module.named_parameters())
+        pipeline_template = plugin._pipeline_index_to_pipeline[pipeline_index]
+        expected_module_names = pipeline_template.modules_per_stage[
+            plugin.stage_manager.stage
+        ]
+        # Get parameters in expected modules after filtering out parameter-less modules
+        expected_param_names = list(
+            itertools.chain.from_iterable(
+                [
+                    [
+                        f"{module_name}.{name}"
+                        for name, _ in model.module.get_submodule(
+                            module_name
+                        ).named_parameters()
+                    ]
+                    for module_name in expected_module_names
+                    if list(model.module.get_submodule(module_name).named_parameters())
+                ]
+            )
+        )
+        assert param_names == expected_param_names
 
 
 instantiate_parametrized_tests(TestHeterogeneousParallelPluginClass)

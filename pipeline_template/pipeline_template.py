@@ -18,7 +18,7 @@ class PipelineTemplate:
         self,
         num_nodes: int,
         gpus_per_node: int,
-        modules_per_stage: list[list[nn.Module]],
+        modules_per_stage: list[list[str]],
     ):
         self.num_nodes = num_nodes
         self.gpus_per_node = gpus_per_node

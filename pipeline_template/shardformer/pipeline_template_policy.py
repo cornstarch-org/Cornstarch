@@ -37,8 +37,11 @@ class PipelineTemplatePolicyWrapper:
             and policy.pipeline_stage_manager.num_stages
             == len(self.pipeline_template.modules_per_stage)
         ), "The given policy is not compatible with the given pipeline template."
-        return self.pipeline_template.modules_per_stage[
-            policy.pipeline_stage_manager.stage
+        return [
+            policy.model.get_submodule(name)
+            for name in self.pipeline_template.modules_per_stage[
+                policy.pipeline_stage_manager.stage
+            ]
         ]
 
     def wrap(self, policy: Policy):
