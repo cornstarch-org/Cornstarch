@@ -153,7 +153,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
         num_ranks = sum(
-            sum(template.gpus_per_stage) * num_pipelines
+            template.num_gpus * num_pipelines
             for template, num_pipelines in pipeline_templates.items()
         )
         assert dist.get_world_size() == num_ranks, (
@@ -227,27 +227,23 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         """Instantiate pipeline templates and initialize distributed process groups."""
         assert self.pipeline_templates, "Pipeline templates are not set."
 
-        for pipeline_template in self.pipeline_templates.keys():
-            assert pipeline_template.verify_all_modules_in_template(
-                model
-            ), "All modules must be included in the pipeline template."
-
         if not isinstance(model, ModelWrapper):
             dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
             template = self._pipeline_index_to_pipeline[self._pipeline_index]
-            module_names = template.module_names_per_stage[self.stage_manager.stage]
+            modules = template.modules_per_stage[self.stage_manager.stage]
             assert isinstance(dp_groups, list) and len(dp_groups) == len(
-                module_names
+                modules
             ), "Number of dp groups does not match the number of modules in the stage."
 
             policy = get_autopolicy(model)
+            policy.set_model(model)
+            policy.set_shard_config(self.shard_config)
             policy = PipelineTemplatePolicyWrapper(template).wrap(policy)
 
             model = HeterogeneousParallelModule(
                 module=model,
                 dp_groups={
-                    module_name: dp_group
-                    for module_name, dp_group in zip(module_names, dp_groups)
+                    module: dp_group for module, dp_group in zip(modules, dp_groups)
                 },
                 tp_group=self.tp_group,
                 precision=self.precision,

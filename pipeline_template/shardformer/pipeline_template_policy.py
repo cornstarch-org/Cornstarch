@@ -2,8 +2,10 @@ import functools
 from typing import Union
 
 from colossalai.shardformer.policies.base_policy import Policy
+import torch.nn as nn
 
 from pipeline_template.pipeline_template import PipelineTemplate
+from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
 
 
 class PipelineTemplatePolicyWrapper:
@@ -28,30 +30,16 @@ class PipelineTemplatePolicyWrapper:
     def __init__(self, pipeline_template: PipelineTemplate):
         self.pipeline_template = pipeline_template
 
-    def distribute_layers(self, num_layers: int, num_stages: int) -> list[int]:
-        assert num_stages == self.pipeline_template.num_stages
-        return [
-            len(
-                [
-                    module_name
-                    for module_name in module_names
-                    if module_name
-                    not in self.pipeline_template.module_names_not_distributable
-                ]
-            )
-            for module_names in self.pipeline_template.module_names_per_stage
+    def get_layers_from_template(self, policy: Policy) -> list[nn.Module]:
+        """Get layers from the given policy based on the pipeline template."""
+        assert (
+            policy.pipeline_stage_manager is not None
+            and policy.pipeline_stage_manager.num_stages
+            == len(self.pipeline_template.modules_per_stage)
+        ), "The given policy is not compatible with the given pipeline template."
+        return self.pipeline_template.modules_per_stage[
+            policy.pipeline_stage_manager.stage
         ]
-
-    def get_stage_index(
-        self,
-        layers_per_stage: list[int],
-        stage: int,
-        num_model_chunks: int = 1,
-        num_stages: int = 0,
-    ) -> Union[tuple[int, int], list[tuple[int, int]]]:
-        return Policy.get_stage_index(
-            layers_per_stage, stage, num_model_chunks, num_stages
-        )
 
     def wrap(self, policy: Policy):
         """
@@ -71,12 +59,17 @@ class PipelineTemplatePolicyWrapper:
         class PipelineTemplatePolicy(type(policy)):
             def __init__(self):
                 super().__init__()
+                self._policy = policy
 
-        PipelineTemplatePolicy.distribute_layers = functools.partial(
-            PipelineTemplatePolicyWrapper.distribute_layers, self
+            def __getattr__(self, name):
+                return getattr(self._policy, name)
+
+            def get_held_layers(self) -> list[nn.Module]:
+                pass
+
+        wrapped_policy = PipelineTemplatePolicy()
+        wrapped_policy.get_held_layers = functools.partial(
+            PipelineTemplatePolicyWrapper.get_layers_from_template, self, policy
         )
-        PipelineTemplatePolicy.get_stage_index = functools.partial(
-            PipelineTemplatePolicyWrapper.get_stage_index, self
-        )
-        policy.__class__ = PipelineTemplatePolicy
-        return policy
+
+        return wrapped_policy

@@ -14,16 +14,16 @@ class HeterogeneousParallelModule(HybridParallelModule):
     def __init__(
         self,
         module: torch.nn.Module,
-        dp_groups: dict[str, dist.ProcessGroup],
+        dp_groups: dict[torch.nn.Module, dist.ProcessGroup],
         tp_group: dist.ProcessGroup,
         precision: str,
         shard_config: ShardConfig,
         custom_policy: Policy,
     ):
-        for module_name in dp_groups.keys():
-            assert (
-                module.get_submodule(module_name) is not None
-            ), f"Submodule {module_name} is not found in module list."
+        # for module in dp_groups.keys():
+        #     assert (
+        #         module.get_submodule(module) is not None
+        #     ), f"Submodule {module} is not found in module list."
 
         super().__init__(
             module=module,

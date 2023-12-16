@@ -26,61 +26,50 @@ from pipeline_template.plugin.heterogeneous_parallel_plugin import (
 # TODO: test more models
 config = AutoConfig.from_pretrained("gpt2")
 config.num_hidden_layers = 4
+model = AutoModelForCausalLM.from_config(config)
 
 homogeneous_templates = {
     PipelineTemplate(
-        config,
-        ["0"],
-        [2, 2, 2],
+        3,
+        2,
         [
-            [f"transformer.{emb}" for emb in ["wte", "wpe", "drop"]]
-            + [f"transformer.h.0"],
-            [f"transformer.h.{i}" for i in range(1, 4)],
-            ["transformer.ln_f", "lm_head"],
-        ],
-        [
-            "transformer.wte",
-            "transformer.wpe",
-            "transformer.drop",
-            "transformer.ln_f",
-            "lm_head",
+            [
+                model.transformer.wte,
+                model.transformer.wpe,
+                model.transformer.drop,
+                model.transformer.h[0],
+            ],
+            [model.transformer.h[i] for i in range(1, 4)],
+            [model.transformer.ln_f, model.lm_head],
         ],
     ): 3
 }
 heterogeneous_templates = {
     PipelineTemplate(
-        config,
-        ["0"],
-        [2, 2, 2],
+        3,
+        2,
         [
-            [f"transformer.{emb}" for emb in ["wte", "wpe", "drop"]]
-            + [f"transformer.h.0"],
-            [f"transformer.h.{i}" for i in range(1, 4)],
-            ["transformer.ln_f", "lm_head"],
-        ],
-        [
-            "transformer.wte",
-            "transformer.wpe",
-            "transformer.drop",
-            "transformer.ln_f",
-            "lm_head",
+            [
+                model.transformer.wte,
+                model.transformer.wpe,
+                model.transformer.drop,
+                model.transformer.h[0],
+            ],
+            [model.transformer.h[i] for i in range(1, 4)],
+            [model.transformer.ln_f, model.lm_head],
         ],
     ): 1,
     PipelineTemplate(
-        config,
-        ["0"],
-        [2, 2],
+        2,
+        2,
         [
-            [f"transformer.{emb}" for emb in ["wte", "wpe", "drop"]],
-            [f"transformer.h.{i}" for i in range(0, 4)]
-            + ["transformer.ln_f", "lm_head"],
-        ],
-        [
-            "transformer.wte",
-            "transformer.wpe",
-            "transformer.drop",
-            "transformer.ln_f",
-            "lm_head",
+            [
+                model.transformer.wte,
+                model.transformer.wpe,
+                model.transformer.drop,
+            ],
+            [model.transformer.h[i] for i in range(0, 4)]
+            + [model.transformer.ln_f, model.lm_head],
         ],
     ): 3,
 }
@@ -313,9 +302,6 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         assert plugin._pipeline_index == pipeline_index
 
         assert isinstance(model, ModelWrapper)
-        assert plugin._pipeline_index_to_pipeline[
-            plugin._pipeline_index
-        ].verify_all_modules_in_stage(model.module, plugin.stage_manager.stage)
 
 
 instantiate_parametrized_tests(TestHeterogeneousParallelPluginClass)

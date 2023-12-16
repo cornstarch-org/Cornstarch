@@ -75,25 +75,25 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             for pt in pipeline_templates
         ), "All pipeline templates must have the same number of layers."
 
-        # Sort pipeline templates in terms of number of nodes used.
-        pipeline_templates: list[tuple[PipelineTemplate, int]] = sorted(
-            pipeline_templates.items(), key=lambda pt: len(pt[0].node_ids)
-        )
+        # # Sort pipeline templates in terms of number of nodes used.
+        # pipeline_templates: list[tuple[PipelineTemplate, int]] = sorted(
+        #     pipeline_templates.items(), key=lambda pt: pt[0].num_nodes
+        # )
 
         self._shape = (
-            sum(num_pt for _, num_pt in pipeline_templates),
-            pipeline_templates[0][0].num_layers,
+            sum(num_pt for _, num_pt in pipeline_templates.items()),
+            next(iter(pipeline_templates)).num_layers,
             tp_size,
         )
         self._rank = dist.get_rank()
         self._mesh: np.array = np.empty(self._shape, dtype=object)
         rank = 0
         num_pipelines = 0
-        for template, num_template in pipeline_templates:
+        for template, num_template in pipeline_templates.items():
             for _ in range(num_template):
                 pipeline_ranks = np.empty((template.num_layers, tp_size), dtype=object)
                 next_layer_index = 0
-                for modules in template.module_names_per_stage:
+                for modules in template.modules_per_stage:
                     ranks_per_stage = list(range(rank, rank + tp_size))
                     for _ in range(len(modules)):
                         pipeline_ranks[next_layer_index] = ranks_per_stage

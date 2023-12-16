@@ -37,27 +37,27 @@ modules_per_stage: list[list[torch.nn.Module]] = [
     "pipeline_templates, tp_size, expected_mesh",
     [
         [
-            {PipelineTemplate(None, ["0"], [1], [[None, None]]): 1},
+            {PipelineTemplate(1, 1, [[None, None]]): 1},
             1,
             [[[0], [0]]],
         ],
         [
-            {PipelineTemplate(None, ["0"], [1], [[None, None, None]]): 2},
+            {PipelineTemplate(1, 1, [[None, None, None]]): 2},
             1,
             [[[0], [0], [0]], [[1], [1], [1]]],
         ],
         [
-            {PipelineTemplate(None, ["0"], [1, 1], [[None], [None, None]]): 2},
+            {PipelineTemplate(2, 1, [[None], [None, None]]): 2},
             1,
             [[[0], [1], [1]], [[2], [3], [3]]],
         ],
         [
-            {PipelineTemplate(None, ["0"], [2], [[None, None]]): 1},
+            {PipelineTemplate(1, 2, [[None, None]]): 1},
             2,
             [[[0, 1], [0, 1]]],
         ],
         [
-            {PipelineTemplate(None, ["0"], [4, 4], [[None], [None, None]]): 2},
+            {PipelineTemplate(2, 4, [[None], [None, None]]): 2},
             4,
             [
                 [[0, 1, 2, 3], [4, 5, 6, 7], [4, 5, 6, 7]],
@@ -80,24 +80,24 @@ def test_homogeneous_pipelines(
     [
         [
             {
-                PipelineTemplate(None, ["0"], [1, 1], [[None], [None, None]]): 1,
-                PipelineTemplate(None, ["0"], [1], [[None, None, None]]): 1,
+                PipelineTemplate(2, 1, [[None], [None, None]]): 1,
+                PipelineTemplate(1, 1, [[None, None, None]]): 1,
             },
             1,
             [[[0], [1], [1]], [[2], [2], [2]]],
         ],
         [
             {
-                PipelineTemplate(None, ["0"], [1, 1], [[None], [None, None]]): 1,
-                PipelineTemplate(None, ["0"], [1], [[None, None, None]]): 2,
+                PipelineTemplate(2, 1, [[None], [None, None]]): 1,
+                PipelineTemplate(1, 1, [[None, None, None]]): 2,
             },
             1,
             [[[0], [1], [1]], [[2], [2], [2]], [[3], [3], [3]]],
         ],
         [
             {
-                PipelineTemplate(None, ["0"], [4, 4], [[None], [None]]): 2,
-                PipelineTemplate(None, ["0"], [4], [[None, None]]): 2,
+                PipelineTemplate(2, 4, [[None], [None]]): 2,
+                PipelineTemplate(1, 4, [[None, None]]): 2,
             },
             4,
             [
@@ -109,10 +109,8 @@ def test_homogeneous_pipelines(
         ],
         [
             {
-                PipelineTemplate(
-                    None, ["0"], [2, 2, 2], [[None], [None], [None, None]]
-                ): 2,
-                PipelineTemplate(None, ["0"], [2, 2], [[None, None, None], [None]]): 1,
+                PipelineTemplate(3, 2, [[None], [None], [None, None]]): 2,
+                PipelineTemplate(2, 2, [[None, None, None], [None]]): 1,
             },
             2,
             [
@@ -128,8 +126,7 @@ def test_heterogeneous_pipelines(
     pipeline_templates: dict[PipelineTemplate, int], tp_size: int, expected_mesh: list
 ):
     assert all(
-        all(num_gpus == tp_size for num_gpus in template.gpus_per_stage)
-        for template in pipeline_templates.keys()
+        tp_size == template.gpus_per_node for template in pipeline_templates.keys()
     ), "Heterogeneous tensor parallel stage is not supported yet."
     mesh = HeterogeneousProcessGroupMesh(pipeline_templates, tp_size)
     np.array_equal(mesh._mesh, expected_mesh)
@@ -140,7 +137,7 @@ def test_heterogeneous_pipelines(
     [
         [
             {
-                PipelineTemplate(None, ["0"], [2, 2], [[None, None], [None]]): 4,
+                PipelineTemplate(2, 2, [[None, None], [None]]): 4,
             },
             2,
             {
@@ -164,12 +161,8 @@ def test_heterogeneous_pipelines(
         ],
         [
             {
-                PipelineTemplate(
-                    None, ["0"], [2, 2, 2, 2], [[None], [None], [None, None], [None]]
-                ): 1,
-                PipelineTemplate(
-                    None, ["0"], [2, 2], [[None, None, None], [None, None]]
-                ): 2,
+                PipelineTemplate(4, 2, [[None], [None], [None, None], [None]]): 1,
+                PipelineTemplate(2, 2, [[None, None, None], [None, None]]): 2,
             },
             2,
             {
