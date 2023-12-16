@@ -69,7 +69,7 @@ class GLUEDataBuilder:
         self.setup()
 
     def setup(self):
-        self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        self.tokenizer.pad_token = self.tokenizer.eos_token
         self.dataset = datasets.load_dataset("glue", self.task_name)
 
         for split in self.dataset.keys():

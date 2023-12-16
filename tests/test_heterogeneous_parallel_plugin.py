@@ -14,7 +14,7 @@ from torch.testing._internal.common_utils import (
 )
 from transformers import (
     AutoConfig,
-    AutoModelForCausalLM,
+    GPT2ForSequenceClassification,
     get_linear_schedule_with_warmup,
 )
 
@@ -41,7 +41,7 @@ homogeneous_templates = {
                 "transformer.h.0",
             ],
             [f"transformer.h.{i}" for i in range(1, 4)],
-            ["transformer.ln_f", "lm_head"],
+            ["transformer.ln_f", "score"],
         ],
     ): 3
 }
@@ -57,7 +57,7 @@ heterogeneous_templates = {
                 "transformer.h.0",
             ],
             [f"transformer.h.{i}" for i in range(1, 4)],
-            ["transformer.ln_f", "lm_head"],
+            ["transformer.ln_f", "score"],
         ],
     ): 1,
     PipelineTemplate(
@@ -66,7 +66,7 @@ heterogeneous_templates = {
         [
             ["transformer.wte", "transformer.wpe", "transformer.drop"],
             [f"transformer.h.{i}" for i in range(0, 4)]
-            + [f"transformer.ln_f", "lm_head"],
+            + [f"transformer.ln_f", "score"],
         ],
     ): 3,
 }
@@ -278,7 +278,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         plugin.set_pipeline_templates(pipeline_templates)
 
         global config
-        model = AutoModelForCausalLM.from_config(config)
+        model = GPT2ForSequenceClassification(config)
 
         optimizer = CPUAdam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
@@ -344,8 +344,16 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         )
         plugin.set_pipeline_templates(pipeline_templates)
 
+        databuilder = GLUEDataBuilder(
+            "gpt2",
+            plugin,
+            train_batch_size=4,
+        )
+        dataloader = databuilder.train_dataloader()
+
         global config
-        model = AutoModelForCausalLM.from_config(config)
+        config.num_labels = databuilder.num_labels
+        model = GPT2ForSequenceClassification(config)
 
         optimizer = CPUAdam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
@@ -357,12 +365,6 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             lr_scheduler=lr_scheduler,
         )
 
-        dataloader = GLUEDataBuilder(
-            "gpt2",
-            plugin,
-            train_batch_size=16,
-        ).train_dataloader()
-
         plugin.execute_pipeline(
             iter(dataloader),
             model,
@@ -371,6 +373,8 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             return_loss=True,
             return_outputs=True,
         )
+
+        dist.barrier()
 
 
 instantiate_parametrized_tests(TestHeterogeneousParallelPluginClass)
