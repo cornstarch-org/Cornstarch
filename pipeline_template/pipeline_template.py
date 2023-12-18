@@ -1,10 +1,3 @@
-from __future__ import annotations
-
-import torch.nn as nn
-from colossalai.shardformer.policies.auto_policy import get_autopolicy
-from colossalai.shardformer.shard.shard_config import ShardConfig
-
-
 class PipelineTemplate:
     """A template for a single pipeline that can be used to instantiate identical pipelines.
 
