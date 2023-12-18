@@ -125,6 +125,14 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.max_norm = max_norm
 
     @property
+    def train_batch_size(self) -> int:
+        assert (
+            self.stage_manager is not None
+        ), "Must call set_pipeline_templates() first to determine batch size."
+
+        return self.microbatch_size * self.num_microbatches[self._pipeline_index]
+
+    @property
     def enable_pipeline_parallelism(self) -> bool:
         return True
 
@@ -155,7 +163,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
         num_ranks = sum(
-            template.num_gpus * num_pipelines
+            template.num_gpus * template.num_stages * num_pipelines
             for template, num_pipelines in pipeline_templates.items()
         )
         assert dist.get_world_size() == num_ranks, (
@@ -240,7 +248,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             module_names = template.modules_per_stage[self.stage_manager.stage]
             assert isinstance(dp_groups, list) and len(dp_groups) == len(
                 module_names
-            ), "Number of dp groups does not match the number of modules in the stage."
+            ), f"Number of dp groups ({len(dp_groups)}) does not match the number of modules in the stage ({len(module_names)})."
 
             policy = get_autopolicy(model)
             policy.set_model(model)
