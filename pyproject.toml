@@ -1,6 +1,6 @@
 [project]
-name = "pipeline-template"
-description = "A library that provides heterogeneous pipeline templates and instantiation."
+name = "oobleck-colossalai"
+description = "A backend submodule for Oobleck that executes heterogeneous pipelines on ColossalAI."
 readme = "README.md"
 license = {file = "LICENSE.txt"}
 requires-python = ">=3.10"
@@ -13,12 +13,13 @@ maintainers = [
 ]
 dependencies = [
     "torch",
-    "transformers",
+    "transformers>=4.36.0",
     "colossalai",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "torch>=2.1.0",
     "ruff",
     "black>=23.0",
     "isort>=5.12",
