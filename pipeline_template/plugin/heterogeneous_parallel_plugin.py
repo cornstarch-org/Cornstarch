@@ -246,9 +246,14 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
             template = self._pipeline_index_to_pipeline[self._pipeline_index]
             module_names = template.modules_per_stage[self.stage_manager.stage]
-            assert isinstance(dp_groups, list) and len(dp_groups) == len(
-                module_names
-            ), f"Number of dp groups ({len(dp_groups)}) does not match the number of modules in the stage ({len(module_names)})."
+            if dp_groups:
+                assert isinstance(dp_groups, list) and len(dp_groups) == len(
+                    module_names
+                ), f"Number of dp groups ({len(dp_groups)}) does not match the number of modules in the stage ({len(module_names)})."
+            else:
+                assert (
+                    sum(self.pipeline_templates.values()) == 1
+                ), "There are more than 1 dp_groups but dp_group is None."
 
             policy = get_autopolicy(model)
             policy.set_model(model)
@@ -260,7 +265,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                 dp_groups={
                     module_name: dp_group
                     for module_name, dp_group in zip(module_names, dp_groups)
-                },
+                }
+                if dp_groups
+                else None,
                 tp_group=self.tp_group,
                 precision=self.precision,
                 shard_config=self.shard_config,

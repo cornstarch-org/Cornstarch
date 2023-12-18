@@ -48,10 +48,10 @@ class HeterogeneousParallelModule(HybridParallelModule):
             None
         """
 
-        for module_name, dp_group in self.dp_groups.items():
-            if dp_group.size() == 1:
-                continue
+        if self.dp_groups is None:
+            return
 
+        for module_name, dp_group in self.dp_groups.items():
             module = self.module.get_submodule(module_name)
             # TODO (insujang): flatten parameters
             for param in module.parameters():
