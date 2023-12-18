@@ -9,8 +9,8 @@ from pytest_mock import MockerFixture
 from torch.testing._internal.distributed.fake_pg import FakeStore
 from transformers import PretrainedConfig
 
-from pipeline_template.pipeline_template import PipelineTemplate
-from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
+from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
 
 
 @pytest.fixture(autouse=True)

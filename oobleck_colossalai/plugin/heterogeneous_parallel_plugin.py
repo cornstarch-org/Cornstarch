@@ -25,15 +25,15 @@ from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, Pipeline
 from colossalai.shardformer import ShardConfig, ShardFormer
 from colossalai.shardformer.policies.auto_policy import get_autopolicy
 from colossalai.shardformer.policies.base_policy import Policy
-from pipeline_template.pipeline_template import PipelineTemplate
-from pipeline_template.plugin.heterogeneous_parallel_module import (
+from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
     HeterogeneousParallelModule,
 )
-from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
-from pipeline_template.shardformer.pipeline_template_policy import (
+from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
+from oobleck_colossalai.shardformer.pipeline_template_policy import (
     PipelineTemplatePolicyWrapper,
 )
-from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
+from oobleck_colossalai.stage_manager import HeterogeneousPipelineStageManager
 
 
 class HeterogeneousParallelPlugin(HybridParallelPlugin):

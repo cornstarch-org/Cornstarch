@@ -20,8 +20,8 @@ from transformers import (
 from colossalai.interface import ModelWrapper
 from colossalai.nn.optimizer import CPUAdam
 from colossalai.shardformer.modeling.gpt2 import GPT2PipelineForwards
-from pipeline_template.pipeline_template import PipelineTemplate
-from pipeline_template.plugin.heterogeneous_parallel_plugin import (
+from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.plugin.heterogeneous_parallel_plugin import (
     HeterogeneousParallelPlugin,
 )
 

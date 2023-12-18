@@ -4,8 +4,8 @@ import re
 import torch.nn as nn
 
 from colossalai.shardformer.policies.base_policy import Policy
-from pipeline_template.pipeline_template import PipelineTemplate
-from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
+from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.stage_manager import HeterogeneousPipelineStageManager
 
 
 class PipelineTemplatePolicyWrapper:

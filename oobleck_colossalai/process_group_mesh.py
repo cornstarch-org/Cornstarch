@@ -6,7 +6,7 @@ from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import GroupMember
 
 from colossalai.cluster.process_group_mesh import ProcessGroupMesh
-from pipeline_template.pipeline_template import PipelineTemplate
+from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 DP_AXIS, PP_AXIS, TP_AXIS = 0, 1, 2
 

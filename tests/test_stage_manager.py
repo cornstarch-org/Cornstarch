@@ -13,9 +13,9 @@ from torch.testing._internal.common_utils import (
 )
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
-from pipeline_template.pipeline_template import PipelineTemplate
-from pipeline_template.process_group_mesh import HeterogeneousProcessGroupMesh
-from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
+from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
+from oobleck_colossalai.stage_manager import HeterogeneousPipelineStageManager
 
 no_tp_templates = {
     PipelineTemplate(2, 1, [[None, None], [None, None, None, None]]): 2,
