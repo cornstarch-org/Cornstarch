@@ -4,9 +4,6 @@ from unittest.mock import patch
 
 import numpy as np
 import torch.distributed as dist
-from colossalai.interface import ModelWrapper
-from colossalai.nn.optimizer import CPUAdam
-from colossalai.shardformer.modeling.gpt2 import GPT2PipelineForwards
 from data_builder import GLUEDataBuilder
 from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
 from torch.testing._internal.common_utils import (
@@ -20,6 +17,9 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
+from colossalai.interface import ModelWrapper
+from colossalai.nn.optimizer import CPUAdam
+from colossalai.shardformer.modeling.gpt2 import GPT2PipelineForwards
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.plugin.heterogeneous_parallel_plugin import (
     HeterogeneousParallelPlugin,

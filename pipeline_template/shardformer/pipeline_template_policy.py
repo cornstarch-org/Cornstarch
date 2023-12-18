@@ -2,8 +2,8 @@ import functools
 import re
 
 import torch.nn as nn
-from colossalai.shardformer.policies.base_policy import Policy
 
+from colossalai.shardformer.policies.base_policy import Policy
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.stage_manager import HeterogeneousPipelineStageManager
 

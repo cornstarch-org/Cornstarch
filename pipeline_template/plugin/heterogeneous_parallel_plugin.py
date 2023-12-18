@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.utils.data
+
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
     DP_AXIS,
     PP_AXIS,
@@ -24,7 +25,6 @@ from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, Pipeline
 from colossalai.shardformer import ShardConfig, ShardFormer
 from colossalai.shardformer.policies.auto_policy import get_autopolicy
 from colossalai.shardformer.policies.base_policy import Policy
-
 from pipeline_template.pipeline_template import PipelineTemplate
 from pipeline_template.plugin.heterogeneous_parallel_module import (
     HeterogeneousParallelModule,
