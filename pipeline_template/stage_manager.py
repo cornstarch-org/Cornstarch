@@ -80,13 +80,20 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
     @property
     def num_stages(self) -> int:
         group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)
-        assert isinstance(group, dist.ProcessGroup)
+        if group is None:
+            # This is one-stage pipeline
+            return 1
+
         return len(self.pg_mesh.get_ranks_in_group(group))
 
     @property
     def stage(self) -> int:
         group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)
-        assert isinstance(group, dist.ProcessGroup)
+
+        if group is None:
+            # This is one-stage pipeline
+            return 0
+
         ranks_in_group = self.pg_mesh.get_ranks_in_group(group)
         return ranks_in_group.index(self.get_rank())
 
