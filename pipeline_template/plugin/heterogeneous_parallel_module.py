@@ -47,15 +47,13 @@ class HeterogeneousParallelModule(HybridParallelModule):
             None
         """
 
-        if len(self.dp_groups) == 1:
-            return
-
-        print("Syncing DP grads")
-        return
-
         for module_name, dp_group in self.dp_groups.items():
+            if dp_group.size() == 1:
+                continue
+
             module = self.module.get_submodule(module_name)
             # TODO (insujang): flatten parameters
             for param in module.parameters():
-                dist.all_reduce(param.grad.data, group=dp_group)
-                param.grad.div_(dp_group.size())
+                if param.grad is not None:
+                    dist.all_reduce(param.grad, group=dp_group)
+                    param.grad.div_(dp_group.size())
