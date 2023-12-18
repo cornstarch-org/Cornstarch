@@ -325,7 +325,8 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
 
         # check forward is patched
         assert (
-            model.module.forward.func is GPT2PipelineForwards.gpt2_lmhead_model_forward
+            model.module.forward.func
+            is GPT2PipelineForwards.gpt2_for_sequence_classification_forward
         )
 
     @parametrize(

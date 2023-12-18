@@ -163,7 +163,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
         num_ranks = sum(
-            template.num_gpus * template.num_stages * num_pipelines
+            template.num_gpus * num_pipelines
             for template, num_pipelines in pipeline_templates.items()
         )
         assert dist.get_world_size() == num_ranks, (
