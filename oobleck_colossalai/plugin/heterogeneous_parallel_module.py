@@ -4,7 +4,6 @@ Code is adopted from ColossalAI HybridParallelModule
 
 import torch
 import torch.distributed as dist
-
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelModule
 from colossalai.shardformer import ShardConfig
 from colossalai.shardformer.policies.base_policy import Policy

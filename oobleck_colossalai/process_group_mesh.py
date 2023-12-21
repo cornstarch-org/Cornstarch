@@ -2,10 +2,10 @@ import itertools
 
 import numpy as np
 import torch.distributed as dist
+from colossalai.cluster.process_group_mesh import ProcessGroupMesh
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import GroupMember
 
-from colossalai.cluster.process_group_mesh import ProcessGroupMesh
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 DP_AXIS, PP_AXIS, TP_AXIS = 0, 1, 2
