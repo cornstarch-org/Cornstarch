@@ -1,9 +1,8 @@
 # Coda copied from colossalai/examples/language/gpt/hybridparallelism/data.py
 
 import datasets
-from transformers import AutoTokenizer, PreTrainedTokenizer
-
 from colossalai.booster.plugin.dp_plugin_base import DPPluginBase
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 
 class GLUEDataBuilder:
@@ -49,16 +48,12 @@ class GLUEDataBuilder:
         plugin: DPPluginBase,
         task_name: str = "mrpc",
         max_seq_length: int = 128,
-        train_batch_size: int = 32,
-        eval_batch_size: int = 32,
         **kwargs,
     ):
         super().__init__()
         self.model_name_or_path = model_name_or_path
         self.task_name = task_name
         self.max_seq_length = max_seq_length
-        self.train_batch_size = train_batch_size
-        self.eval_batch_size = eval_batch_size
         self.plugin = plugin
 
         self.text_fields = self.task_text_field_map[task_name]
@@ -92,36 +87,9 @@ class GLUEDataBuilder:
     def train_dataloader(self):
         return self.plugin.prepare_dataloader(
             self.dataset["train"],
-            batch_size=self.train_batch_size,
             shuffle=True,
             drop_last=True,
         )
-
-    def val_dataloader(self):
-        if len(self.eval_splits) == 1:
-            return self.plugin.prepare_dataloader(
-                self.dataset["validation"], batch_size=self.eval_batch_size
-            )
-        elif len(self.eval_splits) > 1:
-            return [
-                self.plugin.prepare_dataloader(
-                    self.dataset[x], batch_size=self.eval_batch_size
-                )
-                for x in self.eval_splits
-            ]
-
-    def test_dataloader(self):
-        if len(self.eval_splits) == 1:
-            return self.plugin.prepare_dataloader(
-                self.dataset["test"], batch_size=self.eval_batch_size
-            )
-        elif len(self.eval_splits) > 1:
-            return [
-                self.plugin.prepare_dataloader(
-                    self.dataset[x], batch_size=self.eval_batch_size
-                )
-                for x in self.eval_splits
-            ]
 
     def convert_to_features(self, example_batch):
         # Either encode single sentence or sentence pairs

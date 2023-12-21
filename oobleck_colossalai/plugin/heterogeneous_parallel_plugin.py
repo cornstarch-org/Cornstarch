@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.utils.data
-
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
     DP_AXIS,
     PP_AXIS,
@@ -22,9 +21,9 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
-from colossalai.shardformer import ShardConfig, ShardFormer
+from colossalai.shardformer import ShardConfig
 from colossalai.shardformer.policies.auto_policy import get_autopolicy
-from colossalai.shardformer.policies.base_policy import Policy
+
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
     HeterogeneousParallelModule,
@@ -63,7 +62,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         enable_fused_normalization: bool = False,
         enable_flash_attention: bool = False,
         enable_jit_fused: bool = False,
-        num_microbatches: list[int] | None = None,
         microbatch_size: int | None = None,
         initial_scale: float = 2**16,
         min_scale: float = 1,
@@ -85,7 +83,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.stage_manager: HeterogeneousPipelineStageManager = None
         self.pg_mesh: HeterogeneousProcessGroupMesh = None
         self.schedule: PipelineSchedule = None
-        self.num_microbatches = num_microbatches
         self.microbatch_size = microbatch_size
 
         logger = getLogger(__name__)
@@ -152,14 +149,30 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         return True
 
     def set_pipeline_templates(
-        self, pipeline_templates: dict[PipelineTemplate, int] | None
+        self,
+        pipeline_templates: dict[PipelineTemplate, int] | None = None,
+        num_microbatches: dict[PipelineTemplate, int] | None = None,
     ):
         """Set pipeline templates and instantiate pipeline stage manager.
 
         If pipeline templates are set, thje plugin will use the given
         templates to instantiate pipeline parallel training.
-        Given pipeline templates must cover all ranks.
+        Given pipeline templates must cover all ranks.\
         """
+        assert (pipeline_templates and num_microbatches) or (
+            not pipeline_templates and not num_microbatches
+        ), (
+            "pipeline_templates and num_microbatches must be specified together "
+            "or not specified together."
+        )
+
+        if pipeline_templates is None:
+            raise NotImplementedError("Auto pipeline parallelism is not supported yet.")
+
+        assert (
+            num_microbatches.keys() == pipeline_templates.keys()
+        ), "Number of pipeline templates does not match number of num_microbatches."
+
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
         num_ranks = sum(
@@ -174,9 +187,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         dp_size = sum(pipeline_templates.values())
 
         if sum(pipeline_templates.values()) > 1:
-            assert self.num_microbatches is not None and dp_size == len(
-                self.num_microbatches
-            ), "number of pipelines should match the length of num_microbatches list."
             assert (
                 self.microbatch_size is not None
             ), "microbatch_size must be specified when using pipeline parallelism"
@@ -185,6 +195,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             ), "zero stage must be 0 or 1 when using pipeline parallelism"
 
         self.pipeline_templates = pipeline_templates
+        self.num_microbatches = num_microbatches
         self.dp_size = dp_size
 
         self.pg_mesh = HeterogeneousProcessGroupMesh(
@@ -207,7 +218,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
         self.schedule = OneForwardOneBackwardSchedule(
             self.stage_manager,
-            self.num_microbatches[self._pipeline_index],
+            self.num_microbatches[
+                self._pipeline_index_to_pipeline[self._pipeline_index]
+            ],
             self.microbatch_size,
         )
 
@@ -329,7 +342,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
     def prepare_dataloader(
         self,
         dataset: torch.utils.data.Dataset,
-        batch_size: int,
         shuffle: bool = False,
         seed: int = 1024,
         drop_last: bool = False,
@@ -375,7 +387,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         return torch.utils.data.DataLoader(
             dataset,
-            batch_size=batch_size,
+            batch_size=self.num_microbatches[
+                self._pipeline_index_to_pipeline[self._pipeline_index]
+            ],
             sampler=sampler,
             worker_init_fn=seed_worker,
             drop_last=drop_last,
