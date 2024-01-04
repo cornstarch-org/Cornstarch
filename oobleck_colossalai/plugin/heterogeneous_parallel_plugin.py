@@ -1,13 +1,11 @@
 import itertools
-import random
 from logging import getLogger
 from types import MethodType
 from typing import Any, Callable
 
-import numpy as np
 import torch
 import torch.distributed as dist
-import torch.utils.data
+from torch.utils.data import Dataset
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
     DP_AXIS,
     PP_AXIS,
@@ -28,6 +26,7 @@ from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
     HeterogeneousParallelModule,
 )
+from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
 from oobleck_colossalai.shardformer.pipeline_template_policy import (
     PipelineTemplatePolicyWrapper,
@@ -55,6 +54,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
     def __init__(
         self,
         tp_size: int,
+        global_batch_size: int,
+        microbatch_size: int,
         precision: str = "fp16",
         zero_stage: int = 0,
         zero_size: int = 1,
@@ -62,7 +63,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         enable_fused_normalization: bool = False,
         enable_flash_attention: bool = False,
         enable_jit_fused: bool = False,
-        microbatch_size: int | None = None,
         initial_scale: float = 2**16,
         min_scale: float = 1,
         growth_factor: float = 2,
@@ -78,11 +78,17 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
     ):
         super(PipelinePluginBase).__init__()
 
+        assert global_batch_size % microbatch_size == 0, (
+            f"global_batch_size ({global_batch_size}) must be divisible by "
+            f"microbatch_size ({microbatch_size})."
+        )
+
         self.precision = precision
         self.zero_stage = zero_stage
         self.stage_manager: HeterogeneousPipelineStageManager = None
         self.pg_mesh: HeterogeneousProcessGroupMesh = None
         self.schedule: PipelineSchedule = None
+        self.global_batch_size = global_batch_size
         self.microbatch_size = microbatch_size
 
         logger = getLogger(__name__)
@@ -146,7 +152,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         return False
 
     def control_checkpoint_io(self) -> bool:
-        return True
+        return False
 
     def set_pipeline_templates(
         self,
@@ -217,11 +223,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         }
         self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
         self.schedule = OneForwardOneBackwardSchedule(
-            self.stage_manager,
-            self.num_microbatches[
-                self._pipeline_index_to_pipeline[self._pipeline_index]
-            ],
-            self.microbatch_size,
+            stage_manager=self.stage_manager,
+            microbatch_size=self.microbatch_size,
         )
 
         self.shard_config = ShardConfig(
@@ -287,6 +290,22 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                 custom_policy=policy,
             )
 
+        if dataloader is None or not isinstance(dataloader, HeterogeneousDataLoader):
+            raise RuntimeError(
+                "dataloader must be an instance of HeterogeneousDataLoader."
+            )
+
+        # Convert num_microbatches into a flat list
+        num_microbatches = list(
+            itertools.chain(
+                *[
+                    [self.num_microbatches[pipeline]] * num_pipelines
+                    for pipeline, num_pipelines in self.pipeline_templates.items()
+                ]
+            )
+        )
+        dataloader.configure(self._pipeline_index, num_microbatches)
+
         param_info = get_param_info(optimizer)
         if optimizer is not None and not isinstance(optimizer, OptimizerWrapper):
             if self.zero_stage == 0:
@@ -333,26 +352,23 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                     **self.amp_config,
                 )
 
-            # inject update_master_params
-            model.update_master_params = MethodType(
-                optimizer.update_master_params, model
-            )
-            return model, optimizer, criterion, dataloader, lr_scheduler
+        # inject update_master_params
+        model.update_master_params = MethodType(optimizer.update_master_params, model)
+        return model, optimizer, criterion, dataloader, lr_scheduler
 
     def prepare_dataloader(
         self,
-        dataset: torch.utils.data.Dataset,
+        dataset: Dataset,
         shuffle: bool = False,
         seed: int = 1024,
         drop_last: bool = False,
         pin_memory: bool = False,
         num_workers: int = 0,
         **kwargs,
-    ):
+    ) -> HeterogeneousDataLoader:
         r"""
-        Prepare a dataloader for distributed training. The dataloader will be wrapped by
-        `torch.utils.data.DataLoader` and `torch.utils.data.DistributedSampler`.
-
+        Do the first-stage initialization of HeterogeneousDataLoader.
+        It must finish second-stage initialization via ``configure()`` before being used for training.
 
         Args:
             dataset (`torch.utils.data.Dataset`): The dataset to be loaded.
@@ -371,29 +387,17 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             :class:`torch.utils.data.DataLoader`: A DataLoader used for training or testing.
         """
         _kwargs = kwargs.copy()
-        sampler = torch.utils.data.DistributedSampler(
+        _kwargs.pop("sampler", None)
+        _kwargs.pop("batch_sampler", None)
+
+        return HeterogeneousDataLoader(
             dataset,
-            num_replicas=self.dp_size,
-            rank=self._pipeline_index,
+            global_batch_size=self.global_batch_size,
+            microbatch_size=self.microbatch_size,
             shuffle=shuffle,
-        )
-
-        # Deterministic dataloader
-        def seed_worker(worker_id):
-            worker_seed = seed
-            np.random.seed(worker_seed)
-            torch.manual_seed(worker_seed)
-            random.seed(worker_seed)
-
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=self.num_microbatches[
-                self._pipeline_index_to_pipeline[self._pipeline_index]
-            ],
-            sampler=sampler,
-            worker_init_fn=seed_worker,
+            seed=seed,
+            num_workers=num_workers,
             drop_last=drop_last,
             pin_memory=pin_memory,
-            num_workers=num_workers,
             **_kwargs,
         )
