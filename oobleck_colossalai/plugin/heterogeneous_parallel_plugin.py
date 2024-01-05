@@ -181,10 +181,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
-        num_ranks = sum(
-            template.num_gpus * num_pipelines
-            for template, num_pipelines in pipeline_templates.items()
-        )
+        num_ranks = sum(pipeline_templates.values()) & self.shard_config["tp_size"]
         assert dist.get_world_size() == num_ranks, (
             f"Number of ranks in pipeline templates does not match "
             f"world size ({dist.get_world_size()})."
@@ -374,7 +371,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             dataset (`torch.utils.data.Dataset`): The dataset to be loaded.
             shuffle (bool, optional): Whether to shuffle the dataset. Defaults to False.
             seed (int, optional): Random worker seed for sampling, defaults to 1024.
-            add_sampler: Whether to add ``DistributedDataParallelSampler`` to the dataset. Defaults to True.
             drop_last (bool, optional): Set to True to drop the last incomplete batch, if the dataset size
                 is not divisible by the batch size. If False and the size of dataset is not divisible by
                 the batch size, then the last batch will be smaller, defaults to False.
@@ -384,7 +380,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                     `DataLoader <https://pytorch.org/docs/stable/_modules/torch/utils/data/dataloader.html#DataLoader>`_.
 
         Returns:
-            :class:`torch.utils.data.DataLoader`: A DataLoader used for training or testing.
+            :class:`oobleck_colossalai.plugin.heterogeneous_dataloader.HeterogeneousDataLoader`:
+                A DataLoader used for training or testing.
         """
         _kwargs = kwargs.copy()
         _kwargs.pop("sampler", None)

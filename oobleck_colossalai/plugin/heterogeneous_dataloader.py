@@ -88,6 +88,8 @@ class HeterogeneousBatchSampler(BatchSampler):
             # batch start indices for the current pipeline within this iteration
             pipeline_batch_offset = sum(self.num_microbatches[: self.pipeline_index])
 
+            # Return all microbatches for the current iteration at once.
+            # This is because the current ColossalAI implementation fetches all microbatches.
             batch_start_index = index + pipeline_batch_offset
             yield list(
                 range(
