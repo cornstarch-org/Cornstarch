@@ -15,7 +15,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
-    GPT2ForSequenceClassification,
+    BertForSequenceClassification,
     PretrainedConfig,
     get_linear_schedule_with_warmup,
 )
@@ -25,7 +25,7 @@ from data_builder import GLUEDataBuilder
 
 @dataclass
 class ExampleArguments:
-    model_name_or_path: str = "gpt2"
+    model_name_or_path: str = "bert-base-uncased"
     global_batch_size: int = 32
     num_epoch: int = 3
     warmup_faction: float = 0.1
@@ -48,14 +48,13 @@ def main():
     booster = Booster(plugin=plugin)
 
     data_builder = GLUEDataBuilder(
-        args.model_name_or_path, plugin, task_name="mrpc", pad_tokens=True
+        args.model_name_or_path, plugin, task_name="mrpc", pad_tokens=False
     )
 
     config: PretrainedConfig = AutoConfig.from_pretrained(
         args.model_name_or_path, num_labels=data_builder.num_labels
     )
-    config.pad_token_id = config.eos_token_id
-    model = GPT2ForSequenceClassification.from_pretrained(
+    model = BertForSequenceClassification.from_pretrained(
         args.model_name_or_path, config=config
     )
 

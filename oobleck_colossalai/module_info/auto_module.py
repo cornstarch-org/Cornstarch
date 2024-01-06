@@ -1,9 +1,12 @@
 import importlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Type
 
 import torch.nn as nn
 from colossalai.shardformer.policies.auto_policy import _POLICY_LIST, _fullname
+
+from loguru import logger
 
 
 class BaseModuleInfo(ABC):
@@ -41,4 +44,7 @@ def get_module_names(model: nn.Module) -> list[str]:
         module_name = f"oobleck_colossalai.module_info.{module_info_location.file_name}"
         module = importlib.import_module(module_name)
         class_name = getattr(module, module_info_location.class_name)
-        return class_name(model).modules()
+        module_names: Type[BaseModuleInfo] = class_name(model).modules()
+
+        logger.debug(f"Module names for {model.__class__.__qualname__}: {module_names}")
+        return module_names
