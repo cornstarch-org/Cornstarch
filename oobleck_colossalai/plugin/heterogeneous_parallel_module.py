@@ -35,6 +35,11 @@ class HeterogeneousParallelModule(HybridParallelModule):
     def sync_shared_params(self):
         super().sync_shared_params()
 
+    def sync_sp_grads(self, grads: list[torch.Tensor] | None = None):
+        # if there is no tp used, tp_group is None.
+        if self.tp_group is not None:
+            super().sync_sp_grads(grads)
+
     def sync_dp_grads(self):
         r"""
         Synchronize gradients across data parallelism (DP) if the DP group size is greater than 1.
@@ -50,7 +55,7 @@ class HeterogeneousParallelModule(HybridParallelModule):
         if self.dp_groups is None:
             return
 
-        for module_name, dp_group in self.dp_groups.items():
+        for module_name, dp_group in reversed(self.dp_groups.items()):
             module = self.module.get_submodule(module_name)
             # TODO (insujang): flatten parameters
             for param in module.parameters():

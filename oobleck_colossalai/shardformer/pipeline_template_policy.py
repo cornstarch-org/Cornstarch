@@ -39,7 +39,7 @@ class PipelineTemplatePolicyWrapper:
             list[int]: a list of layer indices per stage
         """
         num_distributed_layers = [
-            sum(bool(re.search(r"\d", s)) for s in modules)
+            sum(bool(re.search(r"\.\d", s)) for s in modules)
             for modules in self.pipeline_template.modules_per_stage
         ]
         assert num_layers == sum(

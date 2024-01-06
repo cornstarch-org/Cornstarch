@@ -171,6 +171,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             "pipeline_templates and num_microbatches must be specified together "
             "or not specified together."
         )
+        assert list(pipeline_templates.keys()) == list(
+            num_microbatches.keys()
+        ), "pipeline_templates and num_microbatches must have the same set of templates."
 
         if pipeline_templates is None:
             raise NotImplementedError("Auto pipeline parallelism is not supported yet.")
@@ -181,9 +184,15 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
-        num_ranks = sum(pipeline_templates.values()) & self.shard_config["tp_size"]
+        num_ranks = (
+            sum(
+                template.num_stages * num_instances
+                for template, num_instances in pipeline_templates.items()
+            )
+            * self.shard_config["tp_size"]
+        )
         assert dist.get_world_size() == num_ranks, (
-            f"Number of ranks in pipeline templates does not match "
+            f"Number of ranks in pipeline templates ({num_ranks}) does not match "
             f"world size ({dist.get_world_size()})."
         )
 

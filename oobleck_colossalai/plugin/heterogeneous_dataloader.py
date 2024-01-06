@@ -90,7 +90,7 @@ class HeterogeneousBatchSampler(BatchSampler):
 
             # Return all microbatches for the current iteration at once.
             # This is because the current ColossalAI implementation fetches all microbatches.
-            batch_start_index = index + pipeline_batch_offset
+            batch_start_index = index + self.microbatch_size * pipeline_batch_offset
             yield list(
                 range(
                     batch_start_index,
@@ -137,6 +137,7 @@ class HeterogeneousDataLoader(DataLoader):
         self.drop_last = drop_last
         self.pin_memory = pin_memory
         self.kwargs = kwargs
+        self.batch_sampler = None
 
     def __iter__(self) -> _BaseDataLoaderIter:
         if self.batch_sampler is None:
