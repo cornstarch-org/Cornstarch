@@ -32,8 +32,6 @@ config.num_hidden_layers = 4
 
 homogeneous_templates = {
     PipelineTemplate(
-        3,
-        2,
         [
             [
                 "transformer.wte",
@@ -48,8 +46,6 @@ homogeneous_templates = {
 }
 heterogeneous_templates = {
     PipelineTemplate(
-        3,
-        2,
         [
             [
                 "transformer.wte",
@@ -62,8 +58,6 @@ heterogeneous_templates = {
         ],
     ): 1,
     PipelineTemplate(
-        2,
-        2,
         [
             ["transformer.wte", "transformer.wpe", "transformer.drop"],
             [f"transformer.h.{i}" for i in range(0, 4)]
@@ -223,6 +217,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
             microbatch_size=1,
+            global_batch_size=sum(pipeline_templates.values()),
         )
         plugin.set_pipeline_templates(
             pipeline_templates, {template: 1 for template in pipeline_templates}
@@ -275,10 +270,17 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
             microbatch_size=1,
+            global_batch_size=sum(pipeline_templates.values()),
         )
         plugin.set_pipeline_templates(
             pipeline_templates, {template: 1 for template in pipeline_templates}
         )
+
+        databuilder = GLUEDataBuilder(
+            "gpt2",
+            plugin,
+        )
+        dataloader = databuilder.train_dataloader()
 
         global config
         model = GPT2ForSequenceClassification(config)
@@ -289,6 +291,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         model, optimizer, _, _, lr_scheduler = plugin.configure(
             model,
             optimizer,
+            dataloader=dataloader,
             criterion=lambda outputs, inputs: outputs.loss,
             lr_scheduler=lr_scheduler,
         )
@@ -344,6 +347,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
             microbatch_size=1,
+            global_batch_size=4 * sum(pipeline_templates.values()),
         )
         plugin.set_pipeline_templates(
             pipeline_templates, {template: 4 for template in pipeline_templates}
@@ -365,6 +369,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         model, optimizer, criterion, _, lr_scheduler = plugin.configure(
             model,
             optimizer,
+            dataloader=dataloader,
             criterion=lambda outputs, inputs: outputs.loss,
             lr_scheduler=lr_scheduler,
         )
