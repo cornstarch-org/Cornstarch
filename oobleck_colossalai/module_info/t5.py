@@ -1,6 +1,6 @@
-from .auto_module import BaseModuleInfo
-
 import torch.nn as nn
+
+from .auto_module import BaseModuleInfo
 
 
 class T5Model(BaseModuleInfo):

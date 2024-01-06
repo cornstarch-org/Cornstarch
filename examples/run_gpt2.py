@@ -1,32 +1,29 @@
+from dataclasses import dataclass
+
+import colossalai
+import datasets
+import simple_parsing
+from colossalai.booster import Booster
+from colossalai.cluster import DistCoordinator
+from torch.optim import Adam
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import (
+    AutoConfig,
+    AutoTokenizer,
+    GPT2ForSequenceClassification,
+    PretrainedConfig,
+    PreTrainedTokenizer,
+    get_linear_schedule_with_warmup,
+)
+
 from oobleck_colossalai import (
-    HeterogeneousParallelPlugin,
     HeterogeneousDataLoader,
+    HeterogeneousParallelPlugin,
     PipelineTemplate,
 )
 from oobleck_colossalai.module_info.auto_module import get_module_names
-
-import colossalai
-from colossalai.cluster import DistCoordinator
-from colossalai.booster import Booster
-
-from tqdm import tqdm
-
-from dataclasses import dataclass
-import datasets
-import simple_parsing
-
-from torch.utils.data import DataLoader
-from torch.optim import Adam
-from torch.optim.lr_scheduler import LambdaLR
-
-from transformers import (
-    AutoConfig,
-    PretrainedConfig,
-    PreTrainedTokenizer,
-    AutoTokenizer,
-    GPT2ForSequenceClassification,
-    get_linear_schedule_with_warmup,
-)
 
 
 class GLUEDataBuilder:

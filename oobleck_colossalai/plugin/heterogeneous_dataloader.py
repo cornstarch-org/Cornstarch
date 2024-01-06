@@ -1,10 +1,10 @@
-from torch.utils.data import BatchSampler, DataLoader, Dataset
-from torch.utils.data.dataloader import _BaseDataLoaderIter
 import math
+from typing import Iterator
 
 import torch
-from typing import Iterator
 from loguru import logger
+from torch.utils.data import BatchSampler, DataLoader, Dataset
+from torch.utils.data.dataloader import _BaseDataLoaderIter
 
 
 class HeterogeneousBatchSampler(BatchSampler):

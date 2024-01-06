@@ -1,9 +1,9 @@
 import importlib
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch.nn as nn
 from colossalai.shardformer.policies.auto_policy import _POLICY_LIST, _fullname
-from abc import ABC, abstractmethod
 
 
 class BaseModuleInfo(ABC):

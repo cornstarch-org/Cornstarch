@@ -1,13 +1,14 @@
-from oobleck_colossalai.module_info.auto_module import (
-    _MODULE_LIST,
-    get_module_names,
-    ModuleInfoLocation,
-)
-from transformers import AutoConfig
-import torch.nn as nn
+import importlib
 
 import pytest
-import importlib
+import torch.nn as nn
+from transformers import AutoConfig
+
+from oobleck_colossalai.module_info.auto_module import (
+    _MODULE_LIST,
+    ModuleInfoLocation,
+    get_module_names,
+)
 
 sample_model_name = {
     "bert": "bert-base-uncased",

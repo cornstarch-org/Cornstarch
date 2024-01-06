@@ -5,7 +5,6 @@ from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
     DP_AXIS,
     PP_AXIS,
@@ -21,12 +20,13 @@ from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
 from colossalai.shardformer import ShardConfig
 from colossalai.shardformer.policies.auto_policy import get_autopolicy
+from torch.utils.data import Dataset
 
 from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
     HeterogeneousParallelModule,
 )
-from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
 from oobleck_colossalai.shardformer.pipeline_template_policy import (
     PipelineTemplatePolicyWrapper,
