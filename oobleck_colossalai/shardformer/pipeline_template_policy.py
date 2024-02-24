@@ -2,7 +2,6 @@ import functools
 import re
 
 from colossalai.shardformer.policies.base_policy import Policy
-
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 
