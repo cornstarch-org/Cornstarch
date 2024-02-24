@@ -20,6 +20,7 @@ from colossalai.shardformer.modeling.llama import (
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
+    SubModuleReplacementDescription,
 )
 from torch.nn import Module
 
