@@ -12,19 +12,16 @@ from colossalai.shardformer.layer import (
     RMSNorm,
     VocabParallelEmbedding1D,
 )
-from torch import Tensor
-from torch.nn import Module
-
-from ..modeling.llama import (
+from colossalai.shardformer.modeling.llama import (
     LlamaPipelineForwards,
     get_llama_flash_attention_forward,
     get_lm_forward_with_dist_cross_entropy,
 )
-from .base_policy import (
+from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
-    SubModuleReplacementDescription,
 )
+from torch.nn import Module
 
 __all__ = [
     "LlamaPolicy",
@@ -184,7 +181,7 @@ class LlamaPolicy(Policy):
                 len(module.layers),
                 stage_manager.num_stages * stage_manager.num_model_chunks,
             )
-            stage_manager.stage_indices = Policy.get_stage_index(
+            stage_manager.stage_indices = self.get_stage_index(
                 layers_per_stage,
                 stage_manager.stage,
                 num_model_chunks=stage_manager.num_model_chunks,
@@ -199,10 +196,10 @@ class LlamaPolicy(Policy):
             }
 
         else:
-            layers_per_stage = Policy.distribute_layers(
+            layers_per_stage = self.distribute_layers(
                 len(module.layers), stage_manager.num_stages
             )
-            stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
+            stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
             method_replacement = {
                 "forward": partial(
                     new_forward,
@@ -236,7 +233,7 @@ class LlamaPolicy(Policy):
                 len(module.layers),
                 stage_manager.num_stages * stage_manager.num_model_chunks,
             )
-            stage_indices = Policy.get_stage_index(
+            stage_indices = self.get_stage_index(
                 layers_per_stage,
                 stage_manager.stage,
                 num_model_chunks=stage_manager.num_model_chunks,

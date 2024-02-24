@@ -6,16 +6,15 @@ from typing import Callable, Dict, List, Union
 import colossalai.shardformer.layer as col_nn
 import torch.nn as nn
 from colossalai.shardformer.layer import DropoutForReplicatedInput, Linear1D_Col
-
-from ..modeling.jit import get_jit_fused_dropout_add_func
-from ..modeling.vit import (
+from colossalai.shardformer.modeling.jit import get_jit_fused_dropout_add_func
+from colossalai.shardformer.modeling.vit import (
     ViTForImageClassification_pipeline_forward,
     ViTForMaskedImageModeling_pipeline_forward,
     ViTModel_pipeline_forward,
     get_jit_fused_vit_output_forward,
     get_vit_flash_self_attention_forward,
 )
-from .base_policy import (
+from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
     SubModuleReplacementDescription,
@@ -170,10 +169,10 @@ class ViTPolicy(Policy):
             else:
                 module = self.model.vit
 
-            layers_per_stage = Policy.distribute_layers(
+            layers_per_stage = self.distribute_layers(
                 len(module.encoder.layer), stage_manager.num_stages
             )
-            stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
+            stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
             method_replacement = {
                 "forward": pipeline_forward(
                     stage_manager=stage_manager, stage_index=stage_index

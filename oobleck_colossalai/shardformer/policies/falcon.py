@@ -5,20 +5,19 @@ from functools import partial
 from typing import Callable, Dict, List
 
 import colossalai.shardformer.layer as col_nn
-from torch import Tensor, nn
-from torch.nn import Module
-
-from ..modeling.falcon import (
+from colossalai.shardformer.modeling.falcon import (
     FalconPipelineForwards,
     build_falcon_alibi_tensor_fn,
     get_falcon_flash_attention_forward,
     get_tp_falcon_decoder_layer_forward,
 )
-from .base_policy import (
+from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
     SubModuleReplacementDescription,
 )
+from torch import Tensor, nn
+from torch.nn import Module
 
 __all__ = ["FalconPolicy"]
 
@@ -193,10 +192,10 @@ class FalconPolicy(Policy):
             else:
                 module = self.model.transformer
 
-            layers_per_stage = Policy.distribute_layers(
+            layers_per_stage = self.distribute_layers(
                 len(module.h), stage_manager.num_stages
             )
-            stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
+            stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
             method_replacement = {
                 "forward": partial(
                     new_forward,

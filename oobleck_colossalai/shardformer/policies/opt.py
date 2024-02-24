@@ -5,6 +5,7 @@ from functools import partial
 from typing import Callable, Dict, List
 
 import torch.nn as nn
+from colossalai.shardformer._utils import getattr_
 from colossalai.shardformer.layer import (
     FusedLayerNorm,
     LayerNorm,
@@ -12,20 +13,18 @@ from colossalai.shardformer.layer import (
     Linear1D_Row,
     VocabParallelEmbedding1D,
 )
-from torch import Tensor, nn
-
-from .._utils import getattr_
-from ..modeling.jit import get_jit_fused_dropout_add_func
-from ..modeling.opt import (
+from colossalai.shardformer.modeling.jit import get_jit_fused_dropout_add_func
+from colossalai.shardformer.modeling.opt import (
     OPTPipelineForwards,
     get_jit_fused_opt_decoder_layer_forward,
     get_opt_flash_attention_forward,
 )
-from .base_policy import (
+from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
     SubModuleReplacementDescription,
 )
+from torch import Tensor, nn
 
 __all__ = [
     "OPTPolicy",
@@ -221,10 +220,10 @@ class OPTPolicy(Policy):
             else:
                 module = self.model.model.decoder
 
-            layers_per_stage = Policy.distribute_layers(
+            layers_per_stage = self.distribute_layers(
                 len(module.layers), stage_manager.num_stages
             )
-            stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
+            stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
             method_replacement = {
                 "forward": partial(
                     new_forward, stage_manager=stage_manager, stage_index=stage_index

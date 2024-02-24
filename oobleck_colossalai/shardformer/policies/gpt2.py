@@ -4,18 +4,17 @@ from functools import partial
 from typing import Callable, Dict, List
 
 import colossalai.shardformer.layer as col_nn
-from torch import Tensor, nn
-
-from ..modeling.gpt2 import (
+from colossalai.shardformer.modeling.gpt2 import (
     GPT2PipelineForwards,
     get_gpt2_flash_attention_forward,
     gpt2_sequence_parallel_forward_fn,
 )
-from .base_policy import (
+from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
     SubModuleReplacementDescription,
 )
+from torch import Tensor, nn
 
 __all__ = [
     "GPT2Policy",
@@ -221,10 +220,10 @@ class GPT2Policy(Policy):
         else:
             module = self.model.transformer
 
-        layers_per_stage = Policy.distribute_layers(
+        layers_per_stage = self.distribute_layers(
             len(module.h), stage_manager.num_stages
         )
-        stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
+        stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
         method_replacement = {
             "forward": partial(
                 new_forward,

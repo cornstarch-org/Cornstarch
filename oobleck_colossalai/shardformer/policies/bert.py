@@ -5,22 +5,21 @@ from typing import Callable, Dict, List
 
 import colossalai.shardformer.layer as col_nn
 import torch.nn as nn
-from torch import Tensor
-from torch.nn import Module
-
-from ..modeling.bert import (
+from colossalai.shardformer.modeling.bert import (
     BertPipelineForwards,
     bert_sequence_parallel_forward_fn,
     get_bert_flash_attention_forward,
     get_jit_fused_bert_output_forward,
     get_jit_fused_bert_self_output_forward,
 )
-from ..modeling.jit import get_jit_fused_dropout_add_func
-from .base_policy import (
+from colossalai.shardformer.modeling.jit import get_jit_fused_dropout_add_func
+from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
     SubModuleReplacementDescription,
 )
+from torch import Tensor
+from torch.nn import Module
 
 __all__ = [
     "BertPolicy",
@@ -292,7 +291,7 @@ class BertPolicy(Policy):
                 len(module.encoder.layer),
                 stage_manager.num_stages * stage_manager.num_model_chunks,
             )
-            stage_manager.stage_indices = Policy.get_stage_index(
+            stage_manager.stage_indices = self.get_stage_index(
                 layers_per_stage,
                 stage_manager.stage,
                 num_model_chunks=stage_manager.num_model_chunks,
@@ -307,10 +306,10 @@ class BertPolicy(Policy):
             }
 
         else:
-            layers_per_stage = Policy.distribute_layers(
+            layers_per_stage = self.distribute_layers(
                 len(module.encoder.layer), stage_manager.num_stages
             )
-            stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
+            stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
             method_replacement = {
                 "forward": partial(
                     new_forward,
@@ -341,7 +340,7 @@ class BertPolicy(Policy):
                 len(module.encoder.layer),
                 stage_manager.num_stages * stage_manager.num_model_chunks,
             )
-            stage_indices = Policy.get_stage_index(
+            stage_indices = self.get_stage_index(
                 layers_per_stage,
                 stage_manager.stage,
                 num_model_chunks=stage_manager.num_model_chunks,
@@ -360,7 +359,7 @@ class BertPolicy(Policy):
             )
             if stage_manager.is_first_stage():
                 held_layers.append(module.embeddings)
-            start_idx, end_idx = Policy.get_stage_index(
+            start_idx, end_idx = self.get_stage_index(
                 layers_per_stage, stage_manager.stage
             )
             held_layers.extend(module.encoder.layer[start_idx:end_idx])
