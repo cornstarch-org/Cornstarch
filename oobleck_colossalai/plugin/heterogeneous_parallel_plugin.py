@@ -19,9 +19,9 @@ from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
 from colossalai.shardformer import ShardConfig
-from colossalai.shardformer.policies.auto_policy import get_autopolicy
 from torch.utils.data import Dataset
 
+from oobleck_colossalai.shardformer.policies.auto_policy import get_autopolicy
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
