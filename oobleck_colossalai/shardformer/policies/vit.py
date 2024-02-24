@@ -3,9 +3,8 @@
 import warnings
 from typing import Callable, Dict, List, Union
 
-import torch.nn as nn
-
 import colossalai.shardformer.layer as col_nn
+import torch.nn as nn
 from colossalai.shardformer.layer import DropoutForReplicatedInput, Linear1D_Col
 
 from ..modeling.jit import get_jit_fused_dropout_add_func
@@ -16,9 +15,18 @@ from ..modeling.vit import (
     get_jit_fused_vit_output_forward,
     get_vit_flash_self_attention_forward,
 )
-from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
+from .base_policy import (
+    ModulePolicyDescription,
+    Policy,
+    SubModuleReplacementDescription,
+)
 
-__all__ = ["ViTPolicy", "ViTModelPolicy", "ViTForImageClassificationPolicy", "ViTForMaskedImageModelingPolicy"]
+__all__ = [
+    "ViTPolicy",
+    "ViTModelPolicy",
+    "ViTForImageClassificationPolicy",
+    "ViTForMaskedImageModelingPolicy",
+]
 
 
 class ViTPolicy(Policy):
@@ -29,13 +37,20 @@ class ViTPolicy(Policy):
         return self.model
 
     def module_policy(self) -> Dict[Union[str, nn.Module], ModulePolicyDescription]:
-        from transformers.models.vit.modeling_vit import ViTEmbeddings, ViTLayer, ViTOutput, ViTSelfAttention
+        from transformers.models.vit.modeling_vit import (
+            ViTEmbeddings,
+            ViTLayer,
+            ViTOutput,
+            ViTSelfAttention,
+        )
 
         policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
-            warnings.warn("Vit doesn't support sequence parallelism now, will ignore the sequence parallelism flag.")
+            warnings.warn(
+                "Vit doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
+            )
 
         if self.shard_config.enable_tensor_parallelism:
             policy[ViTEmbeddings] = ModulePolicyDescription(
@@ -136,14 +151,18 @@ class ViTPolicy(Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        layers_per_stage = self.distribute_layers(len(module.encoder.layer), stage_manager.num_stages)
+        layers_per_stage = self.distribute_layers(
+            len(module.encoder.layer), stage_manager.num_stages
+        )
         if stage_manager.is_first_stage():
             held_layers.append(module.embeddings)
         start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
         held_layers.extend(module.encoder.layer[start_idx:end_idx])
         return held_layers
 
-    def set_pipeline_forward(self, model_cls: nn.Module, pipeline_forward: Callable, policy: Dict):
+    def set_pipeline_forward(
+        self, model_cls: nn.Module, pipeline_forward: Callable, policy: Dict
+    ):
         if self.pipeline_stage_manager:
             stage_manager = self.pipeline_stage_manager
             if self.model.__class__.__name__ == "ViTModel":
@@ -151,9 +170,15 @@ class ViTPolicy(Policy):
             else:
                 module = self.model.vit
 
-            layers_per_stage = Policy.distribute_layers(len(module.encoder.layer), stage_manager.num_stages)
+            layers_per_stage = Policy.distribute_layers(
+                len(module.encoder.layer), stage_manager.num_stages
+            )
             stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
-            method_replacement = {"forward": pipeline_forward(stage_manager=stage_manager, stage_index=stage_index)}
+            method_replacement = {
+                "forward": pipeline_forward(
+                    stage_manager=stage_manager, stage_index=stage_index
+                )
+            }
             self.append_or_create_method_replacement(
                 description=method_replacement, policy=policy, target_key=model_cls
             )
@@ -167,7 +192,11 @@ class ViTModelPolicy(ViTPolicy):
         policy = super().module_policy()
 
         if self.shard_config.pipeline_stage_manager is not None:
-            self.set_pipeline_forward(model_cls=ViTModel, pipeline_forward=ViTModel_pipeline_forward, policy=policy)
+            self.set_pipeline_forward(
+                model_cls=ViTModel,
+                pipeline_forward=ViTModel_pipeline_forward,
+                policy=policy,
+            )
         return policy
 
     def get_held_layers(self) -> List[nn.Module]:
@@ -186,7 +215,10 @@ class ViTModelPolicy(ViTPolicy):
 # ViTForImageClassification
 class ViTForImageClassificationPolicy(ViTPolicy):
     def module_policy(self):
-        from transformers.models.vit.modeling_vit import ViTForImageClassification, ViTModel
+        from transformers.models.vit.modeling_vit import (
+            ViTForImageClassification,
+            ViTModel,
+        )
 
         policy = super().module_policy()
         if self.shard_config.enable_tensor_parallelism:
@@ -194,7 +226,9 @@ class ViTForImageClassificationPolicy(ViTPolicy):
                 ViTForImageClassification: ModulePolicyDescription(
                     sub_module_replacement=[
                         SubModuleReplacementDescription(
-                            suffix="classifier", target_module=Linear1D_Col, kwargs=dict(gather_output=True)
+                            suffix="classifier",
+                            target_module=Linear1D_Col,
+                            kwargs=dict(gather_output=True),
                         )
                     ]
                 )
@@ -202,7 +236,11 @@ class ViTForImageClassificationPolicy(ViTPolicy):
             policy.update(new_item)
 
         if self.shard_config.pipeline_stage_manager is not None:
-            self.set_pipeline_forward(model_cls=ViTModel, pipeline_forward=ViTModel_pipeline_forward, policy=policy)
+            self.set_pipeline_forward(
+                model_cls=ViTModel,
+                pipeline_forward=ViTModel_pipeline_forward,
+                policy=policy,
+            )
             self.set_pipeline_forward(
                 model_cls=ViTForImageClassification,
                 pipeline_forward=ViTForImageClassification_pipeline_forward,
@@ -227,12 +265,19 @@ class ViTForImageClassificationPolicy(ViTPolicy):
 # ViTForMaskedImageModeling
 class ViTForMaskedImageModelingPolicy(ViTPolicy):
     def module_policy(self):
-        from transformers.models.vit.modeling_vit import ViTForMaskedImageModeling, ViTModel
+        from transformers.models.vit.modeling_vit import (
+            ViTForMaskedImageModeling,
+            ViTModel,
+        )
 
         policy = super().module_policy()
 
         if self.shard_config.pipeline_stage_manager is not None:
-            self.set_pipeline_forward(model_cls=ViTModel, pipeline_forward=ViTModel_pipeline_forward, policy=policy)
+            self.set_pipeline_forward(
+                model_cls=ViTModel,
+                pipeline_forward=ViTModel_pipeline_forward,
+                policy=policy,
+            )
             self.set_pipeline_forward(
                 model_cls=ViTForMaskedImageModeling,
                 pipeline_forward=ViTForMaskedImageModeling_pipeline_forward,

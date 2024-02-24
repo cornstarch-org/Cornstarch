@@ -3,11 +3,10 @@
 from functools import partial
 from typing import Callable, Dict, List
 
+import colossalai.shardformer.layer as col_nn
 import torch.nn as nn
 from torch import Tensor
 from torch.nn import Module
-
-import colossalai.shardformer.layer as col_nn
 
 from ..modeling.bloom import (
     BloomPipelineForwards,
@@ -18,8 +17,16 @@ from ..modeling.bloom import (
     get_jit_fused_bloom_gelu_forward,
     get_jit_fused_bloom_mlp_forward,
 )
-from ..modeling.jit import get_dropout_add_func, get_jit_fused_dropout_add_func, get_jit_fused_gelu_forward_func
-from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
+from ..modeling.jit import (
+    get_dropout_add_func,
+    get_jit_fused_dropout_add_func,
+    get_jit_fused_gelu_forward_func,
+)
+from .base_policy import (
+    ModulePolicyDescription,
+    Policy,
+    SubModuleReplacementDescription,
+)
 
 
 class BloomPolicy(Policy):
@@ -49,7 +56,13 @@ class BloomPolicy(Policy):
         return self.model
 
     def module_policy(self):
-        from transformers.models.bloom.modeling_bloom import BloomAttention, BloomBlock, BloomGelu, BloomMLP, BloomModel
+        from transformers.models.bloom.modeling_bloom import (
+            BloomAttention,
+            BloomBlock,
+            BloomGelu,
+            BloomMLP,
+            BloomModel,
+        )
 
         policy = {}
 
@@ -66,13 +79,17 @@ class BloomPolicy(Policy):
                     // self.shard_config.tensor_parallel_size,
                     "self_attention.split_size": self.model.config.hidden_size
                     // self.shard_config.tensor_parallel_size,
-                    "self_attention.num_heads": self.model.config.n_head // self.shard_config.tensor_parallel_size,
+                    "self_attention.num_heads": self.model.config.n_head
+                    // self.shard_config.tensor_parallel_size,
                 },
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attention.query_key_value",
                         target_module=col_nn.Linear1D_Col,
-                        kwargs={"seq_parallel": use_sequence_parallel, "overlap": overlap},
+                        kwargs={
+                            "seq_parallel": use_sequence_parallel,
+                            "overlap": overlap,
+                        },
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attention.dense",
@@ -86,7 +103,10 @@ class BloomPolicy(Policy):
                     SubModuleReplacementDescription(
                         suffix="mlp.dense_h_to_4h",
                         target_module=col_nn.Linear1D_Col,
-                        kwargs={"seq_parallel": use_sequence_parallel, "overlap": overlap},
+                        kwargs={
+                            "seq_parallel": use_sequence_parallel,
+                            "overlap": overlap,
+                        },
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.dense_4h_to_h",
@@ -98,10 +118,13 @@ class BloomPolicy(Policy):
 
             policy[BloomModel] = ModulePolicyDescription(
                 attribute_replacement={
-                    "num_heads": self.model.config.n_head // self.shard_config.tensor_parallel_size,
+                    "num_heads": self.model.config.n_head
+                    // self.shard_config.tensor_parallel_size,
                 },
                 method_replacement={
-                    "build_alibi_tensor": build_bloom_alibi_tensor_fn(self.shard_config.tensor_parallel_process_group)
+                    "build_alibi_tensor": build_bloom_alibi_tensor_fn(
+                        self.shard_config.tensor_parallel_process_group
+                    )
                 },
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
@@ -148,7 +171,9 @@ class BloomPolicy(Policy):
 
         if use_sequence_parallel:
             self.append_or_create_method_replacement(
-                description={"forward": get_bloom_sequence_parallel_forward_fn(self.shard_config)},
+                description={
+                    "forward": get_bloom_sequence_parallel_forward_fn(self.shard_config)
+                },
                 policy=policy,
                 target_key=BloomModel,
             )
@@ -195,7 +220,9 @@ class BloomPolicy(Policy):
     def postprocess(self):
         return self.model
 
-    def set_pipeline_forward(self, model_cls: nn.Module, new_forward: Callable, policy: Dict) -> None:
+    def set_pipeline_forward(
+        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
+    ) -> None:
         """If under pipeline parallel setting, replacing the original forward method of huggingface
         to customized forward method, and add this changing to policy."""
         if self.pipeline_stage_manager:
@@ -205,11 +232,16 @@ class BloomPolicy(Policy):
             else:
                 module = self.model.transformer
 
-            layers_per_stage = Policy.distribute_layers(len(module.h), stage_manager.num_stages)
+            layers_per_stage = Policy.distribute_layers(
+                len(module.h), stage_manager.num_stages
+            )
             stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
             method_replacement = {
                 "forward": partial(
-                    new_forward, stage_manager=stage_manager, stage_index=stage_index, shard_config=self.shard_config
+                    new_forward,
+                    stage_manager=stage_manager,
+                    stage_index=stage_index,
+                    shard_config=self.shard_config,
                 )
             }
             self.append_or_create_method_replacement(
@@ -228,7 +260,9 @@ class BloomPolicy(Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        layers_per_stage = self.distribute_layers(len(module.h), stage_manager.num_stages)
+        layers_per_stage = self.distribute_layers(
+            len(module.h), stage_manager.num_stages
+        )
         if stage_manager.is_first_stage():
             held_layers.append(module.word_embeddings)
             held_layers.append(module.word_embeddings_layernorm)
@@ -247,7 +281,9 @@ class BloomModelPolicy(BloomPolicy):
 
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
-                model_cls=BloomModel, new_forward=BloomPipelineForwards.bloom_model_forward, policy=policy
+                model_cls=BloomModel,
+                new_forward=BloomPipelineForwards.bloom_model_forward,
+                policy=policy,
             )
         return policy
 
@@ -273,14 +309,18 @@ class BloomForCausalLMPolicy(BloomPolicy):
         if self.shard_config.enable_tensor_parallelism:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(
-                    suffix="lm_head", target_module=col_nn.Linear1D_Col, kwargs=dict(gather_output=True)
+                    suffix="lm_head",
+                    target_module=col_nn.Linear1D_Col,
+                    kwargs=dict(gather_output=True),
                 ),
                 policy=policy,
                 target_key=BloomForCausalLM,
             )
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
-                model_cls=BloomForCausalLM, new_forward=BloomPipelineForwards.bloom_for_causal_lm_forward, policy=policy
+                model_cls=BloomForCausalLM,
+                new_forward=BloomPipelineForwards.bloom_for_causal_lm_forward,
+                policy=policy,
             )
         return policy
 
@@ -295,12 +335,15 @@ class BloomForCausalLMPolicy(BloomPolicy):
     def get_shared_params(self) -> List[Dict[int, Tensor]]:
         bloom_model = self.model
         if self.pipeline_stage_manager and self.pipeline_stage_manager.num_stages > 1:
-            if id(bloom_model.transformer.word_embeddings.weight) == id(bloom_model.lm_head.weight):
+            if id(bloom_model.transformer.word_embeddings.weight) == id(
+                bloom_model.lm_head.weight
+            ):
                 # tie weights
                 return [
                     {
                         0: bloom_model.transformer.word_embeddings.weight,
-                        self.pipeline_stage_manager.num_stages - 1: bloom_model.lm_head.weight,
+                        self.pipeline_stage_manager.num_stages
+                        - 1: bloom_model.lm_head.weight,
                     }
                 ]
         return []
@@ -308,7 +351,9 @@ class BloomForCausalLMPolicy(BloomPolicy):
 
 class BloomForSequenceClassificationPolicy(BloomPolicy):
     def module_policy(self):
-        from transformers.models.bloom.modeling_bloom import BloomForSequenceClassification
+        from transformers.models.bloom.modeling_bloom import (
+            BloomForSequenceClassification,
+        )
 
         policy = super().module_policy()
 
@@ -316,7 +361,9 @@ class BloomForSequenceClassificationPolicy(BloomPolicy):
         if self.shard_config.enable_tensor_parallelism:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(
-                    suffix="score", target_module=col_nn.Linear1D_Col, kwargs=dict(gather_output=True)
+                    suffix="score",
+                    target_module=col_nn.Linear1D_Col,
+                    kwargs=dict(gather_output=True),
                 ),
                 policy=policy,
                 target_key=BloomForSequenceClassification,
@@ -353,7 +400,9 @@ class BloomForTokenClassificationPolicy(BloomPolicy):
             self.append_or_create_submodule_replacement(
                 description=[
                     SubModuleReplacementDescription(
-                        suffix="classifier", target_module=col_nn.Linear1D_Col, kwargs=dict(gather_output=True)
+                        suffix="classifier",
+                        target_module=col_nn.Linear1D_Col,
+                        kwargs=dict(gather_output=True),
                     ),
                     SubModuleReplacementDescription(
                         suffix="dropout",

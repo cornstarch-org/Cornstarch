@@ -5,14 +5,27 @@ from functools import partial
 from typing import Callable, Dict, List
 
 import torch.nn as nn
+from colossalai.shardformer.layer import (
+    FusedLayerNorm,
+    LayerNorm,
+    Linear1D_Col,
+    Linear1D_Row,
+    VocabParallelEmbedding1D,
+)
 from torch import Tensor, nn
-
-from colossalai.shardformer.layer import FusedLayerNorm, LayerNorm, Linear1D_Col, Linear1D_Row, VocabParallelEmbedding1D
 
 from .._utils import getattr_
 from ..modeling.jit import get_jit_fused_dropout_add_func
-from ..modeling.opt import OPTPipelineForwards, get_jit_fused_opt_decoder_layer_forward, get_opt_flash_attention_forward
-from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
+from ..modeling.opt import (
+    OPTPipelineForwards,
+    get_jit_fused_opt_decoder_layer_forward,
+    get_opt_flash_attention_forward,
+)
+from .base_policy import (
+    ModulePolicyDescription,
+    Policy,
+    SubModuleReplacementDescription,
+)
 
 __all__ = [
     "OPTPolicy",
@@ -50,7 +63,11 @@ class OPTPolicy(Policy):
         return self.model
 
     def module_policy(self):
-        from transformers.models.opt.modeling_opt import OPTAttention, OPTDecoder, OPTDecoderLayer
+        from transformers.models.opt.modeling_opt import (
+            OPTAttention,
+            OPTDecoder,
+            OPTDecoderLayer,
+        )
 
         policy = {}
 
@@ -61,7 +78,9 @@ class OPTPolicy(Policy):
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
-            warnings.warn("OPT doesn't support sequence parallelism now, will ignore the sequence parallelism flag.")
+            warnings.warn(
+                "OPT doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
+            )
 
         if self.shard_config.enable_tensor_parallelism:
             policy[OPTDecoder] = ModulePolicyDescription(
@@ -87,8 +106,10 @@ class OPTPolicy(Policy):
 
             policy[OPTAttention] = ModulePolicyDescription(
                 attribute_replacement={
-                    "embed_dim": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
-                    "num_heads": self.model.config.num_attention_heads // self.shard_config.tensor_parallel_size,
+                    "embed_dim": self.model.config.hidden_size
+                    // self.shard_config.tensor_parallel_size,
+                    "num_heads": self.model.config.num_attention_heads
+                    // self.shard_config.tensor_parallel_size,
                 },
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
@@ -113,7 +134,9 @@ class OPTPolicy(Policy):
         # optimization configuration
         self.append_or_create_submodule_replacement(
             description=SubModuleReplacementDescription(
-                suffix="final_layer_norm", target_module=norm_cls, ignore_if_not_exist=True
+                suffix="final_layer_norm",
+                target_module=norm_cls,
+                ignore_if_not_exist=True,
             ),
             policy=policy,
             target_key=OPTDecoder,
@@ -121,10 +144,14 @@ class OPTPolicy(Policy):
         self.append_or_create_submodule_replacement(
             description=[
                 SubModuleReplacementDescription(
-                    suffix="self_attn_layer_norm", target_module=norm_cls, ignore_if_not_exist=True
+                    suffix="self_attn_layer_norm",
+                    target_module=norm_cls,
+                    ignore_if_not_exist=True,
                 ),
                 SubModuleReplacementDescription(
-                    suffix="final_layer_norm", target_module=norm_cls, ignore_if_not_exist=True
+                    suffix="final_layer_norm",
+                    target_module=norm_cls,
+                    ignore_if_not_exist=True,
                 ),
             ],
             policy=policy,
@@ -168,7 +195,9 @@ class OPTPolicy(Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        layers_per_stage = self.distribute_layers(len(module.layers), stage_manager.num_stages)
+        layers_per_stage = self.distribute_layers(
+            len(module.layers), stage_manager.num_stages
+        )
         if stage_manager.is_first_stage():
             held_layers.append(module.embed_tokens)
             held_layers.append(module.embed_positions)
@@ -180,7 +209,9 @@ class OPTPolicy(Policy):
             held_layers.append(module.project_out)
         return held_layers
 
-    def set_pipeline_forward(self, model_cls: nn.Module, new_forward: Callable, policy: Dict) -> None:
+    def set_pipeline_forward(
+        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
+    ) -> None:
         """If under pipeline parallel setting, replacing the original forward method of huggingface
         to customized forward method, and add this changing to policy."""
         if self.pipeline_stage_manager:
@@ -190,9 +221,15 @@ class OPTPolicy(Policy):
             else:
                 module = self.model.model.decoder
 
-            layers_per_stage = Policy.distribute_layers(len(module.layers), stage_manager.num_stages)
+            layers_per_stage = Policy.distribute_layers(
+                len(module.layers), stage_manager.num_stages
+            )
             stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
-            method_replacement = {"forward": partial(new_forward, stage_manager=stage_manager, stage_index=stage_index)}
+            method_replacement = {
+                "forward": partial(
+                    new_forward, stage_manager=stage_manager, stage_index=stage_index
+                )
+            }
             self.append_or_create_method_replacement(
                 description=method_replacement, policy=policy, target_key=model_cls
             )
@@ -205,7 +242,9 @@ class OPTModelPolicy(OPTPolicy):
         policy = super().module_policy()
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
-                model_cls=OPTModel, new_forward=OPTPipelineForwards.opt_model_forward, policy=policy
+                model_cls=OPTModel,
+                new_forward=OPTPipelineForwards.opt_model_forward,
+                policy=policy,
             )
         return policy
 
@@ -225,14 +264,18 @@ class OPTForCausalLMPolicy(OPTPolicy):
         if self.shard_config.enable_tensor_parallelism:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(
-                    suffix="lm_head", target_module=Linear1D_Col, kwargs=dict(gather_output=True)
+                    suffix="lm_head",
+                    target_module=Linear1D_Col,
+                    kwargs=dict(gather_output=True),
                 ),
                 policy=policy,
                 target_key=OPTForCausalLM,
             )
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
-                model_cls=OPTForCausalLM, new_forward=OPTPipelineForwards.opt_for_causal_lm_forward, policy=policy
+                model_cls=OPTForCausalLM,
+                new_forward=OPTPipelineForwards.opt_for_causal_lm_forward,
+                policy=policy,
             )
 
         return policy
@@ -247,12 +290,22 @@ class OPTForCausalLMPolicy(OPTPolicy):
         opt_model = self.model
         if self.pipeline_stage_manager and self.pipeline_stage_manager.num_stages > 1:
             num_stages = self.pipeline_stage_manager.num_stages
-            if id(opt_model.model.decoder.embed_tokens.weight) == id(opt_model.lm_head.weight):
-                return [{0: opt_model.model.decoder.embed_tokens.weight, num_stages - 1: opt_model.lm_head.weight}]
+            if id(opt_model.model.decoder.embed_tokens.weight) == id(
+                opt_model.lm_head.weight
+            ):
+                return [
+                    {
+                        0: opt_model.model.decoder.embed_tokens.weight,
+                        num_stages - 1: opt_model.lm_head.weight,
+                    }
+                ]
         return []
 
     def postprocess(self):
-        if self.shard_config.enable_tensor_parallelism and self.pipeline_stage_manager is None:
+        if (
+            self.shard_config.enable_tensor_parallelism
+            and self.pipeline_stage_manager is None
+        ):
             binding_map = {
                 "model.decoder.embed_tokens": "lm_head",
             }

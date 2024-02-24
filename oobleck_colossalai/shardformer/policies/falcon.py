@@ -4,10 +4,9 @@ import warnings
 from functools import partial
 from typing import Callable, Dict, List
 
+import colossalai.shardformer.layer as col_nn
 from torch import Tensor, nn
 from torch.nn import Module
-
-import colossalai.shardformer.layer as col_nn
 
 from ..modeling.falcon import (
     FalconPipelineForwards,
@@ -15,7 +14,11 @@ from ..modeling.falcon import (
     get_falcon_flash_attention_forward,
     get_tp_falcon_decoder_layer_forward,
 )
-from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
+from .base_policy import (
+    ModulePolicyDescription,
+    Policy,
+    SubModuleReplacementDescription,
+)
 
 __all__ = ["FalconPolicy"]
 
@@ -47,9 +50,16 @@ class FalconPolicy(Policy):
         return self.model
 
     def module_policy(self):
-        from transformers.models.falcon.modeling_falcon import FalconAttention, FalconDecoderLayer, FalconModel
+        from transformers.models.falcon.modeling_falcon import (
+            FalconAttention,
+            FalconDecoderLayer,
+            FalconModel,
+        )
 
-        if not self.model.config.new_decoder_architecture and self.model.config.multi_query:
+        if (
+            not self.model.config.new_decoder_architecture
+            and self.model.config.multi_query
+        ):
             warnings.warn(
                 "Falcon doesn't support tensor parallelism when (not new_decoder_architecture and multi_query) is True, will ignore the tensor parallelism flag."
             )
@@ -57,16 +67,21 @@ class FalconPolicy(Policy):
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
-            warnings.warn("Falcon doesn't support sequence parallelism now, will ignore the sequence parallelism flag.")
+            warnings.warn(
+                "Falcon doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
+            )
 
         policy = {}
         if self.shard_config.enable_tensor_parallelism:
             attn_attribute_replacement = {
-                "self_attention.hidden_size": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
-                "self_attention.split_size": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
+                "self_attention.hidden_size": self.model.config.hidden_size
+                // self.shard_config.tensor_parallel_size,
+                "self_attention.split_size": self.model.config.hidden_size
+                // self.shard_config.tensor_parallel_size,
                 "self_attention.num_heads": self.model.config.num_attention_heads
                 // self.shard_config.tensor_parallel_size,
-                "self_attention.num_kv_heads": self.model.config.num_kv_heads // self.shard_config.tensor_parallel_size,
+                "self_attention.num_kv_heads": self.model.config.num_kv_heads
+                // self.shard_config.tensor_parallel_size,
             }
 
             policy[FalconDecoderLayer] = ModulePolicyDescription(
@@ -89,16 +104,21 @@ class FalconPolicy(Policy):
                         suffix="mlp.dense_h_to_4h",
                         target_module=col_nn.Linear1D_Col,
                     ),
-                    SubModuleReplacementDescription(suffix="mlp.dense_4h_to_h", target_module=col_nn.Linear1D_Row),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.dense_4h_to_h", target_module=col_nn.Linear1D_Row
+                    ),
                 ],
             )
 
             policy[FalconModel] = ModulePolicyDescription(
                 attribute_replacement={
-                    "num_heads": self.model.config.num_attention_heads // self.shard_config.tensor_parallel_size,
+                    "num_heads": self.model.config.num_attention_heads
+                    // self.shard_config.tensor_parallel_size,
                 },
                 method_replacement={
-                    "build_alibi_tensor": build_falcon_alibi_tensor_fn(self.shard_config.tensor_parallel_process_group)
+                    "build_alibi_tensor": build_falcon_alibi_tensor_fn(
+                        self.shard_config.tensor_parallel_process_group
+                    )
                 },
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
@@ -126,16 +146,24 @@ class FalconPolicy(Policy):
             self.append_or_create_submodule_replacement(
                 description=[
                     SubModuleReplacementDescription(
-                        suffix="ln_attn", target_module=col_nn.FusedLayerNorm, ignore_if_not_exist=True
+                        suffix="ln_attn",
+                        target_module=col_nn.FusedLayerNorm,
+                        ignore_if_not_exist=True,
                     ),
                     SubModuleReplacementDescription(
-                        suffix="ln_mlp", target_module=col_nn.FusedLayerNorm, ignore_if_not_exist=True
+                        suffix="ln_mlp",
+                        target_module=col_nn.FusedLayerNorm,
+                        ignore_if_not_exist=True,
                     ),
                     SubModuleReplacementDescription(
-                        suffix="input_layernorm", target_module=col_nn.FusedLayerNorm, ignore_if_not_exist=True
+                        suffix="input_layernorm",
+                        target_module=col_nn.FusedLayerNorm,
+                        ignore_if_not_exist=True,
                     ),
                     SubModuleReplacementDescription(
-                        suffix="post_attention_layernorm", target_module=col_nn.FusedLayerNorm, ignore_if_not_exist=True
+                        suffix="post_attention_layernorm",
+                        target_module=col_nn.FusedLayerNorm,
+                        ignore_if_not_exist=True,
                     ),
                 ],
                 policy=policy,
@@ -153,7 +181,9 @@ class FalconPolicy(Policy):
     def postprocess(self):
         return self.model
 
-    def set_pipeline_forward(self, model_cls: nn.Module, new_forward: Callable, policy: Dict) -> None:
+    def set_pipeline_forward(
+        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
+    ) -> None:
         """If under pipeline parallel setting, replacing the original forward method of huggingface
         to customized forward method, and add this changing to policy."""
         if self.pipeline_stage_manager:
@@ -163,11 +193,16 @@ class FalconPolicy(Policy):
             else:
                 module = self.model.transformer
 
-            layers_per_stage = Policy.distribute_layers(len(module.h), stage_manager.num_stages)
+            layers_per_stage = Policy.distribute_layers(
+                len(module.h), stage_manager.num_stages
+            )
             stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
             method_replacement = {
                 "forward": partial(
-                    new_forward, stage_manager=stage_manager, stage_index=stage_index, shard_config=self.shard_config
+                    new_forward,
+                    stage_manager=stage_manager,
+                    stage_index=stage_index,
+                    shard_config=self.shard_config,
                 )
             }
             self.append_or_create_method_replacement(
@@ -183,7 +218,9 @@ class FalconPolicy(Policy):
             module = self.model.transformer
         stage_manager = self.pipeline_stage_manager
         held_layers = []
-        layers_per_stage = self.distribute_layers(len(module.h), stage_manager.num_stages)
+        layers_per_stage = self.distribute_layers(
+            len(module.h), stage_manager.num_stages
+        )
         if stage_manager.is_first_stage():
             held_layers.append(module.word_embeddings)
         start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
@@ -205,7 +242,9 @@ class FalconModelPolicy(FalconPolicy):
 
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
-                model_cls=FalconModel, new_forward=FalconPipelineForwards.falcon_model_forward, policy=policy
+                model_cls=FalconModel,
+                new_forward=FalconPipelineForwards.falcon_model_forward,
+                policy=policy,
             )
         return policy
 
@@ -234,7 +273,9 @@ class FalconForCausalLMPolicy(FalconPolicy):
         if self.shard_config.enable_tensor_parallelism:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(
-                    suffix="lm_head", target_module=col_nn.Linear1D_Col, kwargs=dict(gather_output=True)
+                    suffix="lm_head",
+                    target_module=col_nn.Linear1D_Col,
+                    kwargs=dict(gather_output=True),
                 ),
                 policy=policy,
                 target_key=FalconForCausalLM,
@@ -258,12 +299,15 @@ class FalconForCausalLMPolicy(FalconPolicy):
     def get_shared_params(self) -> List[Dict[int, Tensor]]:
         falcon_model = self.model
         if self.pipeline_stage_manager and self.pipeline_stage_manager.num_stages > 1:
-            if id(falcon_model.transformer.word_embeddings.weight) == id(falcon_model.lm_head.weight):
+            if id(falcon_model.transformer.word_embeddings.weight) == id(
+                falcon_model.lm_head.weight
+            ):
                 # tie weights
                 return [
                     {
                         0: falcon_model.transformer.word_embeddings.weight,
-                        self.pipeline_stage_manager.num_stages - 1: falcon_model.lm_head.weight,
+                        self.pipeline_stage_manager.num_stages
+                        - 1: falcon_model.lm_head.weight,
                     }
                 ]
         return []
@@ -274,7 +318,9 @@ class FalconForSequenceClassificationPolicy(FalconPolicy):
         super().__init__()
 
     def module_policy(self):
-        from transformers.models.falcon.modeling_falcon import FalconForSequenceClassification
+        from transformers.models.falcon.modeling_falcon import (
+            FalconForSequenceClassification,
+        )
 
         policy = super().module_policy()
 
@@ -282,7 +328,9 @@ class FalconForSequenceClassificationPolicy(FalconPolicy):
         if self.shard_config.enable_tensor_parallelism:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(
-                    suffix="score", target_module=col_nn.Linear1D_Col, kwargs=dict(gather_output=True)
+                    suffix="score",
+                    target_module=col_nn.Linear1D_Col,
+                    kwargs=dict(gather_output=True),
                 ),
                 policy=policy,
                 target_key=FalconForSequenceClassification,
@@ -314,7 +362,9 @@ class FalconForTokenClassificationPolicy(FalconPolicy):
         super().__init__()
 
     def module_policy(self):
-        from transformers.models.falcon.modeling_falcon import FalconForTokenClassification
+        from transformers.models.falcon.modeling_falcon import (
+            FalconForTokenClassification,
+        )
 
         policy = super().module_policy()
 
@@ -323,7 +373,9 @@ class FalconForTokenClassificationPolicy(FalconPolicy):
             self.append_or_create_submodule_replacement(
                 description=[
                     SubModuleReplacementDescription(
-                        suffix="classifier", target_module=col_nn.Linear1D_Col, kwargs=dict(gather_output=True)
+                        suffix="classifier",
+                        target_module=col_nn.Linear1D_Col,
+                        kwargs=dict(gather_output=True),
                     ),
                     SubModuleReplacementDescription(
                         suffix="dropout",
@@ -360,7 +412,9 @@ class FalconForQuestionAnsweringPolicy(FalconPolicy):
         super().__init__()
 
     def module_policy(self):
-        from transformers.models.falcon.modeling_falcon import FalconForQuestionAnswering
+        from transformers.models.falcon.modeling_falcon import (
+            FalconForQuestionAnswering,
+        )
 
         policy = super().module_policy()
 
@@ -368,7 +422,9 @@ class FalconForQuestionAnsweringPolicy(FalconPolicy):
         if self.shard_config.enable_tensor_parallelism:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(
-                    suffix="qa_outputs", target_module=col_nn.Linear1D_Col, kwargs=dict(gather_output=True)
+                    suffix="qa_outputs",
+                    target_module=col_nn.Linear1D_Col,
+                    kwargs=dict(gather_output=True),
                 ),
                 policy=policy,
                 target_key=FalconForQuestionAnswering,
