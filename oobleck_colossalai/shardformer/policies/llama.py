@@ -22,6 +22,7 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
+from torch import Tensor
 from torch.nn import Module
 
 __all__ = [
