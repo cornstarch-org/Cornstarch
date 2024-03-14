@@ -1,11 +1,13 @@
 # Code copied from https://github.com/hpcaitech/ColossalAI/blob/v0.3.5/colossalai/shardformer/policies/auto_policy.py
 
 import importlib
+
 from colossalai.shardformer.policies.auto_policy import (
     _POLICY_LIST,
     PolicyLocation,
 )
 from colossalai.shardformer.policies.base_policy import Policy
+
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 __all__ = ["get_autopolicy", "import_policy"]

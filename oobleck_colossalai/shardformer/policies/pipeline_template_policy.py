@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import Type
 
 from transformers import PretrainedConfig
 
@@ -11,7 +10,7 @@ class PipelineTemplatePolicyBase(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> list[str]:
+    def get_all_modules(config: PretrainedConfig) -> list[str]:
         """Get all modules in the model to create a pipeline template."""
         ...
 

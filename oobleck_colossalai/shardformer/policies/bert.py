@@ -2,7 +2,7 @@
 
 import itertools
 from functools import partial
-from typing import Callable, Dict, List, Type, cast
+from typing import Callable, Dict, List, cast
 
 import colossalai.shardformer.layer as col_nn
 import torch.nn as nn
@@ -44,7 +44,7 @@ __all__ = [
 
 class BertPolicy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         assert isinstance(
             config, BertConfig
         ), "config must be an instance of BertConfig"

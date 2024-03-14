@@ -1,10 +1,10 @@
 # Copied from https://github.com/hpcaitech/ColossalAI/blob/v0.3.5/colossalai/shardformer/policies/opt.py
 
+import itertools
 import warnings
 from functools import partial
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, cast
 
-import torch.nn as nn
 from colossalai.shardformer._utils import getattr_
 from colossalai.shardformer.layer import (
     FusedLayerNorm,
@@ -25,6 +25,12 @@ from colossalai.shardformer.policies.base_policy import (
     SubModuleReplacementDescription,
 )
 from torch import Tensor, nn
+from transformers import OPTConfig, PretrainedConfig
+
+from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+    PipelineTemplatePolicyBase,
+)
 
 __all__ = [
     "OPTPolicy",
@@ -35,7 +41,51 @@ __all__ = [
 ]
 
 
-class OPTPolicy(Policy):
+class OPTPolicy(PipelineTemplatePolicyBase, Policy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        assert isinstance(config, OPTConfig), "config must be an instance of OPTConfig"
+        config: OPTConfig = cast(OPTConfig, config)
+
+        modules = []
+        modules.extend(
+            ["decoder.embed_tokens", "decoder.embed_positions", "decoder.project_in"]
+        )
+        modules.extend([f"decoder.layers.{i}" for i in range(config.num_hidden_layers)])
+        modules.extend(["decoder.final_layer_norm", "decoder.project_out"])
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        assert (
+            "transformers.models.bert.modeling_llama" in template.model_name
+        ), "The pipeline template is not for the model that the policy is designed for."
+
+        assert hasattr(self.model, "config"), "model must have a config attribute"
+        modules = self.get_all_modules(self.model.config)
+        modules_in_template = list(itertools.chain(*template.modules_per_stage))
+        if modules != modules_in_template:
+            raise ValueError(
+                "Modules in the pipeline template do not match the modules in the model."
+            )
+
+        if not all(
+            module in template.modules_per_stage[0]
+            for module in [
+                "decoder.embed_tokens",
+                "decoder.embed_positions",
+                "decoder.project_in",
+            ]
+        ):
+            raise ValueError("The embedding layers must be in the first stage.")
+
+        if not all(
+            module in template.modules_per_stage[-1]
+            for module in ["decoder.final_layer_norm", "decoder.project_out"]
+        ):
+            raise ValueError(
+                "The final layer normalization and project_out layers must be in the last stage."
+            )
+
     def __init__(self) -> None:
         super().__init__()
         import transformers
@@ -235,6 +285,13 @@ class OPTPolicy(Policy):
 
 
 class OPTModelPolicy(OPTPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        return OPTPolicy.get_all_modules(config)
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+
     def module_policy(self):
         from transformers.models.opt.modeling_opt import OPTModel
 
@@ -256,6 +313,17 @@ class OPTModelPolicy(OPTPolicy):
 
 
 class OPTForCausalLMPolicy(OPTPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"model.{module}" for module in OPTPolicy.get_all_modules(config)]
+        modules.append("lm_head")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "lm_head" not in template.modules_per_stage[-1]:
+            raise ValueError("The lm_head layer must be in the last stage.")
+
     def module_policy(self):
         from transformers.models.opt.modeling_opt import OPTForCausalLM
 
@@ -318,6 +386,17 @@ class OPTForCausalLMPolicy(OPTPolicy):
 
 
 class OPTForSequenceClassificationPolicy(OPTPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"model.{module}" for module in OPTPolicy.get_all_modules(config)]
+        modules.append("score")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "score" not in template.modules_per_stage[-1]:
+            raise ValueError("The score layer must be in the last stage.")
+
     def module_policy(self):
         from transformers.models.opt.modeling_opt import OPTForSequenceClassification
 
@@ -343,6 +422,17 @@ class OPTForSequenceClassificationPolicy(OPTPolicy):
 
 
 class OPTForQuestionAnsweringPolicy(OPTPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"model.{module}" for module in OPTPolicy.get_all_modules(config)]
+        modules.append("qa_outputs")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "qa_outputs" not in template.modules_per_stage[-1]:
+            raise ValueError("The qa_outputs layer must be in the last stage.")
+
     def module_policy(self):
         from transformers.models.opt.modeling_opt import OPTForQuestionAnswering
 

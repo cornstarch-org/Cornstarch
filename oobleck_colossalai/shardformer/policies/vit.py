@@ -2,7 +2,7 @@
 
 import itertools
 import warnings
-from typing import Callable, Dict, List, Type, Union, cast
+from typing import Callable, Dict, List, Union, cast
 
 import colossalai.shardformer.layer as col_nn
 import torch.nn as nn
@@ -37,7 +37,7 @@ __all__ = [
 
 class ViTPolicy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         assert isinstance(config, ViTConfig), "config must be an instance of ViTConfig"
         config: ViTConfig = cast(ViTConfig, config)
 
@@ -219,7 +219,7 @@ class ViTPolicy(PipelineTemplatePolicyBase, Policy):
 # ViTModel
 class ViTModelPolicy(ViTPolicy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = ViTPolicy.get_all_modules(config)
         modules.extend(["layernorm", "pooler"])
         return modules
@@ -262,7 +262,7 @@ class ViTModelPolicy(ViTPolicy):
 # ViTForImageClassification
 class ViTForImageClassificationPolicy(ViTPolicy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = [f"vit.{module}" for module in ViTPolicy.get_all_modules(config)]
         modules.extend(["vit.layernorm", "classifier"])
         return modules

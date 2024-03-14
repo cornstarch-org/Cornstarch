@@ -2,7 +2,7 @@
 
 import itertools
 from functools import partial
-from typing import Callable, Dict, List, Type, cast
+from typing import Callable, Dict, List, cast
 
 import colossalai.shardformer.layer as col_nn
 from colossalai.shardformer.modeling.gpt2 import (
@@ -35,7 +35,7 @@ __all__ = [
 
 class GPT2Policy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         assert isinstance(
             config, GPT2Config
         ), "config must be an instance of GPT2Config"
@@ -282,7 +282,7 @@ class GPT2Policy(PipelineTemplatePolicyBase, Policy):
 # GPT2Model
 class GPT2ModelPolicy(GPT2Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         return GPT2Policy.get_all_modules(config)
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
@@ -312,7 +312,7 @@ class GPT2ModelPolicy(GPT2Policy):
 # GPT2LMHeadModel
 class GPT2LMHeadModelPolicy(GPT2Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = [
             f"transformer.{module}" for module in GPT2Policy.get_all_modules(config)
         ]
@@ -378,7 +378,7 @@ class GPT2LMHeadModelPolicy(GPT2Policy):
 # GPT2DoubleHeadsModel
 class GPT2DoubleHeadsModelPolicy(GPT2Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = [
             f"transformer.{module}" for module in GPT2Policy.get_all_modules(config)
         ]
@@ -456,7 +456,7 @@ class GPT2DoubleHeadsModelPolicy(GPT2Policy):
 # GPT2ForQuestionAnswering
 class GPT2ForQuestionAnsweringPolicy(GPT2Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = [
             f"transformer.{module}" for module in GPT2Policy.get_all_modules(config)
         ]
@@ -496,7 +496,7 @@ class GPT2ForQuestionAnsweringPolicy(GPT2Policy):
 # GPT2ForTokenClassification
 class GPT2ForTokenClassificationPolicy(GPT2Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = [
             f"transformer.{module}" for module in GPT2Policy.get_all_modules(config)
         ]
@@ -552,7 +552,7 @@ class GPT2ForTokenClassificationPolicy(GPT2Policy):
 # GPT2ForSequenceClassification
 class GPT2ForSequenceClassificationPolicy(GPT2Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = [
             f"transformer.{module}" for module in GPT2Policy.get_all_modules(config)
         ]

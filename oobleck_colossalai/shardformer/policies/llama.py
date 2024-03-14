@@ -3,7 +3,7 @@
 import itertools
 import warnings
 from functools import partial
-from typing import Callable, Dict, List, Type, Union, cast
+from typing import Callable, Dict, List, Union, cast
 
 from colossalai.shardformer.layer import (
     FusedRMSNorm,
@@ -39,7 +39,7 @@ __all__ = [
 
 class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         assert isinstance(
             config, LlamaConfig
         ), "config must be an instance of LlamaConfig"
@@ -304,7 +304,7 @@ class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
 
 class LlamaModelPolicy(LlamaPolicy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         return LlamaPolicy.get_all_modules(config)
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
@@ -335,7 +335,7 @@ class LlamaModelPolicy(LlamaPolicy):
 
 class LlamaForCausalLMPolicy(LlamaPolicy):
     @staticmethod
-    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = [f"model.{module}" for module in LlamaPolicy.get_all_modules(config)]
         modules.append("lm_head")
         return modules
