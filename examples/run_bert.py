@@ -4,12 +4,7 @@ import colossalai
 import simple_parsing
 from colossalai.booster import Booster
 from colossalai.cluster import DistCoordinator
-from oobleck_colossalai import (
-    HeterogeneousDataLoader,
-    HeterogeneousParallelPlugin,
-    PipelineTemplate,
-)
-from oobleck_colossalai.module_info.auto_module import get_module_names
+from data_builder import GLUEDataBuilder
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
@@ -20,7 +15,11 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from data_builder import GLUEDataBuilder
+from oobleck_colossalai import (
+    HeterogeneousDataLoader,
+    HeterogeneousParallelPlugin,
+    PipelineTemplate,
+)
 
 
 @dataclass
@@ -59,9 +58,10 @@ def main():
     )
 
     # Adjust module_per_stage to arbitrarily implement pipelines
-    modules = get_module_names(model)
-    template1 = PipelineTemplate(modules_per_stage=[modules])
-    template2 = PipelineTemplate(modules_per_stage=[modules[:8], modules[8:]])
+    model_name = PipelineTemplate.get_model_name(model)
+    modules = PipelineTemplate.get_modules(model)
+    template1 = PipelineTemplate(model_name, [modules])
+    template2 = PipelineTemplate(model_name, [modules[:8], modules[8:]])
     plugin.set_pipeline_templates(
         # homogeneous pipelines with 4 GPUs
         pipeline_templates={template2: 2},
