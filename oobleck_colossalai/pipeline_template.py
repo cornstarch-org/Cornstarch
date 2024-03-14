@@ -1,5 +1,7 @@
-from torch import nn
+from typing import Type
+
 from colossalai.shardformer.policies.auto_policy import _fullname
+from torch import nn
 
 
 class PipelineTemplate:
@@ -9,6 +11,25 @@ class PipelineTemplate:
     def get_model_name(model: nn.Module) -> str:
         """Get the model name from the model."""
         return _fullname(model)
+
+    @staticmethod
+    def get_modules(model: nn.Module) -> list[nn.Module]:
+        """Get all modules from the model."""
+        # Avoid circular import
+        from oobleck_colossalai.shardformer.policies.auto_policy import (
+            get_policy_type,
+        )
+        from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+            PipelineTemplatePolicyBase,
+        )
+
+        policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
+            PipelineTemplate.get_model_name(model)
+        )
+        assert issubclass(
+            policy, PipelineTemplatePolicyBase
+        ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
+        return policy.get_all_modules(model.config)
 
     def __init__(
         self,
