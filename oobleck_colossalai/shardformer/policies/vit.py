@@ -1,7 +1,8 @@
 # Copied from https://github.com/hpcaitech/ColossalAI/blob/v0.3.5/colossalai/shardformer/policies/vit.py
 
+import itertools
 import warnings
-from typing import Callable, Dict, List, Union
+from typing import Callable, Dict, List, Type, Union, cast
 
 import colossalai.shardformer.layer as col_nn
 import torch.nn as nn
@@ -19,6 +20,12 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
+from transformers import PretrainedConfig, ViTConfig
+
+from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+    PipelineTemplatePolicyBase,
+)
 
 __all__ = [
     "ViTPolicy",
@@ -28,7 +35,33 @@ __all__ = [
 ]
 
 
-class ViTPolicy(Policy):
+class ViTPolicy(PipelineTemplatePolicyBase, Policy):
+    @staticmethod
+    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+        assert isinstance(config, ViTConfig), "config must be an instance of ViTConfig"
+        config: ViTConfig = cast(ViTConfig, config)
+
+        modules = []
+        modules.append("embeddings")
+        modules.extend([f"encoder.layer.{i}" for i in range(config.num_hidden_layers)])
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        assert (
+            "transformers.models.bert.modeling_llama" in template.model_name
+        ), "The pipeline template is not for the model that the policy is designed for."
+
+        assert hasattr(self.model, "config"), "model must have a config attribute"
+        modules = self.get_all_modules(self.model.config)
+        modules_in_template = list(itertools.chain(*template.modules_per_stage))
+        if modules != modules_in_template:
+            raise ValueError(
+                "Modules in the pipeline template do not match the modules in the model."
+            )
+
+        if "embeddings" not in modules_in_template[0]:
+            raise ValueError("embeddings must be in the first stage.")
+
     def config_sanity_check(self):
         pass
 
@@ -185,6 +218,21 @@ class ViTPolicy(Policy):
 
 # ViTModel
 class ViTModelPolicy(ViTPolicy):
+    @staticmethod
+    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+        modules = ViTPolicy.get_all_modules(config)
+        modules.extend(["layernorm", "pooler"])
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+
+        if not all(
+            module in template.modules_per_stage[-1]
+            for module in ["layernorm", "pooler"]
+        ):
+            raise ValueError("layernorm and pooler must be in the last stage.")
+
     def module_policy(self):
         from transformers.models.vit.modeling_vit import ViTModel
 
@@ -213,6 +261,20 @@ class ViTModelPolicy(ViTPolicy):
 
 # ViTForImageClassification
 class ViTForImageClassificationPolicy(ViTPolicy):
+    @staticmethod
+    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+        modules = [f"vit.{module}" for module in ViTPolicy.get_all_modules(config)]
+        modules.extend(["vit.layernorm", "classifier"])
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if not all(
+            module in template.modules_per_stage[-1]
+            for module in ["vit.layernorm", "classifier"]
+        ):
+            raise ValueError("layernorm and classifier must be in the last stage.")
+
     def module_policy(self):
         from transformers.models.vit.modeling_vit import (
             ViTForImageClassification,
@@ -263,6 +325,20 @@ class ViTForImageClassificationPolicy(ViTPolicy):
 
 # ViTForMaskedImageModeling
 class ViTForMaskedImageModelingPolicy(ViTPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"vit.{module}" for module in ViTPolicy.get_all_modules(config)]
+        modules.extend(["vit.layernorm", "decoder"])
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if not all(
+            module in template.modules_per_stage[-1]
+            for module in ["vit.layernorm", "decoder"]
+        ):
+            raise ValueError("layernorm and decoder must be in the last stage.")
+
     def module_policy(self):
         from transformers.models.vit.modeling_vit import (
             ViTForMaskedImageModeling,

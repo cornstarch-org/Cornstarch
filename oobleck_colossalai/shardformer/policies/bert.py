@@ -1,7 +1,8 @@
 # Copied from https://github.com/hpcaitech/ColossalAI/blob/v0.3.5/colossalai/shardformer/policies/bert.py
 
+import itertools
 from functools import partial
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Type, cast
 
 import colossalai.shardformer.layer as col_nn
 import torch.nn as nn
@@ -20,6 +21,12 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import Tensor
 from torch.nn import Module
+from transformers import BertConfig, PretrainedConfig
+
+from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+    PipelineTemplatePolicyBase,
+)
 
 __all__ = [
     "BertPolicy",
@@ -35,7 +42,40 @@ __all__ = [
 ]
 
 
-class BertPolicy(Policy):
+class BertPolicy(PipelineTemplatePolicyBase, Policy):
+    @staticmethod
+    def get_all_modules(config: Type[PretrainedConfig]) -> List[str]:
+        assert isinstance(
+            config, BertConfig
+        ), "config must be an instance of BertConfig"
+        config: BertConfig = cast(BertConfig, config)
+
+        modules = []
+        modules.append("embeddings")
+        modules.extend([f"encoder.layer.{i}" for i in range(config.num_hidden_layers)])
+        modules.append("pooler")
+
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        assert (
+            "transformers.models.bert.modeling_bert" in template.model_name
+        ), "The pipeline template is not for the model that the policy is designed for."
+
+        assert hasattr(self.model, "config"), "model must have a config attribute"
+        modules = self.get_all_modules(self.model.config)
+        modules_in_template = list(itertools.chain(*template.modules_per_stage))
+        if modules != modules_in_template:
+            raise ValueError(
+                "Modules in the pipeline template do not match the modules in the model."
+            )
+
+        if "embeddings" not in template.modules_per_stage[0]:
+            raise ValueError("The first stage must contain the embeddings module.")
+
+        if "pooler" not in template.modules_per_stage[-1]:
+            raise ValueError("The last stage must contain the pooler module.")
+
     def config_sanity_check(self):
         pass
 
@@ -371,6 +411,13 @@ class BertPolicy(Policy):
 
 # BertModel
 class BertModelPolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        return BertPolicy.get_all_modules(config)
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+
     def module_policy(self):
         policy = super().module_policy()
         from transformers.models.bert.modeling_bert import BertModel
@@ -395,6 +442,18 @@ class BertModelPolicy(BertPolicy):
 
 # BertForPreTraining
 class BertForPreTrainingPolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+        modules.append("cls")
+
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "cls" not in template.modules_per_stage[-1]:
+            raise ValueError("The last stage must contain the cls module.")
+
     def module_policy(self):
         policy = super().module_policy()
         policy = self.add_lm_head_policy(policy)
@@ -437,6 +496,17 @@ class BertForPreTrainingPolicy(BertPolicy):
 
 # BertLMHeadModel
 class BertLMHeadModelPolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+        modules.append("cls")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "cls" not in template.modules_per_stage[-1]:
+            raise ValueError("The last stage must contain the cls module.")
+
     def module_policy(self):
         policy = super().module_policy()
         policy = self.add_lm_head_policy(policy)
@@ -480,6 +550,17 @@ class BertLMHeadModelPolicy(BertPolicy):
 
 # BertForMaskedLM
 class BertForMaskedLMPolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+        modules.append("cls")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "cls" not in template.modules_per_stage[-1]:
+            raise ValueError("The last stage must contain the cls module.")
+
     def module_policy(self):
         policy = super().module_policy()
         policy = self.add_lm_head_policy(policy)
@@ -523,6 +604,23 @@ class BertForMaskedLMPolicy(BertPolicy):
 
 # BertForSequenceClassification
 class BertForSequenceClassificationPolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+        modules.append("dropout")
+        modules.append("classifier")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if not all(
+            module in template.modules_per_stage[-1]
+            for module in ["dropout", "classifier"]
+        ):
+            raise ValueError(
+                "The last stage must contain the dropout and classifier module."
+            )
+
     def module_policy(self):
         from transformers.models.bert.modeling_bert import BertForSequenceClassification
 
@@ -567,6 +665,23 @@ class BertForSequenceClassificationPolicy(BertPolicy):
 
 # BertForTokenClassification
 class BertForTokenClassificationPolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+        modules.append("dropout")
+        modules.append("classifier")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if not all(
+            module in template.modules_per_stage[-1]
+            for module in ["dropout", "classifier"]
+        ):
+            raise ValueError(
+                "The last stage must contain the dropout and classifier module."
+            )
+
     def module_policy(self):
         from transformers.models.bert.modeling_bert import BertForTokenClassification
 
@@ -611,6 +726,17 @@ class BertForTokenClassificationPolicy(BertPolicy):
 
 # BertForNextSentencePrediction
 class BertForNextSentencePredictionPolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+        modules.append("cls")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "cls" not in template.modules_per_stage[-1]:
+            raise ValueError("The last stage must contain the cls module.")
+
     def module_policy(self):
         policy = super().module_policy()
         from transformers.models.bert.modeling_bert import BertForNextSentencePrediction
@@ -641,6 +767,23 @@ class BertForNextSentencePredictionPolicy(BertPolicy):
 
 # BertForMultipleChoice
 class BertForMultipleChoicePolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+        modules.append("dropout")
+        modules.append("classifier")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if not all(
+            module in template.modules_per_stage[-1]
+            for module in ["dropout", "classifier"]
+        ):
+            raise ValueError(
+                "The last stage must contain the dropout and classifier module."
+            )
+
     def module_policy(self):
         from transformers.models.bert.modeling_bert import BertForMultipleChoice
 
@@ -684,6 +827,17 @@ class BertForMultipleChoicePolicy(BertPolicy):
 
 
 class BertForQuestionAnsweringPolicy(BertPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+        modules.append("qa_outputs")
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "qa_outputs" not in template.modules_per_stage[-1]:
+            raise ValueError("The last stage must contain the qa_outputs module.")
+
     def module_policy(self):
         from transformers.models.bert.modeling_bert import BertForQuestionAnswering
 
