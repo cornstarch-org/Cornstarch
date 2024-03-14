@@ -1,7 +1,6 @@
 import itertools
-from logging import getLogger
 from types import MethodType
-from typing import Any, Callable
+from typing import Callable
 
 import torch
 import torch.distributed as dist
@@ -21,16 +20,13 @@ from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, Pipeline
 from colossalai.shardformer import ShardConfig
 from torch.utils.data import Dataset
 
-from oobleck_colossalai.shardformer.policies.auto_policy import get_autopolicy
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
     HeterogeneousParallelModule,
 )
 from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
-from oobleck_colossalai.shardformer.pipeline_template_policy import (
-    PipelineTemplatePolicyWrapper,
-)
+from oobleck_colossalai.shardformer.policies.auto_policy import get_autopolicy
 from oobleck_colossalai.stage_manager import HeterogeneousPipelineStageManager
 
 
@@ -90,8 +86,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.schedule: PipelineSchedule = None
         self.global_batch_size = global_batch_size
         self.microbatch_size = microbatch_size
-
-        logger = getLogger(__name__)
 
         assert zero_stage in (0, 1, 2)
 
@@ -171,8 +165,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             "pipeline_templates and num_microbatches must be specified together "
             "or not specified together."
         )
-        assert list(pipeline_templates.keys()) == list(
-            num_microbatches.keys()
+        assert (
+            list(pipeline_templates.keys()) == list(num_microbatches.keys())
         ), "pipeline_templates and num_microbatches must have the same set of templates."
 
         if pipeline_templates is None:
@@ -269,18 +263,17 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             template = self._pipeline_index_to_pipeline[self._pipeline_index]
             module_names = template.modules_per_stage[self.stage_manager.stage]
             if dp_groups:
-                assert isinstance(dp_groups, list) and len(dp_groups) == len(
-                    module_names
+                assert (
+                    isinstance(dp_groups, list) and len(dp_groups) == len(module_names)
                 ), f"Number of dp groups ({len(dp_groups)}) does not match the number of modules in the stage ({len(module_names)})."
             else:
                 assert (
                     sum(self.pipeline_templates.values()) == 1
                 ), "There are more than 1 dp_groups but dp_group is None."
 
-            policy = get_autopolicy(model)
+            policy = get_autopolicy(template)
             policy.set_model(model)
             policy.set_shard_config(self.shard_config)
-            policy = PipelineTemplatePolicyWrapper(template).wrap(policy)
 
             model = HeterogeneousParallelModule(
                 module=model,
