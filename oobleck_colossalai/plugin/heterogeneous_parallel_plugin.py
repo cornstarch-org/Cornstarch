@@ -121,6 +121,10 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         self.max_norm = max_norm
 
+    def __del__(self):
+        if self.pg_mesh:
+            self.pg_mesh.destroy_mesh_process_groups()
+
     @property
     def train_batch_size(self) -> int:
         assert (
