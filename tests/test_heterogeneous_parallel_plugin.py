@@ -1,11 +1,12 @@
 import itertools
 import sys
+import unittest
+from typing import cast
 from unittest.mock import patch
 
 import numpy as np
 import torch.distributed as dist
-from colossalai.interface import ModelWrapper
-from colossalai.nn.optimizer import CPUAdam
+from colossalai.nn.optimizer import FusedAdam
 from colossalai.shardformer.modeling.gpt2 import GPT2PipelineForwards
 from data_builder import GLUEDataBuilder
 from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
@@ -15,56 +16,34 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 from transformers import (
-    AutoConfig,
+    GPT2Config,
     GPT2ForSequenceClassification,
     get_linear_schedule_with_warmup,
 )
 
 from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
+    HeterogeneousParallelModule,
+)
 from oobleck_colossalai.plugin.heterogeneous_parallel_plugin import (
     HeterogeneousParallelPlugin,
 )
+from oobleck_colossalai.shardformer.policies.gpt2 import (
+    GPT2ForSequenceClassificationPolicy,
+)
 
-# templates are currently based on GPT-2.
-# TODO: test more models
-config = AutoConfig.from_pretrained("gpt2")
-config.num_hidden_layers = 4
+config: GPT2Config = GPT2Config.from_pretrained("gpt2")
+config.is_decoder = True
+config.n_layer = 4
+config.num_labels = GLUEDataBuilder.glue_task_num_labels["mrpc"]
 
-homogeneous_templates = {
-    PipelineTemplate(
-        [
-            [
-                "transformer.wte",
-                "transformer.wpe",
-                "transformer.drop",
-                "transformer.h.0",
-            ],
-            [f"transformer.h.{i}" for i in range(1, 4)],
-            ["transformer.ln_f", "score"],
-        ],
-    ): 3
-}
-heterogeneous_templates = {
-    PipelineTemplate(
-        [
-            [
-                "transformer.wte",
-                "transformer.wpe",
-                "transformer.drop",
-                "transformer.h.0",
-            ],
-            [f"transformer.h.{i}" for i in range(1, 4)],
-            ["transformer.ln_f", "score"],
-        ],
-    ): 1,
-    PipelineTemplate(
-        [
-            ["transformer.wte", "transformer.wpe", "transformer.drop"],
-            [f"transformer.h.{i}" for i in range(0, 4)]
-            + [f"transformer.ln_f", "score"],
-        ],
-    ): 3,
-}
+modules: list[str] = GPT2ForSequenceClassificationPolicy.get_all_modules(config)
+model_name: str = "transformers.models.gpt2.modeling_gpt2.GPT2ForSequenceClassification"
+
+template_2stages = PipelineTemplate(model_name, [modules[:3], modules[3:]])
+template_3stages = PipelineTemplate(
+    model_name, [modules[:4], modules[4:7], modules[7:]]
+)
 
 
 class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
@@ -112,10 +91,11 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         dist.destroy_process_group()
 
     @parametrize(
-        "pipeline_templates, expected_mesh, expected_num_stages",
+        "pipeline_templates, expected_num_stages, expected_mesh",
         [
             [
-                homogeneous_templates,
+                {template_3stages: 3},
+                {tuple(list(range(18))): 3},
                 [
                     [
                         [0, 1],
@@ -151,10 +131,10 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
                         [16, 17],
                     ],
                 ],
-                {tuple(list(range(18))): 3},
             ],
             [
-                heterogeneous_templates,
+                {template_3stages: 1, template_2stages: 3},
+                {tuple(list(range(6))): 3, tuple(list(range(6, 18))): 2},
                 [
                     [
                         [0, 1],
@@ -201,18 +181,19 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
                         [16, 17],
                     ],
                 ],
-                {tuple(list(range(6))): 3, tuple(list(range(6, 18))): 2},
             ],
         ],
-        name_fn=lambda pipeline_templates, expected_mesh, expected_num_stages: "homogeneous"
+        name_fn=lambda pipeline_templates,
+        expected_num_stages,
+        expected_mesh: "homogeneous"
         if len(pipeline_templates) == 1
         else "heterogeneous",
     )
     def test_plugin_initialize(
         self,
         pipeline_templates: dict[PipelineTemplate, int],
-        expected_mesh: list,
         expected_num_stages: dict[tuple[int], int],
+        expected_mesh: list,
     ):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
@@ -241,7 +222,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         "pipeline_templates, expected_pipeline_index",
         [
             [
-                homogeneous_templates,
+                {template_3stages: 3},
                 {
                     tuple(list(range(0, 6))): 0,
                     tuple(list(range(6, 12))): 1,
@@ -249,7 +230,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
                 },
             ],
             [
-                heterogeneous_templates,
+                {template_3stages: 1, template_2stages: 3},
                 {
                     tuple(list(range(0, 6))): 0,
                     tuple(list(range(6, 10))): 1,
@@ -282,10 +263,9 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         )
         dataloader = databuilder.train_dataloader()
 
-        global config
         model = GPT2ForSequenceClassification(config)
 
-        optimizer = CPUAdam(model.parameters())
+        optimizer = FusedAdam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
 
         model, optimizer, _, _, lr_scheduler = plugin.configure(
@@ -303,7 +283,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         ]
         assert plugin._pipeline_index == pipeline_index
 
-        assert isinstance(model, ModelWrapper)
+        assert isinstance(model, HeterogeneousParallelModule)
 
         # Check whether the model is split as pipeline template intended
         param_names = list(name for name, _ in model.module.named_parameters())
@@ -335,14 +315,16 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         )
 
     @parametrize(
-        "pipeline_templates, unused",
-        [[homogeneous_templates, 0], [heterogeneous_templates, 0]],
-        name_fn=lambda pipeline_templates, _: "homogeneous"
-        if len(pipeline_templates) == 1
+        "pipeline_templates",
+        [{template_3stages: 3}, {template_3stages: 1, template_2stages: 3}],
+        name_fn=lambda pipeline_templates: "homogeneous"
+        if len(pipeline_templates.keys()) == 1
         else "heterogeneous",
     )
+    @unittest.skip("p2p communication for GPU/CPU memory doesn't work. Skipping")
     def test_execute_pipeline(
-        self, pipeline_templates: dict[PipelineTemplate, int], unused
+        self,
+        pipeline_templates: dict[PipelineTemplate, int],
     ):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
@@ -359,11 +341,9 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         )
         dataloader = databuilder.train_dataloader()
 
-        global config
-        config.num_labels = databuilder.num_labels
         model = GPT2ForSequenceClassification(config)
 
-        optimizer = CPUAdam(model.parameters())
+        optimizer = FusedAdam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
 
         model, optimizer, criterion, _, lr_scheduler = plugin.configure(
@@ -373,6 +353,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             criterion=lambda outputs, inputs: outputs.loss,
             lr_scheduler=lr_scheduler,
         )
+        model: HeterogeneousParallelModule = cast(HeterogeneousParallelModule, model)
 
         with patch.object(
             model, "sync_dp_grads", side_effect=model.sync_dp_grads

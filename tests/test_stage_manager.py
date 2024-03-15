@@ -18,8 +18,8 @@ from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
 from oobleck_colossalai.stage_manager import HeterogeneousPipelineStageManager
 
 no_tp_templates = {
-    PipelineTemplate([[None, None], [None, None, None, None]]): 2,
-    PipelineTemplate([[None], [None, None, None], [None, None]]): 1,
+    PipelineTemplate("fake", [[None, None], [None, None, None, None]]): 2,
+    PipelineTemplate("fake", [[None], [None, None, None], [None, None]]): 1,
 }
 no_tp_template_ranks = [
     [[0], [0], [1], [1], [1], [1]],
@@ -28,8 +28,8 @@ no_tp_template_ranks = [
 ]
 
 tp_templates = {
-    PipelineTemplate([[None, None], [None, None, None, None]]): 1,
-    PipelineTemplate([[None], [None, None, None], [None, None]]): 2,
+    PipelineTemplate("fake", [[None, None], [None, None, None, None]]): 1,
+    PipelineTemplate("fake", [[None], [None, None, None], [None, None]]): 2,
 }
 tp_template_ranks = [
     [[0, 1], [0, 1], [2, 3], [2, 3], [2, 3], [2, 3]],

@@ -43,4 +43,4 @@ def get_autopolicy(pipeline_template: PipelineTemplate) -> Policy:
     Return:
         :class:`Policy`: The auto policy for the model
     """
-    return get_policy_type(pipeline_template.model_name)()
+    return get_policy_type(pipeline_template.model_name)(pipeline_template)
