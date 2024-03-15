@@ -43,6 +43,9 @@ class PipelineTemplate:
         self.latency = latency
         self.mem_required = mem_required
 
+    def __repr__(self) -> str:
+        return f"PipelineTemplate({self.model_name}, {self.num_stages} stages)"
+
     @property
     def num_layers(self) -> int:
         return sum(len(stage) for stage in self.modules_per_stage)
