@@ -13,7 +13,7 @@ class PipelineTemplate:
         return _fullname(model)
 
     @staticmethod
-    def get_modules(model: nn.Module) -> list[nn.Module]:
+    def get_modules(model: nn.Module) -> list[str]:
         """Get all modules from the model."""
         # Avoid circular import
         from oobleck_colossalai.shardformer.policies.auto_policy import (
