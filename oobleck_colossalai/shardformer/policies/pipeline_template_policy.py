@@ -10,9 +10,6 @@ from oobleck_colossalai.pipeline_template import PipelineTemplate
 class PipelineTemplatePolicyBase(ABC):
     """A policy base that defines the interface for a pipeline template policy."""
 
-    def __init__(self, pipeline_template: PipelineTemplate):
-        self.pipeline_template = pipeline_template
-
     @staticmethod
     @abstractmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
@@ -20,7 +17,7 @@ class PipelineTemplatePolicyBase(ABC):
         ...
 
     @abstractmethod
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+    def pipeline_template_sanity_check(self):
         """Pipeline template sanity check.
 
         Its implementation should check if the pipeline template is valid for the model.
@@ -37,10 +34,18 @@ class PipelineTemplatePolicyBase(ABC):
         """
         ...
 
+    def set_pipeline_template(self, pipeline_template: PipelineTemplate):
+        self.pipeline_template = pipeline_template
+        self.pipeline_template_sanity_check()
+
     def distribute_layers(
         self, num_layers: int, num_stages: int, is_decoder: bool = True
     ) -> list[int]:
         """Distribute layers to stages."""
+        assert hasattr(
+            self, "pipeline_template"
+        ), "pipeline_template should be set before calling distribute_layers"
+
         assert num_stages == self.pipeline_template.num_stages, (
             f"num_stages {num_stages} should be equal to "
             f"pipeline_template.num_stages {self.pipeline_template.num_stages}"

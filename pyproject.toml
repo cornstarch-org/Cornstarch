@@ -28,6 +28,7 @@ dev = [
     "pytest",
     "pytest-mock",
     "expecttest",
+    "accelerate",
 ]
 
 [tool.ruff]

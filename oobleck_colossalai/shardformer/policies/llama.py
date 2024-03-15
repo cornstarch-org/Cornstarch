@@ -25,7 +25,6 @@ from colossalai.shardformer.policies.base_policy import (
 from torch import Tensor, nn
 from transformers import LlamaConfig, PretrainedConfig
 
-from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -52,23 +51,28 @@ class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
 
         return modules
 
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+    def pipeline_template_sanity_check(self):
         assert (
-            "transformers.models.bert.modeling_llama" in template.model_name
+            "transformers.models.llama.modeling_llama"
+            in self.pipeline_template.model_name
         ), "The pipeline template is not for the model that the policy is designed for."
+
+        prefix = "" if self.model.__class__.__name__ == "LlamaModel" else "model."
 
         assert hasattr(self.model, "config"), "model must have a config attribute"
         modules = self.get_all_modules(self.model.config)
-        modules_in_template = list(itertools.chain(*template.modules_per_stage))
+        modules_in_template = list(
+            itertools.chain(*self.pipeline_template.modules_per_stage)
+        )
         if modules != modules_in_template:
             raise ValueError(
                 "Modules in the pipeline template do not match the modules in the model."
             )
 
-        if "embed_tokens" not in modules_in_template[0]:
+        if f"{prefix}embed_tokens" not in modules_in_template[0]:
             raise ValueError("embed_tokens must be in the first stage.")
 
-        if "norm" not in modules_in_template[-1]:
+        if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("norm must be in the last stage.")
 
     def config_sanity_check(self):
@@ -307,8 +311,8 @@ class LlamaModelPolicy(LlamaPolicy):
     def get_all_modules(config: PretrainedConfig) -> List[str]:
         return LlamaPolicy.get_all_modules(config)
 
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
+    def pipeline_template_sanity_check(self):
+        super().pipeline_template_sanity_check()
 
     def module_policy(self):
         policy = super().module_policy()
@@ -340,9 +344,9 @@ class LlamaForCausalLMPolicy(LlamaPolicy):
         modules.append("lm_head")
         return modules
 
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-        if "lm_head" not in template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self):
+        super().pipeline_template_sanity_check()
+        if "lm_head" not in self.pipeline_template.modules_per_stage[-1]:
             raise ValueError("lm_head must be in the last stage.")
 
     def module_policy(self):
@@ -413,9 +417,9 @@ class LlamaForSequenceClassificationPolicy(LlamaPolicy):
         modules.append("score")
         return modules
 
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-        if "score" not in template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self):
+        super().pipeline_template_sanity_check()
+        if "score" not in self.pipeline_template.modules_per_stage[-1]:
             raise ValueError("score must be in the last stage.")
 
     def module_policy(self):

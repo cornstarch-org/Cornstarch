@@ -33,7 +33,7 @@ def get_policy_type(model_name: str) -> Type[Policy]:
     return import_policy(policy_location)
 
 
-def get_autopolicy(pipeline_template: PipelineTemplate) -> Policy:
+def get_autopolicy(model_name: str) -> Policy:
     r"""
     Return the auto policy for the model
 
@@ -43,4 +43,4 @@ def get_autopolicy(pipeline_template: PipelineTemplate) -> Policy:
     Return:
         :class:`Policy`: The auto policy for the model
     """
-    return get_policy_type(pipeline_template.model_name)(pipeline_template)
+    return get_policy_type(model_name)()

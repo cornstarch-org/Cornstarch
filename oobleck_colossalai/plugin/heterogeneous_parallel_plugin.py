@@ -271,8 +271,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                     sum(self.pipeline_templates.values()) == 1
                 ), "There are more than 1 dp_groups but dp_group is None."
 
-            policy = get_autopolicy(template)
+            policy = get_autopolicy(template.model_name)
             policy.set_model(model)
+            policy.set_pipeline_template(template)
             policy.set_shard_config(self.shard_config)
 
             model = HeterogeneousParallelModule(
