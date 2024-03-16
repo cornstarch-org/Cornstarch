@@ -1,4 +1,5 @@
 import itertools
+from typing import Optional
 
 import numpy as np
 import torch.distributed as dist
@@ -67,6 +68,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         self,
         pipeline_templates: dict[PipelineTemplate, int],
         tp_size: int,
+        ranks: Optional[list[int]] = None,
     ):
         assert pipeline_templates and all(
             num_template > 0 for num_template in pipeline_templates.values()
@@ -88,18 +90,30 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         )
         self._rank = dist.get_rank()
         self._mesh: np.array = np.empty(self._shape, dtype=object)
-        rank = 0
+
+        if ranks is None:
+            ranks = list(
+                range(
+                    tp_size
+                    * sum(
+                        len(template.modules_per_stage) * num_pipelines
+                        for template, num_pipelines in pipeline_templates.items()
+                    )
+                )
+            )
+
+        rank_index = 0
         num_pipelines = 0
         for template, num_template in pipeline_templates.items():
             for _ in range(num_template):
                 pipeline_ranks = np.empty((template.num_layers, tp_size), dtype=object)
                 next_layer_index = 0
                 for modules in template.modules_per_stage:
-                    ranks_per_stage = list(range(rank, rank + tp_size))
+                    ranks_per_stage = ranks[rank_index : rank_index + tp_size]
                     for _ in range(len(modules)):
                         pipeline_ranks[next_layer_index] = ranks_per_stage
                         next_layer_index += 1
-                    rank += tp_size
+                    rank_index += tp_size
                 self._mesh[num_pipelines] = pipeline_ranks
                 num_pipelines += 1
         self._coords = HeterogeneousProcessGroupMesh.unravel(self._rank, self._mesh)
