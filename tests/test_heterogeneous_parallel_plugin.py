@@ -200,7 +200,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             microbatch_size=1,
             global_batch_size=sum(pipeline_templates.values()),
         )
-        plugin.set_pipeline_templates(
+        plugin.set_pipelines(
             pipeline_templates, {template: 1 for template in pipeline_templates}
         )
 
@@ -253,7 +253,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             microbatch_size=1,
             global_batch_size=sum(pipeline_templates.values()),
         )
-        plugin.set_pipeline_templates(
+        plugin.set_pipelines(
             pipeline_templates, {template: 1 for template in pipeline_templates}
         )
 
@@ -331,7 +331,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             microbatch_size=1,
             global_batch_size=4 * sum(pipeline_templates.values()),
         )
-        plugin.set_pipeline_templates(
+        plugin.set_pipelines(
             pipeline_templates, {template: 4 for template in pipeline_templates}
         )
 

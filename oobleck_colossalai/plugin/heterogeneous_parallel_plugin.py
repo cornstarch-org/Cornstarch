@@ -152,7 +152,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
     def control_checkpoint_io(self) -> bool:
         return False
 
-    def set_pipeline_templates(
+    def set_pipelines(
         self,
         pipeline_templates: dict[PipelineTemplate, int] | None = None,
         num_microbatches: dict[PipelineTemplate, int] | None = None,
