@@ -63,7 +63,7 @@ def main():
     modules = PipelineTemplate.get_modules(model)
     template1 = PipelineTemplate(model_name, [modules])
     template2 = PipelineTemplate(model_name, [modules[:8], modules[8:]])
-    plugin.set_pipeline_templates(
+    plugin.set_pipelines(
         # homogeneous pipelines with 4 GPUs
         pipeline_templates={template2: 2},
         num_microbatches={template2: 4},
