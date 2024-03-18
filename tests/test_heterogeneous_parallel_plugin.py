@@ -94,7 +94,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         "pipeline_templates, expected_num_stages, expected_mesh",
         [
             [
-                {template_3stages: 3},
+                [template_3stages, template_3stages, template_3stages],
                 {tuple(list(range(18))): 3},
                 [
                     [
@@ -133,7 +133,12 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
                 ],
             ],
             [
-                {template_3stages: 1, template_2stages: 3},
+                [
+                    template_3stages,
+                    template_2stages,
+                    template_2stages,
+                    template_2stages,
+                ],
                 {tuple(list(range(6))): 3, tuple(list(range(6, 18))): 2},
                 [
                     [
@@ -183,10 +188,8 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
                 ],
             ],
         ],
-        name_fn=lambda pipeline_templates,
-        expected_num_stages,
-        expected_mesh: "homogeneous"
-        if len(pipeline_templates) == 1
+        name_fn=lambda pipeline_templates, *_: "homogeneous"
+        if len(pipeline_templates) == 3
         else "heterogeneous",
     )
     def test_plugin_initialize(
@@ -198,7 +201,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
             microbatch_size=1,
-            global_batch_size=sum(pipeline_templates.values()),
+            global_batch_size=len(pipeline_templates),
         )
         plugin.set_pipelines(
             pipeline_templates, {template: 1 for template in pipeline_templates}
@@ -222,7 +225,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         "pipeline_templates, expected_pipeline_index",
         [
             [
-                {template_3stages: 3},
+                [template_3stages, template_3stages, template_3stages],
                 {
                     tuple(list(range(0, 6))): 0,
                     tuple(list(range(6, 12))): 1,
@@ -230,7 +233,12 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
                 },
             ],
             [
-                {template_3stages: 1, template_2stages: 3},
+                [
+                    template_3stages,
+                    template_2stages,
+                    template_2stages,
+                    template_2stages,
+                ],
                 {
                     tuple(list(range(0, 6))): 0,
                     tuple(list(range(6, 10))): 1,
@@ -240,7 +248,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             ],
         ],
         name_fn=lambda pipeline_templates, _: "homogeneous"
-        if len(pipeline_templates) == 1
+        if len(pipeline_templates) == 3
         else "heterogeneous",
     )
     def test_plugin_configure(
@@ -251,7 +259,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
             microbatch_size=1,
-            global_batch_size=sum(pipeline_templates.values()),
+            global_batch_size=len(pipeline_templates),
         )
         plugin.set_pipelines(
             pipeline_templates, {template: 1 for template in pipeline_templates}
@@ -287,7 +295,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
 
         # Check whether the model is split as pipeline template intended
         param_names = list(name for name, _ in model.module.named_parameters())
-        pipeline_template = plugin._pipeline_index_to_pipeline[pipeline_index]
+        pipeline_template = plugin.pipelines[pipeline_index]
         expected_module_names = pipeline_template.modules_per_stage[
             plugin.stage_manager.stage
         ]
@@ -316,9 +324,12 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
 
     @parametrize(
         "pipeline_templates",
-        [{template_3stages: 3}, {template_3stages: 1, template_2stages: 3}],
+        [
+            [template_3stages, template_3stages, template_3stages],
+            [template_3stages, template_2stages, template_2stages, template_2stages],
+        ],
         name_fn=lambda pipeline_templates: "homogeneous"
-        if len(pipeline_templates.keys()) == 1
+        if len(pipeline_templates) == 3
         else "heterogeneous",
     )
     @unittest.skip("p2p communication for GPU/CPU memory doesn't work. Skipping")
@@ -329,7 +340,7 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         plugin = HeterogeneousParallelPlugin(
             tp_size=2,
             microbatch_size=1,
-            global_batch_size=4 * sum(pipeline_templates.values()),
+            global_batch_size=4 * len(pipeline_templates),
         )
         plugin.set_pipelines(
             pipeline_templates, {template: 4 for template in pipeline_templates}

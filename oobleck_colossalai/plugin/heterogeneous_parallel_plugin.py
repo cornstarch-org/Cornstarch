@@ -1,4 +1,3 @@
-import itertools
 from types import MethodType
 from typing import Callable
 
@@ -154,7 +153,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
     def set_pipelines(
         self,
-        pipeline_templates: dict[PipelineTemplate, int] | None = None,
+        pipelines: list[PipelineTemplate] | None = None,
         num_microbatches: dict[PipelineTemplate, int] | None = None,
     ):
         """Set pipeline templates and instantiate pipeline stage manager.
@@ -163,30 +162,24 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         templates to instantiate pipeline parallel training.
         Given pipeline templates must cover all ranks.\
         """
-        assert (pipeline_templates and num_microbatches) or (
-            not pipeline_templates and not num_microbatches
+        assert (pipelines and num_microbatches) or (
+            not pipelines and not num_microbatches
         ), (
-            "pipeline_templates and num_microbatches must be specified together "
+            "pipelines and num_microbatches must be specified together "
             "or not specified together."
         )
-        assert (
-            list(pipeline_templates.keys()) == list(num_microbatches.keys())
-        ), "pipeline_templates and num_microbatches must have the same set of templates."
 
-        if pipeline_templates is None:
+        assert all(
+            pipeline in num_microbatches.keys() for pipeline in pipelines
+        ), "All pipelines must have a corresponding number of microbatches."
+
+        if pipelines is None or num_microbatches is None:
             raise NotImplementedError("Auto pipeline parallelism is not supported yet.")
-
-        assert (
-            num_microbatches.keys() == pipeline_templates.keys()
-        ), "Number of pipeline templates does not match number of num_microbatches."
 
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
         num_ranks = (
-            sum(
-                template.num_stages * num_instances
-                for template, num_instances in pipeline_templates.items()
-            )
+            sum(template.num_stages for template in pipelines)
             * self.shard_config["tp_size"]
         )
         assert dist.get_world_size() == num_ranks, (
@@ -194,37 +187,20 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             f"world size ({dist.get_world_size()})."
         )
 
-        dp_size = sum(pipeline_templates.values())
+        dp_size = len(pipelines)
 
-        if sum(pipeline_templates.values()) > 1:
-            assert (
-                self.microbatch_size is not None
-            ), "microbatch_size must be specified when using pipeline parallelism"
-            assert (
-                self.zero_config["zero_stage"] <= 1
-            ), "zero stage must be 0 or 1 when using pipeline parallelism"
-
-        self.pipeline_templates = pipeline_templates
+        self.pipelines = pipelines
         self.num_microbatches = num_microbatches
         self.dp_size = dp_size
 
         self.pg_mesh = HeterogeneousProcessGroupMesh(
-            self.pipeline_templates, self.shard_config["tp_size"]
+            self.pipelines, self.shard_config["tp_size"]
         )
         self.stage_manager = HeterogeneousPipelineStageManager(self.pg_mesh, PP_AXIS)
         self.tp_group = self.pg_mesh.get_group_along_axis(TP_AXIS)
         self.dp_group = self.pg_mesh.get_group_along_axis(DP_AXIS)
         self.pp_group = self.pg_mesh.get_group_along_axis(PP_AXIS)
 
-        self._pipeline_index_to_pipeline: dict[int, PipelineTemplate] = {
-            index: pipeline_template
-            for index, pipeline_template in enumerate(
-                itertools.chain.from_iterable(
-                    itertools.repeat(pipeline_template, num_pipelines)
-                    for pipeline_template, num_pipelines in pipeline_templates.items()
-                )
-            )
-        }
         self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
         self.schedule = OneForwardOneBackwardSchedule(
             stage_manager=self.stage_manager,
@@ -260,11 +236,11 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         torch.optim.lr_scheduler.LRScheduler,
     ]:
         """Instantiate pipeline templates and initialize distributed process groups."""
-        assert self.pipeline_templates, "Pipeline templates are not set."
+        assert self.pipelines, "Pipeline templates are not set."
 
         if not isinstance(model, ModelWrapper):
             dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
-            template = self._pipeline_index_to_pipeline[self._pipeline_index]
+            template = self.pipelines[self._pipeline_index]
             module_names = template.modules_per_stage[self.stage_manager.stage]
             if dp_groups:
                 assert (
@@ -272,7 +248,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                 ), f"Number of dp groups ({len(dp_groups)}) does not match the number of modules in the stage ({len(module_names)})."
             else:
                 assert (
-                    sum(self.pipeline_templates.values()) == 1
+                    len(self.pipelines) == 1
                 ), "There are more than 1 dp_groups but dp_group is None."
 
             policy = get_autopolicy(template.model_name)
@@ -300,14 +276,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             )
 
         # Convert num_microbatches into a flat list
-        num_microbatches = list(
-            itertools.chain(
-                *[
-                    [self.num_microbatches[pipeline]] * num_pipelines
-                    for pipeline, num_pipelines in self.pipeline_templates.items()
-                ]
-            )
-        )
+        num_microbatches = [
+            self.num_microbatches[pipeline] for pipeline in self.pipelines
+        ]
         dataloader.configure(self._pipeline_index, num_microbatches)
 
         param_info = get_param_info(optimizer)

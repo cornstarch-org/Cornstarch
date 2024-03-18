@@ -17,20 +17,22 @@ from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
 from oobleck_colossalai.stage_manager import HeterogeneousPipelineStageManager
 
-no_tp_templates = {
-    PipelineTemplate("fake", [[None, None], [None, None, None, None]]): 2,
-    PipelineTemplate("fake", [[None], [None, None, None], [None, None]]): 1,
-}
+no_tp_templates = [
+    PipelineTemplate("fake", [[None, None], [None, None, None, None]]),
+    PipelineTemplate("fake", [[None, None], [None, None, None, None]]),
+    PipelineTemplate("fake", [[None], [None, None, None], [None, None]]),
+]
 no_tp_template_ranks = [
     [[0], [0], [1], [1], [1], [1]],
     [[2], [2], [3], [3], [3], [3]],
     [[4], [5], [5], [5], [6], [6]],
 ]
 
-tp_templates = {
-    PipelineTemplate("fake", [[None, None], [None, None, None, None]]): 1,
-    PipelineTemplate("fake", [[None], [None, None, None], [None, None]]): 2,
-}
+tp_templates = [
+    PipelineTemplate("fake", [[None, None], [None, None, None, None]]),
+    PipelineTemplate("fake", [[None], [None, None, None], [None, None]]),
+    PipelineTemplate("fake", [[None], [None, None, None], [None, None]]),
+]
 tp_template_ranks = [
     [[0, 1], [0, 1], [2, 3], [2, 3], [2, 3], [2, 3]],
     [[4, 5], [6, 7], [6, 7], [6, 7], [8, 9], [8, 9]],
@@ -54,7 +56,7 @@ tp_template_ranks = [
     ],
 )
 def test_stage_manager_process_group_init_order_matches(
-    pipeline_templates: dict[PipelineTemplate, int],
+    pipeline_templates: list[PipelineTemplate],
     tp_size: int,
     world_size: int,
     mocker: MockerFixture,
@@ -132,7 +134,7 @@ class TestStageManagerClass(MultiThreadedTestCase):
     )
     def test_num_stages(
         self,
-        pipeline_templates: dict[PipelineTemplate, int],
+        pipeline_templates: list[PipelineTemplate],
         tp_size: int,
         world_size: int,
         ranks_to_expected_num_stages: dict[tuple[int, ...], int],
@@ -181,7 +183,7 @@ class TestStageManagerClass(MultiThreadedTestCase):
     )
     def test_init_process_group_by_layers(
         self,
-        pipeline_templates: dict[PipelineTemplate, int],
+        pipeline_templates: list[PipelineTemplate],
         tp_size: int,
         world_size: int,
         layers_to_expected_ranks_in_group: dict[tuple[int, ...], list[int]],
@@ -247,7 +249,7 @@ class TestStageManagerClass(MultiThreadedTestCase):
     )
     def test_prev_next_ranks(
         self,
-        pipeline_templates: dict[PipelineTemplate, int],
+        pipeline_templates: list[PipelineTemplate],
         tp_size: int,
         world_size: int,
         rank_to_expected_prev_next_rank: dict[int, tuple[int, int]],

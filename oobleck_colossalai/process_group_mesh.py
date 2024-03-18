@@ -66,28 +66,21 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
 
     def __init__(
         self,
-        pipeline_templates: dict[PipelineTemplate, int],
+        pipelines: list[PipelineTemplate],
         tp_size: int,
         ranks: Optional[list[int]] = None,
     ):
-        assert pipeline_templates and all(
-            num_template > 0 for num_template in pipeline_templates.values()
-        ), "At least one pipeline template must be given."
+        assert pipelines, "At least one pipeline template must be given."
         assert all(
-            pt.num_layers == next(iter(pipeline_templates)).num_layers
-            for pt, num_template in pipeline_templates.items()
+            pipeline.num_layers == pipelines[0].num_layers for pipeline in pipelines
         ), "All pipeline templates must have the same number of layers."
 
-        # # Sort pipeline templates in terms of number of nodes used.
-        # pipeline_templates: list[tuple[PipelineTemplate, int]] = sorted(
-        #     pipeline_templates.items(), key=lambda pt: pt[0].num_nodes
-        # )
-
         self._shape = (
-            sum(num_pt for _, num_pt in pipeline_templates.items()),
-            next(iter(pipeline_templates)).num_layers,
+            len(pipelines),
+            pipelines[0].num_layers,
             tp_size,
         )
+
         self._rank = dist.get_rank()
         self._mesh: np.array = np.empty(self._shape, dtype=object)
 
@@ -95,27 +88,23 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             ranks = list(
                 range(
                     tp_size
-                    * sum(
-                        len(template.modules_per_stage) * num_pipelines
-                        for template, num_pipelines in pipeline_templates.items()
-                    )
+                    * sum(len(pipeline.modules_per_stage) for pipeline in pipelines)
                 )
             )
 
         rank_index = 0
         num_pipelines = 0
-        for template, num_template in pipeline_templates.items():
-            for _ in range(num_template):
-                pipeline_ranks = np.empty((template.num_layers, tp_size), dtype=object)
-                next_layer_index = 0
-                for modules in template.modules_per_stage:
-                    ranks_per_stage = ranks[rank_index : rank_index + tp_size]
-                    for _ in range(len(modules)):
-                        pipeline_ranks[next_layer_index] = ranks_per_stage
-                        next_layer_index += 1
-                    rank_index += tp_size
-                self._mesh[num_pipelines] = pipeline_ranks
-                num_pipelines += 1
+        for pipeline in pipelines:
+            pipeline_ranks = np.empty((pipeline.num_layers, tp_size), dtype=object)
+            next_layer_index = 0
+            for modules in pipeline.modules_per_stage:
+                ranks_per_stage = ranks[rank_index : rank_index + tp_size]
+                for _ in range(len(modules)):
+                    pipeline_ranks[next_layer_index] = ranks_per_stage
+                    next_layer_index += 1
+                rank_index += tp_size
+            self._mesh[num_pipelines] = pipeline_ranks
+            num_pipelines += 1
         self._coords = HeterogeneousProcessGroupMesh.unravel(self._rank, self._mesh)
         self._ranks_to_group: dict[tuple[int, ...], dist.ProcessGroup] = {}
         self._group_to_ranks: dict[dist.ProcessGroup, tuple[int, ...]] = {}

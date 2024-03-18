@@ -3,7 +3,6 @@ from collections import defaultdict
 
 import numpy as np
 import pytest
-import torch
 import torch.distributed as dist
 from pytest_mock import MockerFixture
 from torch.testing._internal.distributed.fake_pg import FakeStore
@@ -27,27 +26,36 @@ def init_process_group(request: pytest.FixtureRequest):
     "pipeline_templates, tp_size, expected_mesh",
     [
         [
-            {PipelineTemplate("fake", [[None, None]]): 1},
+            [PipelineTemplate("fake", [[None, None]])],
             1,
             [[[0], [0]]],
         ],
         [
-            {PipelineTemplate("fake", [[None, None, None]]): 2},
+            [
+                PipelineTemplate("fake", [[None, None, None]]),
+                PipelineTemplate("fake", [[None, None, None]]),
+            ],
             1,
             [[[0], [0], [0]], [[1], [1], [1]]],
         ],
         [
-            {PipelineTemplate("fake", [[None], [None, None]]): 2},
+            [
+                PipelineTemplate("fake", [[None], [None, None]]),
+                PipelineTemplate("fake", [[None], [None, None]]),
+            ],
             1,
             [[[0], [1], [1]], [[2], [3], [3]]],
         ],
         [
-            {PipelineTemplate("fake", [[None, None]]): 1},
+            [PipelineTemplate("fake", [[None, None]])],
             2,
             [[[0, 1], [0, 1]]],
         ],
         [
-            {PipelineTemplate("fake", [[None], [None, None]]): 2},
+            [
+                PipelineTemplate("fake", [[None], [None, None]]),
+                PipelineTemplate("fake", [[None], [None, None]]),
+            ],
             4,
             [
                 [[0, 1, 2, 3], [4, 5, 6, 7], [4, 5, 6, 7]],
@@ -69,26 +77,29 @@ def test_homogeneous_pipelines(
     "pipeline_templates, tp_size, expected_mesh",
     [
         [
-            {
-                PipelineTemplate("fake", [[None], [None, None]]): 1,
-                PipelineTemplate("fake", [[None, None, None]]): 1,
-            },
+            [
+                PipelineTemplate("fake", [[None], [None, None]]),
+                PipelineTemplate("fake", [[None, None, None]]),
+            ],
             1,
             [[[0], [1], [1]], [[2], [2], [2]]],
         ],
         [
-            {
-                PipelineTemplate("fake", [[None], [None, None]]): 1,
-                PipelineTemplate("fake", [[None, None, None]]): 2,
-            },
+            [
+                PipelineTemplate("fake", [[None], [None, None]]),
+                PipelineTemplate("fake", [[None, None, None]]),
+                PipelineTemplate("fake", [[None, None, None]]),
+            ],
             1,
             [[[0], [1], [1]], [[2], [2], [2]], [[3], [3], [3]]],
         ],
         [
-            {
-                PipelineTemplate("fake", [[None], [None]]): 2,
-                PipelineTemplate("fake", [[None, None]]): 2,
-            },
+            [
+                PipelineTemplate("fake", [[None], [None]]),
+                PipelineTemplate("fake", [[None], [None]]),
+                PipelineTemplate("fake", [[None, None]]),
+                PipelineTemplate("fake", [[None, None]]),
+            ],
             4,
             [
                 [[0, 1, 2, 3], [4, 5, 6, 7]],
@@ -98,10 +109,11 @@ def test_homogeneous_pipelines(
             ],
         ],
         [
-            {
-                PipelineTemplate("fake", [[None], [None], [None, None]]): 2,
-                PipelineTemplate("fake", [[None, None, None], [None]]): 1,
-            },
+            [
+                PipelineTemplate("fake", [[None], [None], [None, None]]),
+                PipelineTemplate("fake", [[None], [None], [None, None]]),
+                PipelineTemplate("fake", [[None, None, None], [None]]),
+            ],
             2,
             [
                 [[0, 1], [2, 3], [4, 5], [4, 5]],
@@ -123,9 +135,12 @@ def test_heterogeneous_pipelines(
     "pipeline_templates, tp_size, expected_ranks",
     [
         [
-            {
-                PipelineTemplate("fake", [[None, None], [None]]): 4,
-            },
+            [
+                PipelineTemplate("fake", [[None, None], [None]]),
+                PipelineTemplate("fake", [[None, None], [None]]),
+                PipelineTemplate("fake", [[None, None], [None]]),
+                PipelineTemplate("fake", [[None, None], [None]]),
+            ],
             2,
             {
                 0: [[0, 4, 8, 12], [0, 4, 8, 12]],
@@ -147,10 +162,11 @@ def test_heterogeneous_pipelines(
             },
         ],
         [
-            {
-                PipelineTemplate("fake", [[None], [None], [None, None], [None]]): 1,
-                PipelineTemplate("fake", [[None, None, None], [None, None]]): 2,
-            },
+            [
+                PipelineTemplate("fake", [[None], [None], [None, None], [None]]),
+                PipelineTemplate("fake", [[None, None, None], [None, None]]),
+                PipelineTemplate("fake", [[None, None, None], [None, None]]),
+            ],
             2,
             {
                 0: [[0, 8, 12]],
