@@ -1,4 +1,6 @@
-from typing import Type
+from __future__ import annotations
+
+from typing import Optional, Type
 
 from colossalai.shardformer.policies.auto_policy import _fullname
 from torch import nn
@@ -31,6 +33,20 @@ class PipelineTemplate:
         ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
         return policy.get_all_modules(model.config)
 
+    @staticmethod
+    def find_pipeline_template(
+        pipeline_templates: list[PipelineTemplate], num_stages: int
+    ) -> Optional[PipelineTemplate]:
+        """Find a pipeline template with a specific number of stages."""
+        return next(
+            (
+                pipeline_template
+                for pipeline_template in pipeline_templates
+                if pipeline_template.num_stages == num_stages
+            ),
+            None,
+        )
+
     def __init__(
         self,
         model_name: str,
@@ -53,3 +69,6 @@ class PipelineTemplate:
     @property
     def num_stages(self) -> int:
         return len(self.modules_per_stage)
+
+    def __eq__(self, template: PipelineTemplate) -> bool:
+        return self.modules_per_stage == template.modules_per_stage
