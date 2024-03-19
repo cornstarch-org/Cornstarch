@@ -64,11 +64,11 @@ def main():
     template2 = PipelineTemplate(model_name, [modules[:8], modules[8:]])
     plugin.set_pipelines(
         # homogeneous pipelines with 4 GPUs
-        pipeline_templates={template2: 2},
-        num_microbatches={template2: 4},
+        # pipelines=[template2, template2],
+        # num_microbatches={template2: 4},
         # heterogeneous pipelines with 3 GPUs
-        # pipeline_templates={template1: 1, template2: 1},
-        # num_microbatches={template1: 3, template2: 5},
+        pipelines=[template1, template2],
+        num_microbatches={template1: 3, template2: 5},
     )
 
     # Prepare dataloader

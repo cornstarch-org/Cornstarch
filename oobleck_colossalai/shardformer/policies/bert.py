@@ -62,6 +62,8 @@ class BertPolicy(PipelineTemplatePolicyBase, Policy):
             in self.pipeline_template.model_name
         ), "The pipeline template is not for the model that the policy is designed for."
 
+        prefix = "" if self.model.__class__.__name__ == "BertModel" else "bert."
+
         assert hasattr(self.model, "config"), "model must have a config attribute"
         modules = self.get_all_modules(self.model.config)
         modules_in_template = list(
@@ -72,10 +74,10 @@ class BertPolicy(PipelineTemplatePolicyBase, Policy):
                 "Modules in the pipeline template do not match the modules in the model."
             )
 
-        if "embeddings" not in self.pipeline_template.modules_per_stage[0]:
+        if f"{prefix}embeddings" not in self.pipeline_template.modules_per_stage[0]:
             raise ValueError("The first stage must contain the embeddings module.")
 
-        if "pooler" not in self.pipeline_template.modules_per_stage[-1]:
+        if f"{prefix}pooler" not in self.pipeline_template.modules_per_stage[-1]:
             raise ValueError("The last stage must contain the pooler module.")
 
     def config_sanity_check(self):
