@@ -160,7 +160,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         If pipeline templates are set, thje plugin will use the given
         templates to instantiate pipeline parallel training.
-        Given pipeline templates must cover all ranks.\
+        Given pipeline templates must cover all ranks.
         """
         assert (pipelines and num_microbatches) or (
             not pipelines and not num_microbatches
@@ -207,19 +207,25 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             microbatch_size=self.microbatch_size,
         )
 
-        self.shard_config = ShardConfig(
-            tensor_parallel_process_group=self.tp_group,
-            pipeline_stage_manager=self.stage_manager,
-            enable_tensor_parallelism=self.shard_config["tp_size"] > 1,
-            enable_all_optimization=self.shard_config["enable_all_optimization"],
-            enable_fused_normalization=self.shard_config["enable_fused_normalization"],
-            enable_flash_attention=self.shard_config["enable_flash_attention"],
-            enable_jit_fused=self.shard_config["enable_jit_fused"],
-            enable_sequence_parallelism=self.shard_config[
-                "enable_sequence_parallelism"
-            ],
-            enable_sequence_overlap=self.shard_config["enable_sequence_overlap"],
-        )
+        if isinstance(self.shard_config, ShardConfig):
+            self.shard_config.tensor_parallel_process_group = self.tp_group
+            self.shard_config.pipeline_stage_manager = self.stage_manager
+        else:
+            self.shard_config = ShardConfig(
+                tensor_parallel_process_group=self.tp_group,
+                pipeline_stage_manager=self.stage_manager,
+                enable_tensor_parallelism=self.shard_config["tp_size"] > 1,
+                enable_all_optimization=self.shard_config["enable_all_optimization"],
+                enable_fused_normalization=self.shard_config[
+                    "enable_fused_normalization"
+                ],
+                enable_flash_attention=self.shard_config["enable_flash_attention"],
+                enable_jit_fused=self.shard_config["enable_jit_fused"],
+                enable_sequence_parallelism=self.shard_config[
+                    "enable_sequence_parallelism"
+                ],
+                enable_sequence_overlap=self.shard_config["enable_sequence_overlap"],
+            )
 
     def configure(
         self,
