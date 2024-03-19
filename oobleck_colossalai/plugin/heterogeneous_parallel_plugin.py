@@ -235,7 +235,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         dataloader: torch.utils.data.DataLoader | None = None,
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
     ) -> tuple[
-        torch.nn.Module,
+        ModelWrapper,
         OptimizerWrapper,
         callable,
         torch.utils.data.DataLoader,
