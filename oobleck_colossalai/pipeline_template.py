@@ -72,3 +72,6 @@ class PipelineTemplate:
 
     def __eq__(self, template: PipelineTemplate) -> bool:
         return self.modules_per_stage == template.modules_per_stage
+
+    def __hash__(self) -> int:
+        return id(self)
