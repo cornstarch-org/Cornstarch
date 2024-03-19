@@ -74,4 +74,4 @@ class PipelineTemplate:
         return self.modules_per_stage == template.modules_per_stage
 
     def __hash__(self) -> int:
-        return id(self)
+        return hash(tuple(tuple(modules) for modules in self.modules_per_stage))
