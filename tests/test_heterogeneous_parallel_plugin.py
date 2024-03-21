@@ -355,6 +355,10 @@ class TestHomogeneousExecutionClass(HeterogeneousParallelPluginClassBase):
                 return_outputs=True,
             )
 
+            optimizer.step()
+            optimizer.zero_grad()
+            lr_scheduler.step()
+
             dist.barrier()
 
         assert "loss" in outputs
@@ -389,6 +393,10 @@ class TestHeterogeneousExecutionClass(HeterogeneousParallelPluginClassBase):
                 return_loss=True,
                 return_outputs=True,
             )
+
+            optimizer.step()
+            optimizer.zero_grad()
+            lr_scheduler.step()
 
             dist.barrier()
 
