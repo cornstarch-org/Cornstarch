@@ -111,9 +111,10 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
 
     def __del__(self):
         for group in self._ranks_to_group.values():
-            if group is None:
-                continue
-            dist.destroy_process_group(group)
+            try:
+                dist.destroy_process_group(group)
+            except Exception:
+                pass
 
     @property
     def coords(self) -> list[tuple[int, ...]]:
