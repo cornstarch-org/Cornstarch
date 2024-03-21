@@ -1,15 +1,23 @@
+from __future__ import annotations
+
 import itertools
 import sys
-import unittest
-from typing import cast
+from typing import Callable, cast
 from unittest.mock import patch
 
 import numpy as np
+import torch
 import torch.distributed as dist
-from colossalai.nn.optimizer import FusedAdam
+from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.shardformer.modeling.gpt2 import GPT2PipelineForwards
 from data_builder import GLUEDataBuilder
-from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
+from torch.optim import Adam
+from torch.optim.lr_scheduler import LRScheduler
+from torch.testing._internal.common_distributed import (
+    TEST_SKIPS,
+    MultiProcessTestCase,
+    skip_if_lt_x_gpu,
+)
 from torch.testing._internal.common_utils import (
     FILE_SCHEMA,
     instantiate_parametrized_tests,
@@ -22,6 +30,7 @@ from transformers import (
 )
 
 from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
     HeterogeneousParallelModule,
 )
@@ -40,41 +49,36 @@ config.num_labels = GLUEDataBuilder.glue_task_num_labels["mrpc"]
 modules: list[str] = GPT2ForSequenceClassificationPolicy.get_all_modules(config)
 model_name: str = "transformers.models.gpt2.modeling_gpt2.GPT2ForSequenceClassification"
 
+template_1stage = PipelineTemplate(model_name, [modules])
 template_2stages = PipelineTemplate(model_name, [modules[:3], modules[3:]])
 template_3stages = PipelineTemplate(
     model_name, [modules[:4], modules[4:7], modules[7:]]
 )
 
 
-class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
-    pp_axis = 1
+class HeterogeneousParallelPluginClassBase(MultiProcessTestCase):
+    num_hosts: int
+    tp_size: int
+    backend: str
 
     @property
-    def world_size(self):
-        return 18
+    def world_size(self) -> int:
+        return self.num_hosts * self.tp_size
 
     def setUp(self):
         super().setUp()
         self._spawn_processes()
 
-    @property
-    def init_method(self):
-        return f"{FILE_SCHEMA}{self.file_name}"
-
-    @classmethod
-    def _run(cls, rank: int, test_name: str, file_name: str, parent_pipe):
-        self = cls(test_name)
-        self.rank = rank
-        self.file_name = file_name
-
+    def init_distributed(self):
+        torch.cuda.set_device(self.rank)
+        # assert int(os.environ["CUDA_VISIBLE_DEVICES"]) == self.rank
         print(f"dist init r={self.rank}, world={self.world_size}")
-        backend = "gloo"
 
         try:
             dist.init_process_group(
-                init_method=self.init_method,
-                backend=backend,
-                world_size=int(self.world_size),
+                init_method=f"{FILE_SCHEMA}{self.file_name}",
+                backend=self.backend,
+                world_size=self.world_size,
                 rank=self.rank,
             )
         except RuntimeError as e:
@@ -83,214 +87,68 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
 
             raise
 
-        dist.barrier()
+    def prepare(
+        self, pipelines: list[PipelineTemplate], tp_size: int
+    ) -> HeterogeneousParallelPlugin:
+        self.init_distributed()
+        plugin = HeterogeneousParallelPlugin(
+            tp_size=tp_size,
+            microbatch_size=1,
+            global_batch_size=len(pipelines) * 6,
+        )
+        plugin.set_pipelines(pipelines, {template: 6 for template in pipelines})
+        return plugin
 
-        self.run_test(test_name, parent_pipe)
-
-        dist.barrier()
-        dist.destroy_process_group()
-
-    @parametrize(
-        "pipeline_templates, expected_num_stages, expected_mesh",
-        [
-            [
-                [template_3stages, template_3stages, template_3stages],
-                {tuple(list(range(18))): 3},
-                [
-                    [
-                        [0, 1],
-                        [0, 1],
-                        [0, 1],
-                        [0, 1],
-                        [2, 3],
-                        [2, 3],
-                        [2, 3],
-                        [4, 5],
-                        [4, 5],
-                    ],
-                    [
-                        [6, 7],
-                        [6, 7],
-                        [6, 7],
-                        [6, 7],
-                        [8, 9],
-                        [8, 9],
-                        [8, 9],
-                        [10, 11],
-                        [10, 11],
-                    ],
-                    [
-                        [12, 13],
-                        [12, 13],
-                        [12, 13],
-                        [12, 13],
-                        [14, 15],
-                        [14, 15],
-                        [14, 15],
-                        [16, 17],
-                        [16, 17],
-                    ],
-                ],
-            ],
-            [
-                [
-                    template_3stages,
-                    template_2stages,
-                    template_2stages,
-                    template_2stages,
-                ],
-                {tuple(list(range(6))): 3, tuple(list(range(6, 18))): 2},
-                [
-                    [
-                        [0, 1],
-                        [0, 1],
-                        [0, 1],
-                        [0, 1],
-                        [2, 3],
-                        [2, 3],
-                        [2, 3],
-                        [4, 5],
-                        [4, 5],
-                    ],
-                    [
-                        [6, 7],
-                        [6, 7],
-                        [6, 7],
-                        [8, 9],
-                        [8, 9],
-                        [8, 9],
-                        [8, 9],
-                        [8, 9],
-                        [8, 9],
-                    ],
-                    [
-                        [10, 11],
-                        [10, 11],
-                        [10, 11],
-                        [12, 13],
-                        [12, 13],
-                        [12, 13],
-                        [12, 13],
-                        [12, 13],
-                        [12, 13],
-                    ],
-                    [
-                        [14, 15],
-                        [14, 15],
-                        [14, 15],
-                        [16, 17],
-                        [16, 17],
-                        [16, 17],
-                        [16, 17],
-                        [16, 17],
-                        [16, 17],
-                    ],
-                ],
-            ],
-        ],
-        name_fn=lambda pipeline_templates, *_: "homogeneous"
-        if len(pipeline_templates) == 3
-        else "heterogeneous",
-    )
-    def test_plugin_initialize(
+    def _test_plugin_initialize(
         self,
-        pipeline_templates: dict[PipelineTemplate, int],
-        expected_num_stages: dict[tuple[int], int],
+        pipelines: list[PipelineTemplate],
+        expected_num_stages: list[int],
         expected_mesh: list,
     ):
-        plugin = HeterogeneousParallelPlugin(
-            tp_size=2,
-            microbatch_size=1,
-            global_batch_size=len(pipeline_templates),
-        )
-        plugin.set_pipelines(
-            pipeline_templates, {template: 1 for template in pipeline_templates}
-        )
+        plugin = self.prepare(pipelines, self.tp_size)
 
         assert (
             plugin.shard_config.enable_tensor_parallelism
-            and plugin.shard_config.tensor_parallel_size == 2
+            and plugin.shard_config.tensor_parallel_size == self.tp_size
         )
         assert np.array_equal(plugin.stage_manager.pg_mesh.mesh, expected_mesh)
-        assert (
-            expected_num_stages[
-                next(
-                    ranks for ranks in expected_num_stages.keys() if self.rank in ranks
-                )
-            ]
-            == plugin.stage_manager.num_stages
-        )
+        assert expected_num_stages[self.rank] == plugin.stage_manager.num_stages
 
-    @parametrize(
-        "pipeline_templates, expected_pipeline_index",
-        [
-            [
-                [template_3stages, template_3stages, template_3stages],
-                {
-                    tuple(list(range(0, 6))): 0,
-                    tuple(list(range(6, 12))): 1,
-                    tuple(list(range(12, 18))): 2,
-                },
-            ],
-            [
-                [
-                    template_3stages,
-                    template_2stages,
-                    template_2stages,
-                    template_2stages,
-                ],
-                {
-                    tuple(list(range(0, 6))): 0,
-                    tuple(list(range(6, 10))): 1,
-                    tuple(list(range(10, 14))): 2,
-                    tuple(list(range(14, 18))): 3,
-                },
-            ],
-        ],
-        name_fn=lambda pipeline_templates, _: "homogeneous"
-        if len(pipeline_templates) == 3
-        else "heterogeneous",
-    )
-    def test_plugin_configure(
-        self,
-        pipeline_templates: dict[PipelineTemplate, int],
-        expected_pipeline_index: dict[tuple[int], int],
-    ):
-        plugin = HeterogeneousParallelPlugin(
-            tp_size=2,
-            microbatch_size=1,
-            global_batch_size=len(pipeline_templates),
-        )
-        plugin.set_pipelines(
-            pipeline_templates, {template: 1 for template in pipeline_templates}
-        )
+    def configure(
+        self, pipelines: list[PipelineTemplate]
+    ) -> tuple[
+        HeterogeneousParallelPlugin,
+        ModelWrapper,
+        OptimizerWrapper,
+        Callable,
+        HeterogeneousDataLoader,
+        LRScheduler,
+    ]:
+        plugin = self.prepare(pipelines, self.tp_size)
 
-        databuilder = GLUEDataBuilder(
-            "gpt2",
-            plugin,
-        )
-        dataloader = databuilder.train_dataloader()
-
+        dataloader = GLUEDataBuilder("gpt2", plugin).train_dataloader()
         model = GPT2ForSequenceClassification(config)
 
-        optimizer = FusedAdam(model.parameters())
+        optimizer = Adam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
 
-        model, optimizer, _, _, lr_scheduler = plugin.configure(
+        return plugin, *plugin.configure(
             model,
             optimizer,
-            dataloader=dataloader,
-            criterion=lambda outputs, inputs: outputs.loss,
-            lr_scheduler=lr_scheduler,
+            lambda outputs, inputs: outputs.loss,
+            dataloader,
+            lr_scheduler,
         )
 
-        pipeline_index = expected_pipeline_index[
-            next(
-                ranks for ranks in expected_pipeline_index.keys() if self.rank in ranks
-            )
-        ]
-        assert plugin._pipeline_index == pipeline_index
+    def _test_plugin_configure(
+        self,
+        pipelines: list[PipelineTemplate],
+        expected_pipeline_index: list[int],
+    ):
+        plugin, model, *_ = self.configure(pipelines)
 
+        pipeline_index = expected_pipeline_index[self.rank]
+        assert plugin._pipeline_index == pipeline_index
         assert isinstance(model, HeterogeneousParallelModule)
 
         # Check whether the model is split as pipeline template intended
@@ -322,48 +180,168 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
             is GPT2PipelineForwards.gpt2_for_sequence_classification_forward
         )
 
+
+class TestHeterogeneous3DParallelPluginConfigurationClass(
+    HeterogeneousParallelPluginClassBase
+):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_hosts = 9
+        self.tp_size = 2
+        self.backend = "gloo"
+
     @parametrize(
-        "pipeline_templates",
+        "pipelines, expected_num_stages, expected_mesh",
         [
-            [template_3stages, template_3stages, template_3stages],
-            [template_3stages, template_2stages, template_2stages, template_2stages],
+            [
+                [template_3stages, template_3stages, template_3stages],
+                [3] * 18,
+                [
+                    [
+                        [0, 1],
+                        [0, 1],
+                        [0, 1],
+                        [0, 1],
+                        [2, 3],
+                        [2, 3],
+                        [2, 3],
+                        [4, 5],
+                        [4, 5],
+                    ],
+                    [
+                        [6, 7],
+                        [6, 7],
+                        [6, 7],
+                        [6, 7],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                        [10, 11],
+                        [10, 11],
+                    ],
+                    [
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [14, 15],
+                        [14, 15],
+                        [14, 15],
+                        [16, 17],
+                        [16, 17],
+                    ],
+                ],
+            ],
+            [
+                [
+                    template_3stages,
+                    template_2stages,
+                    template_2stages,
+                    template_2stages,
+                ],
+                [3] * 6 + [2] * 12,
+                [
+                    [
+                        [0, 1],
+                        [0, 1],
+                        [0, 1],
+                        [0, 1],
+                        [2, 3],
+                        [2, 3],
+                        [2, 3],
+                        [4, 5],
+                        [4, 5],
+                    ],
+                    [
+                        [6, 7],
+                        [6, 7],
+                        [6, 7],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                        [8, 9],
+                    ],
+                    [
+                        [10, 11],
+                        [10, 11],
+                        [10, 11],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                        [12, 13],
+                    ],
+                    [
+                        [14, 15],
+                        [14, 15],
+                        [14, 15],
+                        [16, 17],
+                        [16, 17],
+                        [16, 17],
+                        [16, 17],
+                        [16, 17],
+                        [16, 17],
+                    ],
+                ],
+            ],
         ],
-        name_fn=lambda pipeline_templates: "homogeneous"
-        if len(pipeline_templates) == 3
+        name_fn=lambda pipelines, *_: "homogeneous"
+        if len(set(pipelines)) == 1
         else "heterogeneous",
     )
-    @unittest.skip("p2p communication for GPU/CPU memory doesn't work. Skipping")
-    def test_execute_pipeline(
+    def test_plugin_initialte(
         self,
-        pipeline_templates: dict[PipelineTemplate, int],
+        pipelines: list[PipelineTemplate],
+        expected_num_stages: list[int],
+        expected_mesh: list,
     ):
-        plugin = HeterogeneousParallelPlugin(
-            tp_size=2,
-            microbatch_size=1,
-            global_batch_size=4 * len(pipeline_templates),
-        )
-        plugin.set_pipelines(
-            pipeline_templates, {template: 4 for template in pipeline_templates}
+        self._test_plugin_initialize(pipelines, expected_num_stages, expected_mesh)
+
+    @parametrize(
+        "pipelines, expected_pipeline_index",
+        [
+            [
+                [template_3stages, template_3stages, template_3stages],
+                [0] * 6 + [1] * 6 + [2] * 6,
+            ],
+            [
+                [
+                    template_3stages,
+                    template_2stages,
+                    template_2stages,
+                    template_2stages,
+                ],
+                [0] * 6 + [1] * 4 + [2] * 4 + [3] * 4,
+            ],
+        ],
+        name_fn=lambda pipelines, _: "homogeneous"
+        if len(set(pipelines)) == 1
+        else "heterogeneous",
+    )
+    def test_plugin_configure(
+        self, pipelines: list[PipelineTemplate], expected_pipeline_index: list[int]
+    ):
+        self._test_plugin_configure(pipelines, expected_pipeline_index)
+
+
+class TestHomogeneousExecutionClass(HeterogeneousParallelPluginClassBase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_hosts = 4
+        self.tp_size = 1
+        self.backend = "nccl"
+
+    @skip_if_lt_x_gpu(4)
+    def test_execute(self):
+        pipelines = [template_2stages, template_2stages]
+
+        plugin, model, optimizer, criterion, dataloader, lr_scheduler = self.configure(
+            pipelines
         )
 
-        databuilder = GLUEDataBuilder(
-            "gpt2",
-            plugin,
-        )
-        dataloader = databuilder.train_dataloader()
-
-        model = GPT2ForSequenceClassification(config)
-
-        optimizer = FusedAdam(model.parameters())
-        lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
-
-        model, optimizer, criterion, _, lr_scheduler = plugin.configure(
-            model,
-            optimizer,
-            dataloader=dataloader,
-            criterion=lambda outputs, inputs: outputs.loss,
-            lr_scheduler=lr_scheduler,
-        )
         model: HeterogeneousParallelModule = cast(HeterogeneousParallelModule, model)
 
         with patch.object(
@@ -384,4 +362,39 @@ class TestHeterogeneousParallelPluginClass(MultiProcessTestCase):
         assert mock.called
 
 
-instantiate_parametrized_tests(TestHeterogeneousParallelPluginClass)
+class TestHeterogeneousExecutionClass(HeterogeneousParallelPluginClassBase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_hosts = 3
+        self.tp_size = 1
+        self.backend = "nccl"
+
+    @skip_if_lt_x_gpu(3)
+    def test_execute(self):
+        pipelines = [template_1stage, template_2stages]
+
+        plugin, model, optimizer, criterion, dataloader, lr_scheduler = self.configure(
+            pipelines
+        )
+
+        model: HeterogeneousParallelModule = cast(HeterogeneousParallelModule, model)
+
+        with patch.object(
+            model, "sync_dp_grads", side_effect=model.sync_dp_grads
+        ) as mock:
+            outputs = plugin.execute_pipeline(
+                iter(dataloader),
+                model,
+                criterion,
+                optimizer,
+                return_loss=True,
+                return_outputs=True,
+            )
+
+            dist.barrier()
+
+        assert "loss" in outputs
+        assert mock.called
+
+
+instantiate_parametrized_tests(TestHeterogeneous3DParallelPluginConfigurationClass)
