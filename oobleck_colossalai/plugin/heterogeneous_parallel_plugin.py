@@ -78,6 +78,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             f"microbatch_size ({microbatch_size})."
         )
 
+        self.tp_size = tp_size
         self.precision = precision
         self.zero_stage = zero_stage
         self.stage_manager: HeterogeneousPipelineStageManager = None
@@ -186,6 +187,10 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             f"Number of ranks in pipeline templates ({num_ranks}) does not match "
             f"world size ({dist.get_world_size()})."
         )
+        assert isinstance(self.shard_config, dict), (
+            "shard_config must be a dictionary. "
+            "Have you called set_pipelines() already?"
+        )
 
         dp_size = len(pipelines)
 
@@ -207,25 +212,19 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             microbatch_size=self.microbatch_size,
         )
 
-        if isinstance(self.shard_config, ShardConfig):
-            self.shard_config.tensor_parallel_process_group = self.tp_group
-            self.shard_config.pipeline_stage_manager = self.stage_manager
-        else:
-            self.shard_config = ShardConfig(
-                tensor_parallel_process_group=self.tp_group,
-                pipeline_stage_manager=self.stage_manager,
-                enable_tensor_parallelism=self.shard_config["tp_size"] > 1,
-                enable_all_optimization=self.shard_config["enable_all_optimization"],
-                enable_fused_normalization=self.shard_config[
-                    "enable_fused_normalization"
-                ],
-                enable_flash_attention=self.shard_config["enable_flash_attention"],
-                enable_jit_fused=self.shard_config["enable_jit_fused"],
-                enable_sequence_parallelism=self.shard_config[
-                    "enable_sequence_parallelism"
-                ],
-                enable_sequence_overlap=self.shard_config["enable_sequence_overlap"],
-            )
+        self.shard_config = ShardConfig(
+            tensor_parallel_process_group=self.tp_group,
+            pipeline_stage_manager=self.stage_manager,
+            enable_tensor_parallelism=self.shard_config["tp_size"] > 1,
+            enable_all_optimization=self.shard_config["enable_all_optimization"],
+            enable_fused_normalization=self.shard_config["enable_fused_normalization"],
+            enable_flash_attention=self.shard_config["enable_flash_attention"],
+            enable_jit_fused=self.shard_config["enable_jit_fused"],
+            enable_sequence_parallelism=self.shard_config[
+                "enable_sequence_parallelism"
+            ],
+            enable_sequence_overlap=self.shard_config["enable_sequence_overlap"],
+        )
 
     def configure(
         self,
