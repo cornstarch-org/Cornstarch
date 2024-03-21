@@ -71,7 +71,6 @@ class HeterogeneousParallelPluginClassBase(MultiProcessTestCase):
 
     def init_distributed(self):
         torch.cuda.set_device(self.rank)
-        # assert int(os.environ["CUDA_VISIBLE_DEVICES"]) == self.rank
         print(f"dist init r={self.rank}, world={self.world_size}")
 
         try:
