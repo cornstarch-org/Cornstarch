@@ -2,11 +2,20 @@
 Code is adopted from ColossalAI HybridParallelModule
 """
 
+from functools import partial
+
 import torch
 import torch.distributed as dist
-from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelModule
+from colossalai.accelerator import get_accelerator
+from colossalai.booster.plugin.hybrid_parallel_plugin import (
+    HybridParallelModule,
+    _convert_floating_point,
+)
+from colossalai.interface import ModelWrapper
 from colossalai.shardformer import ShardConfig
 from colossalai.shardformer.policies.base_policy import Policy
+
+from oobleck_colossalai.shardformer.shard.shardformer import ShardFormer
 
 
 class HeterogeneousParallelModule(HybridParallelModule):
@@ -19,16 +28,46 @@ class HeterogeneousParallelModule(HybridParallelModule):
         shard_config: ShardConfig,
         custom_policy: Policy,
     ):
-        super().__init__(
-            module=module,
-            precision=precision,
-            shard_config=shard_config,
-            dp_group=None,
-            tp_group=tp_group,
-            use_ddp=False,
-            ddp_config=None,
-            custom_policy=custom_policy,
-        )
+        self.stage_manager = shard_config.pipeline_stage_manager
+        self.shard_config = shard_config
+        self.dp_group = None
+        self.tp_group = tp_group
+        self.use_dpp = False
+        self.require_grad_sync = True
+
+        shardformer = ShardFormer(shard_config)
+        if custom_policy is not None:
+            assert isinstance(custom_policy, object)
+        module, self.shared_params = shardformer.optimize(module, custom_policy)
+
+        # setting process groups for shared parameters
+        self.shared_param_process_groups = []
+        for shared_param in self.shared_params:
+            if len(shared_param) > 0:
+                self.shared_param_process_groups.append(
+                    self.stage_manager.init_process_group_by_stages(
+                        list(shared_param.keys())
+                    )
+                )
+
+        # setting mixed_precision
+        self.mixed_precision = None
+        if precision == "fp16":
+            self.mixed_precision = torch.float16
+        elif precision == "bf16":
+            self.mixed_precision = torch.bfloat16
+        if self.mixed_precision is not None:
+            module = module.to(self.mixed_precision)
+        module = module.to(get_accelerator().get_current_device())
+
+        # setting input type cast when using mixed precision
+        self.convert_fn = None
+        if self.mixed_precision is not None:
+            self.convert_fn = partial(
+                _convert_floating_point, dtype=self.mixed_precision
+            )
+
+        ModelWrapper.__init__(self, module)
 
         self.dp_groups = dp_groups
 

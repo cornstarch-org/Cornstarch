@@ -40,6 +40,7 @@ from oobleck_colossalai.plugin.heterogeneous_parallel_plugin import (
 from oobleck_colossalai.shardformer.policies.gpt2 import (
     GPT2ForSequenceClassificationPolicy,
 )
+from oobleck_colossalai.shardformer.shard.placeholder import ParameterPlaceholder
 
 config: GPT2Config = GPT2Config.from_pretrained("gpt2")
 config.is_decoder = True
@@ -70,7 +71,8 @@ class HeterogeneousParallelPluginClassBase(MultiProcessTestCase):
         self._spawn_processes()
 
     def init_distributed(self):
-        torch.cuda.set_device(self.rank)
+        if self.backend and self.backend == "nccl":
+            torch.cuda.set_device(self.rank)
         print(f"dist init r={self.rank}, world={self.world_size}")
 
         try:
@@ -151,12 +153,16 @@ class HeterogeneousParallelPluginClassBase(MultiProcessTestCase):
         assert isinstance(model, HeterogeneousParallelModule)
 
         # Check whether the model is split as pipeline template intended
-        param_names = list(name for name, _ in model.module.named_parameters())
+        param_names = list(
+            name
+            for name, param in model.module.named_parameters()
+            if not isinstance(param, ParameterPlaceholder)
+        )
         pipeline_template = plugin.pipelines[pipeline_index]
         expected_module_names = pipeline_template.modules_per_stage[
             plugin.stage_manager.stage
         ]
-        # Get parameters in expected modules after filtering out parameter-less modules
+        # Get parameters in expected modules
         expected_param_names = list(
             itertools.chain.from_iterable(
                 [
@@ -167,7 +173,6 @@ class HeterogeneousParallelPluginClassBase(MultiProcessTestCase):
                         ).named_parameters()
                     ]
                     for module_name in expected_module_names
-                    if list(model.module.get_submodule(module_name).named_parameters())
                 ]
             )
         )
