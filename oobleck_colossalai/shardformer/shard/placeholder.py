@@ -5,16 +5,18 @@ class ParameterPlaceholder(torch.nn.Parameter):
     _shape: torch.Size
     _dtype: torch.dtype
     _device: torch.device
+    old_param_id: int
 
-    def __new__(cls, input_tensor: torch.Tensor):
+    def __new__(cls, input_param: torch.nn.Parameter):
         r: ParameterPlaceholder = super().__new__(
             cls,
             data=torch.empty(0, device="meta"),
-            requires_grad=input_tensor.requires_grad,
+            requires_grad=input_param.requires_grad,
         )
-        r._shape = input_tensor.shape
-        r._dtype = input_tensor.dtype
-        r._device = input_tensor.device
+        r._shape = input_param.shape
+        r._dtype = input_param.dtype
+        r._device = input_param.device
+        r.old_param_id = id(input_param)
 
         return r
 
