@@ -25,7 +25,6 @@ from oobleck_colossalai import (
 @dataclass
 class ExampleArguments:
     model_name_or_path: str = "bert-base-uncased"
-    global_batch_size: int = 32
     num_epoch: int = 3
     warmup_faction: float = 0.1
 
@@ -36,22 +35,8 @@ def main():
     colossalai.launch_from_torch(config={})
     coordinator = DistCoordinator()
 
-    plugin = HeterogeneousParallelPlugin(
-        tp_size=1,
-        global_batch_size=args.global_batch_size,
-        microbatch_size=4,
-        precision="bf16",
-        enable_fused_normalization=True,
-        enable_flash_attention=True,
-    )
-    booster = Booster(plugin=plugin)
-
-    data_builder = GLUEDataBuilder(
-        args.model_name_or_path, plugin, task_name="mrpc", pad_tokens=False
-    )
-
     config: PretrainedConfig = AutoConfig.from_pretrained(
-        args.model_name_or_path, num_labels=data_builder.num_labels
+        args.model_name_or_path, num_labels=GLUEDataBuilder.glue_task_num_labels["mrpc"]
     )
     model = BertForSequenceClassification.from_pretrained(
         args.model_name_or_path, config=config
@@ -62,13 +47,20 @@ def main():
     modules = PipelineTemplate.get_modules(model)
     template1 = PipelineTemplate(model_name, [modules])
     template2 = PipelineTemplate(model_name, [modules[:8], modules[8:]])
-    plugin.set_pipelines(
-        # homogeneous pipelines with 4 GPUs
-        # pipelines=[template2, template2],
-        # num_microbatches={template2: 4},
-        # heterogeneous pipelines with 3 GPUs
+
+    plugin = HeterogeneousParallelPlugin(
         pipelines=[template1, template2],
+        tp_size=1,
+        microbatch_size=4,
         num_microbatches={template1: 3, template2: 5},
+        precision="bf16",
+        enable_fused_normalization=True,
+        enable_flash_attention=True,
+    )
+    booster = Booster(plugin=plugin)
+
+    data_builder = GLUEDataBuilder(
+        args.model_name_or_path, plugin, task_name="mrpc", pad_tokens=False
     )
 
     # Prepare dataloader

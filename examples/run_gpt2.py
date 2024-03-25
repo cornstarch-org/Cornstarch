@@ -25,7 +25,6 @@ from oobleck_colossalai import (
 @dataclass
 class ExampleArguments:
     model_name_or_path: str = "gpt2"
-    global_batch_size: int = 32
     num_epoch: int = 3
     warmup_faction: float = 0.1
 
@@ -36,10 +35,25 @@ def main():
     colossalai.launch_from_torch(config={})
     coordinator = DistCoordinator()
 
+    config: PretrainedConfig = AutoConfig.from_pretrained(
+        args.model_name_or_path, num_labels=GLUEDataBuilder.glue_task_num_labels["mrpc"]
+    )
+    config.pad_token_id = config.eos_token_id
+    model = GPT2ForSequenceClassification.from_pretrained(
+        args.model_name_or_path, config=config
+    )
+
+    model_name = PipelineTemplate.get_model_name(model)
+    modules = PipelineTemplate.get_modules(model)
+    template1 = PipelineTemplate(
+        model_name, [modules[:3], modules[3:8], modules[8:13], modules[13:]]
+    )
+    template2 = PipelineTemplate(model_name, [modules[:8], modules[8:]])
     plugin = HeterogeneousParallelPlugin(
+        pipelines=[template2],
         tp_size=1,
-        global_batch_size=args.global_batch_size,
         microbatch_size=4,
+        num_microbatches={template2: 8},
         precision="bf16",
         enable_fused_normalization=True,
         enable_flash_attention=True,
@@ -48,28 +62,6 @@ def main():
 
     data_builder = GLUEDataBuilder(
         args.model_name_or_path, plugin, task_name="mrpc", pad_tokens=True
-    )
-
-    config: PretrainedConfig = AutoConfig.from_pretrained(
-        args.model_name_or_path, num_labels=data_builder.num_labels
-    )
-    config.pad_token_id = config.eos_token_id
-    model = GPT2ForSequenceClassification.from_pretrained(
-        args.model_name_or_path, config=config
-    )
-
-    # Adjust module_per_stage to arbitrarily implement pipelines
-    model_name = PipelineTemplate.get_model_name(model)
-    modules = PipelineTemplate.get_modules(model)
-    template1 = PipelineTemplate(model_name, [modules])
-    template2 = PipelineTemplate(model_name, [modules[:8], modules[8:]])
-    plugin.set_pipelines(
-        # homogeneous pipelines with 4 GPUs
-        pipelines=[template2, template2],
-        num_microbatches={template2: 4},
-        # heterogeneous pipelines with 3 GPUs
-        # pipelines=[template1, template2],
-        # num_microbatches={template1: 3, template2: 5},
     )
 
     # Prepare dataloader
