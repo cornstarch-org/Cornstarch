@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import colossalai
 import simple_parsing
@@ -27,6 +28,7 @@ class ExampleArguments:
     model_name_or_path: str = "bert-base-uncased"
     num_epoch: int = 3
     warmup_faction: float = 0.1
+    checkpoint_path: Path | None = None
 
 
 def main():
@@ -86,6 +88,13 @@ def main():
         lr_scheduler=lr_scheduler,
     )
 
+    if args.checkpoint_path and args.checkpoint_path.exists():
+        booster.load_model(model, args.checkpoint_path / "model")
+        booster.load_optimizer(optimizer, args.checkpoint_path / "optim")
+        booster.load_lr_scheduler(
+            lr_scheduler, args.checkpoint_path / "lr_scheduler.pt"
+        )
+
     # Train model
     model.train()
     optimizer.zero_grad()
@@ -116,6 +125,20 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad()
                 lr_scheduler.step()
+
+    if args.checkpoint_path:
+        booster.save_model(
+            model,
+            checkpoint=args.checkpoint_path / "model",
+            shard=True,
+            use_safetensors=True,
+        )
+        booster.save_optimizer(
+            optimizer, checkpoint=args.checkpoint_path / "optim", shard=True
+        )
+        booster.save_lr_scheduler(
+            lr_scheduler, checkpoint=args.checkpoint_path / "lr_scheduler.pt"
+        )
 
 
 if __name__ == "__main__":
