@@ -94,9 +94,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.tp_size = tp_size
         self.precision = precision
         self.zero_stage = 0
-        self.stage_manager: HeterogeneousPipelineStageManager = None
-        self.pg_mesh: HeterogeneousProcessGroupMesh = None
-        self.schedule: PipelineSchedule = None
         self.global_batch_size = microbatch_size * sum(
             num_microbatches[pipeline] for pipeline in pipelines
         )
