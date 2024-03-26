@@ -15,8 +15,7 @@ from colossalai.interface import ModelWrapper
 from colossalai.shardformer import ShardConfig
 from colossalai.shardformer.policies.base_policy import Policy
 
-# from oobleck_colossalai.shardformer.shard.shardformer import ShardFormer
-from colossalai.shardformer.shard.shardformer import ShardFormer
+from oobleck_colossalai.shardformer.shard.shardformer import ShardFormer
 
 
 class HeterogeneousParallelModule(HybridParallelModule):

@@ -1,44 +1,29 @@
 import torch
+from colossalai.accelerator import get_accelerator
 
 
-class ParameterPlaceholder(torch.nn.Parameter):
-    _shape: torch.Size
-    _dtype: torch.dtype
-    _device: torch.device
-    old_param_id: int
+class TensorPlaceholder:
+    param_id: int
+    shape: torch.Size
+    precision: torch.dtype
+    requires_grad: bool
 
-    def __new__(cls, input_param: torch.nn.Parameter):
-        r: ParameterPlaceholder = super().__new__(
-            cls,
-            data=torch.empty(0, device="meta"),
-            requires_grad=input_param.requires_grad,
-        )
-        r._shape = input_param.shape
-        r._dtype = input_param.dtype
-        r._device = input_param.device
-        r.old_param_id = id(input_param)
-
-        return r
+    def __init__(self, input_tensor: torch.Tensor):
+        self.param_id = id(input_tensor)
+        self.shape = input_tensor.shape
+        self.precision = input_tensor.dtype
+        self.requires_grad = input_tensor.requires_grad
 
     def __repr__(self) -> str:
-        return f"ParameterPlaceholder(..., size={tuple(self._shape)}, device={self._device}, dtype={self._dtype})"
+        return f"TensorPlaceholder(..., id={self.param_id})"
 
-    def create(self) -> torch.nn.Parameter:
-        return torch.nn.Parameter(
-            data=torch.empty(
-                self._shape,
-                dtype=self._dtype,
-                device=self._device,
-            ),
-            requires_grad=self.requires_grad,
+    def create(
+        self,
+        device: torch.device = None,
+        dtype: torch.dtype = None,
+    ) -> torch.Tensor:
+        device = get_accelerator().get_current_device() if device is None else device
+        dtype = self.precision if dtype is None else dtype
+        return torch.empty(
+            self.shape, device=device, dtype=dtype, requires_grad=self.requires_grad
         )
-
-    def to(self, *args, **kwargs) -> torch.Tensor:
-        with torch.no_grad():
-            dummy_tensor = torch.empty(0, dtype=self._dtype, device=self._device).to(
-                *args, **kwargs
-            )
-            self._device = dummy_tensor.device
-            self._dtype = dummy_tensor.dtype
-
-        return self

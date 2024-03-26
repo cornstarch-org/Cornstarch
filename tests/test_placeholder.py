@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from oobleck_colossalai.shardformer.shard.placeholder import ParameterPlaceholder
+from oobleck_colossalai.shardformer.shard.placeholder import TensorPlaceholder
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
@@ -23,7 +23,7 @@ def test_implement_parameter_placeholder(
     target_device: torch.device, target_dtype: torch.dtype, size: torch.Size
 ):
     input_tensor = torch.empty(size, dtype=torch.float32, device=torch.device("cpu"))
-    placeholder: ParameterPlaceholder = ParameterPlaceholder(input_tensor)
+    placeholder: TensorPlaceholder = TensorPlaceholder(input_tensor)
 
     assert placeholder._shape == size
     assert placeholder._dtype == torch.float32

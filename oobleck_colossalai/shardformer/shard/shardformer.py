@@ -6,24 +6,31 @@ from colossalai.shardformer.shard.shardformer import ShardConfig
 from colossalai.shardformer.shard.shardformer import ShardFormer as ColossalShardFormer
 from torch import Tensor, nn
 
-from oobleck_colossalai.shardformer.shard.placeholder import ParameterPlaceholder
+from oobleck_colossalai.shardformer.shard.placeholder import TensorPlaceholder
 
 
 class ModelSharder(ColossalModelSharder):
     def set_tensors_to_placeholder(
         self, model: nn.Module, exclude: set[nn.Module] = set()
     ) -> None:
-        """Set all parameters and buffers of model to ParameterPlaceholder instances"""
+        """Set all parameters and buffers of model to TensorPlaceholder instances"""
         if model in exclude:
             return
 
         for child in model.children():
             self.set_tensors_to_placeholder(child, exclude=exclude)
 
+        paremeters: dict[str, TensorPlaceholder] = {}
+        buffers: dict[str, TensorPlaceholder] = {}
         for n, p in list(model.named_parameters(recurse=False)):
-            setattr(model, n, ParameterPlaceholder(p))
+            paremeters[n] = TensorPlaceholder(p)
+            setattr(model, n, None)
         for n, buf in list(model.named_buffers(recurse=False)):
-            setattr(model, n, ParameterPlaceholder(buf))
+            buffers[n] = TensorPlaceholder(buf)
+            setattr(model, n, None)
+
+        setattr(model, "_parameter_placeholders", paremeters)
+        setattr(model, "_buffer_placeholders", buffers)
 
     def _release_unheld_layers(self) -> Optional[set[nn.Module]]:
         if self.shard_config and self.shard_config.pipeline_stage_manager:

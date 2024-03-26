@@ -40,7 +40,7 @@ from oobleck_colossalai.plugin.heterogeneous_parallel_plugin import (
 from oobleck_colossalai.shardformer.policies.gpt2 import (
     GPT2ForSequenceClassificationPolicy,
 )
-from oobleck_colossalai.shardformer.shard.placeholder import ParameterPlaceholder
+from oobleck_colossalai.shardformer.shard.placeholder import TensorPlaceholder
 
 config: GPT2Config = GPT2Config.from_pretrained("gpt2")
 config.is_decoder = True
@@ -156,7 +156,7 @@ class HeterogeneousParallelPluginClassBase(MultiProcessTestCase):
         param_names = list(
             name
             for name, param in model.module.named_parameters()
-            if not isinstance(param, ParameterPlaceholder)
+            if not isinstance(param, TensorPlaceholder)
         )
         pipeline_template = plugin.pipelines[pipeline_index]
         expected_module_names = pipeline_template.modules_per_stage[
