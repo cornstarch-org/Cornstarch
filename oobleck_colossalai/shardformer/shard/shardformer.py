@@ -10,15 +10,16 @@ from oobleck_colossalai.shardformer.shard.placeholder import TensorPlaceholder
 
 
 class ModelSharder(ColossalModelSharder):
+    @classmethod
     def set_tensors_to_placeholder(
-        self, model: nn.Module, exclude: set[nn.Module] = set()
+        cls, model: nn.Module, exclude: set[nn.Module] = set()
     ) -> None:
         """Set all parameters and buffers of model to TensorPlaceholder instances"""
         if model in exclude:
             return
 
         for child in model.children():
-            self.set_tensors_to_placeholder(child, exclude=exclude)
+            cls.set_tensors_to_placeholder(child, exclude=exclude)
 
         paremeters: dict[str, TensorPlaceholder] = {}
         buffers: dict[str, TensorPlaceholder] = {}

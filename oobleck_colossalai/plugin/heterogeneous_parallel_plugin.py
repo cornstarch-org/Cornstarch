@@ -187,17 +187,17 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
     ]:
         """Instantiate pipeline templates and initialize distributed process groups."""
         if not isinstance(model, ModelWrapper):
-            template = self.pipelines[self._pipeline_index]
-            module_names = template.modules_per_stage[self.stage_manager.stage]
+            my_pipeline = self.pipelines[self._pipeline_index]
+            module_names = my_pipeline.modules_per_stage[self.stage_manager.stage]
 
             assert (
                 isinstance(self.dp_groups, list)
                 and len(self.dp_groups) == len(module_names)
             ), f"Number of dp groups ({len(self.dp_groups)}) does not match the number of modules in the stage ({len(module_names)})."
 
-            policy = get_autopolicy(template.model_name)
+            policy = get_autopolicy(my_pipeline.model_name)
             policy.set_model(model)
-            policy.set_pipeline_template(template)
+            policy.set_pipeline_template(my_pipeline)
             policy.set_shard_config(self.shard_config)
 
             model = HeterogeneousParallelModule(
