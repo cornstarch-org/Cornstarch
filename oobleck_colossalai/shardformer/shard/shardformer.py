@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Iterator, Optional
 
 from colossalai.shardformer.policies.base_policy import Policy
 from colossalai.shardformer.shard.sharder import ModelSharder as ColossalModelSharder
@@ -32,6 +32,42 @@ class ModelSharder(ColossalModelSharder):
 
         setattr(model, "_parameter_placeholders", paremeters)
         setattr(model, "_buffer_placeholders", buffers)
+
+    @classmethod
+    def _placeholders(
+        cls, model: nn.Module, placeholders_name: str
+    ) -> Iterator[tuple[nn.Module, str, TensorPlaceholder]]:
+        assert placeholders_name in ["_parameter_placeholders", "_buffer_placeholders"]
+
+        for child in model.children():
+            yield from cls._placeholders(child, placeholders_name)
+
+        if not hasattr(model, placeholders_name):
+            return
+
+        placeholders: dict[str, TensorPlaceholder] = getattr(model, placeholders_name)
+        for name, placeholder in placeholders.items():
+            yield model, name, placeholder
+
+    @classmethod
+    def buffer_placeholders(
+        cls,
+        model: nn.Module,
+        delete_placeholders_after: bool = False,
+    ) -> Iterator[tuple[nn.Module, str, TensorPlaceholder]]:
+        yield from cls._placeholders(model, "_buffer_placeholders")
+        if delete_placeholders_after:
+            delattr(model, "_buffer_placeholders")
+
+    @classmethod
+    def parameter_placeholders(
+        cls,
+        model: nn.Module,
+        delete_placeholders_after: bool = False,
+    ) -> Iterator[tuple[nn.Module, str, TensorPlaceholder]]:
+        yield from cls._placeholders(model, "_parameter_placeholders")
+        if delete_placeholders_after:
+            delattr(model, "_parameter_placeholders")
 
     def _release_unheld_layers(self) -> Optional[set[nn.Module]]:
         if self.shard_config and self.shard_config.pipeline_stage_manager:
