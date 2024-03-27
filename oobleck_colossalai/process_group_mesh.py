@@ -205,9 +205,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
             ranks_in_group = tuple(
                 set([self._mesh[coord] for coord in coords_in_group])
             )
-            # Skip there is only one rank in the group, but not along the data parallel axis.
-            if len(ranks_in_group) == 1 and axis != DP_AXIS:
-                continue
+
             group = self.get_group(ranks_in_group, backend=backend)
             if ranks_in_group == target_ranks_in_group:
                 target_group = group
@@ -246,13 +244,9 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
                 set([self._mesh[coord] for coord in coords_in_group])
             )
 
-            if ranks_in_group not in self._ranks_to_group:
-                # no need to cache it explicitely, since it will be cached in `create_group_along_axis`
-                group = self.create_group_along_axis(
-                    axis, indices_at_axis, ranks_in_group, backend=backend
-                )
-            else:
-                group = self._ranks_to_group[ranks_in_group]
+            group = self.create_group_along_axis(
+                axis, indices_at_axis, ranks_in_group, backend=backend
+            )
 
             if group and group != GroupMember.NON_GROUP_MEMBER:
                 groups.append(group)

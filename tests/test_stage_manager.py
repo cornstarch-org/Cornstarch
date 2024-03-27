@@ -199,6 +199,8 @@ class TestStageManagerClass(MultiThreadedTestCase):
             if self.rank in expected_ranks:
                 assert group is not None
                 assert self.rank in dist.get_process_group_ranks(group)
+            elif dist.get_world_size(group) == 1:
+                assert dist.get_process_group_ranks(group)[0] == self.rank
             else:
                 assert group is None or group == GroupMember.NON_GROUP_MEMBER
 
