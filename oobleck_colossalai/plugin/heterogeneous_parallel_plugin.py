@@ -118,7 +118,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
     @property
     def enable_pipeline_parallelism(self) -> bool:
-        return True
+        return self.pp_size > 1
 
     def supported_devices(self) -> list[str]:
         return ["cuda"]
@@ -156,19 +156,21 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         )
 
         self.pipelines = pipelines
-        self.dp_size = len(pipelines)
-        self.tp_size = tp_size
 
         self.num_microbatches = num_microbatches
         self.global_batch_size = self.microbatch_size * sum(
             num_microbatches[pipeline] for pipeline in pipelines
         )
 
-        self.pg_mesh = HeterogeneousProcessGroupMesh(self.pipelines, self.tp_size)
+        self.pg_mesh = HeterogeneousProcessGroupMesh(self.pipelines, tp_size)
         self.stage_manager = HeterogeneousPipelineStageManager(self.pg_mesh, PP_AXIS)
         self.dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
         self.tp_group = self.pg_mesh.get_group_along_axis(TP_AXIS)
         self.pp_group = self.pg_mesh.get_group_along_axis(PP_AXIS)
+
+        self.dp_size = len(pipelines)
+        self.pp_size = dist.get_world_size(self.pp_group)
+        self.tp_size = tp_size
 
         self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
         self.schedule = OneForwardOneBackwardSchedule(
@@ -233,33 +235,45 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         ]
         dataloader.configure(self._pipeline_index, num_microbatches)
 
-        if optimizer is not None and not isinstance(optimizer, OptimizerWrapper):
-            param_info = get_param_info(optimizer)
-            if self.precision in ["fp16", "bf16"]:
-                optimizer = HybridParallelAMPOptimizer(
-                    optimizer,
-                    model,
-                    use_pipeline=self.enable_pipeline_parallelism,
-                    param_info=param_info,
-                    precision=self.precision,
-                    max_norm=self.max_norm,
-                    pp_process_group=self.pp_group,
-                    tp_process_group=self.tp_group,
-                    **self.amp_config,
-                )
-            else:
-                optimizer = HybridParallelNaiveOptimizer(
-                    optimizer,
-                    model,
-                    use_pipeline=self.enable_pipeline_parallelism,
-                    param_info=param_info,
-                    max_norm=self.max_norm,
-                    pp_process_group=self.pp_group,
-                    tp_process_group=self.tp_group,
-                )
+        if optimizer is not None:
+            if not isinstance(optimizer, OptimizerWrapper):
+                param_info = get_param_info(optimizer)
+                if self.precision in ["fp16", "bf16"]:
+                    optimizer = HybridParallelAMPOptimizer(
+                        optimizer,
+                        model,
+                        use_pipeline=self.enable_pipeline_parallelism,
+                        param_info=param_info,
+                        precision=self.precision,
+                        max_norm=self.max_norm,
+                        pp_process_group=self.pp_group,
+                        tp_process_group=self.tp_group,
+                        **self.amp_config,
+                    )
+                else:
+                    optimizer = HybridParallelNaiveOptimizer(
+                        optimizer,
+                        model,
+                        use_pipeline=self.enable_pipeline_parallelism,
+                        param_info=param_info,
+                        max_norm=self.max_norm,
+                        pp_process_group=self.pp_group,
+                        tp_process_group=self.tp_group,
+                    )
+            elif forced and isinstance(optimizer, OptimizerWrapper):
+                optimizer.model = model
+                optimizer.stage_manager = self.stage_manager
+                optimizer.shared_params = model.shared_params
+                optimizer.tp_pg = self.tp_group
+                optimizer.pp_pg = self.pp_group
+                optimizer.tp_size = self.tp_size
+                optimizer.pp_size = self.pp_size
 
-        # inject update_master_params
-        model.update_master_params = MethodType(optimizer.update_master_params, model)
+            # inject update_master_params
+            model.update_master_params = MethodType(
+                optimizer.update_master_params, model
+            )
+
         return model, optimizer, criterion, dataloader, lr_scheduler
 
     def prepare_dataloader(
