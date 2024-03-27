@@ -9,8 +9,6 @@ from colossalai.shardformer.policies.auto_policy import (
 )
 from colossalai.shardformer.policies.base_policy import Policy
 
-from oobleck_colossalai.pipeline_template import PipelineTemplate
-
 __all__ = ["get_policy_type", "get_autopolicy", "import_policy"]
 
 
