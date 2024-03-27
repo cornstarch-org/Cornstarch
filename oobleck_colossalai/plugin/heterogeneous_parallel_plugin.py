@@ -15,9 +15,11 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.checkpoint_io import CheckpointIO, HybridParallelCheckpointIO
 from colossalai.interface import ModelWrapper, OptimizerWrapper
-from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
+from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule
 from colossalai.shardformer import ShardConfig
-from torch.utils.data import Dataset
+from torch.optim.lr_scheduler import LRScheduler
+from torch.optim.optimizer import Optimizer
+from torch.utils.data import DataLoader, Dataset
 
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
@@ -70,53 +72,15 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
-        assert (pipelines and num_microbatches) or (
-            not pipelines and not num_microbatches
-        ), (
-            "pipelines and num_microbatches must be specified together "
-            "or not specified together."
-        )
-
-        assert all(
-            pipeline in num_microbatches.keys() for pipeline in pipelines
-        ), "All pipelines must have a corresponding number of microbatches."
-
-        if pipelines is None or num_microbatches is None:
-            raise NotImplementedError("Auto pipeline parallelism is not supported yet.")
-
-        num_ranks = sum(pipeline.num_stages for pipeline in pipelines) * tp_size
-        assert dist.get_world_size() == num_ranks, (
-            f"Number of ranks in pipeline templates ({num_ranks}) does not match "
-            f"world size ({dist.get_world_size()})."
-        )
-
-        self.pipelines = pipelines
-        self.tp_size = tp_size
         self.precision = precision
         self.zero_stage = 0
-        self.global_batch_size = microbatch_size * sum(
-            num_microbatches[pipeline] for pipeline in pipelines
-        )
         self.microbatch_size = microbatch_size
-        self.num_microbatches = num_microbatches
-        self.dp_size = len(pipelines)
-
-        self.pg_mesh = HeterogeneousProcessGroupMesh(self.pipelines, tp_size)
-        self.stage_manager = HeterogeneousPipelineStageManager(self.pg_mesh, PP_AXIS)
-        self.dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
-        self.tp_group = self.pg_mesh.get_group_along_axis(TP_AXIS)
-        self.pp_group = self.pg_mesh.get_group_along_axis(PP_AXIS)
-
-        self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
-        self.schedule = OneForwardOneBackwardSchedule(
-            stage_manager=self.stage_manager,
-            microbatch_size=self.microbatch_size,
-        )
+        self.max_norm = max_norm
 
         self.shard_config = ShardConfig(
-            tensor_parallel_process_group=self.tp_group,
-            pipeline_stage_manager=self.stage_manager,
-            enable_tensor_parallelism=tp_size > 1,
+            tensor_parallel_process_group=None,
+            pipeline_stage_manager=None,
+            enable_tensor_parallelism=False,
             enable_all_optimization=enable_all_optimization,
             enable_fused_normalization=enable_fused_normalization,
             enable_flash_attention=enable_flash_attention,
@@ -138,7 +102,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.ddp_config = None
         self.zero_config = None
 
-        self.max_norm = max_norm
+        self.__post_init__(pipelines, tp_size, num_microbatches)
 
     def __del__(self):
         if self.pg_mesh:
@@ -171,22 +135,64 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
     def control_checkpoint_io(self) -> bool:
         return True
 
+    def __post_init__(
+        self,
+        pipelines: list[PipelineTemplate],
+        tp_size: int,
+        num_microbatches: dict[PipelineTemplate, int],
+    ):
+        assert (
+            pipelines and num_microbatches
+        ), "pipelines and num_microbatches must be specified together."
+
+        assert all(
+            pipeline in num_microbatches.keys() for pipeline in pipelines
+        ), "All pipelines must have a corresponding number of microbatches."
+
+        num_ranks = sum(pipeline.num_stages for pipeline in pipelines) * tp_size
+        assert dist.get_world_size() == num_ranks, (
+            f"Number of ranks in pipeline templates ({num_ranks}) does not match "
+            f"world size ({dist.get_world_size()})."
+        )
+
+        self.pipelines = pipelines
+        self.dp_size = len(pipelines)
+        self.tp_size = tp_size
+
+        self.num_microbatches = num_microbatches
+        self.global_batch_size = self.microbatch_size * sum(
+            num_microbatches[pipeline] for pipeline in pipelines
+        )
+
+        self.pg_mesh = HeterogeneousProcessGroupMesh(self.pipelines, self.tp_size)
+        self.stage_manager = HeterogeneousPipelineStageManager(self.pg_mesh, PP_AXIS)
+        self.dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
+        self.tp_group = self.pg_mesh.get_group_along_axis(TP_AXIS)
+        self.pp_group = self.pg_mesh.get_group_along_axis(PP_AXIS)
+
+        self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
+        self.schedule = OneForwardOneBackwardSchedule(
+            stage_manager=self.stage_manager,
+            microbatch_size=self.microbatch_size,
+        )
+
+        self.shard_config.tensor_parallel_process_group = self.tp_group
+        self.shard_config.pipeline_stage_manager = self.stage_manager
+        self.shard_config.enable_tensor_parallelism = self.tp_size > 1
+        self.shard_config.__post_init__()
+
     def configure(
         self,
         model: torch.nn.Module,
-        optimizer: torch.optim.Optimizer | None = None,
+        optimizer: Optimizer | None = None,
         criterion: Callable | None = None,
-        dataloader: torch.utils.data.DataLoader | None = None,
-        lr_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
-    ) -> tuple[
-        ModelWrapper,
-        OptimizerWrapper,
-        callable,
-        torch.utils.data.DataLoader,
-        torch.optim.lr_scheduler.LRScheduler,
-    ]:
+        dataloader: DataLoader | None = None,
+        lr_scheduler: LRScheduler | None = None,
+        forced: bool = False,
+    ) -> tuple[ModelWrapper, OptimizerWrapper, callable, DataLoader, LRScheduler]:
         """Instantiate pipeline templates and initialize distributed process groups."""
-        if not isinstance(model, ModelWrapper):
+
+        if forced or not isinstance(model, ModelWrapper):
             my_pipeline = self.pipelines[self._pipeline_index]
             module_names = my_pipeline.modules_per_stage[self.stage_manager.stage]
 
@@ -195,13 +201,15 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                 and len(self.dp_groups) == len(module_names)
             ), f"Number of dp groups ({len(self.dp_groups)}) does not match the number of modules in the stage ({len(module_names)})."
 
+            module = model.module if isinstance(model, ModelWrapper) else model
+
             policy = get_autopolicy(my_pipeline.model_name)
-            policy.set_model(model)
+            policy.set_model(module)
             policy.set_pipeline_template(my_pipeline)
             policy.set_shard_config(self.shard_config)
 
             model = HeterogeneousParallelModule(
-                module=model,
+                module=module,
                 dp_groups={
                     module_name: dp_group
                     for module_name, dp_group in zip(module_names, self.dp_groups)
@@ -225,8 +233,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         ]
         dataloader.configure(self._pipeline_index, num_microbatches)
 
-        param_info = get_param_info(optimizer)
         if optimizer is not None and not isinstance(optimizer, OptimizerWrapper):
+            param_info = get_param_info(optimizer)
             if self.precision in ["fp16", "bf16"]:
                 optimizer = HybridParallelAMPOptimizer(
                     optimizer,

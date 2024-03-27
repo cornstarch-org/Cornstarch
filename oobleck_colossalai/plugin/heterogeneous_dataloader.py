@@ -158,6 +158,7 @@ class HeterogeneousDataLoader(DataLoader):
             f"inconsistent global batch size={self.global_batch_size}, microbatch_size={self.microbatch_size}, "
             f"and num_microbatches={num_microbatches}"
         )
+        self._DataLoader__initialized = False
         batch_sampler = HeterogeneousBatchSampler(
             self.dataset,
             pipeline_index,
