@@ -52,14 +52,14 @@ def main():
     )
     template2 = PipelineTemplate(model_name, [modules[:8], modules[8:]])
     plugin = HeterogeneousParallelPlugin(
-        pipelines=[template2],
         tp_size=1,
         microbatch_size=4,
-        num_microbatches={template2: 8},
         precision="bf16",
         enable_fused_normalization=True,
         enable_flash_attention=True,
     )
+    plugin.set_pipelines(pipelines=[template2], num_microbatches={template2: 8})
+
     booster = Booster(plugin=plugin)
 
     data_builder = GLUEDataBuilder(

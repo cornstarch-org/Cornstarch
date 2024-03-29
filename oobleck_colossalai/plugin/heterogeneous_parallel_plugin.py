@@ -50,10 +50,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
     def __init__(
         self,
-        pipelines: list[PipelineTemplate],
         tp_size: int,
         microbatch_size: int,
-        num_microbatches: dict[PipelineTemplate, int],
         precision: str = "fp16",
         enable_all_optimization: bool = False,
         enable_fused_normalization: bool = False,
@@ -76,6 +74,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.zero_stage = 0
         self.microbatch_size = microbatch_size
         self.max_norm = max_norm
+        self.tp_size = tp_size
 
         self.shard_config = ShardConfig(
             tensor_parallel_process_group=None,
@@ -101,8 +100,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         self.ddp_config = None
         self.zero_config = None
-
-        self.__post_init__(pipelines, tp_size, num_microbatches)
 
     def __del__(self):
         if self.pg_mesh:
@@ -135,10 +132,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
     def control_checkpoint_io(self) -> bool:
         return True
 
-    def __post_init__(
+    def set_pipelines(
         self,
         pipelines: list[PipelineTemplate],
-        tp_size: int,
         num_microbatches: dict[PipelineTemplate, int],
     ):
         assert (
@@ -149,20 +145,19 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             pipeline in num_microbatches.keys() for pipeline in pipelines
         ), "All pipelines must have a corresponding number of microbatches."
 
-        num_ranks = sum(pipeline.num_stages for pipeline in pipelines) * tp_size
+        num_ranks = sum(pipeline.num_stages for pipeline in pipelines) * self.tp_size
         assert dist.get_world_size() == num_ranks, (
             f"Number of ranks in pipeline templates ({num_ranks}) does not match "
             f"world size ({dist.get_world_size()})."
         )
-
         self.pipelines = pipelines
-
         self.num_microbatches = num_microbatches
+
         self.global_batch_size = self.microbatch_size * sum(
             num_microbatches[pipeline] for pipeline in pipelines
         )
 
-        self.pg_mesh = HeterogeneousProcessGroupMesh(self.pipelines, tp_size)
+        self.pg_mesh = HeterogeneousProcessGroupMesh(self.pipelines, self.tp_size)
         self.stage_manager = HeterogeneousPipelineStageManager(self.pg_mesh, PP_AXIS)
         self.dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
         self.tp_group = self.pg_mesh.get_group_along_axis(TP_AXIS)
@@ -170,7 +165,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
         self.dp_size = len(pipelines)
         self.pp_size = dist.get_world_size(self.pp_group)
-        self.tp_size = tp_size
 
         self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
         self.schedule = OneForwardOneBackwardSchedule(

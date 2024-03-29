@@ -93,9 +93,11 @@ class HeterogeneousParallelPluginClassBase(MultiProcessTestCase):
     ) -> HeterogeneousParallelPlugin:
         self.init_distributed()
         plugin = HeterogeneousParallelPlugin(
-            pipelines=pipelines,
             tp_size=tp_size,
             microbatch_size=1,
+        )
+        plugin.set_pipelines(
+            pipelines=pipelines,
             num_microbatches={template: 6 for template in pipelines},
         )
         return plugin

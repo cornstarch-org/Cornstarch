@@ -1,5 +1,6 @@
 import pytest
 import torch
+from colossalai.accelerator import get_accelerator
 
 from oobleck_colossalai.shardformer.shard.placeholder import TensorPlaceholder
 
@@ -25,19 +26,18 @@ def test_implement_parameter_placeholder(
     input_tensor = torch.empty(size, dtype=torch.float32, device=torch.device("cpu"))
     placeholder: TensorPlaceholder = TensorPlaceholder(input_tensor)
 
-    assert placeholder._shape == size
-    assert placeholder._dtype == torch.float32
-    assert placeholder._device == torch.device("cpu")
-    assert placeholder.device == torch.device("meta")
+    assert placeholder.shape == size
+    assert placeholder.dtype == torch.float32
+    assert placeholder.param_id == id(input_tensor)
 
-    placeholder = placeholder.to(dtype=target_dtype, device=target_device)
-    assert placeholder._shape == size
-    assert placeholder._dtype == target_dtype
-    assert placeholder._device == target_device
-    assert placeholder.device == torch.device("meta")
+    new_tensor = placeholder.create(dtype=target_dtype, device=target_device)
+    assert isinstance(new_tensor, torch.Tensor)
+    assert new_tensor.shape == size
+    assert new_tensor.dtype == target_dtype
+    assert new_tensor.device == target_device
 
-    output_parameter = placeholder.create()
-    assert isinstance(output_parameter, torch.nn.Parameter)
-    assert output_parameter.shape == size
-    assert output_parameter.dtype == target_dtype
-    assert output_parameter.device == target_device
+    new_tensor = placeholder.create()
+    assert isinstance(new_tensor, torch.Tensor)
+    assert new_tensor.shape == size
+    assert new_tensor.dtype == input_tensor.dtype
+    assert new_tensor.device == get_accelerator().get_current_device()
