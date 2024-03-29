@@ -68,8 +68,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
     ):
         super(PipelinePluginBase).__init__()
 
-        assert dist.is_initialized(), "torch.distributed is not initialized."
-
         self.precision = precision
         self.zero_stage = 0
         self.microbatch_size = microbatch_size
@@ -102,7 +100,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         self.zero_config = None
 
     def __del__(self):
-        if self.pg_mesh:
+        if hasattr(self, "pg_mesh") and self.pg_mesh:
             self.pg_mesh.destroy_mesh_process_groups()
 
     @property
@@ -137,6 +135,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         pipelines: list[PipelineTemplate],
         num_microbatches: dict[PipelineTemplate, int],
     ):
+        assert dist.is_initialized(), "torch.distributed is not initialized."
+
         assert (
             pipelines and num_microbatches
         ), "pipelines and num_microbatches must be specified together."
