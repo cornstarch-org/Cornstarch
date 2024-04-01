@@ -52,15 +52,26 @@ class PipelineTemplate:
         model_name: str,
         modules_per_stage: list[list[str]],
         latency: float = 0.0,
+        kstar_latency: float = 0.0,
         mem_required: int = 0,
     ):
         self.model_name = model_name
         self.modules_per_stage = modules_per_stage
-        self.latency = latency
+        self.pseudo_latency = latency  # latency with fake mb (4*num_stages)
+        self.kstar_latency = kstar_latency
         self.mem_required = mem_required
 
     def __repr__(self) -> str:
         return f"PipelineTemplate({self.model_name}, {self.num_stages} stages)"
+
+    def latency(self, num_microbatches: int) -> float:
+        """Return estimated latency with given actual num_microbatches."""
+        assert (
+            num_microbatches >= self.num_stages
+        ), "Numbe rof microbatches must be >= num_stages."
+        return self.pseudo_latency + self.kstar_latency * (
+            num_microbatches - 4 * self.num_stages
+        )
 
     @property
     def num_layers(self) -> int:
