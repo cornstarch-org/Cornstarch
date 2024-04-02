@@ -2,6 +2,7 @@ import re
 from abc import ABC, abstractmethod
 
 import numpy as np
+from torch import nn
 from transformers import PretrainedConfig
 
 from oobleck_colossalai.pipeline_template import PipelineTemplate
@@ -17,7 +18,7 @@ class PipelineTemplatePolicyBase(ABC):
         ...
 
     @abstractmethod
-    def pipeline_template_sanity_check(self):
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
         """Pipeline template sanity check.
 
         Its implementation should check if the pipeline template is valid for the model.
@@ -36,7 +37,6 @@ class PipelineTemplatePolicyBase(ABC):
 
     def set_pipeline_template(self, pipeline_template: PipelineTemplate):
         self.pipeline_template = pipeline_template
-        self.pipeline_template_sanity_check()
 
     def distribute_layers(
         self, num_layers: int, num_stages: int, is_decoder: bool = True

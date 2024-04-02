@@ -115,4 +115,4 @@ def test_sanity_check(
     policy.set_model(model)
 
     with pytest.raises(ValueError) if not expected_check_pass else nullcontext():
-        policy.set_pipeline_template(pipeline_template)
+        policy.pipeline_template_sanity_check(pipeline_template)

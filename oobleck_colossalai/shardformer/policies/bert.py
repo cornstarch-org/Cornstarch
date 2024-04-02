@@ -1,5 +1,7 @@
 # Copied from https://github.com/hpcaitech/ColossalAI/blob/v0.3.5/colossalai/shardformer/policies/bert.py
 
+from __future__ import annotations
+
 import itertools
 from functools import partial
 from typing import Callable, Dict, List, cast
@@ -23,6 +25,7 @@ from torch import Tensor
 from torch.nn import Module
 from transformers import BertConfig, PretrainedConfig
 
+from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -56,28 +59,25 @@ class BertPolicy(PipelineTemplatePolicyBase, Policy):
 
         return modules
 
-    def pipeline_template_sanity_check(self):
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
         assert (
-            "transformers.models.bert.modeling_bert"
-            in self.pipeline_template.model_name
+            "transformers.models.bert.modeling_bert" in template.model_name
         ), "The pipeline template is not for the model that the policy is designed for."
 
         prefix = "" if self.model.__class__.__name__ == "BertModel" else "bert."
 
         assert hasattr(self.model, "config"), "model must have a config attribute"
         modules = self.get_all_modules(self.model.config)
-        modules_in_template = list(
-            itertools.chain(*self.pipeline_template.modules_per_stage)
-        )
+        modules_in_template = list(itertools.chain(*template.modules_per_stage))
         if modules != modules_in_template:
             raise ValueError(
                 "Modules in the pipeline template do not match the modules in the model."
             )
 
-        if f"{prefix}embeddings" not in self.pipeline_template.modules_per_stage[0]:
+        if f"{prefix}embeddings" not in template.modules_per_stage[0]:
             raise ValueError("The first stage must contain the embeddings module.")
 
-        if f"{prefix}pooler" not in self.pipeline_template.modules_per_stage[-1]:
+        if f"{prefix}pooler" not in template.modules_per_stage[-1]:
             raise ValueError("The last stage must contain the pooler module.")
 
     def config_sanity_check(self):
@@ -419,8 +419,8 @@ class BertModelPolicy(BertPolicy):
     def get_all_modules(config: PretrainedConfig) -> List[str]:
         return BertPolicy.get_all_modules(config)
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
 
     def module_policy(self):
         policy = super().module_policy()
@@ -453,9 +453,9 @@ class BertForPreTrainingPolicy(BertPolicy):
 
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
-        if "cls" not in self.pipeline_template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "cls" not in template.modules_per_stage[-1]:
             raise ValueError("The last stage must contain the cls module.")
 
     def module_policy(self):
@@ -506,9 +506,9 @@ class BertLMHeadModelPolicy(BertPolicy):
         modules.append("cls")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
-        if "cls" not in self.pipeline_template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "cls" not in template.modules_per_stage[-1]:
             raise ValueError("The last stage must contain the cls module.")
 
     def module_policy(self):
@@ -560,9 +560,9 @@ class BertForMaskedLMPolicy(BertPolicy):
         modules.append("cls")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
-        if "cls" not in self.pipeline_template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "cls" not in template.modules_per_stage[-1]:
             raise ValueError("The last stage must contain the cls module.")
 
     def module_policy(self):
@@ -615,10 +615,10 @@ class BertForSequenceClassificationPolicy(BertPolicy):
         modules.append("classifier")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
         if not all(
-            module in self.pipeline_template.modules_per_stage[-1]
+            module in template.modules_per_stage[-1]
             for module in ["dropout", "classifier"]
         ):
             raise ValueError(
@@ -676,10 +676,10 @@ class BertForTokenClassificationPolicy(BertPolicy):
         modules.append("classifier")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
         if not all(
-            module in self.pipeline_template.modules_per_stage[-1]
+            module in template.modules_per_stage[-1]
             for module in ["dropout", "classifier"]
         ):
             raise ValueError(
@@ -736,9 +736,9 @@ class BertForNextSentencePredictionPolicy(BertPolicy):
         modules.append("cls")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
-        if "cls" not in self.pipeline_template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "cls" not in template.modules_per_stage[-1]:
             raise ValueError("The last stage must contain the cls module.")
 
     def module_policy(self):
@@ -778,10 +778,10 @@ class BertForMultipleChoicePolicy(BertPolicy):
         modules.append("classifier")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
         if not all(
-            module in self.pipeline_template.modules_per_stage[-1]
+            module in template.modules_per_stage[-1]
             for module in ["dropout", "classifier"]
         ):
             raise ValueError(
@@ -837,9 +837,9 @@ class BertForQuestionAnsweringPolicy(BertPolicy):
         modules.append("qa_outputs")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
-        if "qa_outputs" not in self.pipeline_template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "qa_outputs" not in template.modules_per_stage[-1]:
             raise ValueError("The last stage must contain the qa_outputs module.")
 
     def module_policy(self):

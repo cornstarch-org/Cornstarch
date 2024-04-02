@@ -1,5 +1,7 @@
 # Copied from https://github.com/hpcaitech/ColossalAI/blob/v0.3.5/colossalai/shardformer/policies/gpt2.py
 
+from __future__ import annotations
+
 import itertools
 from functools import partial
 from typing import Callable, Dict, List, cast
@@ -18,6 +20,7 @@ from colossalai.shardformer.policies.base_policy import (
 from torch import Tensor, nn
 from transformers import GPT2Config, PretrainedConfig
 
+from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -47,10 +50,9 @@ class GPT2Policy(PipelineTemplatePolicyBase, Policy):
 
         return modules
 
-    def pipeline_template_sanity_check(self):
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
         assert (
-            "transformers.models.gpt2.modeling_gpt2"
-            in self.pipeline_template.model_name
+            "transformers.models.gpt2.modeling_gpt2" in template.model_name
         ), "The pipeline template is not for the model that the policy is designed for."
 
         prefix = "" if self.model.__class__.__name__ == "GPT2Model" else "transformer."
@@ -58,7 +60,7 @@ class GPT2Policy(PipelineTemplatePolicyBase, Policy):
         assert hasattr(self.model, "config"), "model must have a config attribute"
         modules = self.get_all_modules(self.model.config)
         modules_in_template = list(
-            itertools.chain.from_iterable(self.pipeline_template.modules_per_stage)
+            itertools.chain.from_iterable(template.modules_per_stage)
         )
         if modules != modules_in_template:
             raise ValueError(
@@ -66,12 +68,12 @@ class GPT2Policy(PipelineTemplatePolicyBase, Policy):
             )
 
         if not all(
-            module in self.pipeline_template.modules_per_stage[0]
+            module in template.modules_per_stage[0]
             for module in [f"{prefix}wte", f"{prefix}wpe", f"{prefix}drop"]
         ):
             raise ValueError("wte, wpe, and drop must be in the first stage.")
 
-        if f"{prefix}ln_f" not in self.pipeline_template.modules_per_stage[-1]:
+        if f"{prefix}ln_f" not in template.modules_per_stage[-1]:
             raise ValueError("ln_f must be in the last stage.")
 
     def config_sanity_check(self):
@@ -290,8 +292,8 @@ class GPT2ModelPolicy(GPT2Policy):
     def get_all_modules(config: PretrainedConfig) -> List[str]:
         return GPT2Policy.get_all_modules(config)
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
 
     def module_policy(self):
         from transformers.models.gpt2.modeling_gpt2 import GPT2Model
@@ -324,9 +326,9 @@ class GPT2LMHeadModelPolicy(GPT2Policy):
         modules.append("lm_head")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
-        if "lm_head" not in self.pipeline_template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "lm_head" not in template.modules_per_stage[-1]:
             raise ValueError("lm_head must be in the last stage.")
 
     def module_policy(self):
@@ -390,10 +392,10 @@ class GPT2DoubleHeadsModelPolicy(GPT2Policy):
         modules.extend(["lm_head", "multiple_choice_head"])
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
         if not all(
-            module in self.pipeline_template.modules_per_stage[-1]
+            module in template.modules_per_stage[-1]
             for module in ["lm_head", "multiple_choice_head"]
         ):
             raise ValueError(
@@ -468,9 +470,9 @@ class GPT2ForQuestionAnsweringPolicy(GPT2Policy):
         modules.append("qa_outputs")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
-        if "qa_outputs" not in self.pipeline_template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "qa_outputs" not in template.modules_per_stage[-1]:
             raise ValueError("qa_outputs must be in the last stage.")
 
     def module_policy(self):
@@ -508,10 +510,10 @@ class GPT2ForTokenClassificationPolicy(GPT2Policy):
         modules.extend(["dropout", "classifier"])
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
         if not all(
-            module in self.pipeline_template.modules_per_stage[-1]
+            module in template.modules_per_stage[-1]
             for module in ["dropout", "classifier"]
         ):
             raise ValueError("dropout and classifier must be in the last stage.")
@@ -564,9 +566,9 @@ class GPT2ForSequenceClassificationPolicy(GPT2Policy):
         modules.append("score")
         return modules
 
-    def pipeline_template_sanity_check(self):
-        super().pipeline_template_sanity_check()
-        if "score" not in self.pipeline_template.modules_per_stage[-1]:
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+        if "score" not in template.modules_per_stage[-1]:
             raise ValueError("score must be in the last stage.")
 
     def module_policy(self):
