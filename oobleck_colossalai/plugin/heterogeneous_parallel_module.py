@@ -72,7 +72,14 @@ class HeterogeneousParallelModule(HybridParallelModule):
         self.dp_groups = dp_groups
 
     def sync_shared_params(self):
-        super().sync_shared_params()
+        for shared_param, group in zip(
+            self.shared_params, self.shared_param_process_groups
+        ):
+            if self.stage_manager.stage in shared_param:
+                param = shared_param[self.stage_manager.stage]
+                dist.all_reduce(param.grad, group=group)
+            # Remove barrier as it may slow down some heterogeneous pipelines
+            # dist.barrier()
 
     def sync_sp_grads(self, grads: list[torch.Tensor] | None = None):
         # if there is no tp used, tp_group is None.
