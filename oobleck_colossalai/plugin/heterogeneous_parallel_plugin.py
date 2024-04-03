@@ -1,5 +1,6 @@
+import warnings
 from types import MethodType
-from typing import Callable
+from typing import Any, Callable, Iterator
 
 import torch
 import torch.distributed as dist
@@ -53,7 +54,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         tp_size: int,
         microbatch_size: int,
         precision: str = "fp16",
-        enable_all_optimization: bool = False,
         enable_fused_normalization: bool = False,
         enable_flash_attention: bool = False,
         enable_jit_fused: bool = False,
@@ -78,7 +78,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             tensor_parallel_process_group=None,
             pipeline_stage_manager=None,
             enable_tensor_parallelism=False,
-            enable_all_optimization=enable_all_optimization,
+            enable_all_optimization=False,
             enable_fused_normalization=enable_fused_normalization,
             enable_flash_attention=enable_flash_attention,
             enable_jit_fused=enable_jit_fused,
@@ -269,6 +269,47 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             )
 
         return model, optimizer, criterion, dataloader, lr_scheduler
+
+    def execute_pipeline(
+        self,
+        data_iter: Iterator,
+        model: HeterogeneousParallelModule,
+        criterion: Callable[[Any, Any], torch.Tensor],
+        optimizer: HybridParallelNaiveOptimizer
+        | HybridParallelAMPOptimizer
+        | None = None,
+        return_loss: bool = True,
+        return_outputs: bool = False,
+    ) -> dict:
+        # assert self.enable_pipeline_parallelism, "pipeline parallelism is not enabled"
+
+        if return_outputs:
+            warnings.warn(
+                "return_outputs may lead to significant extra memory consumption."
+            )
+
+        # Create a context for gradient synchronization based on the optimizer type.
+        # If it's a HybridParallelZeroOptimizer, use optimizer.no_sync(); otherwise, use model.no_sync().
+        # This is to avoid redundant gradient reduction in pipeline parallelism (multiple microbatch values should be reduced once),
+        # so we disable it, performing manual reduction instead.
+        with model.no_sync():
+            outputs = self.schedule.forward_backward_step(
+                model, data_iter, criterion, optimizer, return_loss, return_outputs
+            )
+
+        # run with gradients accumulation
+        if not model.require_grad_sync:
+            return outputs
+
+        # Synchronize the grads of shared parameters of the model.
+        model.sync_shared_params()
+
+        # Check if the optimizer is a HybridParallelZeroOptimizer and synchronize data parallelism gradients if so.
+        # Otherwise, synchronize data parallelism gradients of the model.
+        # This is because these are two different forms of data parallelism.
+        model.sync_dp_grads()
+
+        return outputs
 
     def prepare_dataloader(
         self,
