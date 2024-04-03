@@ -53,6 +53,7 @@ class ExampleArguments:
 
 def main():
     args: ExampleArguments = simple_parsing.parse(ExampleArguments)
+    tp_size = 2
 
     colossalai.launch_from_torch(config={})
     coordinator = DistCoordinator()
@@ -64,7 +65,9 @@ def main():
     )
 
     config: ViTConfig = AutoConfig.from_pretrained(args.model_name_or_path)
-    labels = dataset.features["labels"].names
+    labels: list[str] = dataset.features["labels"].names
+    while len(labels) % tp_size != 0:
+        labels.append(f"pad_label_{len(labels)}")
     config.num_labels = len(labels)
     config.id2label = {str(i): c for i, c in enumerate(labels)}
     config.label2id = {c: str(i) for i, c in enumerate(labels)}
@@ -78,12 +81,14 @@ def main():
     modules = PipelineTemplate.get_modules(model)
     template1 = PipelineTemplate(model_name, [modules])
     plugin = HeterogeneousParallelPlugin(
-        tp_size=4,
+        tp_size=tp_size,
         microbatch_size=4,
         precision="bf16",
         enable_flash_attention=True,
     )
-    plugin.set_pipelines(pipelines=[template1], num_microbatches={template1: 8})
+    plugin.set_pipelines(
+        pipelines=[template1, template1], num_microbatches={template1: 8}
+    )
 
     booster = Booster(plugin=plugin)
 
