@@ -13,10 +13,11 @@ maintainers = [
 ]
 dependencies = [
     "torch",
-    "transformers>=4.36.0",
-    "colossalai==0.3.5",
+    "transformers==4.36.0",
+    "colossalai==0.3.6",
     "loguru",
     "simple_parsing",
+    "datasets",
 ]
 
 [project.optional-dependencies]
