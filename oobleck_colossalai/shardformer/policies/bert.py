@@ -46,7 +46,9 @@ __all__ = [
 
 class BertPolicy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
+    def get_all_modules(
+        config: PretrainedConfig, add_pooling_layer: bool = True
+    ) -> List[str]:
         assert isinstance(
             config, BertConfig
         ), "config must be an instance of BertConfig"
@@ -55,7 +57,8 @@ class BertPolicy(PipelineTemplatePolicyBase, Policy):
         modules = []
         modules.append("embeddings")
         modules.extend([f"encoder.layer.{i}" for i in range(config.num_hidden_layers)])
-        modules.append("pooler")
+        if add_pooling_layer:
+            modules.append("pooler")
 
         return modules
 
@@ -501,8 +504,13 @@ class BertForPreTrainingPolicy(BertPolicy):
 # BertLMHeadModel
 class BertLMHeadModelPolicy(BertPolicy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+    def get_all_modules(
+        config: PretrainedConfig, add_pooling_layer: bool = False
+    ) -> List[str]:
+        modules = [
+            f"bert.{module}"
+            for module in BertPolicy.get_all_modules(config, add_pooling_layer)
+        ]
         modules.append("cls")
         return modules
 
@@ -555,8 +563,13 @@ class BertLMHeadModelPolicy(BertPolicy):
 # BertForMaskedLM
 class BertForMaskedLMPolicy(BertPolicy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+    def get_all_modules(
+        config: PretrainedConfig, add_pooling_layer: bool = False
+    ) -> List[str]:
+        modules = [
+            f"bert.{module}"
+            for module in BertPolicy.get_all_modules(config, add_pooling_layer)
+        ]
         modules.append("cls")
         return modules
 
@@ -670,8 +683,13 @@ class BertForSequenceClassificationPolicy(BertPolicy):
 # BertForTokenClassification
 class BertForTokenClassificationPolicy(BertPolicy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+    def get_all_modules(
+        config: PretrainedConfig, add_pooling_layer: bool = False
+    ) -> List[str]:
+        modules = [
+            f"bert.{module}"
+            for module in BertPolicy.get_all_modules(config, add_pooling_layer)
+        ]
         modules.append("dropout")
         modules.append("classifier")
         return modules
@@ -832,8 +850,13 @@ class BertForMultipleChoicePolicy(BertPolicy):
 
 class BertForQuestionAnsweringPolicy(BertPolicy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = [f"bert.{module}" for module in BertPolicy.get_all_modules(config)]
+    def get_all_modules(
+        config: PretrainedConfig, add_pooling_layer: bool = False
+    ) -> List[str]:
+        modules = [
+            f"bert.{module}"
+            for module in BertPolicy.get_all_modules(config, add_pooling_layer)
+        ]
         modules.append("qa_outputs")
         return modules
 
