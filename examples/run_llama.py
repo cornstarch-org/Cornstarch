@@ -12,8 +12,8 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
-    GPT2LMHeadModel,
-    GPT2TokenizerFast,
+    LlamaForCausalLM,
+    LlamaTokenizerFast,
     PretrainedConfig,
     PreTrainedTokenizer,
     get_linear_schedule_with_warmup,
@@ -28,7 +28,7 @@ from oobleck_colossalai import (
 
 @dataclass
 class ExampleArguments:
-    model_name_or_path: str = "gpt2"
+    model_name_or_path: str = "meta-llama/Llama-2-7b-chat-hf"
     num_epoch: int = 3
     warmup_faction: float = 0.1
     checkpoint_path: Path | None = None
@@ -57,27 +57,26 @@ def main():
     coordinator = DistCoordinator()
 
     config: PretrainedConfig = AutoConfig.from_pretrained(args.model_name_or_path)
-    model = GPT2LMHeadModel.from_pretrained(args.model_name_or_path, config=config)
+    model = LlamaForCausalLM.from_pretrained(args.model_name_or_path, config=config)
     model.gradient_checkpointing_enable()
 
     model_name = PipelineTemplate.get_model_name(model)
     modules = PipelineTemplate.get_modules(model)
     template1 = PipelineTemplate(
-        model_name, [modules[:3], modules[3:8], modules[8:13], modules[13:]]
+        model_name, [modules[:9], modules[9:18], modules[18:26], modules[26:]]
     )
-    template2 = PipelineTemplate(model_name, [modules[:8], modules[8:]])
+    template2 = PipelineTemplate(model_name, [modules[:17], modules[17:]])
     plugin = HeterogeneousParallelPlugin(
         tp_size=2,
-        microbatch_size=4,
+        microbatch_size=2,
         precision="bf16",
-        enable_fused_normalization=True,
         enable_flash_attention=True,
     )
     plugin.set_pipelines(pipelines=[template2], num_microbatches={template2: 8})
 
     booster = Booster(plugin=plugin)
 
-    tokenizer = GPT2TokenizerFast.from_pretrained(args.model_name_or_path)
+    tokenizer = LlamaTokenizerFast.from_pretrained(args.model_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
 
     dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1")

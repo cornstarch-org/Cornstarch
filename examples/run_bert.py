@@ -1,18 +1,21 @@
+import functools
 from dataclasses import dataclass
 from pathlib import Path
 
 import colossalai
+import datasets
 import simple_parsing
 from colossalai.booster import Booster
 from colossalai.cluster import DistCoordinator
-from data_builder import GLUEDataBuilder
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
-    BertForSequenceClassification,
+    BertLMHeadModel,
+    BertTokenizerFast,
     PretrainedConfig,
+    PreTrainedTokenizer,
     get_linear_schedule_with_warmup,
 )
 
@@ -31,6 +34,22 @@ class ExampleArguments:
     checkpoint_path: Path | None = None
 
 
+def tokenize_batch_for_pretrain(
+    batch, tokenizer: PreTrainedTokenizer | None = None, max_length: int = 2048
+):
+    texts = [sample["text"] for sample in batch]
+    data = tokenizer(
+        texts,
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+    )
+    data = {k: v.cuda() for k, v in data.items()}
+    data["labels"] = data["input_ids"].clone()
+    return data
+
+
 def main():
     args: ExampleArguments = simple_parsing.parse(ExampleArguments)
 
@@ -38,11 +57,10 @@ def main():
     coordinator = DistCoordinator()
 
     config: PretrainedConfig = AutoConfig.from_pretrained(
-        args.model_name_or_path, num_labels=GLUEDataBuilder.glue_task_num_labels["mrpc"]
+        args.model_name_or_path, is_decoder=True
     )
-    model = BertForSequenceClassification.from_pretrained(
-        args.model_name_or_path, config=config
-    )
+    model = BertLMHeadModel.from_pretrained(args.model_name_or_path, config=config)
+    model.gradient_checkpointing_enable()
 
     # Adjust module_per_stage to arbitrarily implement pipelines
     model_name = PipelineTemplate.get_model_name(model)
@@ -63,12 +81,21 @@ def main():
     )
     booster = Booster(plugin=plugin)
 
-    data_builder = GLUEDataBuilder(
-        args.model_name_or_path, plugin, task_name="mrpc", pad_tokens=False
-    )
+    tokenizer = BertTokenizerFast.from_pretrained(args.model_name_or_path)
+    tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-    # Prepare dataloader
-    dataloader: HeterogeneousDataLoader = data_builder.dataloader()
+    dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1")
+    dataset = dataset["train"]
+    dataloader: HeterogeneousDataLoader = plugin.prepare_dataloader(
+        dataset,
+        shuffle=True,
+        drop_last=True,
+        collate_fn=functools.partial(
+            tokenize_batch_for_pretrain,
+            tokenizer=tokenizer,
+            max_length=model.config.max_position_embeddings,
+        ),
+    )
 
     # optimizer
     optimizer = Adam(model.parameters())
