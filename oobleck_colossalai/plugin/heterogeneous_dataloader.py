@@ -1,5 +1,5 @@
 import math
-from typing import Iterator
+from typing import Callable, Iterator
 
 import torch
 from loguru import logger
@@ -137,7 +137,8 @@ class HeterogeneousDataLoader(DataLoader):
         self.drop_last = drop_last
         self.pin_memory = pin_memory
         self.kwargs = kwargs
-        self.batch_sampler = None
+        self.batch_sampler: BatchSampler = None
+        self.collate_fn: Callable = kwargs.get("collate_fn", None)
 
     def __iter__(self) -> _BaseDataLoaderIter:
         if self.batch_sampler is None:
