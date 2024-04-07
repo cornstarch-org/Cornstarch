@@ -167,9 +167,6 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         ranks_in_group = sorted(ranks_in_group)
         if tuple(ranks_in_group) not in self._ranks_to_group:
             group: dist.ProcessGroup = dist.new_group(ranks_in_group, backend=backend)
-            if dist.get_rank() == 0:
-                print(f"Created a new group {group} with ranks {ranks_in_group}")
-                print(f"pg_group_ranks: {dist.distributed_c10d._pg_group_ranks}")
             self._ranks_to_group[tuple(ranks_in_group)] = group
             self._group_to_ranks[group] = tuple(ranks_in_group)
         return self._ranks_to_group[tuple(ranks_in_group)]
