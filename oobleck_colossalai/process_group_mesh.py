@@ -82,7 +82,7 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         )
 
         self._rank = dist.get_rank()
-        self._mesh: np.array = np.empty(self._shape, dtype=object)
+        self._mesh: np.ndarray = np.empty(self._shape, dtype=object)
 
         if ranks is None:
             ranks = list(
@@ -122,18 +122,18 @@ class HeterogeneousProcessGroupMesh(ProcessGroupMesh):
         return self._coords
 
     @property
-    def mesh(self) -> np.array:
+    def mesh(self) -> np.ndarray:
         """The process rank mesh.
 
         Returns:
-            np.array: The process rank mesh.
+            np.ndarray: The process rank mesh.
         """
         return self._mesh
 
     # Inherit self.shape, self.rank, self.ravel.
 
     @staticmethod
-    def unravel(rank: int, mesh: np.array) -> list[tuple[int, ...]]:
+    def unravel(rank: int, mesh: np.ndarray) -> list[tuple[int, ...]]:
         """Convert a rank to a list of coordinates.
 
         Unlike colossalai.cluster.process_group_mesh.ProcessGroupMesh.unravel,
