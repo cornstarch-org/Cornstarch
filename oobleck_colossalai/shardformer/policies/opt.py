@@ -33,7 +33,10 @@ from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
-from oobleck_colossalai.shardformer.policies.utils import resize_token_embeddings
+from oobleck_colossalai.shardformer.policies.utils import (
+    resize_embeddings,
+    resize_lm_head,
+)
 
 __all__ = [
     "OPTPolicy",
@@ -111,17 +114,26 @@ class OPTPolicy(PipelineTemplatePolicyBase, Policy):
         r"""
         Reshape the Embedding layer to make the embedding dimension divisible by world_size
         """
-        embedding: nn.Embedding = self.model.get_input_embeddings()
         vocab_size = self.model.config.vocab_size
         world_size = self.shard_config.tensor_parallel_size
 
-        if (
-            self.shard_config.enable_tensor_parallelism
-            and embedding.num_embeddings == vocab_size
-        ):
-            if vocab_size % world_size != 0:
-                new_vocab_size = vocab_size + world_size - vocab_size % world_size
-                resize_token_embeddings(new_vocab_size, embedding)
+        if self.shard_config.enable_tensor_parallelism and vocab_size % world_size != 0:
+            new_vocab_size = vocab_size + world_size - vocab_size % world_size
+
+            embeddings: nn.Embedding = self.model.get_input_embeddings()
+            if embeddings.num_embeddings == new_vocab_size:
+                # Skip if the embedding layer has already been resized
+                return self.model
+
+            resize_embeddings(new_vocab_size, embeddings)
+
+            lm_head: nn.Embedding | nn.Linear = self.model.get_output_embeddings()
+            if isinstance(lm_head, nn.Embedding):
+                resize_embeddings(new_vocab_size, lm_head)
+            elif isinstance(lm_head, nn.Linear):
+                resize_lm_head(new_vocab_size, lm_head)
+
+            self.model.vocab_size = new_vocab_size
 
         return self.model
 
