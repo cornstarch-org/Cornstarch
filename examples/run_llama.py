@@ -62,17 +62,20 @@ def main():
 
     model_name = PipelineTemplate.get_model_name(model)
     modules = PipelineTemplate.get_modules(model)
-    template1 = PipelineTemplate(
-        model_name, [modules[:9], modules[9:18], modules[18:26], modules[26:]]
-    )
-    template2 = PipelineTemplate(model_name, [modules[:17], modules[17:]])
+    template_1stage = PipelineTemplate(model_name, [modules])
+    # template_2stages = PipelineTemplate(model_name, [modules[:17], modules[17:]])
+    # template_4stages = PipelineTemplate(
+    #     model_name, [modules[:9], modules[9:18], modules[18:26], modules[26:]]
+    # )
     plugin = HeterogeneousParallelPlugin(
-        tp_size=2,
+        tp_size=4,
         microbatch_size=2,
         precision="bf16",
         enable_flash_attention=True,
     )
-    plugin.set_pipelines(pipelines=[template2], num_microbatches={template2: 8})
+    plugin.set_pipelines(
+        pipelines=[template_1stage], num_microbatches={template_1stage: 2}
+    )
 
     booster = Booster(plugin=plugin)
 
