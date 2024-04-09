@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Union
+from typing import Iterator, List, Optional, Set
 
 from colossalai.shardformer._utils import getattr_, setattr_
 from colossalai.shardformer.policies.base_policy import (
@@ -8,6 +8,7 @@ from colossalai.shardformer.policies.base_policy import (
 from colossalai.shardformer.shard.sharder import ModelSharder as ColossalModelSharder
 from colossalai.shardformer.shard.shardformer import ShardConfig
 from colossalai.shardformer.shard.shardformer import ShardFormer as ColossalShardFormer
+from loguru import logger
 from torch import Tensor, nn
 
 from oobleck_colossalai.shardformer.shard.placeholder import TensorPlaceholder
@@ -131,12 +132,13 @@ class ModelSharder(ColossalModelSharder):
                     process_group=self.shard_config.tensor_parallel_process_group,
                     **kwargs,
                 )
-            except Exception as e:
-                raise RuntimeError(
+            except Exception:
+                logger.error(
                     f"Failed to replace {suffix} of type {native_sub_module.__class__.__qualname__}"
-                    f" with {target_module.__qualname__} with the exception: {e}. "
+                    f" with {target_module.__qualname__}. "
                     "Please check your model configuration or sharding policy, you can set up an issue for us to help you as well."
                 )
+                raise
 
             setattr_(org_layer, suffix, replace_layer)
 
