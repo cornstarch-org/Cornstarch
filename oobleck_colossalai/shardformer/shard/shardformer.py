@@ -102,7 +102,7 @@ class ModelSharder(ColossalModelSharder):
         self,
         org_layer: nn.Module,
         sub_module_replacement: List[SubModuleReplacementDescription],
-        skip_replaced_modules: bool = True,
+        include: Optional[Set[nn.Module]] = None,
     ) -> None:
         """
         Override the original method's behavior that raises AssertionError
