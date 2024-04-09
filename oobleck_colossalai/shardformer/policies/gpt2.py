@@ -24,6 +24,7 @@ from oobleck_colossalai.pipeline_template import PipelineTemplate
 from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
+from oobleck_colossalai.shardformer.policies.utils import resize_token_embeddings
 
 __all__ = [
     "GPT2Policy",
@@ -80,16 +81,21 @@ class GPT2Policy(PipelineTemplatePolicyBase, Policy):
         pass
 
     def preprocess(self):
-        # reshape the embedding layer
         r"""
         Reshape the Embedding layer to make the embedding dimension divisible by world_size
         """
-        if self.shard_config.enable_tensor_parallelism:
-            vocab_size = self.model.config.vocab_size
-            world_size = self.shard_config.tensor_parallel_size
+        embedding: nn.Embedding = self.model.get_input_embeddings()
+        vocab_size = self.model.config.vocab_size
+        world_size = self.shard_config.tensor_parallel_size
+
+        if (
+            self.shard_config.enable_tensor_parallelism
+            and embedding.num_embeddings == vocab_size
+        ):
             if vocab_size % world_size != 0:
                 new_vocab_size = vocab_size + world_size - vocab_size % world_size
-                self.model.resize_token_embeddings(new_vocab_size)
+                resize_token_embeddings(new_vocab_size, embedding)
+
         return self.model
 
     def module_policy(self):
