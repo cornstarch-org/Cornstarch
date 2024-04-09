@@ -11,6 +11,8 @@ from oobleck_colossalai.pipeline_template import PipelineTemplate
 class PipelineTemplatePolicyBase(ABC):
     """A policy base that defines the interface for a pipeline template policy."""
 
+    skip_replaced_modules: bool = True
+
     @staticmethod
     @abstractmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
