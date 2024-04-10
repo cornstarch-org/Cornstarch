@@ -94,7 +94,7 @@ class GPT2Policy(PipelineTemplatePolicyBase, Policy):
             new_vocab_size = vocab_size + world_size - vocab_size % world_size
 
             embeddings: nn.Embedding = self.model.get_input_embeddings()
-            if embeddings.num_embeddings == new_vocab_size:
+            if embeddings.num_embeddings * world_size == new_vocab_size:
                 # Skip if the embedding layer has already been resized
                 return self.model
 
