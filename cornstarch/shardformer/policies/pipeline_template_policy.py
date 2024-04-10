@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 from cornstarch.pipeline_template import PipelineTemplate
-from torch import nn
 from transformers import PretrainedConfig
 
 
