@@ -1,9 +1,8 @@
 import numpy as np
 import torch.distributed as dist
 from colossalai.pipeline.stage_manager import PipelineStageManager
+from cornstarch.process_group_mesh import HeterogeneousProcessGroupMesh
 from torch.distributed.distributed_c10d import GroupMember
-
-from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
 
 
 class HeterogeneousPipelineStageManager(PipelineStageManager):

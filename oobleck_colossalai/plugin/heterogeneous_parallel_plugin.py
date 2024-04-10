@@ -18,18 +18,17 @@ from colossalai.checkpoint_io import CheckpointIO, HybridParallelCheckpointIO
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule
 from colossalai.shardformer import ShardConfig
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
+from cornstarch.plugin.heterogeneous_parallel_module import (
+    HeterogeneousParallelModule,
+)
+from cornstarch.process_group_mesh import HeterogeneousProcessGroupMesh
+from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+from cornstarch.stage_manager import HeterogeneousPipelineStageManager
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, Dataset
-
-from oobleck_colossalai.pipeline_template import PipelineTemplate
-from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
-from oobleck_colossalai.plugin.heterogeneous_parallel_module import (
-    HeterogeneousParallelModule,
-)
-from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
-from oobleck_colossalai.shardformer.policies.auto_policy import get_autopolicy
-from oobleck_colossalai.stage_manager import HeterogeneousPipelineStageManager
 
 
 class HeterogeneousParallelPlugin(HybridParallelPlugin):
@@ -338,7 +337,7 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
                     `DataLoader <https://pytorch.org/docs/stable/_modules/torch/utils/data/dataloader.html#DataLoader>`_.
 
         Returns:
-            :class:`oobleck_colossalai.plugin.heterogeneous_dataloader.HeterogeneousDataLoader`:
+            :class:`cornstarch.plugin.heterogeneous_dataloader.HeterogeneousDataLoader`:
                 A DataLoader used for training or testing.
         """
         _kwargs = kwargs.copy()

@@ -8,10 +8,9 @@ from colossalai.shardformer.policies.base_policy import (
 from colossalai.shardformer.shard.sharder import ModelSharder as ColossalModelSharder
 from colossalai.shardformer.shard.shardformer import ShardConfig
 from colossalai.shardformer.shard.shardformer import ShardFormer as ColossalShardFormer
+from cornstarch.shardformer.shard.placeholder import TensorPlaceholder
 from loguru import logger
 from torch import Tensor, nn
-
-from oobleck_colossalai.shardformer.shard.placeholder import TensorPlaceholder
 
 
 class ModelSharder(ColossalModelSharder):

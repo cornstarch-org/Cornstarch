@@ -2,10 +2,9 @@ import re
 from abc import ABC, abstractmethod
 
 import numpy as np
+from cornstarch.pipeline_template import PipelineTemplate
 from torch import nn
 from transformers import PretrainedConfig
-
-from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 
 class PipelineTemplatePolicyBase(ABC):

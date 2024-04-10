@@ -1,5 +1,5 @@
 import datasets
-from oobleck_colossalai import HeterogeneousDataLoader, HeterogeneousParallelPlugin
+from cornstarch import HeterogeneousDataLoader, HeterogeneousParallelPlugin
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 

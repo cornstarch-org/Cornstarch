@@ -18,10 +18,10 @@ class PipelineTemplate:
     def get_modules(model: nn.Module) -> list[str]:
         """Get all modules from the model."""
         # Avoid circular import
-        from oobleck_colossalai.shardformer.policies.auto_policy import (
+        from cornstarch.shardformer.policies.auto_policy import (
             get_policy_type,
         )
-        from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+        from cornstarch.shardformer.policies.pipeline_template_policy import (
             PipelineTemplatePolicyBase,
         )
 

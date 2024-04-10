@@ -2,12 +2,11 @@ from contextlib import nullcontext
 
 import pytest
 from accelerate import init_empty_weights
-from transformers import GPT2Config, GPT2ForSequenceClassification
-
-from oobleck_colossalai.pipeline_template import PipelineTemplate
-from oobleck_colossalai.shardformer.policies.gpt2 import (
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.policies.gpt2 import (
     GPT2ForSequenceClassificationPolicy,
 )
+from transformers import GPT2Config, GPT2ForSequenceClassification
 
 num_layers = 4
 

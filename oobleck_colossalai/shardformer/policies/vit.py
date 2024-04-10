@@ -22,12 +22,11 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
-from transformers import PretrainedConfig, ViTConfig
-
-from oobleck_colossalai.pipeline_template import PipelineTemplate
-from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
+from transformers import PretrainedConfig, ViTConfig
 
 __all__ = [
     "ViTPolicy",

@@ -1,15 +1,20 @@
 [project]
-name = "oobleck-colossalai"
-description = "A backend submodule for Oobleck that executes heterogeneous pipelines on ColossalAI."
+name = "cornstarch"
+description = "A versatile model toolkit for distributed training."
 readme = "README.md"
 license = {file = "LICENSE.txt"}
 requires-python = ">=3.10"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
     {name = "Insu Jang", email = "insujang@umich.edu"}
 ]
 maintainers = [
     {name = "Insu Jang", email = "insujang@umich.edu"}
+]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Programming Language :: Python :: 3.10",
 ]
 dependencies = [
     "torch",

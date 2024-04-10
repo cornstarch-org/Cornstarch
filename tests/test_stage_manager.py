@@ -4,6 +4,9 @@ from collections import defaultdict
 import numpy as np
 import pytest
 import torch.distributed as dist
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.process_group_mesh import HeterogeneousProcessGroupMesh
+from cornstarch.stage_manager import HeterogeneousPipelineStageManager
 from pytest_mock import MockerFixture
 from torch.distributed.distributed_c10d import GroupMember
 from torch.testing._internal.common_distributed import MultiThreadedTestCase
@@ -12,10 +15,6 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 from torch.testing._internal.distributed.fake_pg import FakeStore
-
-from oobleck_colossalai.pipeline_template import PipelineTemplate
-from oobleck_colossalai.process_group_mesh import HeterogeneousProcessGroupMesh
-from oobleck_colossalai.stage_manager import HeterogeneousPipelineStageManager
 
 no_tp_templates = [
     PipelineTemplate("fake", [[None, None], [None, None, None, None]]),

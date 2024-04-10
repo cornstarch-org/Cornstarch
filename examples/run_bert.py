@@ -7,6 +7,11 @@ import datasets
 import simple_parsing
 from colossalai.booster import Booster
 from colossalai.cluster import DistCoordinator
+from cornstarch import (
+    HeterogeneousDataLoader,
+    HeterogeneousParallelPlugin,
+    PipelineTemplate,
+)
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
@@ -17,12 +22,6 @@ from transformers import (
     PretrainedConfig,
     PreTrainedTokenizer,
     get_linear_schedule_with_warmup,
-)
-
-from oobleck_colossalai import (
-    HeterogeneousDataLoader,
-    HeterogeneousParallelPlugin,
-    PipelineTemplate,
 )
 
 

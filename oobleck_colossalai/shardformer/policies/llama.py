@@ -24,17 +24,16 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
-from torch import Tensor, nn
-from transformers import LlamaConfig, PretrainedConfig
-
-from oobleck_colossalai.pipeline_template import PipelineTemplate
-from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
-from oobleck_colossalai.shardformer.policies.utils import (
+from cornstarch.shardformer.policies.utils import (
     resize_embeddings,
     resize_lm_head,
 )
+from torch import Tensor, nn
+from transformers import LlamaConfig, PretrainedConfig
 
 __all__ = [
     "LlamaPolicy",

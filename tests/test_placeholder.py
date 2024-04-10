@@ -1,8 +1,7 @@
 import pytest
 import torch
 from colossalai.accelerator import get_accelerator
-
-from oobleck_colossalai.shardformer.shard.placeholder import TensorPlaceholder
+from cornstarch.shardformer.shard.placeholder import TensorPlaceholder
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")

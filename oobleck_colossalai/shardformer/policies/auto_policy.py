@@ -16,7 +16,7 @@ def import_policy(policy_location: PolicyLocation) -> Policy:
     """
     Dynamically import a Policy class based on the policy location.
     """
-    module_name = f"oobleck_colossalai.shardformer.policies.{policy_location.file_name}"
+    module_name = f"cornstarch.shardformer.policies.{policy_location.file_name}"
     module = importlib.import_module(module_name)
     return getattr(module, policy_location.class_name)
 
