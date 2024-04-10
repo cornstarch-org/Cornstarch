@@ -4,7 +4,7 @@ description = "A versatile model toolkit for distributed training."
 readme = "README.md"
 license = {file = "LICENSE.txt"}
 requires-python = ">=3.10"
-version = "0.0.3"
+version = "0.0.4"
 authors = [
     {name = "Insu Jang", email = "insujang@umich.edu"}
 ]
@@ -47,3 +47,5 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["cornstarch*"]
+exclude = ["examples", "tests"]
