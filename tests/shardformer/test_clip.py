@@ -101,9 +101,7 @@ class TestCLIPVisionPolicyClass(PolicyTestBase):
         self.check_forward_backward(
             org_model,
             sharded_model,
-            data_gen_fn=lambda: dict(
-                pixel_values=torch.rand(1, 3, 224, 224).to(precision)
-            ),
+            data_gen_fn=lambda: dict(pixel_values=torch.rand(1, 3, 224, 224)),
             output_transform_fn=lambda x: x,
             loss_fn=lambda x: x["last_hidden_state"].mean(),
         )
