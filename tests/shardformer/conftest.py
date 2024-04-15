@@ -1,7 +1,9 @@
 import os
+import random
 import sys
 from unittest.mock import patch
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
@@ -51,12 +53,20 @@ class PolicyTestBase(MultiProcessTestCase):
             torch.cuda.set_device(device_id)
             device_ids = [device_id]
 
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        random.seed(0)
+        np.random.seed(0)
+
         # Execute barrier prior to running test to ensure that every process
         # has finished initialization and that the following test
         # immediately exiting due to a skip doesn't cause flakiness.
         dist.barrier(device_ids=device_ids)
 
-        self.run_test(test_name, pipe)
+        with torch.backends.cudnn.flags(
+            enabled=True, deterministic=True, benchmark=True
+        ):
+            self.run_test(test_name, pipe)
 
         dist.barrier(device_ids=device_ids)
 
