@@ -1,7 +1,6 @@
 import warnings
 
 from colossalai.shardformer.layer import (
-    DropoutForParallelInput,
     FusedLayerNorm,
     LayerNorm,
     Linear1D_Col,
@@ -101,19 +100,6 @@ class CLIPVisionPolicy(Policy):
             policy=policy,
             target_key=CLIPEncoderLayer,
         )
-
-        # # add missing dropout in attention
-        # self.append_or_create_submodule_replacement(
-        #     description=[
-        #         SubModuleReplacementDescription(
-        #             suffix="dropout",
-        #             target_module=DropoutForParallelInput,
-        #             kwargs=dict(p=self.model.config.attention_dropout),
-        #         ),
-        #     ],
-        #     policy=policy,
-        #     target_key=CLIPAttention,
-        # )
 
         # handle CLIPVisionTransformer layer
         self.append_or_create_submodule_replacement(
