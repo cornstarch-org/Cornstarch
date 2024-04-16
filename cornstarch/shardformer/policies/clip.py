@@ -1,4 +1,6 @@
+import itertools
 import warnings
+from typing import Callable, Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedLayerNorm,
@@ -11,15 +13,62 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
-from torch import nn
+from torch import Tensor, nn
+from transformers import PretrainedConfig
+from transformers.models.clip.configuration_clip import CLIPVisionConfig
 
+from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.clip import (
     get_clip_flash_attention_forward,
     get_clip_naive_attention_forward,
 )
+from cornstarch.shardformer.policies.pipeline_template_policy import (
+    PipelineTemplatePolicyBase,
+)
 
 
-class CLIPVisionPolicy(Policy):
+class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> list[str]:
+        assert isinstance(
+            config, CLIPVisionConfig
+        ), f"config must be CLIPVisionConfig, got {type(config)}"
+        config: CLIPVisionConfig = cast(CLIPVisionConfig, config)
+
+        modules = []
+        modules.extend(["embeddings", "pre_layrnorm"])
+        modules.extend([f"encoder.layer.{i}" for i in range(config.num_hidden_layers)])
+        modules.append("post_layernorm")
+
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        assert (
+            "transformers.models.clip.modeling_clip" in template.model_name
+        ), "The pipeline template is not for the model that the policy is designed for."
+
+        prefix = (
+            ""
+            if self.model.__class__.__name__ == "CLIPVisionTransformer"
+            else "vision_model."
+        )
+
+        assert hasattr(self.model, "config"), "model must have a config attribute"
+        modules = self.get_all_modules(self.model.config)
+        modules_in_template = list(itertools.chain(*template.modules_per_stage))
+        if modules != modules_in_template:
+            raise ValueError(
+                "Modules in the pipeline template do not match the modules in the model."
+            )
+
+        if f"{prefix}embeddings" not in modules_in_template[0]:
+            raise ValueError("embeddings must be in the first stage.")
+        if f"{prefix}pre_layrnorm" not in modules_in_template[0]:
+            raise ValueError("pre layernorm must be in the first stage.")
+
+        if f"{prefix}post_layernorm" not in modules_in_template[-1]:
+            raise ValueError("post layernorm must be in the last stage.")
+
     def config_sanity_check(self):
         pass
 
@@ -140,3 +189,49 @@ class CLIPVisionPolicy(Policy):
             pass
 
         return policy
+
+    def get_held_layers(self) -> List[nn.Module]:
+        raise NotImplementedError
+
+    def get_shared_params(self) -> List[Dict[int, Tensor]]:
+        raise NotImplementedError
+
+    def set_pipeline_forward(
+        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
+    ):
+        raise NotImplementedError
+
+
+class CLIPVisionModelPolicy(CLIPVisionTransformerPolicy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> list[str]:
+        modules = [
+            f"vision_model.{module}"
+            for module in CLIPVisionTransformerPolicy.get_all_modules(config)
+        ]
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        super().pipeline_template_sanity_check(template)
+
+    def module_policy(self):
+        policy = super().module_policy()
+        from transformers.models.clip.modeling_clip import CLIPVisionTransformer
+
+        if self.pipeline_stage_manager:
+            self.set_pipeline_forward(
+                model_cls=CLIPVisionTransformer,
+                new_forward=None,
+                policy=policy,
+            )
+
+        return policy
+
+    def get_held_layers(self) -> List[nn.Module]:
+        """Get pipeline layers for current stage."""
+        held_layers = super().get_held_layers()
+        return held_layers
+
+    def get_shared_params(self) -> List[Dict[int, Tensor]]:
+        """No shared params in clip model"""
+        return []
