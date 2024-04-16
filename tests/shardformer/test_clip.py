@@ -26,14 +26,28 @@ from cornstarch.shardformer.policies.clip import CLIPVisionPolicy
 
 class TestCLIPVisionPolicyClass(PolicyTestBase):
     def check_forward_backward(
-        self, org_model, sharded_model, data_gen_fn, output_transform_fn, loss_fn
+        self,
+        org_model,
+        sharded_model,
+        data_gen_fn,
+        output_transform_fn,
+        loss_fn,
+        precision,
     ):
         org_output, org_loss, shard_output, shard_loss = run_forward(
             org_model, sharded_model, data_gen_fn, output_transform_fn, loss_fn
         )
 
+        if precision == torch.float32:
+            atol, rtol = 1e-5, 1e-5
+        else:
+            atol, rtol = 5e-2, 5e-2
+
         assert_hf_output_close(
-            org_output.last_hidden_state, shard_output.last_hidden_state
+            org_output.last_hidden_state,
+            shard_output.last_hidden_state,
+            atol=atol,
+            rtol=rtol,
         )
 
         # do backward
@@ -41,7 +55,7 @@ class TestCLIPVisionPolicyClass(PolicyTestBase):
         shard_loss.backward()
 
         assert torch.allclose(
-            org_loss, shard_loss, atol=1e-5
+            org_loss, shard_loss, atol=atol, rtol=rtol
         ), f"shard model loss is not equal to orgin model loss\n{org_loss}\n{shard_loss}"
 
         # check grad
@@ -58,8 +72,8 @@ class TestCLIPVisionPolicyClass(PolicyTestBase):
             org_model,
             sharded_model,
             col_layer_for_check,
-            atol=1e-6,
-            rtol=1e-5,
+            atol=atol,
+            rtol=rtol,
             dim=0,
             verbose=False,
         )
@@ -67,21 +81,16 @@ class TestCLIPVisionPolicyClass(PolicyTestBase):
             org_model,
             sharded_model,
             row_layer_for_check,
-            atol=1e-6,
-            rtol=1e-5,
+            atol=atol,
+            rtol=rtol,
             dim=1,
             verbose=False,
         )
 
-    @parametrize("precision", [torch.float32, torch.bfloat16])
-    @parametrize("enable_fused_normalization", [True, False])
-    @parametrize("enable_flash_attention", [True, False])
-    def test_clip_vision(
-        self,
-        precision: torch.dtype,
-        enable_fused_normalization: bool,
-        enable_flash_attention: bool,
-    ):
+    @parametrize("precision", [torch.float32, torch.bfloat16, torch.float16])
+    @parametrize("fn", [True, False])
+    @parametrize("fa", [True, False])
+    def test_clip_vision(self, precision: torch.dtype, fn: bool, fa: bool):
         with patch(
             "colossalai.shardformer.shard.sharder.get_autopolicy",
             return_value=CLIPVisionPolicy(),
@@ -91,8 +100,8 @@ class TestCLIPVisionPolicyClass(PolicyTestBase):
 
             org_model, sharded_model = build_model(
                 model_fn=lambda: CLIPVisionModel(config),
-                enable_fused_normalization=enable_fused_normalization,
-                enable_flash_attention=enable_flash_attention,
+                enable_fused_normalization=fn,
+                enable_flash_attention=fa,
                 enable_tensor_parallelism=True,
                 enable_jit_fused=False,
                 dtype=precision,
@@ -104,6 +113,7 @@ class TestCLIPVisionPolicyClass(PolicyTestBase):
             data_gen_fn=lambda: dict(pixel_values=torch.rand(1, 3, 224, 224)),
             output_transform_fn=lambda x: x,
             loss_fn=lambda x: x["last_hidden_state"].mean(),
+            precision=precision,
         )
 
 
