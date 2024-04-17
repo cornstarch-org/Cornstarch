@@ -1,5 +1,5 @@
 """
-Code copied from:
+Code modified after copied from:
 https://github.com/hpcaitech/ColossalAI/blob/v0.3.6/colossalai/shardformer/policies/mistral.py
 """
 
@@ -19,20 +19,38 @@ from colossalai.shardformer.policies.base_policy import (
     SubModuleReplacementDescription,
 )
 
+from cornstarch.shardformer.policies.utils import (
+    resize_embeddings,
+    resize_lm_head,
+)
+
 
 class MistralPolicy(Policy):
     def config_sanity_check(self):
         pass
 
     def preprocess(self):
-        if self.shard_config.enable_tensor_parallelism:
-            # Resize embedding
-            vocab_size = self.model.config.vocab_size
-            world_size = self.shard_config.tensor_parallel_size
+        # Resize embedding
+        vocab_size = self.model.config.vocab_size
+        world_size = self.shard_config.tensor_parallel_size
 
-            if vocab_size % world_size != 0:
-                new_vocab_size = vocab_size + world_size - vocab_size % world_size
-                self.model.resize_token_embeddings(new_vocab_size)
+        if self.shard_config.enable_tensor_parallelism and vocab_size % world_size != 0:
+            new_vocab_size = vocab_size + world_size - vocab_size % world_size
+
+            embeddings: nn.Embedding = self.model.get_input_embeddings()
+            if embeddings.num_embeddings * world_size == new_vocab_size:
+                # Skip if the embedding layer has already been resized
+                return self.model
+
+            resize_embeddings(new_vocab_size, embeddings)
+
+            lm_head: nn.Embedding | nn.Linear = self.model.get_output_embeddings()
+            if isinstance(lm_head, nn.Embedding):
+                resize_embeddings(new_vocab_size, lm_head)
+            elif isinstance(lm_head, nn.Linear):
+                resize_lm_head(new_vocab_size, lm_head)
+
+            self.model.vocab_size = new_vocab_size
 
         return self.model
 
