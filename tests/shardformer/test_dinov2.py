@@ -122,18 +122,18 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
                 dim=0,
                 verbose=False,
             )
-        col_layer_grads = get_grad_tensors_for_check(
-            dino_model,
-            shard_dino_model,
-            col_layer_for_check,
-            tp_group,
-            atol=2e-5,
-            rtol=1e-3,
-            dim=1,
-            verbose=False,
-        )
-        grads_to_check.update(row_layer_grads)
-        grads_to_check.update(col_layer_grads)
+            col_layer_grads = get_grad_tensors_for_check(
+                dino_model,
+                shard_dino_model,
+                col_layer_for_check,
+                tp_group,
+                atol=2e-5,
+                rtol=1e-3,
+                dim=1,
+                verbose=False,
+            )
+            grads_to_check.update(row_layer_grads)
+            grads_to_check.update(col_layer_grads)
 
         # optimizer executes step
         org_optimizer.step()
@@ -145,7 +145,7 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
                 check_output_hidden_state(
                     org_output, sharded_output, stage_manager, atol=2e-3, rtol=1e-3
                 )
-        check_loss(org_loss, sharded_loss, atol=2e-3, rtol=1e-3)
+            check_loss(org_loss, sharded_loss, atol=2e-3, rtol=1e-3)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage():
