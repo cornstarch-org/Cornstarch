@@ -94,6 +94,16 @@ _POLICY_LIST = {
     "transformers.models.clip.modeling_clip.CLIPVisionModel": PolicyLocation(
         file_name="clip", class_name="CLIPVisionModelPolicy"
     ),
+    # Mistral
+    "transformers.models.mistral.modeling_mistral.MistralModel": PolicyLocation(
+        file_name="mistral", class_name="MistralModelPolicy"
+    ),
+    "transformers.models.mistral.modeling_mistral.MistralForCausalLM": PolicyLocation(
+        file_name="mistral", class_name="MistralForCausalLMPolicy"
+    ),
+    "transformers.models.mistral.modeling_mistral.MistralForSequenceClassification": PolicyLocation(
+        file_name="mistral", class_name="MistralForSequenceClassificationPolicy"
+    ),
 }
 
 
