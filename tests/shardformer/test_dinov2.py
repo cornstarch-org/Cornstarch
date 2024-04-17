@@ -60,7 +60,9 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
     def model_fn(self) -> Dinov2PreTrainedModel:
         return self.model_class(self.config)
 
-    def run_hybrid_parallel(self, tp_size: int, pp_size: int):
+    def run_hybrid_parallel(
+        self, tp_size: int, pp_size: int, base_model_class_name: str
+    ):
         (
             org_model,
             org_optimizer,
@@ -95,9 +97,81 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
             )
         )
 
+        stage_manager = booster.plugin.stage_manager
+        tp_group = booster.plugin.tp_group
+
+        # unwrap model
+        dino_model = unwrap_model(org_model, base_model_class_name, "dinov2")
+        shard_dino_model = unwrap_model(sharded_model, base_model_class_name, "dinov2")
+
+        row_layer_for_check = ["encoder.layer[0].attention.attention.query"]
+        col_layer_for_check = ["encoder.layer[0].attention.output.dense"]
+
+        # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
+        grads_to_check = {}
+        if (
+            stage_manager is None or stage_manager.is_first_stage()
+        ) and booster.plugin.zero_stage == 0:
+            row_layer_grads = get_grad_tensors_for_check(
+                dino_model,
+                shard_dino_model,
+                row_layer_for_check,
+                tp_group,
+                atol=2e-5,
+                rtol=1e-3,
+                dim=0,
+                verbose=False,
+            )
+        col_layer_grads = get_grad_tensors_for_check(
+            dino_model,
+            shard_dino_model,
+            col_layer_for_check,
+            tp_group,
+            atol=2e-5,
+            rtol=1e-3,
+            dim=1,
+            verbose=False,
+        )
+        grads_to_check.update(row_layer_grads)
+        grads_to_check.update(col_layer_grads)
+
         # optimizer executes step
         org_optimizer.step()
         sharded_optimizer.step()
+
+        # check last hidden state & loss
+        if stage_manager is None or stage_manager.is_last_stage():
+            if org_model.__class__.__name__ == "Dinov2Model":
+                check_output_hidden_state(
+                    org_output, sharded_output, stage_manager, atol=2e-3, rtol=1e-3
+                )
+        check_loss(org_loss, sharded_loss, atol=2e-3, rtol=1e-3)
+
+        # check weights
+        if stage_manager is None or stage_manager.is_first_stage():
+            check_weight(
+                dino_model,
+                shard_dino_model,
+                row_layer_for_check,
+                tp_group,
+                atol=5e-3,
+                rtol=1e-3,
+                dim=0,
+                verbose=False,
+            )
+            check_weight(
+                dino_model,
+                shard_dino_model,
+                col_layer_for_check,
+                tp_group,
+                atol=5e-3,
+                rtol=1e-3,
+                dim=1,
+                verbose=False,
+            )
+
+        # check grads
+        check_all_grad_tensors(grads_to_check)
 
 
 class TestDinov2ModelPolicy(Dinov2PolicyTestClassBase):
@@ -130,7 +204,7 @@ class TestDinov2ModelPolicy(Dinov2PolicyTestClassBase):
                 new=lambda _, *args: Policy.get_stage_index(*args),
             ),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size)
+            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Model")
 
 
 class TestDinov2ForImageClassificationPolicy(Dinov2PolicyTestClassBase):
@@ -164,7 +238,7 @@ class TestDinov2ForImageClassificationPolicy(Dinov2PolicyTestClassBase):
                 new=lambda _, *args: Policy.get_stage_index(*args),
             ),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size)
+            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Model")
 
 
 class TestDinov2BackbonePolicy(Dinov2PolicyTestClassBase):
@@ -196,7 +270,7 @@ class TestDinov2BackbonePolicy(Dinov2PolicyTestClassBase):
                 new=lambda _, *args: Policy.get_stage_index(*args),
             ),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size)
+            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Backbone")
 
 
 instantiate_parametrized_tests(TestDinov2ModelPolicy)
