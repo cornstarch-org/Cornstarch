@@ -180,7 +180,7 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         if self.model.__class__.__name__ in ["Dinov2Model", "Dinov2Backbone"]:
             module = self.model
         else:
-            module = self.model.model
+            module = self.model.dinov2
 
         layers_per_stage = self.distribute_layers(
             len(module.encoder.layer), stage_manager.num_stages
@@ -246,6 +246,7 @@ class Dinov2ForImageClassificationPolicy(Dinov2ModelPolicy):
     def module_policy(self) -> dict[str | Module, ModulePolicyDescription]:
         from transformers.models.dinov2.modeling_dinov2 import (
             Dinov2ForImageClassification,
+            Dinov2Model,
         )
 
         policy = super().module_policy()
@@ -263,7 +264,26 @@ class Dinov2ForImageClassificationPolicy(Dinov2ModelPolicy):
             }
             policy.update(new_item)
 
+        if self.pipeline_stage_manager:
+            self.set_pipeline_forward(
+                model_cls=Dinov2Model,
+                new_forward=Dinov2PipelineForwards.dinov2_model_forward,
+                policy=policy,
+            )
+            self.set_pipeline_forward(
+                model_cls=Dinov2ForImageClassification,
+                new_forward=Dinov2PipelineForwards.dinov2_for_image_classification_forward,
+                policy=policy,
+            )
+
         return policy
+
+    def get_held_layers(self) -> list[Module]:
+        stage_manager = self.pipeline_stage_manager
+        held_layers = super().get_held_layers()
+        if stage_manager.is_last_stage(ignore_chunk=True):
+            held_layers.append(self.model.classifier)
+        return held_layers
 
 
 class Dinov2BackbonePolicy(Dinov2Policy):
@@ -276,6 +296,14 @@ class Dinov2BackbonePolicy(Dinov2Policy):
 
     def module_policy(self) -> dict[str | Module, ModulePolicyDescription]:
         policy = super().module_policy()
+        from transformers.models.dinov2.modeling_dinov2 import Dinov2Backbone
+
+        if self.pipeline_stage_manager:
+            self.set_pipeline_forward(
+                model_cls=Dinov2Backbone,
+                new_forward=Dinov2PipelineForwards.dinov2_backbone_forward,
+                policy=policy,
+            )
 
         # use flash attention
         if self.shard_config.enable_flash_attention:
