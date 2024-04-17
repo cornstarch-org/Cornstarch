@@ -1,5 +1,6 @@
 import itertools
 import warnings
+from functools import partial
 from typing import Callable, Dict, List, cast
 
 from colossalai.shardformer.layer import (
@@ -19,6 +20,7 @@ from transformers.models.clip.configuration_clip import CLIPVisionConfig
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.clip import (
+    CLIPVisionPipelineForwards,
     get_clip_flash_attention_forward,
     get_clip_naive_attention_forward,
 )
@@ -191,15 +193,57 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         return policy
 
     def get_held_layers(self) -> List[nn.Module]:
-        raise NotImplementedError
+        assert self.pipeline_stage_manager is not None
 
-    def get_shared_params(self) -> List[Dict[int, Tensor]]:
-        raise NotImplementedError
+        if self.model.__class__.__name__ == "CLIPVisionTransformer":
+            module = self.model
+        else:
+            module = self.model.vision_model
+        stage_manager = self.pipeline_stage_manager
+
+        held_layers = []
+        layers_per_stage = self.distribute_layers(
+            len(module.encoder.layers), stage_manager.num_stages
+        )
+        if stage_manager.is_first_stage():
+            held_layers.append(module.embeddings)
+            held_layers.append(module.pre_layrnorm)
+        start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        held_layers.extend(module.encoder.layers[start_idx:end_idx])
+        if stage_manager.is_last_stage():
+            held_layers.append(module.post_layernorm)
+
+        return held_layers
 
     def set_pipeline_forward(
         self, model_cls: nn.Module, new_forward: Callable, policy: Dict
     ):
-        raise NotImplementedError
+        """If under pipeline parallel setting, replacing the original forward method of huggingface
+        to customized forward method, and add this changing to policy."""
+        if self.pipeline_stage_manager is None:
+            return
+
+        stage_manager = self.pipeline_stage_manager
+        if self.model.__class__.__name__ == "CLIPVisionTransformer":
+            module = self.model
+        else:
+            module = self.model.vision_model
+
+        layers_per_stage = self.distribute_layers(
+            len(module.encoder.layers), stage_manager.num_stages
+        )
+        stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        method_replacement = {
+            "forward": partial(
+                new_forward,
+                stage_manager=stage_manager,
+                stage_index=stage_index,
+                shard_config=self.shard_config,
+            )
+        }
+        self.append_or_create_method_replacement(
+            description=method_replacement, policy=policy, target_key=model_cls
+        )
 
 
 class CLIPVisionModelPolicy(CLIPVisionTransformerPolicy):
@@ -216,12 +260,12 @@ class CLIPVisionModelPolicy(CLIPVisionTransformerPolicy):
 
     def module_policy(self):
         policy = super().module_policy()
-        from transformers.models.clip.modeling_clip import CLIPVisionTransformer
+        from transformers.models.clip.modeling_clip import CLIPVisionModel
 
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
-                model_cls=CLIPVisionTransformer,
-                new_forward=None,
+                model_cls=CLIPVisionModel,
+                new_forward=CLIPVisionPipelineForwards.clip_vision_model_forward,
                 policy=policy,
             )
 
