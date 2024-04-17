@@ -104,6 +104,16 @@ _POLICY_LIST = {
     "transformers.models.mistral.modeling_mistral.MistralForSequenceClassification": PolicyLocation(
         file_name="mistral", class_name="MistralForSequenceClassificationPolicy"
     ),
+    # DINOv2
+    "transformers.models.dinov2.modeling_dinov2.Dinov2Model": PolicyLocation(
+        file_name="dinov2", class_name="Dinov2ModelPolicy"
+    ),
+    "transformers.models.dinov2.modeling_dinov2.Dinov2ForImageClassification": PolicyLocation(
+        file_name="dinov2", class_name="Dinov2ForImageClassificationPolicy"
+    ),
+    "transformers.models.dinov2.modeling_dinov2.Dinov2Backbone": PolicyLocation(
+        file_name="dinov2", class_name="Dinov2BackbonePolicy"
+    ),
 }
 
 
