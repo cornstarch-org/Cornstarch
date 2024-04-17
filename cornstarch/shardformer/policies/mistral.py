@@ -26,7 +26,10 @@ from transformers import PretrainedConfig
 from transformers.models.mistral.configuration_mistral import MistralConfig
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.mistral import MistralPipelineForwards
+from cornstarch.shardformer.modeling.mistral import (
+    MistralPipelineForwards,
+    get_lm_forward_with_dist_cross_entropy,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -310,10 +313,17 @@ class MistralForCausalLMPolicy(MistralPolicy):
                         SubModuleReplacementDescription(
                             suffix="lm_head",
                             target_module=Linear1D_Col,
+                            kwargs=dict(
+                                gather_output=not self.shard_config.parallel_output
+                            ),
                         )
                     ]
                 )
             }
+            if self.shard_config.parallel_output:
+                new_item[MistralForCausalLM].method_replacement = {
+                    "forward": get_lm_forward_with_dist_cross_entropy(self.shard_config)
+                }
             policy.update(new_item)
 
         if self.pipeline_stage_manager:
