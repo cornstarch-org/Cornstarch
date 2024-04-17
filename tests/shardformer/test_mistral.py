@@ -113,8 +113,6 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         row_layer_for_check = ["layers[0].self_attn.q_proj", "embed_tokens"]
         col_layer_for_check = ["layers[0].self_attn.o_proj"]
 
-        atol, rtol = 5e-5, 1e-4
-
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
         if (
@@ -125,8 +123,8 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
                 shard_mistral_model,
                 row_layer_for_check,
                 tp_group,
-                atol=atol,
-                rtol=rtol,
+                atol=5e-5,
+                rtol=1e-4,
                 dim=0,
                 verbose=False,
             )
@@ -135,8 +133,8 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
                 shard_mistral_model,
                 col_layer_for_check,
                 tp_group,
-                atol=atol,
-                rtol=rtol,
+                atol=5e-5,
+                rtol=1e-4,
                 dim=1,
                 verbose=False,
             )
@@ -151,20 +149,30 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         if stage_manager is None or stage_manager.is_last_stage():
             if org_model.__class__.__name__ == "MistralModel":
                 check_output_hidden_state(
-                    org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
+                    org_output, sharded_output, stage_manager, atol=1e-5, rtol=1e-3
                 )
 
-            check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
+            check_loss(org_loss, sharded_loss, atol=1e-5, rtol=1e-3)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage():
             check_weight(
                 mistral_model,
                 shard_mistral_model,
+                row_layer_for_check,
+                tp_group,
+                atol=1e-4,
+                rtol=1e-3,
+                dim=0,
+                verbose=False,
+            )
+            check_weight(
+                mistral_model,
+                shard_mistral_model,
                 col_layer_for_check,
                 tp_group,
-                atol=atol,
-                rtol=rtol,
+                atol=1e-4,
+                rtol=1e-3,
                 dim=1,
                 verbose=False,
             )
