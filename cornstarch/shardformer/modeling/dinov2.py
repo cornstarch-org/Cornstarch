@@ -12,6 +12,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2Backbone,
+    Dinov2Encoder,
     Dinov2ForImageClassification,
     Dinov2Model,
 )
@@ -23,6 +24,64 @@ class Dinov2PipelineForwards:
     This class servers as a micro library for forward function substitution of Dinov2 models
     under pipeline setting.
     """
+
+    @staticmethod
+    def dinov2_encoder_forward(
+        encoder: Dinov2Encoder,
+        start_idx: int,
+        end_idx: int,
+        hidden_states: torch.Tensor,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = True,
+        stage_manager: Optional[PipelineStageManager] = None,
+    ) -> Union[Tuple, BaseModelOutput]:
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+
+        for idx, layer_module in enumerate(
+            encoder.layer[start_idx:end_idx], start=start_idx
+        ):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            layer_head_mask = head_mask[idx] if head_mask is not None else None
+
+            if encoder.gradient_checkpointing and encoder.training:
+                layer_outputs = encoder._gradient_checkpointing_func(
+                    layer_module.__call__,
+                    hidden_states,
+                    layer_head_mask,
+                    output_attentions,
+                )
+            else:
+                layer_outputs = layer_module(
+                    hidden_states, layer_head_mask, output_attentions
+                )
+
+            hidden_states = layer_outputs[0]
+
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[1],)
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+        if not stage_manager.is_last_stage():
+            return hidden_states
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [hidden_states, all_hidden_states, all_self_attentions]
+                if v is not None
+            )
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+        )
 
     @staticmethod
     def dinov2_model_forward(
@@ -41,19 +100,14 @@ class Dinov2PipelineForwards:
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-        logger = logging.get_logger(__name__)
 
+        logger = logging.get_logger(__name__)
         # Preprocess passed in arguments
         if output_attentions:
             logger.warning_once(
                 "output_attentions=True is not supported for pipeline models at the moment."
             )
             output_attentions = False
-        if output_hidden_states:
-            logger.warning_once(
-                "output_hidden_states=True is not supported for pipeline models at the moment."
-            )
-            output_hidden_states = False
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
@@ -75,34 +129,20 @@ class Dinov2PipelineForwards:
                 hidden_states is not None
             ), f"Current stage is {stage_manager.stage}, hidden_states should not be None"
 
-        start_idx, end_idx = stage_index[0], stage_index[1]
-        for idx, layer_module in enumerate(
-            self.encoder.layer[start_idx:end_idx], start=start_idx
-        ):
-            layer_head_mask = head_mask[idx] if head_mask is not None else None
-
-            if self.encoder.gradient_checkpointing and self.training:
-                layer_outputs = self.encoder._gradient_checkpointing_func(
-                    layer_module.__call__,
-                    hidden_states,
-                    layer_head_mask,
-                    output_attentions,
-                )
-            else:
-                layer_outputs = layer_module(
-                    hidden_states, layer_head_mask, output_attentions
-                )
-
-            hidden_states = layer_outputs[0]
+        encoder_outputs = Dinov2PipelineForwards.dinov2_encoder_forward(
+            encoder=self.encoder,
+            start_idx=stage_index[0],
+            end_idx=stage_index[1],
+            hidden_states=hidden_states,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            stage_manager=stage_manager,
+        )
 
         if not stage_manager.is_last_stage():
-            return {"hidden_states": hidden_states}
-
-        encoder_outputs = BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=None,
-            attentions=None,
-        )
+            return {"hidden_states": encoder_outputs}
 
         sequence_output = encoder_outputs[0]
         sequence_output = self.layernorm(sequence_output)
@@ -218,16 +258,20 @@ class Dinov2PipelineForwards:
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-        logger = logging.get_logger(__name__)
 
+        logger = logging.get_logger(__name__)
         # Preprocess passed in arguments
         if output_attentions:
             logger.warning_once(
                 "output_attentions=True is not supported for pipeline models at the moment."
             )
             output_attentions = False
-        if output_hidden_states:
-            all_hidden_states = ()
+
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
 
         if stage_manager.is_first_stage():
             if pixel_values is None:
@@ -239,40 +283,20 @@ class Dinov2PipelineForwards:
             assert (
                 hidden_states is not None
             ), f"Current stage is {stage_manager.stage}, hidden_states should not be None"
-            all_hidden_states = hidden_states
-            hidden_states = hidden_states[0]
 
-        start_idx, end_idx = stage_index[0], stage_index[1]
-        for idx, layer_module in enumerate(
-            self.encoder.layer[start_idx:end_idx], start=start_idx
-        ):
-            if self.encoder.gradient_checkpointing and self.training:
-                layer_outputs = self.encoder._gradient_checkpointing_func(
-                    layer_module.__call__,
-                    hidden_states,
-                    None,  # head_mask
-                    output_attentions,
-                )
-            else:
-                layer_outputs = layer_module(
-                    hidden_states,
-                    head_mask=None,
-                    output_attentions=output_attentions,
-                )
-
-            hidden_states = layer_outputs[0]
+        outputs = Dinov2PipelineForwards.dinov2_encoder_forward(
+            encoder=self.encoder,
+            start_idx=stage_index[0],
+            end_idx=stage_index[1],
+            hidden_states=hidden_states,
+            output_attentions=output_attentions,
+            output_hidden_states=True,
+            return_dict=return_dict,
+            stage_manager=stage_manager,
+        )
 
         if not stage_manager.is_last_stage():
-            return {"hidden_states": hidden_states}
-
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
-
-        outputs = BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=all_hidden_states,
-            attentions=None,
-        )
+            return {"hidden_states": outputs}
 
         hidden_states = outputs.hidden_states if return_dict else outputs[1]
 
