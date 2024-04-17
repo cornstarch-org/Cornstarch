@@ -137,6 +137,14 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                 ],
             )
 
+        # use flash attention
+        if self.shard_config.enable_flash_attention:
+            raise NotImplementedError
+
+        # use jit fused operator
+        if self.shard_config.enable_jit_fused:
+            raise NotImplementedError
+
         # use fused operator
         if self.shard_config.enable_fused_normalization:
             raise NotImplementedError
@@ -218,14 +226,6 @@ class Dinov2ModelPolicy(Dinov2Policy):
                 policy=policy,
             )
 
-        # use flash attention
-        if self.shard_config.enable_flash_attention:
-            raise NotImplementedError
-
-        # use jit fused operator
-        if self.shard_config.enable_jit_fused:
-            raise NotImplementedError
-
         return policy
 
 
@@ -304,13 +304,5 @@ class Dinov2BackbonePolicy(Dinov2Policy):
                 new_forward=Dinov2PipelineForwards.dinov2_backbone_forward,
                 policy=policy,
             )
-
-        # use flash attention
-        if self.shard_config.enable_flash_attention:
-            raise NotImplementedError
-
-        # use jit fused operator
-        if self.shard_config.enable_jit_fused:
-            raise NotImplementedError
 
         return policy
