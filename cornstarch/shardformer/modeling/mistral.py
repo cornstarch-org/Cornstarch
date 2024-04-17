@@ -2,7 +2,6 @@ from typing import Optional, Tuple, Union
 
 import torch
 from colossalai.pipeline.stage_manager import PipelineStageManager
-from colossalai.shardformer.layer._operation import _gather
 from colossalai.shardformer.layer.loss import cross_entropy_1d
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
@@ -296,7 +295,10 @@ class MistralPipelineForwards:
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
 
-                if shard_config.enable_tensor_parallelism:
+                if (
+                    shard_config.enable_tensor_parallelism
+                    and shard_config.parallel_output
+                ):
                     new_vocab_size = logits.shape[-1]
                     shift_logits = shift_logits.view(-1, new_vocab_size)
                     loss = cross_entropy_1d(
@@ -307,9 +309,6 @@ class MistralPipelineForwards:
                 else:
                     shift_logits = shift_logits.view(-1, self.config.vocab_size)
                     loss = loss_fct(shift_logits, shift_labels)
-
-            if not shard_config.parallel_output:
-                logits = _gather(logits, -1, shard_config.tensor_parallel_process_group)
 
             if not return_dict:
                 output = (logits,) + outputs[1:]

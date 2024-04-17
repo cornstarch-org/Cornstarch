@@ -117,7 +117,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
         if (
-            stage_manager is None or stage_manager.is_first_stage()
+            stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True)
         ) and booster.plugin.zero_stage == 0:
             row_layer_grads = get_grad_tensors_for_check(
                 mistral_model,
@@ -147,7 +147,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         sharded_optimizer.step()
 
         # check last hidden state & loss
-        if stage_manager is None or stage_manager.is_last_stage():
+        if stage_manager is None or stage_manager.is_last_stage(ignore_chunk=True):
             if org_model.__class__.__name__ == "MistralModel":
                 check_output_hidden_state(
                     org_output, sharded_output, stage_manager, atol=1e-5, rtol=1e-3
@@ -156,7 +156,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
             check_loss(org_loss, sharded_loss, atol=1e-5, rtol=1e-3)
 
         # check weights
-        if stage_manager is None or stage_manager.is_first_stage():
+        if stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True):
             check_weight(
                 mistral_model,
                 shard_mistral_model,
