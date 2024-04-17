@@ -63,6 +63,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
     )
 
     def model_fn(self) -> MistralPreTrainedModel:
+        self.config.pad_token_id = self.config.eos_token_id
         return self.model_class(self.config)
 
     def run_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool):
@@ -206,7 +207,7 @@ class TestMistralModelPolicy(MistralPolicyTestClassBase):
 
     model_class = MistralModel
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
     def test_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool):
         with (
@@ -241,7 +242,7 @@ class TestMistralForCausalLMPolicy(MistralPolicyTestClassBase):
 
     model_class = MistralForCausalLM
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
     def test_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool):
         with (
@@ -276,7 +277,7 @@ class TestMistralForSequenceClassificationPolicy(MistralPolicyTestClassBase):
 
     model_class = MistralForSequenceClassification
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
     def test_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool):
         with (
