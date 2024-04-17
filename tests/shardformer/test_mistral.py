@@ -55,7 +55,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         hidden_size=256,
         intermediate_size=256,
         num_attention_heads=64,
-        num_hidden_layers=2,
+        num_hidden_layers=4,
         vocab_size=50258,
         # Need to explicitly set use_cache=False
         # https://github.com/huggingface/transformers/issues/28056
@@ -89,7 +89,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         )
 
         org_model.gradient_checkpointing_enable()
-        # sharded_model.unwrap().gradient_checkpointing_enable()
+        sharded_model.unwrap().gradient_checkpointing_enable()
 
         org_loss, org_output, sharded_loss, sharded_output = (
             run_forward_backward_with_hybrid_plugin(

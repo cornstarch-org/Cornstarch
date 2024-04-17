@@ -21,6 +21,7 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
+from torch import Tensor
 from transformers import PretrainedConfig
 from transformers.models.mistral.configuration_mistral import MistralConfig
 
@@ -297,7 +298,7 @@ class MistralForCausalLMPolicy(MistralPolicy):
             raise ValueError("lm_head must be in the last stage.")
 
     def module_policy(self):
-        from transformers import MistralForCausalLM
+        from transformers.models.mistral.modeling_mistral import MistralForCausalLM
 
         policy = super().module_policy()
 
@@ -314,13 +315,40 @@ class MistralForCausalLMPolicy(MistralPolicy):
                     ]
                 )
             }
-
-            if self.pipeline_stage_manager:
-                warnings.warn("Mistral doesn't support pipeline parallelism now.")
-
             policy.update(new_item)
 
+        if self.pipeline_stage_manager:
+            self.set_pipeline_forward(
+                model_cls=MistralForCausalLM,
+                new_forward=MistralPipelineForwards.mistral_for_causal_lm_forward,
+                policy=policy,
+            )
+
         return policy
+
+    def get_held_layers(self) -> List[nn.Module]:
+        stage_manager = self.pipeline_stage_manager
+        held_layers = super().get_held_layers()
+        if stage_manager.is_last_stage(ignore_chunk=True):
+            held_layers.append(self.model.lm_head)
+        return held_layers
+
+    def get_shared_params(self) -> List[Dict[int, Tensor]]:
+        mistral_model = self.model.model
+        if (
+            self.pipeline_stage_manager
+            and self.pipeline_stage_manager.num_stages > 1
+            and id(mistral_model.embed_tokens.weight) == id(self.model.lm_head.weight)
+        ):
+            # tie weights
+            return [
+                {
+                    0: mistral_model.embed_tokens.weight,
+                    self.pipeline_stage_manager.num_stages
+                    - 1: self.model.lm_head.weight,
+                }
+            ]
+        return []
 
 
 class MistralForSequenceClassificationPolicy(MistralPolicy):
@@ -338,7 +366,9 @@ class MistralForSequenceClassificationPolicy(MistralPolicy):
             raise ValueError("score must be in the last stage.")
 
     def module_policy(self):
-        from transformers import MistralForSequenceClassification
+        from transformers.models.mistral.modeling_mistral import (
+            MistralForSequenceClassification,
+        )
 
         policy = super().module_policy()
 
@@ -355,9 +385,23 @@ class MistralForSequenceClassificationPolicy(MistralPolicy):
                     ]
                 )
             }
-
-            if self.pipeline_stage_manager:
-                warnings.warn("Mistral doesn't support pipeline parallelism now.")
-
             policy.update(new_item)
+
+        if self.pipeline_stage_manager:
+            self.set_pipeline_forward(
+                model_cls=MistralForSequenceClassification,
+                new_forward=MistralPipelineForwards.mistral_for_sequence_classification_forward,
+                policy=policy,
+            )
+
         return policy
+
+    def get_held_layers(self) -> List[nn.Module]:
+        stage_manager = self.pipeline_stage_manager
+        held_layers = super().get_held_layers()
+        if stage_manager.is_last_stage(ignore_chunk=True):
+            held_layers.append(self.model.score)
+        return held_layers
+
+    def get_shared_params(self) -> List[Dict[int, Tensor]]:
+        return []
