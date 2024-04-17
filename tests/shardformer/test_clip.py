@@ -21,10 +21,10 @@ from transformers.models.clip.modeling_clip import (
     CLIPVisionModel,
 )
 
-from cornstarch.shardformer.policies.clip import CLIPVisionPolicy
+from cornstarch.shardformer.policies.clip import CLIPVisionModelPolicy
 
 
-class TestCLIPVisionPolicyClass(PolicyTestBase):
+class TestCLIPVisionModelPolicyClass(PolicyTestBase):
     def check_forward_backward(
         self,
         org_model,
@@ -93,7 +93,7 @@ class TestCLIPVisionPolicyClass(PolicyTestBase):
     def test_clip_vision(self, precision: torch.dtype, fn: bool, fa: bool):
         with patch(
             "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=CLIPVisionPolicy(),
+            return_value=CLIPVisionModelPolicy(),
         ):
             config = CLIPVisionConfig()
             config.attention_dropout = 0.0
@@ -117,4 +117,4 @@ class TestCLIPVisionPolicyClass(PolicyTestBase):
         )
 
 
-instantiate_parametrized_tests(TestCLIPVisionPolicyClass)
+instantiate_parametrized_tests(TestCLIPVisionModelPolicyClass)

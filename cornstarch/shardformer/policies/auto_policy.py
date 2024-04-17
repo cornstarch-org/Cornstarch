@@ -92,7 +92,7 @@ _POLICY_LIST = {
     ),
     # CLIP
     "transformers.models.clip.modeling_clip.CLIPVisionModel": PolicyLocation(
-        file_name="clip", class_name="CLIPVisionPolicy"
+        file_name="clip", class_name="CLIPVisionModelPolicy"
     ),
 }
 
