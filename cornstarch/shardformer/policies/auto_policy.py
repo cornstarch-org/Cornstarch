@@ -3,13 +3,98 @@
 import importlib
 from typing import Type
 
-from colossalai.shardformer.policies.auto_policy import (
-    _POLICY_LIST,
-    PolicyLocation,
-)
+from colossalai.shardformer.policies.auto_policy import PolicyLocation
 from colossalai.shardformer.policies.base_policy import Policy
 
 __all__ = ["get_policy_type", "get_autopolicy", "import_policy"]
+
+
+_POLICY_LIST = {
+    # BERT
+    "transformers.models.bert.modeling_bert.BertModel": PolicyLocation(
+        file_name="bert", class_name="BertModelPolicy"
+    ),
+    "transformers.models.bert.modeling_bert.BertForPreTraining": PolicyLocation(
+        file_name="bert", class_name="BertForPreTrainingPolicy"
+    ),
+    "transformers.models.bert.modeling_bert.BertLMHeadModel": PolicyLocation(
+        file_name="bert", class_name="BertLMHeadModelPolicy"
+    ),
+    "transformers.models.bert.modeling_bert.BertForMaskedLM": PolicyLocation(
+        file_name="bert", class_name="BertForMaskedLMPolicy"
+    ),
+    "transformers.models.bert.modeling_bert.BertForSequenceClassification": PolicyLocation(
+        file_name="bert", class_name="BertForSequenceClassificationPolicy"
+    ),
+    "transformers.models.bert.modeling_bert.BertForTokenClassification": PolicyLocation(
+        file_name="bert", class_name="BertForTokenClassificationPolicy"
+    ),
+    "transformers.models.bert.modeling_bert.BertForNextSentencePrediction": PolicyLocation(
+        file_name="bert", class_name="BertForNextSentencePredictionPolicy"
+    ),
+    "transformers.models.bert.modeling_bert.BertForMultipleChoice": PolicyLocation(
+        file_name="bert", class_name="BertForMultipleChoicePolicy"
+    ),
+    "transformers.models.bert.modeling_bert.BertForQuestionAnswering": PolicyLocation(
+        file_name="bert", class_name="BertForQuestionAnsweringPolicy"
+    ),
+    # LLaMA
+    "transformers.models.llama.modeling_llama.LlamaModel": PolicyLocation(
+        file_name="llama", class_name="LlamaModelPolicy"
+    ),
+    "transformers.models.llama.modeling_llama.LlamaForCausalLM": PolicyLocation(
+        file_name="llama", class_name="LlamaForCausalLMPolicy"
+    ),
+    "transformers.models.llama.modeling_llama.LlamaForSequenceClassification": PolicyLocation(
+        file_name="llama", class_name="LlamaForSequenceClassificationPolicy"
+    ),
+    # GPT2
+    "transformers.models.gpt2.modeling_gpt2.GPT2Model": PolicyLocation(
+        file_name="gpt2", class_name="GPT2ModelPolicy"
+    ),
+    "transformers.models.gpt2.modeling_gpt2.GPT2LMHeadModel": PolicyLocation(
+        file_name="gpt2", class_name="GPT2LMHeadModelPolicy"
+    ),
+    "transformers.models.gpt2.modeling_gpt2.GPT2DoubleHeadsModel": PolicyLocation(
+        file_name="gpt2", class_name="GPT2DoubleHeadsModelPolicy"
+    ),
+    "transformers.models.gpt2.modeling_gpt2.GPT2ForQuestionAnswering": PolicyLocation(
+        file_name="gpt2", class_name="GPT2ForQuestionAnsweringPolicy"
+    ),
+    "transformers.models.gpt2.modeling_gpt2.GPT2ForTokenClassification": PolicyLocation(
+        file_name="gpt2", class_name="GPT2ForTokenClassificationPolicy"
+    ),
+    "transformers.models.gpt2.modeling_gpt2.GPT2ForSequenceClassification": PolicyLocation(
+        file_name="gpt2", class_name="GPT2ForSequenceClassificationPolicy"
+    ),
+    # ViT
+    "transformers.models.vit.modeling_vit.ViTModel": PolicyLocation(
+        file_name="vit", class_name="ViTModelPolicy"
+    ),
+    "transformers.models.vit.modeling_vit.ViTForImageClassification": PolicyLocation(
+        file_name="vit", class_name="ViTForImageClassificationPolicy"
+    ),
+    "transformers.models.vit.modeling_vit.ViTForMaskedImageModeling": PolicyLocation(
+        file_name="vit", class_name="ViTForMaskedImageModelingPolicy"
+    ),
+    # OPT
+    "transformers.models.opt.modeling_opt.OPTModel": PolicyLocation(
+        file_name="opt", class_name="OPTModelPolicy"
+    ),
+    "transformers.models.opt.modeling_opt.OPTForCausalLM": PolicyLocation(
+        file_name="opt", class_name="OPTForCausalLMPolicy"
+    ),
+    "transformers.models.opt.modeling_opt.OPTForSequenceClassification": PolicyLocation(
+        file_name="opt", class_name="OPTForSequenceClassificationPolicy"
+    ),
+    "transformers.models.opt.modeling_opt.OPTForQuestionAnswering": PolicyLocation(
+        file_name="opt", class_name="OPTForQuestionAnsweringPolicy"
+    ),
+    # CLIP
+    "transformers.models.clip.modeling_clip.CLIPVisionModel": PolicyLocation(
+        file_name="clip", class_name="CLIPVisionModelPolicy"
+    ),
+}
 
 
 def import_policy(policy_location: PolicyLocation) -> Policy:
