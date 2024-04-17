@@ -5,7 +5,8 @@ https://github.com/hpcaitech/ColossalAI/blob/v0.3.6/colossalai/shardformer/polic
 
 import itertools
 import warnings
-from typing import cast
+from functools import partial
+from typing import Callable, Dict, List, cast
 
 import torch.nn as nn
 from colossalai.shardformer.layer import (
@@ -24,6 +25,7 @@ from transformers import PretrainedConfig
 from transformers.models.mistral.configuration_mistral import MistralConfig
 
 from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.modeling.mistral import MistralPipelineForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -205,6 +207,58 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
     def postprocess(self):
         return self.model
 
+    def get_held_layers(self) -> List[nn.Module]:
+        assert self.pipeline_stage_manager is not None
+
+        if self.model.__class__.__name__ == "MistralModel":
+            module = self.model
+        else:
+            module = self.model.model
+        stage_manager = self.pipeline_stage_manager
+
+        held_layers = []
+        layers_per_stage = self.distribute_layers(
+            len(module.layers), stage_manager.num_stages
+        )
+        if stage_manager.is_first_stage():
+            held_layers.append(module.embed_tokens)
+        start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        held_layers.extend(module.layers[start_idx:end_idx])
+        if stage_manager.is_last_stage():
+            held_layers.append(module.norm)
+
+        return held_layers
+
+    def set_pipeline_forward(
+        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
+    ):
+        """If under pipeline parallel setting, replacing the original forward method of huggingface
+        to customized forward method, and add this changing to policy."""
+        if self.pipeline_stage_manager is None:
+            return
+
+        stage_manager = self.pipeline_stage_manager
+        if self.model.__class__.__name__ == "MistralModel":
+            module = self.model
+        else:
+            module = self.model.model
+
+        layers_per_stage = self.distribute_layers(
+            len(module.layers), stage_manager.num_stages
+        )
+        stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        method_replacement = {
+            "forward": partial(
+                new_forward,
+                stage_manager=stage_manager,
+                stage_index=stage_index,
+                shard_config=self.shard_config,
+            )
+        }
+        self.append_or_create_method_replacement(
+            description=method_replacement, policy=policy, target_key=model_cls
+        )
+
 
 class MistralModelPolicy(MistralPolicy):
     @staticmethod
@@ -215,10 +269,17 @@ class MistralModelPolicy(MistralPolicy):
         super().pipeline_template_sanity_check(template)
 
     def module_policy(self):
-        if self.pipeline_stage_manager:
-            warnings.warn("Mistral doesn't support pipeline parallelism now.")
+        policy = super().module_policy()
+        from transformers.models.mistral.modeling_mistral import MistralModel
 
-        return super().module_policy()
+        if self.pipeline_stage_manager:
+            self.set_pipeline_forward(
+                model_cls=MistralModel,
+                new_forward=MistralPipelineForwards.mistral_model_forward,
+                policy=policy,
+            )
+
+        return policy
 
 
 class MistralForCausalLMPolicy(MistralPolicy):
