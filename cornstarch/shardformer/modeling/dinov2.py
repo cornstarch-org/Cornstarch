@@ -69,7 +69,10 @@ class Dinov2PipelineForwards:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not stage_manager.is_last_stage():
-            return hidden_states
+            if output_hidden_states:
+                return hidden_states, all_hidden_states
+            else:
+                return hidden_states
 
         if not return_dict:
             return tuple(
@@ -257,6 +260,7 @@ class Dinov2PipelineForwards:
         return_dict: Optional[bool] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
         stage_index: Optional[list[int]] = None,
         shard_config: ShardConfig = None,
     ) -> BackboneOutput:
@@ -271,12 +275,6 @@ class Dinov2PipelineForwards:
                 "output_attentions=True is not supported for pipeline models at the moment."
             )
             output_attentions = False
-
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
 
         if stage_manager.is_first_stage():
             if pixel_values is None:
@@ -301,9 +299,14 @@ class Dinov2PipelineForwards:
         )
 
         if not stage_manager.is_last_stage():
-            return {"hidden_states": outputs}
+            return {
+                "hidden_states": outputs[0],
+                "all_hidden_states": all_hidden_states + outputs[1][:-1],
+            }
 
-        hidden_states = outputs.hidden_states if return_dict else outputs[1]
+        hidden_states = all_hidden_states + (
+            outputs.hidden_states if return_dict else outputs[1]
+        )
 
         feature_maps = ()
         for stage, hidden_state in zip(self.stage_names, hidden_states):
