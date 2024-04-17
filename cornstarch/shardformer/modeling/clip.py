@@ -67,7 +67,7 @@ class CLIPVisionPipelineForwards:
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
             if self.encoder.gradient_checkpointing and self.training:
-                layer_outputs = self.encoder._gradient_checkpoining_func(
+                layer_outputs = self.encoder._gradient_checkpointing_func(
                     encoder_layer.__call__,
                     hidden_states,
                     None,  # attention_mask

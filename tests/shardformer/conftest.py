@@ -13,7 +13,7 @@ from torch.testing._internal.common_utils import FILE_SCHEMA
 class PolicyTestBase(MultiProcessTestCase):
     @property
     def world_size(self) -> int:
-        return 2
+        return 4
 
     def setUp(self) -> None:
         super().setUp()
