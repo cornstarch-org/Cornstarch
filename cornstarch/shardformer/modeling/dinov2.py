@@ -108,6 +108,11 @@ class Dinov2PipelineForwards:
                 "output_attentions=True is not supported for pipeline models at the moment."
             )
             output_attentions = False
+        if output_hidden_states:
+            logger.warning_once(
+                "output_hidden_states=True is not supported for pipeline models at the moment."
+            )
+            output_hidden_states = False
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
