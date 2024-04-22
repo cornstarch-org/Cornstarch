@@ -51,7 +51,7 @@ class MultimodalLanguageModelConfig(PretrainedConfig):
         self,
         text_config: PretrainedConfig,
         encoder_configs: PretrainedConfig | list[PretrainedConfig],
-        projection_type: str,
+        projection_type: str = "linear",
         **kwargs,
     ):
         super().__init__(**kwargs)

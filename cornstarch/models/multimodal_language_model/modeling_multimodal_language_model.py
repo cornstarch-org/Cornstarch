@@ -5,12 +5,23 @@ from typing import Any, Callable
 
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
-from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
 
 from cornstarch.models.multimodal_language_model import MultimodalLanguageModelConfig
+
+
+class MultimodalEncoderProjector(nn.Module):
+    def __init__(self, encoder: PreTrainedModel, projection: nn.Module):
+        super().__init__()
+        self.encoder = encoder
+        self.projection = projection
+        self.config = encoder.config
+
+    def forward(self, *args, **kwargs):
+        encoder_outputs = self.encoder(*args, **kwargs)
+        return self.projection(encoder_outputs[0])
 
 
 class MultimodalLanguageModel(PreTrainedModel):
@@ -21,7 +32,7 @@ class MultimodalLanguageModel(PreTrainedModel):
         self,
         config: MultimodalLanguageModelConfig,
         language_model: PreTrainedModel = None,
-        encoders: list[PretrainedConfig] = [],
+        encoders: list[MultimodalEncoderProjector] = [],
     ):
         super().__init__(config)
 
@@ -29,7 +40,7 @@ class MultimodalLanguageModel(PreTrainedModel):
             language_model = AutoModel.from_config(config.text_config)
 
         if not encoders:
-            for encoder_config in config.encoder_configs:
+            for idx, encoder_config in enumerate(config.encoder_configs):
                 if isinstance(encoder_config, CLIPVisionConfig):
                     encoder = CLIPVisionModel(encoder_config)
                 elif isinstance(encoder_config, Dinov2Config):
@@ -37,13 +48,19 @@ class MultimodalLanguageModel(PreTrainedModel):
                 else:
                     encoder = AutoModel.from_config(encoder_config)
 
-            if config.projection_type == "linear":
-                projection = nn.Linear(
-                    in_features=encoder.config.hidden_size,
-                    out_features=language_model.config.hidden_size,
-                )
+                if config.projection_type == "linear":
+                    projection = nn.Linear(
+                        in_features=encoder.config.hidden_size,
+                        out_features=language_model.config.hidden_size,
+                    )
 
-            encoders.append((encoder, projection))
+                encoder_projector = MultimodalEncoderProjector(encoder, projection)
+                encoders.append(encoder_projector)
+
+        for idx, encoder in enumerate(encoders):
+            self.add_module(f"encoder_{idx}", encoder)
+
+        self.add_module("language_model", language_model)
 
         self.language_model = language_model
         self.encoders = encoders
@@ -72,7 +89,14 @@ class MultimodalLanguageModel(PreTrainedModel):
         ... )
         ```
         """
-        encoder_models: list[PretrainedConfig] = []
+        language_model = AutoModelForCausalLM.from_pretrained(
+            text_model_name_or_path,
+            **MultimodalLanguageModel._filter_kwargs(
+                AutoModel.from_pretrained, **kwargs
+            ),
+        )
+
+        encoder_models: list[MultimodalEncoderProjector] = []
         for encoder_name_or_path in encoder_names_or_paths:
             encoder_config = AutoConfig.from_pretrained(encoder_name_or_path)
 
@@ -97,14 +121,15 @@ class MultimodalLanguageModel(PreTrainedModel):
                         AutoModel.from_pretrained, **kwargs
                     ),
                 )
-            encoder_models.append(encoder_model)
 
-        language_model = AutoModelForCausalLM.from_pretrained(
-            text_model_name_or_path,
-            **MultimodalLanguageModel._filter_kwargs(
-                AutoModel.from_pretrained, **kwargs
-            ),
-        )
+            # TODO: need to load projection from pretrained as well
+            if projection_type == "linear":
+                projection = nn.Linear(
+                    in_features=encoder_model.config.hidden_size,
+                    out_features=language_model.config.hidden_size,
+                )
+
+            encoder_models.append(MultimodalEncoderProjector(encoder_model, projection))
 
         config = MultimodalLanguageModelConfig(
             text_config=language_model.config,
