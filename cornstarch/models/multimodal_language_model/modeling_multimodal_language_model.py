@@ -39,11 +39,14 @@ class MultimodalLanguageModel(PreTrainedModel):
         config: MultimodalLanguageModelConfig,
         language_model: PreTrainedModel = None,
         vision_model: MultimodalEncoderProjector = None,
+        **kwargs,
     ):
         super().__init__(config)
 
         if language_model is None:
-            language_model = AutoModelForCausalLM.from_config(config.text_config)
+            language_model = AutoModelForCausalLM.from_config(
+                config.text_config, **kwargs
+            )
 
         if vision_model is None:
             if isinstance(config.vision_config, CLIPVisionConfig):
