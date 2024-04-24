@@ -23,14 +23,11 @@ class MultimodalEncoderProjector(nn.Module):
         self.config = encoder.config
 
     def forward(self, *args, **kwargs):
-        encoder_outputs = self.encoder(*args, **kwargs)
+        image_feature = self.encoder(*args, **kwargs)
+        image_feature = image_feature[0]
+        image_feature = self.projection(image_feature)
 
-        image_feature = encoder_outputs[0]
-        attention_mask = torch.ones(
-            image_feature.size()[:-1], dtype=torch.long, device=image_feature.device
-        )
-
-        return self.projection(image_feature), attention_mask
+        return image_feature
 
 
 class MultimodalLanguageModel(PreTrainedModel):
@@ -41,38 +38,34 @@ class MultimodalLanguageModel(PreTrainedModel):
         self,
         config: MultimodalLanguageModelConfig,
         language_model: PreTrainedModel = None,
-        encoders: list[MultimodalEncoderProjector] = [],
+        vision_model: MultimodalEncoderProjector = None,
     ):
         super().__init__(config)
 
         if language_model is None:
-            language_model = AutoModel.from_config(config.text_config)
+            language_model = AutoModelForCausalLM.from_config(config.text_config)
 
-        if not encoders:
-            for idx, encoder_config in enumerate(config.encoder_configs):
-                if isinstance(encoder_config, CLIPVisionConfig):
-                    encoder = CLIPVisionModel(encoder_config)
-                elif isinstance(encoder_config, Dinov2Config):
-                    encoder = Dinov2Model(encoder_config)
-                else:
-                    encoder = AutoModel.from_config(encoder_config)
+        if vision_model is None:
+            if isinstance(config.vision_config, CLIPVisionConfig):
+                vision_model = CLIPVisionModel(config.vision_config)
+            elif isinstance(config.vision_config, Dinov2Config):
+                vision_model = Dinov2Model(config.vision_config)
+            else:
+                vision_model = AutoModel.from_config(config.vision_config)
 
-                if config.projection_type == "linear":
-                    projection = nn.Linear(
-                        in_features=encoder.config.hidden_size,
-                        out_features=language_model.config.hidden_size,
-                    )
+            if config.projection_type == "linear":
+                projection = nn.Linear(
+                    in_features=vision_model.config.hidden_size,
+                    out_features=language_model.config.hidden_size,
+                )
 
-                encoder_projector = MultimodalEncoderProjector(encoder, projection)
-                encoders.append(encoder_projector)
-
-        for idx, encoder in enumerate(encoders):
-            self.add_module(f"encoder_{idx}", encoder)
+            vision_model = MultimodalEncoderProjector(vision_model, projection)
 
         self.add_module("language_model", language_model)
+        self.add_module("vision_model", vision_model)
 
         self.language_model = language_model
-        self.encoders = encoders
+        self.vision_model = vision_model
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -124,8 +117,10 @@ class MultimodalLanguageModel(PreTrainedModel):
         )
 
         if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings()(input_ids)
+            # 1. Extra the input embeddings
+            inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
+            # 2. Merge text and images
             # This is the case of first token generation
             if past_key_values is None:
                 assert (
@@ -303,8 +298,8 @@ class MultimodalLanguageModel(PreTrainedModel):
     @classmethod
     def from_encoders_llm_pretrained(
         cls,
-        encoder_names_or_paths: list[str] = None,
         text_model_name_or_path: str = None,
+        vision_model_name_or_path: str = None,
         projection_type: str = "linear",
         **kwargs,
     ) -> MultimodalLanguageModel:
@@ -326,50 +321,48 @@ class MultimodalLanguageModel(PreTrainedModel):
             ),
         )
 
-        encoder_models: list[MultimodalEncoderProjector] = []
-        for encoder_name_or_path in encoder_names_or_paths:
-            encoder_config = AutoConfig.from_pretrained(encoder_name_or_path)
+        vision_config = AutoConfig.from_pretrained(vision_model_name_or_path)
 
-            if encoder_config.model_type == "clip":
-                encoder_model = CLIPVisionModel.from_pretrained(
-                    encoder_name_or_path,
-                    **MultimodalLanguageModel._filter_kwargs(
-                        CLIPVisionModel.from_pretrained, **kwargs
-                    ),
-                )
-            elif encoder_config.model_type == "dinov2":
-                encoder_model = Dinov2Model.from_pretrained(
-                    encoder_name_or_path,
-                    **MultimodalLanguageModel._filter_kwargs(
-                        Dinov2Model.from_pretrained, **kwargs
-                    ),
-                )
-            else:
-                encoder_model = AutoModel.from_pretrained(
-                    encoder_name_or_path,
-                    **MultimodalLanguageModel._filter_kwargs(
-                        AutoModel.from_pretrained, **kwargs
-                    ),
-                )
+        if vision_config.model_type == "clip":
+            vision_model = CLIPVisionModel.from_pretrained(
+                vision_model_name_or_path,
+                **MultimodalLanguageModel._filter_kwargs(
+                    CLIPVisionModel.from_pretrained, **kwargs
+                ),
+            )
+        elif vision_config.model_type == "dinov2":
+            vision_model = Dinov2Model.from_pretrained(
+                vision_model_name_or_path,
+                **MultimodalLanguageModel._filter_kwargs(
+                    Dinov2Model.from_pretrained, **kwargs
+                ),
+            )
+        else:
+            vision_model = AutoModel.from_pretrained(
+                vision_model_name_or_path,
+                **MultimodalLanguageModel._filter_kwargs(
+                    AutoModel.from_pretrained, **kwargs
+                ),
+            )
 
-            # TODO: need to load projection from pretrained as well
-            if projection_type == "linear":
-                projection = nn.Linear(
-                    in_features=encoder_model.config.hidden_size,
-                    out_features=language_model.config.hidden_size,
-                )
+        # TODO: need to load projection from pretrained as well
+        if projection_type == "linear":
+            projection = nn.Linear(
+                in_features=vision_model.config.hidden_size,
+                out_features=language_model.config.hidden_size,
+            )
 
-            encoder_models.append(MultimodalEncoderProjector(encoder_model, projection))
+        vision_model = MultimodalEncoderProjector(vision_model, projection)
 
         config = MultimodalLanguageModelConfig(
             text_config=language_model.config,
-            encoder_configs=[encoder.config for encoder in encoder_models],
+            vision_config=vision_model.config,
             projection_type=projection_type,
             **kwargs,
         )
 
         model = cls(
-            config=config, language_model=language_model, encoders=encoder_models
+            config=config, language_model=language_model, vision_model=vision_model
         )
 
         return model

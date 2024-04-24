@@ -21,20 +21,19 @@ class MultimodalLanguageModelConfig(PretrainedConfig):
     Examples:
 
     ```python
-    >>> from transformers import CLIPVisionConfig, LlavaConfig
+    >>> from transformers import CLIPVisionConfig, LlamaConfig
     >>> from cornstarch.models.multimodal_language_model import MultimodalLanguageModelConfig, MultimodalLanguageModel
 
     >>> # Initializing a CLIPVisionModel and Llava configuration
-    >>> config_vision = CLIPVisionConfig()
-    >>> config_text = LlavaConfig()
-
-    >>> config = MultimodalLanguageModelConfig(text_config=config_text, encoder_configs=config_vision)
+    >>> vision_config = CLIPVisionConfig.from_pretrained("openai/clip-vit-base-patch16")
+    >>> language_config = LlamaConfig.from_pretrained("meta-llama/Meta-Llama-3-8B")
 
     >>> # Initializing a MultimodalLanguageModel (with random weights)
+    >>> config = MultimodalLanguageModelConfig(text_config=language_config, vision_config=vision_config)
     >>> model = MultimodalLanguageModel(config=config)
 
     >>> # Initializing a MultimodalLanguageModel from pretrained vision and text models
-    >>> model = MultimodalLanguageModel.from_encoders_llm_pretrained(["openai/clip-vit-base-patch16"], "meta-llama/Meta-Llama-3-8B")
+    >>> model = MultimodalLanguageModel.from_encoders_llm_pretrained("meta-llama/Meta-Llama-3-8B", "openai/clip-vit-base-patch16")
 
     >>> # Accessing the model configuration
     >>> config_vision = model.config.encoder_configs[0]
@@ -50,30 +49,19 @@ class MultimodalLanguageModelConfig(PretrainedConfig):
     def __init__(
         self,
         text_config: PretrainedConfig,
-        encoder_configs: PretrainedConfig | list[PretrainedConfig],
+        vision_config: PretrainedConfig,
         projection_type: str = "linear",
         **kwargs,
     ):
         super().__init__(**kwargs)
 
-        self.text_config = AutoConfig.for_model(**text_config.to_dict())
+        self.text_config = text_config
+        self.vision_config = vision_config
 
-        if not isinstance(encoder_configs, list):
-            encoder_configs = [encoder_configs]
-
-        self.encoder_configs: list[PretrainedConfig] = []
-        for encoder_config in encoder_configs:
-            encoder_model_type = encoder_config.model_type
-            vision_config_class = VISION_MODEL_CONFIGS.get(encoder_model_type, None)
-            if vision_config_class is not None:
-                self.encoder_configs.append(
-                    vision_config_class(**encoder_config.to_dict())
-                )
-            # TODO: add more encoder type
-            else:
-                self.encoder_configs.append(
-                    AutoConfig.for_model(**encoder_config.to_dict())
-                )
+        vision_model_type = vision_config.model_type
+        vision_config_class = VISION_MODEL_CONFIGS.get(vision_model_type, None)
+        if vision_config_class is None:
+            raise ValueError(f"Unsupported vision config: {vision_model_type}")
 
         assert projection_type in ["linear"], "Only linear projection is supported."
         self.projection_type = projection_type
