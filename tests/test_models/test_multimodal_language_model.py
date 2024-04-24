@@ -3,6 +3,7 @@ from typing import Type
 import pytest
 import transformers
 from accelerate import init_empty_weights
+from packaging.version import Version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.models.clip import CLIPVisionConfig
 from transformers.models.dinov2 import Dinov2Config
@@ -26,8 +27,6 @@ language_model_names = [
     "mistralai/Mistral-7B-Instruct-v0.2",
     "microsoft/Phi-3-mini-4k-instruct",
 ]
-
-from packaging.version import Version
 
 
 @pytest.mark.parametrize("vision_model_name", vision_model_names, ids=lambda x: x[0])
