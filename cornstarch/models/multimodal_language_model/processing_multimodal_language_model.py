@@ -174,15 +174,9 @@ class ImageProcessorWrapper(BaseImageProcessor):
         )
         self.crop_size = get_size_dict(shortest_edge_or_height, default_to_square=True)
 
-        size = self.crop_size["height"]
+        patch_size = self.crop_size["height"]
         self.image_grid_pinpoints: list[tuple[int, int]] = [
-            (size * 2, size * 2),
-            (size, size * 2),
-            (size, size * 3),
-            (size, size * 4),
-            (size * 2, size),
-            (size * 3, size),
-            (size * 4, size),
+            (patch_size * i, patch_size * j) for i in range(1, 5) for j in range(1, 5)
         ]
 
     def resize(
@@ -293,6 +287,11 @@ class ImageProcessorWrapper(BaseImageProcessor):
         paste_y = (target_height - new_height) // 2
 
         padded_image = pad(image, padding=((paste_y, paste_y), (paste_x, paste_x)))
+
+        if new_width + paste_x * 2 != target_width:
+            padded_image = pad(padded_image, padding=((0, 0), (1, 0)))
+        if new_height + paste_y * 2 != target_height:
+            padded_image = pad(padded_image, padding=((1, 0), (0, 0)))
 
         return padded_image
 
