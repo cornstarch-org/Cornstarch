@@ -5,6 +5,7 @@ import numpy as np
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_processing_utils import BaseImageProcessor, get_size_dict
 from transformers.image_transforms import (
+    convert_to_rgb,
     get_resize_output_image_size,
     pad,
     resize,
@@ -17,6 +18,7 @@ from transformers.image_utils import (
     get_image_size,
     infer_channel_dimension_format,
     make_list_of_images,
+    to_numpy_array,
     valid_images,
 )
 from transformers.processing_utils import ProcessorMixin
@@ -73,6 +75,31 @@ def select_best_resolution(
             best_fit = (height, width)
 
     return best_fit
+
+
+# Copied from transformers/a0102a425dc8d01fddf215444aa2e54dfd8b7eb2/src/transformers/models/llava_next/modeling_llava_next.py
+def image_size_to_num_patches(image_size: tuple[int, int], patch_size: int) -> int:
+    """
+    Calculate the shape of the image patch grid after the preprocessing for images of any resolution.
+
+    Args:
+        image_size (`tuple`):
+            The size of the input image in the format (height, width).
+        patch_size (`int`):
+            The size of each image patch.
+
+    Returns:
+        The number of image patchs.
+    """
+    height, width = image_size
+    num_patches = 0
+    # consider change to ceil(height/patch_size)*ceil(width/patch_size) + 1
+    for i in range(0, height, patch_size):
+        for j in range(0, width, patch_size):
+            num_patches += 1
+    # add the base patch
+    num_patches += 1
+    return num_patches
 
 
 # Copied from transformers/a0102a425dc8d01fddf215444aa2e54dfd8b7eb2/src/transformers/models/llava_next/image_processing_llava_next.py
@@ -147,14 +174,15 @@ class ImageProcessorWrapper(BaseImageProcessor):
         )
         self.crop_size = get_size_dict(shortest_edge_or_height, default_to_square=True)
 
+        size = self.crop_size["height"]
         self.image_grid_pinpoints: list[tuple[int, int]] = [
-            (self.crop_size * 2, self.crop_size * 2),
-            (self.crop_size, self.crop_size * 2),
-            (self.crop_size, self.crop_size * 3),
-            (self.crop_size, self.crop_size * 4),
-            (self.crop_size * 2, self.crop_size),
-            (self.crop_size * 3, self.crop_size),
-            (self.crop_size * 4, self.crop_size),
+            (size * 2, size * 2),
+            (size, size * 2),
+            (size, size * 3),
+            (size, size * 4),
+            (size * 2, size),
+            (size * 3, size),
+            (size * 4, size),
         ]
 
     def resize(
@@ -182,10 +210,10 @@ class ImageProcessorWrapper(BaseImageProcessor):
             input_data_format (`ChannelDimension` or `str`, *optional*):
                 The channel dimension format of the input image. If not provided, it will be inferred.
         """
-        default_to_sqaure = True
+        default_to_square = True
         if "shortest_edge" in size:
             size = size["shortest_edge"]
-            default_to_sqaure = False
+            default_to_square = False
         elif "height" in size and "width" in size:
             size = (size["height"], size["width"])
         else:
@@ -196,7 +224,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
         output_size = get_resize_output_image_size(
             image,
             size=size,
-            default_to_sqaure=default_to_sqaure,
+            default_to_square=default_to_square,
             input_data_format=input_data_format,
         )
 
@@ -239,7 +267,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
         # Resize the image
         resized_image = self.resize(
             image,
-            size=(new_height, new_width),
+            size={"height": new_height, "width": new_width},
             resample=resample,
             data_format=input_data_format,
             input_data_format=input_data_format,
@@ -340,6 +368,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
         size: dict[str, int] = None,
         image_grid_pinpoints: list[tuple[int, int]] = None,
         resample: PILImageResampling = PILImageResampling.BICUBIC,
+        do_convert_rgb: bool = None,
         return_tensors: Optional[str] = None,
         data_format: Optional[ChannelDimension] = ChannelDimension.FIRST,
         input_data_format: Optional[Union[str, ChannelDimension]] = None,
@@ -348,7 +377,12 @@ class ImageProcessorWrapper(BaseImageProcessor):
         if size is not None:
             size = size["shortest_edge"] if "shortest_edge" in size else size["height"]
         else:
-            size = self.size
+            size = self.crop_size
+        do_convert_rgb = (
+            do_convert_rgb
+            if do_convert_rgb is not None
+            else self.image_processor.do_convert_rgb
+        )
         image_grid_pinpoints = (
             image_grid_pinpoints
             if image_grid_pinpoints is not None
@@ -363,26 +397,33 @@ class ImageProcessorWrapper(BaseImageProcessor):
                 "torch.Tensor, tf.Tensor or jax.ndarray."
             )
 
+        if do_convert_rgb:
+            images = [convert_to_rgb(image) for image in images]
+
+        # All transformations expect numpy arrays.
+        images = [to_numpy_array(image) for image in images]
+
         if input_data_format is None:
             # We assume that all images have the same channel dimension format.
             input_data_format = infer_channel_dimension_format(images[0])
 
         new_images: list[np.ndarray] = []
         image_sizes: list[tuple[int, int]] = []
+        num_patches: list[int] = []
         for image in images:
             # Convert an image into a list of patches
             image_patches = self.get_image_patches(
                 image,
                 image_grid_pinpoints,
-                size=self.crop_size["height"],
+                size=(self.crop_size["height"], self.crop_size["width"]),
                 patch_size=self.crop_size["height"],
                 resample=resample,
-                data_format=data_format,
+                data_format=input_data_format,
                 input_data_format=input_data_format,
             )
 
             # preprocess patches
-            pixel_values = self.image_processor.preprocess(
+            preprocess_output = self.image_processor.preprocess(
                 image_patches,
                 do_resize=False,
                 resample=resample,
@@ -390,9 +431,11 @@ class ImageProcessorWrapper(BaseImageProcessor):
                 input_data_format=input_data_format,
                 **kwargs,
             )
-            pixel_values = np.array(pixel_values)
+            pixel_values = np.array(preprocess_output["pixel_values"])
             new_images.append(pixel_values)
-            image_sizes.append(get_image_size(image, channel_dim=input_data_format))
+            image_size = get_image_size(image, channel_dim=input_data_format)
+            image_sizes.append(image_size)
+            num_patches.append(len(image_patches))
 
         # Pad features
         max_patch = max(len(x) for x in new_images)
@@ -411,7 +454,11 @@ class ImageProcessorWrapper(BaseImageProcessor):
             for x in new_images
         ]
 
-        data = {"pixel_values": pixel_values, "image_sizes": image_sizes}
+        data = {
+            "pixel_values": pixel_values,
+            "image_sizes": image_sizes,
+            "num_patches": num_patches,
+        }
         return BatchFeature(data=data, tensor_type=return_tensors)
 
     @property
@@ -442,10 +489,16 @@ class MultimodalLanguageModelProcessor(ProcessorMixin):
         self.image_processor = ImageProcessorWrapper(image_processor)
         self.tokenizer = tokenizer
 
-        self.tokenizer.add_tokens("<image>")
-        self.image_token_id = self.tokenizer.convert_tokens_to_ids("<image>")
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-    def preprocess(
+        if self.image_processor is not None:
+            self.tokenizer.add_tokens("<image>")
+            self.image_token_id = self.tokenizer.convert_tokens_to_ids("<image>")
+        else:
+            self.image_token_id = None
+
+    def __call__(
         self,
         text: Union[
             TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]
@@ -465,7 +518,7 @@ class MultimodalLanguageModelProcessor(ProcessorMixin):
             )
             inputs.update(image_inputs.data)
 
-        return BatchFeature(data=inputs, return_tensors=return_tensors)
+        return BatchFeature(data=inputs, tensor_type=return_tensors)
 
     def batch_decode(self, *args, **kwargs):
         return self.tokenizer.batch_decode(*args, **kwargs)
