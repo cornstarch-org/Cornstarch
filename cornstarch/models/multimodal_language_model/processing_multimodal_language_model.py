@@ -105,7 +105,7 @@ def image_size_to_num_patches(image_size: tuple[int, int], patch_size: int) -> i
 # Copied from transformers/a0102a425dc8d01fddf215444aa2e54dfd8b7eb2/src/transformers/models/llava_next/image_processing_llava_next.py
 def _divide_to_patches(
     image: np.ndarray, patch_size: int, input_data_format: ChannelDimension
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], tuple[int, int]]:
     """
     Divides an image into patches of a specified size.
 
@@ -119,6 +119,7 @@ def _divide_to_patches(
 
     Returns:
         list: A list of np.array representing the patches.
+        tuple: The number of patches in the image.
     """
     patches = []
     height, width = get_image_size(image, channel_dim=input_data_format)
@@ -130,7 +131,7 @@ def _divide_to_patches(
                 patch = image[:, i : i + patch_size, j : j + patch_size]
             patches.append(patch)
 
-    return patches
+    return patches, (height // patch_size, width // patch_size)
 
 
 def _get_patch_output_size(
@@ -304,7 +305,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
         resample: PILImageResampling,
         data_format: ChannelDimension,
         input_data_format: ChannelDimension,
-    ) -> list[np.ndarray]:
+    ) -> tuple[list[np.ndarray], tuple[int, int]]:
         """
         Process an image with variable resolutions by dividing it into patches.
 
@@ -326,6 +327,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
 
         Returns:
             list[np.ndarray]: A list of NumPy arrays containing the processed image patches.
+            tuple[int, int]: The number of patches in the image.
         """
         if not isinstance(grid_pinpoints, list):
             raise ValueError("grid_pinpoints must be a list of possible resolutions.")
@@ -341,7 +343,9 @@ class ImageProcessorWrapper(BaseImageProcessor):
             resized_image, best_resolution, input_data_format
         )
 
-        patches = _divide_to_patches(padded_image, patch_size, input_data_format)
+        patches, num_patches = _divide_to_patches(
+            padded_image, patch_size, input_data_format
+        )
 
         # Make sure that all patches are in the input data format
         patches = [
@@ -359,7 +363,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
             input_data_format=input_data_format,
         )
 
-        return [resized_original_image] + patches
+        return [resized_original_image] + patches, num_patches
 
     def preprocess(
         self,
@@ -408,10 +412,10 @@ class ImageProcessorWrapper(BaseImageProcessor):
 
         new_images: list[np.ndarray] = []
         image_sizes: list[tuple[int, int]] = []
-        num_patches: list[int] = []
+        num_patches: list[tuple[int, int]] = []
         for image in images:
             # Convert an image into a list of patches
-            image_patches = self.get_image_patches(
+            image_patches, num_patches = self.get_image_patches(
                 image,
                 image_grid_pinpoints,
                 size=(self.crop_size["height"], self.crop_size["width"]),
@@ -434,7 +438,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
             new_images.append(pixel_values)
             image_size = get_image_size(image, channel_dim=input_data_format)
             image_sizes.append(image_size)
-            num_patches.append(len(image_patches))
+            num_patches.append(num_patches)
 
         # Pad features
         max_patch = max(len(x) for x in new_images)
