@@ -415,7 +415,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
         num_patches: list[tuple[int, int]] = []
         for image in images:
             # Convert an image into a list of patches
-            image_patches, num_patches = self.get_image_patches(
+            image_patches, num_patch = self.get_image_patches(
                 image,
                 image_grid_pinpoints,
                 size=(self.crop_size["height"], self.crop_size["width"]),
@@ -438,7 +438,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
             new_images.append(pixel_values)
             image_size = get_image_size(image, channel_dim=input_data_format)
             image_sizes.append(image_size)
-            num_patches.append(num_patches)
+            num_patches.append(num_patch)
 
         # Pad features
         max_patch = max(len(x) for x in new_images)
@@ -492,8 +492,11 @@ class MultimodalLanguageModelProcessor(ProcessorMixin):
         self.image_processor = ImageProcessorWrapper(image_processor)
         self.tokenizer = tokenizer
 
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
+        self.tokenizer.add_tokens("<unk>")
+        self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids("<unk>")
+        print(
+            f"Setting `pad_token_id` to `unk_token_id`: {self.tokenizer.unk_token_id}."
+        )
 
         if self.image_processor is not None:
             self.tokenizer.add_tokens("<image>")

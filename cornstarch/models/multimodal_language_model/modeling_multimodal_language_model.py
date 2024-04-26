@@ -15,6 +15,40 @@ from transformers.models.dinov2 import Dinov2Config, Dinov2Model
 from cornstarch.models.multimodal_language_model import MultimodalLanguageModelConfig
 
 
+# Copied from transformers/models/llava_next/modeling_llava_next.py
+def unpad_image(tensor: torch.Tensor, original_size: torch.Tensor) -> torch.Tensor:
+    """
+    Unpads a PyTorch tensor of a padded and resized image.
+
+    Args:
+        tensor (`torch.Tensor`):
+            The image tensor, assumed to be of shape (num_channels, height, width).
+        original_size (`torch.Tensor`):
+            The original size of the image of shape of (2).
+
+    Returns:
+        `torch.Tensor`: The unpadded image tensor.
+    """
+    original_height, original_width = original_size
+    current_height, current_width = tensor.shape[1:]
+
+    original_aspect_ratio = original_width / original_height
+    current_aspect_ratio = current_width / current_height
+
+    if original_aspect_ratio > current_aspect_ratio:
+        scale_factor = current_width / original_width
+        new_height = int(original_height * scale_factor)
+        padding = (current_height - new_height) // 2
+        unpadded_tensor = tensor[:, padding : current_height - padding, :]
+    else:
+        scale_factor = current_height / original_height
+        new_width = int(original_width * scale_factor)
+        padding = (current_width - new_width) // 2
+        unpadded_tensor = tensor[:, :, padding : current_width - padding]
+
+    return unpadded_tensor
+
+
 class MultimodalEncoderProjector(nn.Module):
     def __init__(self, encoder: PreTrainedModel, projection: nn.Module):
         super().__init__()
@@ -25,6 +59,8 @@ class MultimodalEncoderProjector(nn.Module):
     def forward(self, *args, **kwargs):
         image_feature = self.encoder(*args, **kwargs)
         image_feature = image_feature[0]
+        # Always use "default" feature select strategy
+        image_feature = image_feature[:, 1:]
         image_feature = self.projection(image_feature)
 
         return image_feature
@@ -110,204 +146,6 @@ class MultimodalLanguageModel(PreTrainedModel):
 
     def tie_weights(self):
         self.language_model.tie_weights()
-
-    def _merge_input_ids_with_image_features(
-        self,
-        image_features: torch.Tensor,
-        feature_lens: torch.LongTensor,
-        inputs_embeds: torch.Tensor,
-        input_ids: torch.LongTensor,
-        attention_mask: torch.LongTensor,
-        image_token_id: int,
-        labels: torch.LongTensor = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        ignore_index: int = -100,
-    ):
-        """
-        Merge input_ids with with image features into embeddings
-
-        Args:
-            image_features (`torch.Tensor` of shape `(all_feature_lens, embed_dim)`)
-                All vision vectors of all images in the batch
-            feature_lens (`torch.LongTensor` of shape `(num_images)`)
-                The length of visual embeddings of each image as stacked in `image_features`
-            inputs_embeds (`torch.Tensor` of shape `(batch_size, sequence_length, embed_dim)`)
-                token embeddings before merging with visual embeddings
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`)
-                input_ids of tokens, possibly filled with image token
-            attention_mask (`torch.LongTensor` of shape `(batch_size, sequence_length)`)
-                attention_mask for input_ids
-            position_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`)
-            labels (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*, defaults to None)
-                labels need to be recalculated to support training (if provided)
-        Returns:
-            final_embedding, final_attention_mask, position_ids, final_labels
-
-        Explanation:
-            each image has variable length embeddings, with length specified by feature_lens
-            image_features is concatenation of all visual embed vectors
-            task: fill each <image> with the correct number of visual embeddings
-            Example:
-                X (5 patches), Y (3 patches), Z (7 patches)
-                X, Y is on the same sequence (in-context learning)
-            if right padding
-                input_ids: [
-                    a b c d e f X g h i j k Y l m
-                    o p q r Z s t u v _ _ _ _ _ _
-                ]
-                input_ids should be: [
-                    a b c d e f X X X X X g h i j k Y Y Y l m
-                    o p q r Z Z Z Z Z Z Z s t u v _ _ _ _ _ _
-                ]
-                labels should be: [
-                    a b c d e f _ _ _ _ _ g h i j k _ _ _ l m
-                    o p q r _ _ _ _ _ _ _ s t u v _ _ _ _ _ _
-                ]
-            elif left padding
-                input_ids: [
-                    a b c d e f X g h i j k Y l m
-                    _ _ _ _ _ _ o p q r Z s t u v
-                ]
-                input_ids should be: [
-                    a b c d e f X X X X X g h i j k Y Y Y l m
-                    _ _ _ _ _ _ o p q r Z Z Z Z Z Z Z s t u v
-                ]
-                labels should be: [
-                    a b c d e f _ _ _ _ _ g h i j k _ _ _ l m
-                    _ _ _ _ _ _ o p q r _ _ _ _ _ _ _ s t u v
-                ]
-        """
-        with torch.no_grad():
-            # ! in llava 1.6, number of patches is variable
-            num_images = feature_lens.size(0)
-            num_image_features, embed_dim = image_features.shape
-            if feature_lens.sum() != num_image_features:
-                raise ValueError(
-                    f"{feature_lens=} / {feature_lens.sum()} != {image_features.shape=}"
-                )
-            batch_size, sequence_length = input_ids.shape
-
-            # Whether to turn off right padding
-            # 1. Create a mask to know where special image tokens are
-            special_image_token_mask = input_ids == image_token_id
-            # special_image_token_mask: [bsz, seqlen]
-            num_special_image_tokens = torch.sum(special_image_token_mask, dim=-1)
-            # num_special_image_tokens: [bsz]
-            # Reserve for padding of num_images
-            total_num_special_image_tokens = torch.sum(special_image_token_mask)
-            if total_num_special_image_tokens != num_images:
-                raise ValueError(
-                    f"Number of image tokens in input_ids ({total_num_special_image_tokens}) different from num_images ({num_images})."
-                )
-            # Compute the maximum embed dimension
-            # max_image_feature_lens is max_feature_lens per batch
-            feature_lens_batch = feature_lens.split(
-                num_special_image_tokens.tolist(), dim=0
-            )
-            feature_lens_batch_sum = torch.tensor(
-                [x.sum() for x in feature_lens_batch], device=feature_lens.device
-            )
-            embed_sequence_lengths = (
-                (attention_mask == 1).long().sum(-1)
-                - num_special_image_tokens
-                + feature_lens_batch_sum
-            )
-            max_embed_dim = embed_sequence_lengths.max()
-
-            batch_indices, non_image_indices = torch.where(
-                (input_ids != image_token_id) & (attention_mask == 1)
-            )
-            # 2. Compute the positions where text should be written
-            # Calculate new positions for text tokens in merged image-text sequence.
-            # `special_image_token_mask` identifies image tokens. Each image token will be replaced by `nb_text_tokens_per_images - 1` text tokens.
-            # `torch.cumsum` computes how each image token shifts subsequent text token positions.
-            # - 1 to adjust for zero-based indexing, as `cumsum` inherently increases indices by one.
-            # ! instead of special_image_token_mask * (num_image_patches - 1)
-            #   special_image_token_mask * (num_feature_len - 1)
-            special_image_len_mask = special_image_token_mask.clone().long()
-            special_image_len_mask[special_image_len_mask == 1] = feature_lens - 1
-            new_token_positions = torch.cumsum((special_image_len_mask + 1), -1) - 1
-            if padding_side == "left":
-                # shift right token positions so that they are ending at the same number
-                # the below here was incorrect? new_token_positions += new_token_positions[:, -1].max() - new_token_positions[:, -1:]
-                new_token_positions += max_embed_dim - 1 - new_token_positions[:, -1:]
-
-            text_to_overwrite = new_token_positions[batch_indices, non_image_indices]
-
-        # 3. Create the full embedding, already padded to the maximum position
-        final_embedding = torch.zeros(
-            batch_size,
-            max_embed_dim,
-            embed_dim,
-            dtype=inputs_embeds.dtype,
-            device=inputs_embeds.device,
-        )
-        final_attention_mask = torch.zeros(
-            batch_size,
-            max_embed_dim,
-            dtype=attention_mask.dtype,
-            device=inputs_embeds.device,
-        )
-        final_labels = None
-        if labels is not None:
-            final_labels = torch.full_like(final_attention_mask, ignore_index).to(
-                torch.long
-            )
-        # In case the Vision model or the Language model has been offloaded to CPU, we need to manually
-        # set the corresponding tensors into their correct target device.
-        target_device = inputs_embeds.device
-        batch_indices, non_image_indices, text_to_overwrite = (
-            batch_indices.to(target_device),
-            non_image_indices.to(target_device),
-            text_to_overwrite.to(target_device),
-        )
-        attention_mask = attention_mask.to(target_device)
-
-        # 4. Fill the embeddings based on the mask. If we have ["hey" "<image>", "how", "are"]
-        # we need to index copy on [0, 577, 578, 579] for the text and [1:576] for the image features
-        final_embedding[batch_indices, text_to_overwrite] = inputs_embeds[
-            batch_indices, non_image_indices
-        ]
-        final_attention_mask[batch_indices, text_to_overwrite] = attention_mask[
-            batch_indices, non_image_indices
-        ]
-        if labels is not None:
-            final_labels[batch_indices, text_to_overwrite] = labels[
-                batch_indices, non_image_indices
-            ]
-
-        # 5. Fill the embeddings corresponding to the images. Anything that is still zeros needs filling
-        with torch.no_grad():
-            image_to_overwrite = torch.all(final_embedding == 0, dim=-1)
-            embed_indices = torch.arange(max_embed_dim).unsqueeze(0).to(target_device)
-            embed_indices = embed_indices.expand(batch_size, max_embed_dim)
-            embed_seq_lens = embed_sequence_lengths[:, None].to(target_device)
-
-            if padding_side == "left":
-                # exclude padding on the left
-                val = (max_embed_dim - embed_indices) <= embed_seq_lens
-            else:
-                # exclude padding on the right
-                val = embed_indices < embed_seq_lens
-            image_to_overwrite &= val
-
-            if image_to_overwrite.sum() != num_image_features:
-                raise ValueError(
-                    f"{image_to_overwrite.sum()=} != {num_image_features=} The input provided to the model are wrong. "
-                    f"The number of image tokens is {torch.sum(special_image_token_mask)} while"
-                    f" the number of image given to the model is {num_images}. "
-                    f"This prevents correct indexing and breaks batch generation."
-                )
-        final_embedding[image_to_overwrite] = image_features.to(target_device)
-        final_attention_mask |= image_to_overwrite
-        position_ids = (final_attention_mask.cumsum(-1) - 1).masked_fill_(
-            (final_attention_mask == 0), 1
-        )
-
-        return final_embedding, final_attention_mask, position_ids, final_labels
-
-    def _pad_embeddings(self):
-        raise NotImplementedError
 
     def pack_image_features(
         self,
@@ -452,7 +290,7 @@ class MultimodalLanguageModel(PreTrainedModel):
         left_padding: bool = self.padding_side == "left"
 
         with torch.no_grad():
-            num_images = feature_lens.size()
+            num_images = feature_lens.size(0)
             num_image_features, embed_dim = image_features.shape
             batch_size, sequence_length = input_ids.shape
 
@@ -589,7 +427,7 @@ class MultimodalLanguageModel(PreTrainedModel):
             image_features.contiguous().reshape(-1, embed_dim).to(target_device)
         )
         new_attention_mask |= image_to_overwrite
-        position_ids = (new_attention_mask.cumsum(dim=-1), -1).masked_fill_(
+        position_ids = (new_attention_mask.cumsum(dim=-1) - 1).masked_fill_(
             (new_attention_mask == 0), 1
         )
 
@@ -600,7 +438,7 @@ class MultimodalLanguageModel(PreTrainedModel):
         input_ids: Optional[torch.LongTensor] = None,
         pixel_values: Optional[torch.FloatTensor] = None,
         image_sizes: Optional[torch.LongTensor] = None,
-        num_patches: Optional[list[torch.LongTensor]] = None,
+        num_patches_grid: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[list[torch.FloatTensor]] = None,
@@ -623,7 +461,7 @@ class MultimodalLanguageModel(PreTrainedModel):
             image_sizes (`torch.LongTensor` of shape `(batch_size, 2)`, *optional*, defaults to `None`)
                 The size of the image (height, width) for each image in the batch.
                 The image sizes are the original image sizes before they are split into patches.
-            num_patches (`List[torch.LongTensor]` of length `batch_size`, *optional*, defaults to `None`)
+            num_patches_grid (`torch.LongTensor` of length `(batch_size, 2)`, *optional*, defaults to `None`)
                 The number of patches per image in the batch.
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*, defaults to `None`)
                 Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
@@ -679,6 +517,9 @@ class MultimodalLanguageModel(PreTrainedModel):
                         # there are no images
                         pass
                     else:
+                        num_patches: list[int] = (
+                            torch.prod(num_patches_grid, dim=1) + 1
+                        ).tolist()
                         # figure out if pixel_values is concatenate or stacking
                         if pixel_values.dim() == 5:
                             # stacking: e.g. [2, 5, 3, 336, 336], convert to concat
@@ -700,15 +541,14 @@ class MultimodalLanguageModel(PreTrainedModel):
                         image_features, feature_lens = self.pack_image_features(
                             image_features,
                             image_sizes,
-                            num_patches,
+                            num_patches_grid,
                         )
 
                         inputs_embeds, attention_mask, position_ids, labels = (
                             self.merge_image_features_with_input_ids(
                                 input_ids=input_ids,
                                 image_features=image_features,
-                                image_sizes=image_sizes,
-                                num_patches=num_patches,
+                                feature_lens=feature_lens,
                                 inputs_embeds=inputs_embeds,
                                 attention_mask=attention_mask,
                                 position_ids=position_ids,
@@ -865,7 +705,7 @@ class MultimodalLanguageModel(PreTrainedModel):
                 "attention_mask": attention_mask,
                 "pixel_values": pixel_values,
                 "image_sizes": image_sizes,
-                "num_patches": num_patches,
+                "num_patches_grid": num_patches,
             }
         )
         return model_inputs
@@ -942,7 +782,8 @@ class MultimodalLanguageModel(PreTrainedModel):
         )
 
         tokenizer = AutoTokenizer.from_pretrained(text_model_name_or_path)
-        tokenizer.add_tokens("<image>")
+        tokenizer.add_tokens(["<unk>", "<image>"])
+        tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<unk>")
         image_token_id = tokenizer.convert_tokens_to_ids("<image>")
 
         model = cls(
