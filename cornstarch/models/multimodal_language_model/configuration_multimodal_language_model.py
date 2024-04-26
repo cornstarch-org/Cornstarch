@@ -55,6 +55,12 @@ class MultimodalLanguageModelConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
+        if text_config.pad_token_id is None:
+            if text_config.unk_token_id is None:
+                raise ValueError(
+                    "text_config must have either pad_token_id or unk_token_id set."
+                )
+            text_config.pad_token_id = text_config.unk_token_id
         self.text_config = text_config
         self.vision_config = vision_config
 
