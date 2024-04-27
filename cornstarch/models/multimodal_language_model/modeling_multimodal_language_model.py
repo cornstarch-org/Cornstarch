@@ -132,9 +132,26 @@ class MultimodalLanguageModel(PreTrainedModel):
         train_vision_model: bool,
         train_projection: bool,
     ):
-        self.language_model.train(mode=train_language_model)
-        self.vision_model.encoder.train(mode=train_vision_model)
-        self.vision_model.projection.train(mode=train_projection)
+        for p in self.language_model.parameters():
+            p.requires_grad = train_language_model
+        for p in self.vision_model.encoder.parameters():
+            p.requires_grad = train_vision_model
+        for p in self.vision_model.projection.parameters():
+            p.requires_grad = train_projection
+        self.padding_side = "right"
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        if self.language_model.supports_gradient_checkpointing:
+            self.language_model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs
+            )
+        if self.vision_model.encoder.supports_gradient_checkpointing:
+            self.vision_model.encoder.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs
+            )
+
+    def resize_token_embeddings(self, *args, **kwargs) -> nn.Embedding:
+        return self.language_model.resize_token_embeddings(*args, **kwargs)
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()

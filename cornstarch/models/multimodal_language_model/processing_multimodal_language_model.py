@@ -532,6 +532,9 @@ class MultimodalLanguageModelProcessor(ProcessorMixin):
     def decode(self, *args, **kwargs):
         return self.tokenizer.decode(*args, **kwargs)
 
+    def train(self):
+        self.tokenizer.padding_side = "right"
+
     @property
     def model_input_names(self):
         tokenizer_input_names = self.tokenizer.model_input_names
