@@ -460,7 +460,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
         data = {
             "pixel_values": pixel_values,
             "image_sizes": image_sizes,
-            "num_patches": num_patches,
+            "num_patches_grid": num_patches,
         }
         return BatchFeature(data=data, tensor_type=return_tensors)
 
