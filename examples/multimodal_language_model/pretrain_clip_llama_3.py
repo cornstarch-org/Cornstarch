@@ -113,7 +113,7 @@ def pretrain(
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=2,
-        # shuffle=True,
+        shuffle=True,
         drop_last=True,
         collate_fn=functools.partial(
             collate_fn_llava_pretrain, processor=processor, dataset_dir=dataset_dir
