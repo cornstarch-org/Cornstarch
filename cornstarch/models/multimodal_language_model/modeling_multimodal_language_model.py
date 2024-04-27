@@ -126,6 +126,16 @@ class MultimodalLanguageModel(PreTrainedModel):
         self.padding_side = padding_side
         self.image_token_id = image_token_id
 
+    def train(
+        self,
+        train_language_model: bool,
+        train_vision_model: bool,
+        train_projection: bool,
+    ):
+        self.language_model.train(mode=train_language_model)
+        self.vision_model.encoder.train(mode=train_vision_model)
+        self.vision_model.projection.train(mode=train_projection)
+
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
 
