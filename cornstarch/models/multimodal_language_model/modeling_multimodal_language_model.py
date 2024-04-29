@@ -5,6 +5,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -61,7 +62,9 @@ class MultimodalEncoderProjector(nn.Module):
         image_feature = image_feature[0]
         # Always use "default" feature select strategy
         image_feature = image_feature[:, 1:]
-        image_feature = self.projection(image_feature)
+        image_feature = checkpoint(
+            self.projection.__call__, image_feature, use_reentrant=True
+        )
 
         return image_feature
 
