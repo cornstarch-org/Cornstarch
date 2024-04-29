@@ -72,13 +72,13 @@ def pretrain(
     model: MultimodalLanguageModel = (
         MultimodalLanguageModel.from_encoders_llm_pretrained(
             text_model_name_or_path="google/gemma-1.1-2b-it",
-            vision_model_name_or_path="openai/clip-vit-base-patch16",
+            vision_model_name_or_path="openai/clip-vit-base-patch32",
         ).to(dtype=torch.bfloat16, device="cuda")
     )
     model.gradient_checkpointing_enable()
 
     # Create a processor
-    image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch16")
+    image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32")
     text_processor = LlamaTokenizerFast.from_pretrained(
         "google/gemma-1.1-2b-it",
     )
@@ -111,7 +111,7 @@ def pretrain(
     ]
     dataloader = DataLoader(
         dataset=dataset,
-        batch_size=2,
+        batch_size=4,
         shuffle=True,
         drop_last=True,
         collate_fn=functools.partial(
@@ -137,7 +137,7 @@ def pretrain(
     processor.train()
     optimizer.zero_grad()
 
-    writer = TensorboardWriter("clip-vit-base-patch16", "gemma-1.1-2b-it")
+    writer = TensorboardWriter("clip-vit-base-patch32", "gemma-1.1-2b-it")
 
     for epoch in range(num_epoch):
         total_step = len(dataloader)

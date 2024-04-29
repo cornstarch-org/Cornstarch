@@ -72,15 +72,13 @@ def pretrain(
     model: MultimodalLanguageModel = (
         MultimodalLanguageModel.from_encoders_llm_pretrained(
             text_model_name_or_path="meta-llama/Meta-Llama-3-8b",
-            vision_model_name_or_path="openai/clip-vit-large-patch14-336",
+            vision_model_name_or_path="openai/clip-vit-base-patch32",
         ).to(dtype=torch.bfloat16, device="cuda")
     )
     model.gradient_checkpointing_enable()
 
     # Create a processor
-    image_processor = CLIPImageProcessor.from_pretrained(
-        "openai/clip-vit-large-patch14-336"
-    )
+    image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32")
     text_processor = LlamaTokenizerFast.from_pretrained(
         "meta-llama/Meta-Llama-3-8b",
     )
@@ -113,7 +111,7 @@ def pretrain(
     ]
     dataloader = DataLoader(
         dataset=dataset,
-        batch_size=2,
+        batch_size=1,
         shuffle=True,
         drop_last=True,
         collate_fn=functools.partial(
@@ -139,7 +137,7 @@ def pretrain(
     processor.train()
     optimizer.zero_grad()
 
-    writer = TensorboardWriter("clip-vit-large-patch14-336", "meta-llama-3-8b")
+    writer = TensorboardWriter("clip-vit-base-patch32", "meta-llama-3-8b")
 
     for epoch in range(num_epoch):
         total_step = len(dataloader)
@@ -150,7 +148,7 @@ def pretrain(
         ) as pbar:
             for item in pbar:
                 inputs = next(dataload_iter)
-                outputs = model(inputs)
+                outputs = model(**inputs)
                 loss = outputs.loss
                 loss.backward()
                 optimizer.step()

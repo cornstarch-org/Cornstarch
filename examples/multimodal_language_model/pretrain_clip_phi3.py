@@ -72,13 +72,13 @@ def pretrain(
     model: MultimodalLanguageModel = (
         MultimodalLanguageModel.from_encoders_llm_pretrained(
             text_model_name_or_path="microsoft/Phi-3-mini-128k-instruct",
-            vision_model_name_or_path="openai/clip-vit-base-patch16",
+            vision_model_name_or_path="openai/clip-vit-base-patch32",
         ).to(dtype=torch.bfloat16, device="cuda")
     )
     model.gradient_checkpointing_enable()
 
     # Create a processor
-    image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch16")
+    image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32")
     text_processor = LlamaTokenizerFast.from_pretrained(
         "microsoft/Phi-3-mini-128k-instruct",
     )
@@ -111,7 +111,7 @@ def pretrain(
     ]
     dataloader = DataLoader(
         dataset=dataset,
-        batch_size=1,
+        batch_size=4,
         shuffle=True,
         drop_last=True,
         collate_fn=functools.partial(
@@ -137,7 +137,7 @@ def pretrain(
     processor.train()
     optimizer.zero_grad()
 
-    writer = TensorboardWriter("clip-vit-base-patch16", "Phi-3-mini-128k-instruct")
+    writer = TensorboardWriter("clip-vit-base-patch32", "Phi-3-mini-128k-instruct")
 
     for epoch in range(num_epoch):
         total_step = len(dataloader)
