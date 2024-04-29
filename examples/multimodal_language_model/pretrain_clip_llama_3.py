@@ -5,6 +5,7 @@ import click
 import torch
 from datasets import load_dataset
 from PIL import Image
+from tensorboard_util import TensorboardWriter
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
@@ -138,6 +139,8 @@ def pretrain(
     processor.train()
     optimizer.zero_grad()
 
+    writer = TensorboardWriter("clip-vit-large-patch14-336", "meta-llama-3-8b")
+
     for epoch in range(num_epoch):
         total_step = len(dataloader)
         dataload_iter = iter(dataloader)
@@ -145,8 +148,9 @@ def pretrain(
             range(total_step),
             desc=f"Epoch [{epoch + 1}/{num_epoch}]",
         ) as pbar:
-            for _ in pbar:
-                outputs = model(**next(dataload_iter))
+            for item in pbar:
+                inputs = next(dataload_iter)
+                outputs = model(inputs)
                 loss = outputs.loss
                 loss.backward()
                 optimizer.step()
@@ -154,6 +158,21 @@ def pretrain(
                 optimizer.zero_grad()
 
                 pbar.set_postfix({"loss": loss.item()})
+                writer.write_summary(
+                    num_iteration=epoch * total_step + item,
+                    iteration_time={
+                        "Vision Encoder": model.vision_model.get_elapsed_time(),
+                        "Language Model": model.get_elapsed_time(),
+                    },
+                    loss=loss.item(),
+                    learning_rate=lr_scheduler.get_last_lr()[0],
+                    num_patches=sum(
+                        p[0] * p[1] for p in inputs["num_patches_grid"].tolist()
+                    ),
+                )
+
+    print("Saving projection module...")
+    torch.save(model.vision_model.projection, "clip_llama3_vision_projection.pth")
 
 
 if __name__ == "__main__":

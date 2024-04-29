@@ -1,5 +1,4 @@
 import functools
-import time
 from pathlib import Path
 
 import click
@@ -140,7 +139,7 @@ def pretrain(
     processor.train()
     optimizer.zero_grad()
 
-    writer = TensorboardWriter()
+    writer = TensorboardWriter("clip-vit-large-patch14-336", "gemma-1.1-2b-it")
 
     for epoch in range(num_epoch):
         total_step = len(dataloader)
@@ -151,7 +150,6 @@ def pretrain(
         ) as pbar:
             for item in pbar:
                 inputs = next(dataload_iter)
-                start = time.time_ns()
                 outputs = model(**inputs)
                 loss = outputs.loss
                 loss.backward()
@@ -162,7 +160,10 @@ def pretrain(
                 pbar.set_postfix({"loss": loss.item()})
                 writer.write_summary(
                     num_iteration=epoch * total_step + item,
-                    iteration_time=(time.time_ns() - start) / 1_000_000,
+                    iteration_time={
+                        "Vision Encoder": model.vision_model.get_elapsed_time(),
+                        "Language Model": model.get_elapsed_time(),
+                    },
                     loss=loss.item(),
                     learning_rate=lr_scheduler.get_last_lr()[0],
                     num_patches=sum(
