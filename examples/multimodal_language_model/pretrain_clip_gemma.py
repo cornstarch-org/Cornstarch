@@ -160,17 +160,18 @@ def pretrain(
                 optimizer.zero_grad()
 
                 pbar.set_postfix({"loss": loss.item()})
-
-                num_patches = sum(
-                    p[0] * p[1] for p in inputs["num_patches_grid"].tolist()
-                )
-
                 writer.write_summary(
                     num_iteration=epoch * total_step + item,
                     iteration_time=(time.time_ns() - start) / 1_000_000,
                     loss=loss.item(),
-                    num_patches=num_patches,
+                    learning_rate=lr_scheduler.get_last_lr()[0],
+                    num_patches=sum(
+                        p[0] * p[1] for p in inputs["num_patches_grid"].tolist()
+                    ),
                 )
+
+    print("Saving projection module...")
+    torch.save(model.vision_model.projection, "clip_gemma_vision_projection.pth")
 
 
 if __name__ == "__main__":
