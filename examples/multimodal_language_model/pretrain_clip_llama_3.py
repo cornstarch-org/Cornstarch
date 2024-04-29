@@ -51,7 +51,7 @@ def collate_fn_llava_pretrain(
     )
     for k, v in inputs.items():
         if isinstance(v, torch.Tensor):
-            inputs[k] = v.to("cuda")
+            inputs[k] = v.to("cuda").requires_grad_(v.is_floating_point())
     inputs["labels"] = inputs["input_ids"].clone()
     return inputs
 

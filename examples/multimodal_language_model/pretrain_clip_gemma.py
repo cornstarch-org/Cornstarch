@@ -51,7 +51,7 @@ def collate_fn_llava_pretrain(
     )
     for k, v in inputs.items():
         if isinstance(v, torch.Tensor):
-            inputs[k] = v.to("cuda")
+            inputs[k] = v.to("cuda").requires_grad_(v.is_floating_point())
     inputs["labels"] = inputs["input_ids"].clone()
     return inputs
 
@@ -72,15 +72,13 @@ def pretrain(
     model: MultimodalLanguageModel = (
         MultimodalLanguageModel.from_encoders_llm_pretrained(
             text_model_name_or_path="google/gemma-1.1-2b-it",
-            vision_model_name_or_path="openai/clip-vit-large-patch14-336",
+            vision_model_name_or_path="openai/clip-vit-base-patch16",
         ).to(dtype=torch.bfloat16, device="cuda")
     )
     model.gradient_checkpointing_enable()
 
     # Create a processor
-    image_processor = CLIPImageProcessor.from_pretrained(
-        "openai/clip-vit-large-patch14-336"
-    )
+    image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch16")
     text_processor = LlamaTokenizerFast.from_pretrained(
         "google/gemma-1.1-2b-it",
     )
@@ -139,7 +137,7 @@ def pretrain(
     processor.train()
     optimizer.zero_grad()
 
-    writer = TensorboardWriter("clip-vit-large-patch14-336", "gemma-1.1-2b-it")
+    writer = TensorboardWriter("clip-vit-base-patch16", "gemma-1.1-2b-it")
 
     for epoch in range(num_epoch):
         total_step = len(dataloader)
