@@ -23,6 +23,8 @@ dependencies = [
     "loguru",
     "simple_parsing",
     "datasets",
+    "tensorboard",
+    "click",
 ]
 
 [project.optional-dependencies]
