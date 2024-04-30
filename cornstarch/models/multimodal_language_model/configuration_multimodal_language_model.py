@@ -1,4 +1,4 @@
-from transformers import AutoConfig
+from transformers.activations import ACT2CLS
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.clip.configuration_clip import CLIPVisionConfig
 from transformers.models.dinov2.configuration_dinov2 import Dinov2Config
@@ -7,6 +7,36 @@ VISION_MODEL_CONFIGS = {
     "clip_vision_model": CLIPVisionConfig,
     "dinov2": Dinov2Config,
 }
+
+
+class MultimodalLanguageModelProjectorConfig(PretrainedConfig):
+    model_type = "multimodal-projector-model"
+
+    def __init__(
+        self,
+        encoder_config: PretrainedConfig,
+        text_config: PretrainedConfig,
+        projection_type: str = "linear",
+        activation: str = None,
+    ):
+        super().__init__()
+
+        if projection_type not in ["linear", "mlp", "qformer"]:
+            raise ValueError(
+                f"Unsupported projection type: {projection_type}. "
+                f"Supported types are: 'linear', 'mlp', 'qformer'."
+            )
+        if projection_type != "linear" and activation not in ACT2CLS:
+            raise ValueError(
+                f"Unsupported activation function: {activation}. "
+                f"Supported activations are: {ACT2CLS.keys()}."
+            )
+
+        self.projection_type = projection_type
+        self.activation = activation
+
+        self.in_features = encoder_config.hidden_size
+        self.out_features = text_config.hidden_size
 
 
 class MultimodalLanguageModelConfig(PretrainedConfig):
@@ -18,6 +48,18 @@ class MultimodalLanguageModelConfig(PretrainedConfig):
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs.
     Read the documentation from [`PretrainedConfig`] for more information.
 
+    Args:
+        text_config (`PretrainedConfig`):
+            HuggingFace configuration of the text model.
+        vision_config (`PretrainedConfig`):
+            HuggingFace configuration of the vision model. Note that only vision configurations are supported,
+            such as CLIPVisionConfig or Dinov2Config.
+        projection_type (`str`, optional, defaults to "linear"): Type of projection from the vision encoder to the LLM.
+            Possible values are: "linear", "mlp", and "qformer".
+        activation (`str`, optional, defaults to "gelu"): Type of activation function to use in the projection layer.
+            Not used when `projection_type` is `linear`. Refer to ACT2CLS in transformers/activations.py for choices:
+            https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py
+            Validity is checked when the model is initialized, not when the configuration is created.
     Examples:
 
     ```python
@@ -41,27 +83,25 @@ class MultimodalLanguageModelConfig(PretrainedConfig):
     ```
     """
 
-    model_type = "multimodal_language_model"
+    model_type = "multimodal-language-model"
 
-    # This config class is compose dof multiple sub-configs
+    # This config class is composed of multiple sub-configs
     is_composition = True
 
     def __init__(
         self,
         text_config: PretrainedConfig,
         vision_config: PretrainedConfig,
-        projection_type: str = "linear",
+        vision_projector_config: MultimodalLanguageModelProjectorConfig,
         **kwargs,
     ):
         super().__init__(**kwargs)
-
-        self.text_config = text_config
-        self.vision_config = vision_config
 
         vision_model_type = vision_config.model_type
         vision_config_class = VISION_MODEL_CONFIGS.get(vision_model_type, None)
         if vision_config_class is None:
             raise ValueError(f"Unsupported vision config: {vision_model_type}")
 
-        assert projection_type in ["linear"], "Only linear projection is supported."
-        self.projection_type = projection_type
+        self.text_config = text_config
+        self.vision_config = vision_config
+        self.vision_projector_config = vision_projector_config

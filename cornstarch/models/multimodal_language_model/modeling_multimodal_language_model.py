@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import inspect
+import warnings
 from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers.activations import get_activation
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
 
-from cornstarch.models.multimodal_language_model import MultimodalLanguageModelConfig
+from cornstarch.models.multimodal_language_model import (
+    MultimodalLanguageModelConfig,
+    MultimodalLanguageModelProjectorConfig,
+)
+
+MODEL2CLS = {
+    "clip": CLIPVisionModel,
+    "dinov2": Dinov2Model,
+}
 
 
 # Copied from transformers/models/llava_next/modeling_llava_next.py
@@ -50,23 +59,105 @@ def unpad_image(tensor: torch.Tensor, original_size: torch.Tensor) -> torch.Tens
     return unpadded_tensor
 
 
+class MultimodalProjectorModel(PreTrainedModel):
+    """
+    An abstract class to handle weights initialization of projector layers
+    between encoders and a language model.
+    """
+
+    config_class = MultimodalLanguageModelProjectorConfig
+    base_model_prefix = ""
+    main_input_name = "inputs_embeds"
+    supports_gradient_checkpointing = True
+
+    def __init__(self, config: MultimodalLanguageModelProjectorConfig):
+        super().__init__(config)
+        self.gradient_checkpointing = False
+
+        if config.projection_type == "linear":
+            self.projection = nn.Linear(
+                in_features=config.in_features,
+                out_features=config.out_features,
+            )
+        elif config.projection_type == "mlp":
+            self.in_proj = nn.Linear(
+                in_features=config.in_features,
+                out_features=config.out_features,
+            )
+            self.activation = get_activation(config.activation)
+            self.out_proj = nn.Linear(
+                in_features=config.out_features,
+                out_features=config.out_features,
+            )
+        elif config.projection_type == "qformer":
+            raise NotImplementedError
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(self, image_feature: torch.FloatTensor) -> torch.Tensor:
+        if self.gradient_checkpointing and self.training:
+            if self.config.projection_type == "linear":
+                outputs = self._gradient_checkpointing_func(
+                    self.projection.__call__, image_feature
+                )
+            elif self.config.projection_type == "mlp":
+                outputs = self._gradient_checkpointing_func(
+                    self.in_proj.__call__, image_feature
+                )
+                outputs = self.activation(outputs)
+                outputs = self._gradient_checkpointing_func(
+                    self.out_proj.__call__, outputs
+                )
+            else:
+                raise NotImplementedError
+        else:
+            if self.config.projection_type == "linear":
+                outputs = self.projection(image_feature)
+            elif self.config.projection_type == "mlp":
+                outputs = self.in_proj(image_feature)
+                outputs = self.activation(outputs)
+                outputs = self.out_proj(outputs)
+            else:
+                raise NotImplementedError
+
+        return outputs
+
+
 class MultimodalEncoderProjector(nn.Module):
-    def __init__(self, encoder: PreTrainedModel, projection: nn.Module):
+    def __init__(self, encoder: PreTrainedModel, projection: MultimodalProjectorModel):
         super().__init__()
         self.encoder = encoder
         self.projection = projection
-        self.config = encoder.config
+        self.encoder_config = encoder.config
+        self.projection_config = projection.config
 
     def forward(self, *args, **kwargs):
         image_feature = self.encoder(*args, **kwargs)
         image_feature = image_feature[0]
         # Always use "default" feature select strategy
         image_feature = image_feature[:, 1:]
-        image_feature = checkpoint(
-            self.projection.__call__, image_feature, use_reentrant=True
-        )
+        image_feature = self.projection(image_feature)
 
         return image_feature
+
+    def _init_weights(self, module: nn.Module):
+        if isinstance(module, MultimodalProjectorModel):
+            if module.config.projection_type == "linear":
+                nn.init.normal_(module.projection.weight)
+                if module.projection.bias is not None:
+                    module.projection.bias.data.zero_()
+            elif module.config.projection_type == "mlp":
+                nn.init.normal_(module.in_proj.weight)
+                nn.init.normal_(module.out_proj.weight)
+                if module.in_proj.bias is not None:
+                    module.in_proj.bias.data.zero_()
+                if module.out_proj.bias is not None:
+                    module.out_proj.bias.data.zero_()
+            elif module.config.projection_type == "qformer":
+                raise NotImplementedError
+        elif isinstance(module, PreTrainedModel):
+            module.init_weights()
 
 
 class MultimodalLanguageModel(PreTrainedModel):
@@ -110,15 +201,13 @@ class MultimodalLanguageModel(PreTrainedModel):
             elif isinstance(config.vision_config, Dinov2Config):
                 vision_model = Dinov2Model(config.vision_config)
             else:
+                warnings.warn(
+                    f"Vision model {config.vision_config.name_or_path} not officially supported."
+                )
                 vision_model = AutoModel.from_config(config.vision_config)
 
-            if config.projection_type == "linear":
-                projection = nn.Linear(
-                    in_features=vision_model.config.hidden_size,
-                    out_features=language_model.config.hidden_size,
-                )
-
-            vision_model = MultimodalEncoderProjector(vision_model, projection)
+            vision_projection = MultimodalProjectorModel(config.vision_projector_config)
+            vision_model = MultimodalEncoderProjector(vision_model, vision_projection)
 
         self.add_module("language_model", language_model)
         self.add_module("vision_model", vision_model)
@@ -748,69 +837,108 @@ class MultimodalLanguageModel(PreTrainedModel):
     @classmethod
     def from_encoders_llm_pretrained(
         cls,
-        text_model_name_or_path: str = None,
-        vision_model_name_or_path: str = None,
-        projection_type: str = "linear",
+        text_model_name_or_path: str,
+        vision_model_name_or_path: str,
+        vision_projector_model_name_or_path: str = None,
         **kwargs,
     ) -> MultimodalLanguageModel:
         r"""
+        Instantiate a MultimodalLanguageModel from pretrained LLM and vision encoder.
+
+        Arguments:
+            text_model_name_or_path (`str`):
+                Pretrained text model name or path.
+            vision_model_name_or_path (`str`):
+                Pretrained vision model name or path.
+            vision_projector_model_name_or_path (`str`):
+                Pretrained projection model name or path.
+                If loaded, projection model must be compatible with the given text model and vision model,
+                    otherwise it will raise a `ValueError`.
+                If vision projector name is None or pretrained model is not found,
+                    a new projection layer will be initialized.
+                    Specify `projection_type` in `kwargs` to choose the type of projection layer.
+                    Also specify `activation` in `kwargs` to choose the activation function for the projection layer,
+                    if projection type is not "linear".
+
         Example:
 
         ```python
         >>> # initialize a model from pretrained llama and CLIPVision models.
         >>> model = MultimodalLanguageModel.from_encoders_llm_pretrained(
-        ...     encoder_names_or_paths=["openai/clip-vit-base-patch16"],
         ...     text_model_name_or_path="meta-llama/Meta-Llama-3-8B",
+        ...     vision_model_name_or_path="openai/clip-vit-base-patch16",
+        ...     vision_projector_model_name_or_path="clip-vit-base-llama-3-projector-linear",
         ... )
         ```
         """
         language_model = AutoModelForCausalLM.from_pretrained(
-            text_model_name_or_path,
-            **MultimodalLanguageModel._filter_kwargs(
-                AutoModel.from_pretrained, **kwargs
-            ),
+            text_model_name_or_path, **kwargs
         )
 
         vision_config = AutoConfig.from_pretrained(vision_model_name_or_path)
 
-        if vision_config.model_type == "clip":
-            vision_model = CLIPVisionModel.from_pretrained(
-                vision_model_name_or_path,
-                **MultimodalLanguageModel._filter_kwargs(
-                    CLIPVisionModel.from_pretrained, **kwargs
-                ),
-            )
-        elif vision_config.model_type == "dinov2":
-            vision_model = Dinov2Model.from_pretrained(
-                vision_model_name_or_path,
-                **MultimodalLanguageModel._filter_kwargs(
-                    Dinov2Model.from_pretrained, **kwargs
-                ),
+        if vision_config.model_type in MODEL2CLS:
+            vision_model = MODEL2CLS[vision_config.model_type].from_pretrained(
+                vision_model_name_or_path, **kwargs
             )
         else:
             vision_model = AutoModel.from_pretrained(
-                vision_model_name_or_path,
-                **MultimodalLanguageModel._filter_kwargs(
-                    AutoModel.from_pretrained, **kwargs
-                ),
+                vision_model_name_or_path, **kwargs
             )
 
-        # TODO: need to load projection from pretrained as well
-        if projection_type == "linear":
-            projection = nn.Linear(
-                in_features=vision_model.config.hidden_size,
-                out_features=language_model.config.hidden_size,
+        def init_projection_layer():
+            projection_type = kwargs.get("projection_type", "linear")
+            activation = kwargs.get("activation", "gelu")
+
+            name = f"{vision_config.name_or_path}-{language_model.config.name_or_path}-{projection_type}"
+            warnings.warn(
+                "Projection model not provided. Initializing a new projection layer."
+                f"Name: {name}"
             )
 
-        vision_model = MultimodalEncoderProjector(vision_model, projection)
+            config = MultimodalLanguageModelProjectorConfig(
+                encoder_config=vision_model.config,
+                text_config=language_model.config,
+                projection_type=projection_type,
+                activation=activation,
+            )
+            config.name_or_path = name
+            return MultimodalProjectorModel(config)
+
+        if vision_projector_model_name_or_path is None:
+            projection = init_projection_layer()
+        else:
+            try:
+                projection = AutoModel.from_pretrained(
+                    vision_projector_model_name_or_path
+                )
+            except EnvironmentError as e:
+                warnings.warn(
+                    f"Projection model {vision_projector_model_name_or_path} not found. "
+                    f"Initializing a new projection layer."
+                    f"Original error: {e}."
+                )
+                projection = init_projection_layer()
+
+        assert isinstance(projection, MultimodalProjectorModel)
+        assert (
+            projection.config.in_features == vision_model.config.hidden_size
+            and projection.config.out_features == language_model.config.hidden_size
+        ), (
+            f"Projection model {vision_projector_model_name_or_path} is not compatible with "
+            f"the given text model {text_model_name_or_path} and vision model {vision_model_name_or_path}."
+            f"Vision model hidden size {vision_model.config.hidden_size} ? Projection in feature {projection.config.in_features}, "
+            f"Text model hidden size {language_model.config.hidden_size} ? Projection out feature {projection.config.out_features}"
+        )
 
         config = MultimodalLanguageModelConfig(
             text_config=language_model.config,
             vision_config=vision_model.config,
-            projection_type=projection_type,
+            vision_projector_config=projection.config,
             **kwargs,
         )
 
+        # Get required token ids (pad_token_id and image_token_id)
         tokenizer = AutoTokenizer.from_pretrained(text_model_name_or_path)
         tokenizer.add_tokens(["<unk>", "<image>"])
         tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<unk>")
@@ -821,7 +949,7 @@ class MultimodalLanguageModel(PreTrainedModel):
             padding_side=tokenizer.padding_side,
             image_token_id=image_token_id,
             language_model=language_model,
-            vision_model=vision_model,
+            vision_model=MultimodalEncoderProjector(vision_model, projection),
         )
 
         return model
