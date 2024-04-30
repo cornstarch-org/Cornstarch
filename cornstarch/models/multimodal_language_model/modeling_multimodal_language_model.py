@@ -768,7 +768,7 @@ class MultimodalLanguageModel(PreTrainedModel):
         inputs_embeds: torch.FloatTensor = None,
         pixel_values: torch.FloatTensor = None,
         image_sizes: torch.LongTensor = None,
-        num_patches: torch.LongTensor = None,
+        num_patches_grid: torch.LongTensor = None,
         attention_mask: torch.LongTensor = None,
         **kwargs,
     ):
@@ -793,7 +793,7 @@ class MultimodalLanguageModel(PreTrainedModel):
             elif past_length < input_ids.shape[1]:
                 input_ids = input_ids[:, past_length:]
             # 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
-            elif self.config.image_token_index in input_ids:
+            elif self.image_token_id in input_ids:
                 input_ids = input_ids[:, input_ids.shape[1] - 1 :]
             # If the cache has seen more tokens than it can hold, then the cache has a size limit. Let's discard the
             # older attention values, as their corresponding values are not part of the input.
@@ -824,7 +824,7 @@ class MultimodalLanguageModel(PreTrainedModel):
                 "attention_mask": attention_mask,
                 "pixel_values": pixel_values,
                 "image_sizes": image_sizes,
-                "num_patches_grid": num_patches,
+                "num_patches_grid": num_patches_grid,
             }
         )
         return model_inputs
