@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import enum
 import inspect
 import warnings
 from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
+from peft import LoraConfig, TaskType, get_peft_model
+from peft.peft_model import PeftModelForCausalLM
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
 from transformers.activations import get_activation
 from transformers.cache_utils import Cache
@@ -23,6 +26,12 @@ MODEL2CLS = {
     "clip": CLIPVisionModel,
     "dinov2": Dinov2Model,
 }
+
+
+class TrainMode(enum.Enum):
+    full = enum.auto()
+    peft = enum.auto()
+    frozen = enum.auto()
 
 
 # Copied from transformers/models/llava_next/modeling_llava_next.py
@@ -125,19 +134,19 @@ class MultimodalProjectorModel(PreTrainedModel):
 
 
 class MultimodalEncoderProjector(nn.Module):
-    def __init__(self, encoder: PreTrainedModel, projection: MultimodalProjectorModel):
+    def __init__(self, encoder: PreTrainedModel, projector: MultimodalProjectorModel):
         super().__init__()
         self.encoder = encoder
-        self.projection = projection
+        self.projector = projector
         self.encoder_config = encoder.config
-        self.projection_config = projection.config
+        self.projector_config = projector.config
 
     def forward(self, *args, **kwargs):
         image_feature = self.encoder(*args, **kwargs)
         image_feature = image_feature[0]
         # Always use "default" feature select strategy
         image_feature = image_feature[:, 1:]
-        image_feature = self.projection(image_feature)
+        image_feature = self.projector(image_feature)
 
         return image_feature
 
@@ -220,17 +229,138 @@ class MultimodalLanguageModel(PreTrainedModel):
 
     def train(
         self,
-        train_language_model: bool,
-        train_vision_model: bool,
-        train_projection: bool,
-    ):
-        for p in self.language_model.parameters():
-            p.requires_grad = train_language_model
-        for p in self.vision_model.encoder.parameters():
-            p.requires_grad = train_vision_model
-        for p in self.vision_model.projection.parameters():
-            p.requires_grad = train_projection
+        train_language_model: str | TrainMode = TrainMode.frozen,
+        train_vision_model: str | TrainMode = TrainMode.frozen,
+        train_projection: str | TrainMode = TrainMode.full,
+        model_peft_name_or_path: Optional[str] = None,
+    ) -> MultimodalLanguageModel | PeftModelForCausalLM:
+        """
+        Set training mode for each modules of the model.
+        Currently supports three modes: `frozen`, `full`, and `peft`.
+
+        If a mode is `peft`, the corresponding module will be wrapped as `PeftModel`.
+        To load a fine-tuned peft model, provide name or path to `model_peft_name_or_path`.
+        If some modules are set to `peft` training mode but `model_peft_name_of_path` is not provided,
+        the peft modules will be initialized with random weights.
+
+        Args:
+            train_language_model (`str` or `TrainMode`. defaults to `frozen`):
+                Training mode for the language model.
+                Supported modes are `frozen`, `full`, and `peft`.
+            train_vision_model (`str` or `TrainMode`. defaults to `frozen`):
+                Training mode for the vision model.
+                Supported modes are `frozen`, `full`, and `peft`.
+            train_projection (`str` or `TrainMode`. defaults to `full`):
+                Training mode for the vision projection layer.
+                Supported modes are `frozen`, `full`, and `peft`.
+            model_peft_name_or_path (`str`, *optional*):
+                Name or path to the peft model for modules.
+                It will be ignored if no models are set to `peft` training mode.
+
+        Returns:
+            `MultimodalLanguageModel` or `PeftModelForCausalLM`:
+                `MultimodalLanguageModel` if no modules are set to `peft` training mode.
+                `PeftModelForCausalLM` if any modules are set to `peft` training mode.
+        """
+        supported_modes = list(TrainMode.__members__.keys())
+        if isinstance(train_language_model, str):
+            if train_language_model not in supported_modes:
+                raise ValueError(
+                    f"{train_language_model} not supported. "
+                    f"Supported modes are {supported_modes}"
+                )
+            train_language_model = TrainMode[train_language_model]
+        if isinstance(train_vision_model, str):
+            if train_vision_model not in supported_modes:
+                raise ValueError(
+                    f"{train_vision_model} not supported. "
+                    f"Supported modes are {supported_modes}"
+                )
+            train_vision_model = TrainMode[train_vision_model]
+        if isinstance(train_projection, str):
+            if train_projection not in supported_modes:
+                raise ValueError(
+                    f"{train_projection} not supported. "
+                    f"Supported modes are {supported_modes}"
+                )
+            train_projection = TrainMode[train_projection]
+
         self.padding_side = "right"
+
+        module: MultimodalLanguageModel = self
+        model: MultimodalLanguageModel | PeftModelForCausalLM = self
+        if (
+            train_language_model == TrainMode.peft
+            or train_vision_model == TrainMode.peft
+            or train_projection == TrainMode.peft
+        ):
+            if model_peft_name_or_path is None:
+                perf_config = LoraConfig(
+                    target_modules="all-linear",
+                    task_type=TaskType.CAUSAL_LM,
+                    inference_mode=False,
+                )
+                model: PeftModelForCausalLM = get_peft_model(
+                    self, peft_config=perf_config
+                )
+
+            else:
+                model = PeftModelForCausalLM.from_pretrained(
+                    self, model_peft_name_or_path, is_trainable=True
+                )
+
+            module = model.base_model.model
+
+            # Recover non-peft training module
+            # Copied from peft/tuners/mixed/model.py:_unload_and_optionally_merge
+            from peft.tuners.mixed.model import PREFIXES, MixedModel
+            from peft.tuners.tuners_utils import BaseTunerLayer
+            from peft.utils.other import _get_submodules
+
+            def unload(module: MixedModel):
+                for submodule in module.modules():
+                    keys = [
+                        key
+                        for key, _ in submodule.named_modules()
+                        if not any(prefix in key for prefix in PREFIXES)
+                    ]
+                    for key in keys:
+                        try:
+                            parent, target, target_name = _get_submodules(
+                                submodule, key
+                            )
+                            if hasattr(target, "base_layer"):
+                                assert isinstance(target, BaseTunerLayer)
+                                model._replace_module(
+                                    parent, target_name, target.get_base_layer(), target
+                                )
+                        except AttributeError:
+                            continue
+
+            if train_language_model != TrainMode.peft:
+                unload(module.language_model)
+
+            if train_vision_model != TrainMode.peft:
+                unload(module.vision_model.encoder)
+
+            if train_projection != TrainMode.peft:
+                unload(module.vision_model.projector)
+
+        # Set training mode by chainging requires_grad.
+        # This is done after handling peft cases since peft internally modifies requires_grad.
+        if train_language_model in [TrainMode.full, TrainMode.frozen]:
+            for p in module.language_model.parameters():
+                p.requires_grad = train_language_model == TrainMode.full
+
+        if train_vision_model in [TrainMode.full, TrainMode.frozen]:
+            for p in module.vision_model.encoder.parameters():
+                p.requires_grad = train_vision_model == TrainMode.full
+
+        if train_projection in [TrainMode.full, TrainMode.frozen]:
+            for p in module.vision_model.projector.parameters():
+                p.requires_grad = train_projection == TrainMode.full
+
+        return model
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         if self.language_model.supports_gradient_checkpointing:

@@ -5,7 +5,6 @@ import click
 import torch
 from datasets import load_dataset
 from PIL import Image
-from tensorboard_util import TensorboardWriter
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
@@ -119,8 +118,15 @@ def pretrain(
         ),
     )
 
-    optimizer = Adam(model.parameters())
+    model.train(
+        train_language_model="frozen",
+        train_vision_model="frozen",
+        train_projection="full",
+    )
+    processor.train()
 
+    optimizer = Adam(model.parameters())
+    optimizer.zero_grad()
     total_steps = len(dataloader) * num_epoch
     num_warmup_steps = int(total_steps * warmup_fraction)
     lr_scheduler: LambdaLR = get_linear_schedule_with_warmup(
@@ -128,16 +134,6 @@ def pretrain(
         num_warmup_steps=num_warmup_steps,
         num_training_steps=total_steps,
     )
-
-    model.train(
-        train_language_model=False,
-        train_vision_model=False,
-        train_projection=True,
-    )
-    processor.train()
-    optimizer.zero_grad()
-
-    writer = TensorboardWriter("clip-vit-base-patch32", "Phi-3-mini-128k-instruct")
 
     for epoch in range(num_epoch):
         total_step = len(dataloader)
@@ -156,18 +152,6 @@ def pretrain(
                 optimizer.zero_grad()
 
                 pbar.set_postfix({"loss": loss.item()})
-                writer.write_summary(
-                    num_iteration=epoch * total_step + item,
-                    iteration_time={
-                        "Vision Encoder": model.vision_model.get_elapsed_time(),
-                        "Language Model": model.get_elapsed_time(),
-                    },
-                    loss=loss.item(),
-                    learning_rate=lr_scheduler.get_last_lr()[0],
-                    num_patches=sum(
-                        p[0] * p[1] for p in inputs["num_patches_grid"].tolist()
-                    ),
-                )
 
     print("Saving projection module...")
     torch.save(model.vision_model.projection, "clip_phi3_vision_projection.pth")
