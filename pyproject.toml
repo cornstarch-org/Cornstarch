@@ -25,6 +25,7 @@ dependencies = [
     "datasets",
     "tensorboard",
     "click",
+    "timm",
 ]
 
 [project.optional-dependencies]

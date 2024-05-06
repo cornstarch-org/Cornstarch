@@ -3,9 +3,12 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.models.clip.configuration_clip import CLIPVisionConfig
 from transformers.models.dinov2.configuration_dinov2 import Dinov2Config
 
+from cornstarch.models.intern_vit.configuration_intern_vit import InternVisionConfig
+
 VISION_MODEL_CONFIGS = {
     "clip_vision_model": CLIPVisionConfig,
     "dinov2": Dinov2Config,
+    "intern_vit_6b": InternVisionConfig,
 }
 
 
