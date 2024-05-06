@@ -74,17 +74,16 @@ def pretrain(
     model: MultimodalLanguageModel = (
         MultimodalLanguageModel.from_encoders_llm_pretrained(
             text_model_name_or_path="google/gemma-1.1-2b-it",
-            vision_model_name_or_path="BAAI/EVA-CLIP-8B-448",
+            vision_model_name_or_path="BAAI/EVA-CLIP-8B",
             vision_model_cls=EvaCLIPVisionModel,
         ).to(dtype=torch.bfloat16, device="cuda")
     )
     model.gradient_checkpointing_enable()
 
     # Create a processor
-    # ImageProcessor configuration from https://huggingface.co/BAAI/EVA-CLIP-8B-448
-    image_size = 448
-    image_processor = CLIPImageProcessor(
-        size={"shortest_edge": image_size}, do_center_crop=True, crop_size=image_size
+    # ImageProcessor configuration from https://huggingface.co/BAAI/EVA-CLIP-8B
+    image_processor = CLIPImageProcessor.from_pretrained(
+        "openai/clip-vit-large-patch14"
     )
 
     text_processor = GemmaTokenizerFast.from_pretrained(
