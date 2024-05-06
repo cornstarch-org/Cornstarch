@@ -118,7 +118,7 @@ def pretrain(
         ),
     )
 
-    model.train(
+    model = model.train(
         train_language_model="frozen",
         train_vision_model="frozen",
         train_projection="full",
