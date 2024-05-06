@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 import inspect
 import warnings
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Type
 
 import torch
 import torch.nn as nn
@@ -21,11 +21,6 @@ from cornstarch.models.multimodal_language_model import (
     MultimodalLanguageModelConfig,
     MultimodalLanguageModelProjectorConfig,
 )
-
-MODEL2CLS = {
-    "clip": CLIPVisionModel,
-    "dinov2": Dinov2Model,
-}
 
 
 class TrainMode(enum.Enum):
@@ -970,6 +965,8 @@ class MultimodalLanguageModel(PreTrainedModel):
         text_model_name_or_path: str,
         vision_model_name_or_path: str,
         vision_projector_model_name_or_path: str = None,
+        text_model_cls: Type[PreTrainedModel] = AutoModelForCausalLM,
+        vision_model_cls: Type[PreTrainedModel] = AutoModel,
         **kwargs,
     ) -> MultimodalLanguageModel:
         r"""
@@ -1001,18 +998,28 @@ class MultimodalLanguageModel(PreTrainedModel):
         ... )
         ```
         """
-        language_model = AutoModelForCausalLM.from_pretrained(
+        language_model = text_model_cls.from_pretrained(
             text_model_name_or_path, **kwargs
         )
 
-        vision_config = AutoConfig.from_pretrained(vision_model_name_or_path)
+        if vision_model_cls == AutoModel:
+            warnings.warn(
+                f"Using AutoModel to load vision model `{vision_model_name_or_path}` might fail to load vision part of the model."
+                "Consider using a vision model class (e.g. `CLIPVisionModel`) that supports vision model only."
+            )
+            vision_config = AutoConfig.from_pretrained(vision_model_name_or_path)
 
-        if vision_config.model_type in MODEL2CLS:
-            vision_model = MODEL2CLS[vision_config.model_type].from_pretrained(
-                vision_model_name_or_path, **kwargs
+            if vision_config.model_type == "clip":
+                vision_config = vision_config.vision_config
+
+            vision_model = AutoModel.from_pretrained(
+                vision_model_name_or_path, config=vision_config, **kwargs
             )
         else:
-            vision_model = AutoModel.from_pretrained(
+            vision_config = vision_model_cls.config_class.from_pretrained(
+                vision_model_name_or_path
+            )
+            vision_model = vision_model_cls.from_pretrained(
                 vision_model_name_or_path, **kwargs
             )
 
@@ -1020,9 +1027,9 @@ class MultimodalLanguageModel(PreTrainedModel):
             projection_type = kwargs.get("projection_type", "linear")
             activation = kwargs.get("activation", "gelu")
 
-            name = f"{vision_config.name_or_path}-{language_model.config.name_or_path}-{projection_type}"
+            name = f"{vision_model.name_or_path}-{language_model.name_or_path}-{projection_type}"
             warnings.warn(
-                "Projection model not provided. Initializing a new projection layer."
+                "Projection model not provided. Initializing a new projection layer. "
                 f"Name: {name}"
             )
 
