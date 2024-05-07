@@ -1,14 +1,16 @@
 import functools
 from pathlib import Path
+from typing import Type
 
 import click
 import colossalai
 import torch
 from colossalai.booster import Booster
-from colossalai.booster.plugin import GeminiPlugin
-from colossalai.nn.optimizer import HybridAdam
+from colossalai.booster.plugin import TorchFSDPPlugin
+from colossalai.nn.optimizer import FusedAdam
 from datasets import load_dataset
 from PIL import Image
+from torch.distributed.fsdp import BackwardPrefetch, MixedPrecision, ShardingStrategy
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -16,12 +18,17 @@ from transformers import (
     CLIPImageProcessor,
     get_linear_schedule_with_warmup,
 )
+from transformers.models.gemma.modeling_gemma import GemmaDecoderLayer
 from transformers.models.gemma.tokenization_gemma_fast import GemmaTokenizerFast
 
-from cornstarch.models.evaclip import EvaCLIPVisionModel
+from cornstarch.models.evaclip.modeling_evaclip import (
+    EvaCLIPEncoderLayer,
+    EvaCLIPVisionModel,
+)
 from cornstarch.models.multimodal_language_model import (
     MultimodalLanguageModel,
     MultimodalLanguageModelProcessor,
+    MultimodalProjectorModel,
 )
 
 
@@ -61,6 +68,40 @@ def collate_fn_llava_pretrain(
     return inputs
 
 
+def fsdp_auto_wrap_policy(
+    model: torch.nn.Module, transformer_layer_names: list[Type[torch.nn.Module]]
+):
+    import functools
+
+    from torch.distributed.fsdp.wrap import (
+        _or_policy,
+        lambda_auto_wrap_policy,
+        transformer_auto_wrap_policy,
+    )
+
+    def lambda_policy_fn(module: torch.nn.Module):
+        if (
+            len(list(module.named_children())) == 0
+            and getattr(module, "weight", None) is not None
+            and module.weight.requires_grad
+        ):
+            return True
+        return False
+
+    lambda_policy = functools.partial(
+        lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn
+    )
+    transformer_wrap_policy = functools.partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls=set(transformer_layer_names),
+    )
+
+    auto_wrap_policy = functools.partial(
+        _or_policy, policies=[lambda_policy, transformer_wrap_policy]
+    )
+    return auto_wrap_policy
+
+
 @click.command
 @click.option("--dataset_dir", type=Path, required=True, help="Path to the dataset.")
 @click.option(
@@ -81,7 +122,7 @@ def pretrain(
             vision_model_cls=EvaCLIPVisionModel,
         ).to(dtype=torch.bfloat16)
     )
-    model.gradient_checkpointing_enable()
+    model.gradient_checkpointing_enable({"use_reentrant": False})
 
     # Create a processor
     # ImageProcessor configuration from https://huggingface.co/BAAI/EVA-CLIP-8B
@@ -116,7 +157,21 @@ def pretrain(
         dataset_file_name = blip_laion_cc_sbu_558k.json
     """
 
-    plugin = GeminiPlugin(precision="bf16", offload_optim_frac=1.0)
+    plugin = TorchFSDPPlugin(
+        mixed_precision=MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.bfloat16,
+            buffer_dtype=torch.bfloat16,
+            keep_low_precision_grads=True,
+        ),
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+        auto_wrap_policy=fsdp_auto_wrap_policy(
+            model, [GemmaDecoderLayer, EvaCLIPEncoderLayer, MultimodalProjectorModel]
+        ),
+    )
+    plugin.fsdp_kwargs["use_orig_params"] = True
+    plugin.fsdp_kwargs["forward_prefetch"] = True
     booster = Booster(plugin=plugin)
 
     dataset = load_dataset("json", data_files=f"{dataset_dir}/{dataset_file_name}")[
@@ -139,7 +194,7 @@ def pretrain(
     )
     processor.train()
 
-    optimizer = HybridAdam(model.parameters())
+    optimizer = FusedAdam(model.parameters())
     optimizer.zero_grad()
 
     total_steps = len(dataloader) * num_epoch
@@ -176,7 +231,8 @@ def pretrain(
 
                 pbar.set_postfix({"loss": loss.item()})
 
-                if i == 5:
+                if i == 20:
+                    torch.cuda.synchronize()
                     return
 
     print("Saving projection module...")
