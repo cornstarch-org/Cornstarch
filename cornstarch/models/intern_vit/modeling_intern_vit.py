@@ -295,8 +295,9 @@ class InternVisionEncoder(nn.Module):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
             if self.gradient_checkpointing and self.training:
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    encoder_layer, hidden_states
+                layer_outputs = self._gradient_checkpointing_func(
+                    encoder_layer.__call__,
+                    hidden_states,
                 )
             else:
                 layer_outputs = encoder_layer(
