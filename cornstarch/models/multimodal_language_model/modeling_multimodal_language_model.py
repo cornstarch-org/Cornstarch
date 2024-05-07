@@ -257,6 +257,10 @@ class MultimodalLanguageModel(PreTrainedModel):
                 `MultimodalLanguageModel` if no modules are set to `peft` training mode.
                 `PeftModelForCausalLM` if any modules are set to `peft` training mode.
         """
+        self.language_model.train(True)
+        self.vision_model.encoder.train(True)
+        self.vision_model.projector.train(True)
+
         supported_modes = list(TrainMode.__members__.keys())
         if isinstance(train_language_model, str):
             if train_language_model not in supported_modes:
@@ -366,6 +370,9 @@ class MultimodalLanguageModel(PreTrainedModel):
             self.vision_model.encoder.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs
             )
+        self.vision_model.projector.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs
+        )
 
     def resize_token_embeddings(self, *args, **kwargs) -> nn.Embedding:
         return self.language_model.resize_token_embeddings(*args, **kwargs)
