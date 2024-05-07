@@ -68,9 +68,8 @@ def collate_fn_llava_pretrain(
     return inputs
 
 
-def fsdp_auto_wrap_policy(
-    model: torch.nn.Module, transformer_layer_names: list[Type[torch.nn.Module]]
-):
+# Copied and modified from https://github.com/meta-llama/llama-recipes/blob/main/src/llama_recipes/utils/fsdp_utils.py
+def fsdp_auto_wrap_policy(transformer_layer_names: list[Type[torch.nn.Module]]):
     import functools
 
     from torch.distributed.fsdp.wrap import (
@@ -167,7 +166,7 @@ def pretrain(
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
         auto_wrap_policy=fsdp_auto_wrap_policy(
-            model, [GemmaDecoderLayer, EvaCLIPEncoderLayer, MultimodalProjectorModel]
+            [GemmaDecoderLayer, EvaCLIPEncoderLayer, MultimodalProjectorModel]
         ),
     )
     plugin.fsdp_kwargs["use_orig_params"] = True
@@ -179,7 +178,7 @@ def pretrain(
     ]
     dataloader = DataLoader(
         dataset=dataset,
-        batch_size=1,
+        batch_size=2,
         shuffle=True,
         drop_last=True,
         collate_fn=functools.partial(
