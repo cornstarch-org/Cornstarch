@@ -14,6 +14,7 @@ from transformers import PreTrainedTokenizer, get_linear_schedule_with_warmup
 from transformers.models.llama import LlamaTokenizerFast
 from transformers.models.mixtral import MixtralConfig, MixtralForCausalLM
 
+from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.policies.mixtral import MixtralForCausalLMPolicy
 
 
@@ -56,8 +57,13 @@ def main(
         model = MixtralForCausalLM.from_pretrained(model_name_or_path, config=config)
     model.gradient_checkpointing_enable()
 
+    model_name = PipelineTemplate.get_model_name(model)
+    modules = PipelineTemplate.get_modules(model)
+    pipeline_template = PipelineTemplate(model_name, [modules[:4], modules[4:]])
+
     policy = MixtralForCausalLMPolicy()
     policy.set_model(model)
+    policy.set_pipeline_template(pipeline_template)
 
     dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1")["train"]
     tokenizer = LlamaTokenizerFast.from_pretrained(
@@ -66,7 +72,11 @@ def main(
     tokenizer.pad_token = tokenizer.eos_token
 
     plugin = HybridParallelPlugin(
-        tp_size=4, pp_size=1, precision="bf16", custom_policy=policy
+        tp_size=2,
+        pp_size=2,
+        microbatch_size=2,
+        precision="bf16",
+        custom_policy=policy,
     )
     dataloader = plugin.prepare_dataloader(
         dataset,
