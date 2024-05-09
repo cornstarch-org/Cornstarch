@@ -102,16 +102,23 @@ def main(
     # Train model
     model.train()
     optimizer.zero_grad()
+    is_pp_last_stage = plugin.stage_manager.is_last_stage()
 
     dataloader_iter = iter(dataloader)
     with tqdm(range(total_steps), disable=not (coordinator.is_master())) as pbar:
         for _ in pbar:
-            inputs = next(dataloader_iter)
-            outputs = model(**inputs)
-            loss = outputs.loss
-            optimizer.backward(loss)
+            outputs = booster.execute_pipeline(
+                dataloader_iter,
+                model,
+                lambda inputs, outputs: outputs.loss,
+                optimizer,
+                return_loss=True,
+                return_outputs=False,
+            )
 
-            pbar.set_postfix({"loss": loss.item()})
+            if is_pp_last_stage:
+                loss = outputs["loss"]
+                pbar.set_postfix({"loss": loss.item()})
 
             optimizer.step()
             optimizer.zero_grad()
