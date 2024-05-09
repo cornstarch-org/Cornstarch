@@ -3,12 +3,13 @@ import functools
 import click
 import colossalai
 import datasets
+import torch
 from colossalai.accelerator import get_accelerator
 from colossalai.booster import Booster
 from colossalai.booster.plugin import HybridParallelPlugin
 from colossalai.cluster import DistCoordinator
 from colossalai.lazy import LazyInitContext
-from colossalai.nn.optimizer import FusedAdam
+from colossalai.nn.optimizer import CPUAdam
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, get_linear_schedule_with_warmup
 from transformers.models.llama import LlamaTokenizerFast
@@ -52,14 +53,14 @@ def main(
     with LazyInitContext(default_device=get_accelerator().get_current_device()):
         config = MixtralConfig.from_pretrained(model_name_or_path)
         # TODO: remove it when example starts using pipeline parallelism
-        config.num_hidden_layers = 6
+        config.num_hidden_layers = 4
         config._attn_implementation = "flash_attention_2"
         model = MixtralForCausalLM.from_pretrained(model_name_or_path, config=config)
     model.gradient_checkpointing_enable()
 
     model_name = PipelineTemplate.get_model_name(model)
     modules = PipelineTemplate.get_modules(model)
-    pipeline_template = PipelineTemplate(model_name, [modules[:4], modules[4:]])
+    pipeline_template = PipelineTemplate(model_name, [modules[:3], modules[3:]])
 
     policy = MixtralForCausalLMPolicy()
     policy.set_model(model)
@@ -88,7 +89,7 @@ def main(
 
     booster = Booster(plugin=plugin)
     total_steps = len(dataloader)
-    optimizer = FusedAdam(model.parameters())
+    optimizer = CPUAdam(model.parameters())
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=100,
@@ -98,6 +99,13 @@ def main(
     model, optimizer, _, dataloader, lr_scheduler = booster.boost(
         model, optimizer, dataloader=dataloader, lr_scheduler=lr_scheduler
     )
+
+    with torch.no_grad():
+        for param in model.parameters():
+            if param is None or param not in optimizer.working_to_master_map:
+                continue
+            master_param = optimizer.working_to_master_map[param]
+            master_param.data = master_param.data.to(device="cpu")
 
     # Train model
     model.train()
@@ -110,7 +118,7 @@ def main(
             outputs = booster.execute_pipeline(
                 dataloader_iter,
                 model,
-                lambda inputs, outputs: outputs.loss,
+                lambda outputs, inputs: outputs.loss,
                 optimizer,
                 return_loss=True,
                 return_outputs=False,
@@ -120,9 +128,17 @@ def main(
                 loss = outputs["loss"]
                 pbar.set_postfix({"loss": loss.item()})
 
+            for param in model.parameters():
+                param.data = param.data.to(device="cpu")
+                if param.grad is not None:
+                    param.grad.data = param.grad.data.to(device="cpu")
+
             optimizer.step()
             optimizer.zero_grad()
             lr_scheduler.step()
+
+            for param in model.parameters():
+                param.data = param.data.to(device="cuda")
 
 
 if __name__ == "__main__":
