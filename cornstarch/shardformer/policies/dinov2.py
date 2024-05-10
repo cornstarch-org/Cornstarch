@@ -164,14 +164,13 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        layers_per_stage = self.distribute_layers(
-            len(module.encoder.layer), stage_manager.num_stages
-        )
-        if stage_manager.is_first_stage():
+        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layer))
+        stage_indices = stage_manager.get_stage_index(layers_per_stage)
+        if stage_manager.is_first_stage(ignore_chunk=True):
             held_layers.append(module.embeddings)
-        start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
-        held_layers.extend(module.encoder.layer[start_idx:end_idx])
-        if stage_manager.is_last_stage():
+        for start_idx, end_idx in stage_indices:
+            held_layers.extend(module.encoder.layer[start_idx:end_idx])
+        if stage_manager.is_last_stage(ignore_chunk=True):
             held_layers.append(module.layernorm)
 
         return held_layers
@@ -184,16 +183,14 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         if self.pipeline_stage_manager is None:
             return
 
-        stage_manager = self.pipeline_stage_manager
         if self.model.__class__.__name__ in ["Dinov2Model", "Dinov2Backbone"]:
             module = self.model
         else:
             module = self.model.dinov2
 
-        layers_per_stage = self.distribute_layers(
-            len(module.encoder.layer), stage_manager.num_stages
-        )
-        stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        stage_manager = self.pipeline_stage_manager
+        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layer))
+        stage_index = stage_manager.get_stage_index(layers_per_stage)
         method_replacement = {
             "forward": partial(
                 new_forward,
