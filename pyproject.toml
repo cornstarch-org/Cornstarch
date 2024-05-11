@@ -23,6 +23,7 @@ dependencies = [
     "loguru",
     "simple_parsing",
     "datasets",
+    "flash-attn",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +32,7 @@ dev = [
     "ruff",
     "black>=23.0",
     "isort>=5.12",
-    "pytest",
+    "pytest<=8.1",
     "pytest-mock",
     "expecttest",
     "accelerate",
