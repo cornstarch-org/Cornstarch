@@ -6,7 +6,7 @@ from colossalai.shardformer.policies.mistral import (
     MistralForCausalLMPolicy as ColossalMistralForCausalLMPolicy,
 )
 from colossalai.shardformer.policies.mistral import (
-    MistralForSequenceClassificationPolicy as ColossalMistralForSequenceClassificationPolicy,
+    MistralModelPolicy as ColossalMistralModelPolicy,
 )
 from transformers import PretrainedConfig
 from transformers.models.mistral.configuration_mistral import MistralConfig
@@ -54,7 +54,13 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
             raise ValueError("norm must be in the last stage.")
 
 
-class MistralModelPolicy(ColossalMistralForCausalLMPolicy, MistralPolicy):
+class MistralModelPolicy(MistralPolicy, ColossalMistralModelPolicy):
+    def preprocess(self):
+        # This is for forward compatibility to support newer version of transformers
+        self.model._use_flash_attention_2 = self.shard_config.enable_flash_attention
+        self.tie_weight = self.tie_weight_check()
+        return self.model
+
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
         return MistralPolicy.get_all_modules(config)
@@ -63,7 +69,15 @@ class MistralModelPolicy(ColossalMistralForCausalLMPolicy, MistralPolicy):
         super().pipeline_template_sanity_check(template)
 
 
-class MistralForCausalLMPolicy(ColossalMistralForCausalLMPolicy, MistralPolicy):
+class MistralForCausalLMPolicy(MistralPolicy, ColossalMistralForCausalLMPolicy):
+    def preprocess(self):
+        # This is for forward compatibility to support newer version of transformers
+        self.model.model._use_flash_attention_2 = (
+            self.shard_config.enable_flash_attention
+        )
+        self.tie_weight = self.tie_weight_check()
+        return self.model
+
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
         modules = [
@@ -76,20 +90,3 @@ class MistralForCausalLMPolicy(ColossalMistralForCausalLMPolicy, MistralPolicy):
         super().pipeline_template_sanity_check(template)
         if "lm_head" not in template.modules_per_stage[-1]:
             raise ValueError("lm_head must be in the last stage.")
-
-
-class MistralForSequenceClassificationPolicy(
-    ColossalMistralForSequenceClassificationPolicy, MistralPolicy
-):
-    @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> list[str]:
-        modules = [
-            f"model.{module}" for module in MistralPolicy.get_all_modules(config)
-        ]
-        modules.append("score")
-        return modules
-
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-        if "score" not in template.modules_per_stage[-1]:
-            raise ValueError("score must be in the last stage.")

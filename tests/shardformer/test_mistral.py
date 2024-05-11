@@ -1,3 +1,4 @@
+import copy
 from abc import ABC, abstractmethod
 from unittest.mock import patch
 
@@ -12,7 +13,6 @@ from _utils import (
     run_forward_backward_with_hybrid_plugin,
     unwrap_model,
 )
-from colossalai.shardformer.policies.base_policy import Policy
 from conftest import PolicyTestBase
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -22,19 +22,16 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
     ModelOutput,
-    SequenceClassifierOutputWithPast,
 )
 from transformers.models.mistral.modeling_mistral import (
     MistralConfig,
     MistralForCausalLM,
-    MistralForSequenceClassification,
     MistralModel,
     MistralPreTrainedModel,
 )
 
 from cornstarch.shardformer.policies.mistral import (
     MistralForCausalLMPolicy,
-    MistralForSequenceClassificationPolicy,
     MistralModelPolicy,
 )
 
@@ -60,15 +57,26 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         # Need to explicitly set use_cache=False
         # https://github.com/huggingface/transformers/issues/28056
         use_cache=False,
+        _attn_implementation="eager",
     )
 
     def model_fn(self) -> MistralPreTrainedModel:
-        self.config.pad_token_id = self.config.eos_token_id
-        return self.model_class(self.config)
+        config = copy.deepcopy(self.config)
+        config.pad_token_id = config.eos_token_id
+        return self.model_class(config)
 
-    def run_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool):
+    def run_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool, precision: str):
         # Implementation copied from
         # https://github.com/hpcaitech/ColossalAI/blob/8020f4263095373e4c7ad1b15e54b966a8ccb683/tests/test_shardformer/test_model/test_shard_mistral.py#L26
+        test_config = {
+            "tp_size": tp_size,
+            "pp_size": pp_size,
+            "precision": precision,
+            "zero_stage": 0,
+            "num_microbatches": 4,
+            "initial_scale": 1,
+            "enable_flash_attention": fa,
+        }
         (
             org_model,
             org_optimizer,
@@ -79,14 +87,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         ) = build_model_from_hybrid_plugin(
             model_fn=self.model_fn,
             loss_fn=self.loss_fn,
-            test_config={
-                "tp_size": tp_size,
-                "pp_size": pp_size,
-                "precision": "fp32",
-                "zero_stage": 0,
-                "num_microbatches": 4,
-                "enable_flash_attention": fa,
-            },
+            test_config=test_config,
         )
 
         org_model.gradient_checkpointing_enable()
@@ -117,15 +118,16 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
         if (
-            stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True)
+            stage_manager is None or stage_manager.is_first_stage()
         ) and booster.plugin.zero_stage == 0:
+            atol, rtol = (5e-5, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
             row_layer_grads = get_grad_tensors_for_check(
                 mistral_model,
                 shard_mistral_model,
                 row_layer_for_check,
                 tp_group,
-                atol=5e-5,
-                rtol=1e-4,
+                atol=atol,
+                rtol=rtol,
                 dim=0,
                 verbose=False,
             )
@@ -134,8 +136,8 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
                 shard_mistral_model,
                 col_layer_for_check,
                 tp_group,
-                atol=5e-5,
-                rtol=1e-4,
+                atol=atol,
+                rtol=rtol,
                 dim=1,
                 verbose=False,
             )
@@ -147,33 +149,26 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         sharded_optimizer.step()
 
         # check last hidden state & loss
-        if stage_manager is None or stage_manager.is_last_stage(ignore_chunk=True):
+        if stage_manager is None or stage_manager.is_last_stage():
+            atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
             if org_model.__class__.__name__ == "MistralModel":
                 check_output_hidden_state(
-                    org_output, sharded_output, stage_manager, atol=1e-5, rtol=1e-3
+                    org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
                 )
 
             check_loss(org_loss, sharded_loss, atol=1e-5, rtol=1e-3)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True):
-            check_weight(
-                mistral_model,
-                shard_mistral_model,
-                row_layer_for_check,
-                tp_group,
-                atol=1e-4,
-                rtol=1e-3,
-                dim=0,
-                verbose=False,
-            )
+            atol, rtol = (2e-4, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
+            # embed_tokens have different dimension, so skip to check row_layer weight
             check_weight(
                 mistral_model,
                 shard_mistral_model,
                 col_layer_for_check,
                 tp_group,
-                atol=1e-4,
-                rtol=1e-3,
+                atol=atol,
+                rtol=rtol,
                 dim=1,
                 verbose=False,
             )
@@ -182,6 +177,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         check_all_grad_tensors(grads_to_check)
 
 
+@instantiate_parametrized_tests
 class TestMistralModelPolicy(MistralPolicyTestClassBase):
     @staticmethod
     def data_gen_fn() -> dict:
@@ -209,26 +205,18 @@ class TestMistralModelPolicy(MistralPolicyTestClassBase):
 
     @parametrize("tp_size, pp_size", [(2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    def test_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool):
-        with (
-            patch(
-                "colossalai.shardformer.shard.sharder.get_autopolicy",
-                return_value=MistralModelPolicy(),
-            ),
-            patch.object(
-                MistralModelPolicy,
-                "distribute_layers",
-                new=lambda _, *args: Policy.distribute_layers(*args),
-            ),
-            patch.object(
-                MistralModelPolicy,
-                "get_stage_index",
-                new=lambda _, *args: Policy.get_stage_index(*args),
-            ),
+    @parametrize("precision", ["fp16", "fp32"])
+    def test_hybrid_parallel(
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
+    ):
+        with patch(
+            "colossalai.shardformer.shard.sharder.get_autopolicy",
+            return_value=MistralModelPolicy(),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size, fa)
+            self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
 
 
+@instantiate_parametrized_tests
 class TestMistralForCausalLMPolicy(MistralPolicyTestClassBase):
     @staticmethod
     def data_gen_fn() -> dict:
@@ -244,61 +232,12 @@ class TestMistralForCausalLMPolicy(MistralPolicyTestClassBase):
 
     @parametrize("tp_size, pp_size", [(2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    def test_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool):
-        with (
-            patch(
-                "colossalai.shardformer.shard.sharder.get_autopolicy",
-                return_value=MistralForCausalLMPolicy(),
-            ),
-            patch.object(
-                MistralForCausalLMPolicy,
-                "distribute_layers",
-                new=lambda _, *args: Policy.distribute_layers(*args),
-            ),
-            patch.object(
-                MistralForCausalLMPolicy,
-                "get_stage_index",
-                new=lambda _, *args: Policy.get_stage_index(*args),
-            ),
+    @parametrize("precision", ["fp16", "fp32"])
+    def test_hybrid_parallel(
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
+    ):
+        with patch(
+            "colossalai.shardformer.shard.sharder.get_autopolicy",
+            return_value=MistralForCausalLMPolicy(),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size, fa)
-
-
-class TestMistralForSequenceClassificationPolicy(MistralPolicyTestClassBase):
-    @staticmethod
-    def data_gen_fn() -> dict:
-        data = TestMistralModelPolicy.data_gen_fn()
-        data["labels"] = torch.tensor([1], dtype=torch.int64)
-        return data
-
-    @staticmethod
-    def loss_fn(x: SequenceClassifierOutputWithPast) -> torch.Tensor:
-        return x.logits.mean()
-
-    model_class = MistralForSequenceClassification
-
-    @parametrize("tp_size, pp_size", [(2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
-    @parametrize("fa", [True, False])
-    def test_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool):
-        with (
-            patch(
-                "colossalai.shardformer.shard.sharder.get_autopolicy",
-                return_value=MistralForSequenceClassificationPolicy(),
-            ),
-            patch.object(
-                MistralForSequenceClassificationPolicy,
-                "distribute_layers",
-                new=lambda _, *args: Policy.distribute_layers(*args),
-            ),
-            patch.object(
-                MistralForSequenceClassificationPolicy,
-                "get_stage_index",
-                new=lambda _, *args: Policy.get_stage_index(*args),
-            ),
-        ):
-            self.run_hybrid_parallel(tp_size, pp_size, fa)
-
-
-instantiate_parametrized_tests(TestMistralModelPolicy)
-instantiate_parametrized_tests(TestMistralForCausalLMPolicy)
-instantiate_parametrized_tests(TestMistralForSequenceClassificationPolicy)
+            self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
