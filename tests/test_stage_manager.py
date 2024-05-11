@@ -4,9 +4,6 @@ from collections import defaultdict
 import numpy as np
 import pytest
 import torch.distributed as dist
-from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.process_group_mesh import HeterogeneousProcessGroupMesh
-from cornstarch.stage_manager import HeterogeneousPipelineStageManager
 from pytest_mock import MockerFixture
 from torch.distributed.distributed_c10d import GroupMember
 from torch.testing._internal.common_distributed import MultiThreadedTestCase
@@ -15,6 +12,12 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 from torch.testing._internal.distributed.fake_pg import FakeStore
+
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.heterogeneous_parallel_plugin import (
+    HeterogeneousPipelineStageManager,
+    HeterogeneousProcessGroupMesh,
+)
 
 no_tp_templates = [
     PipelineTemplate("fake", [[None, None], [None, None, None, None]]),
@@ -72,7 +75,7 @@ def test_stage_manager_process_group_init_order_matches(
 
         return wrapper
 
-    mock = mocker.patch(
+    mocker.patch(
         "test_stage_manager.dist.new_group",
         wraps=record_new_group_call_decorator(dist.new_group),
     )

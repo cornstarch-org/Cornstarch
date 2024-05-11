@@ -36,7 +36,7 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
             assert len(num_layers_per_stage) == self.num_stages
         self.num_layers_per_stage = num_layers_per_stage
 
-        coords = self.pg_mesh.coordinate()
+        coords = self.pg_mesh.coords
         prev_coord = (
             coords[0][: self.pipeline_axis]
             + (
