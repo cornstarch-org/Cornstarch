@@ -165,11 +165,10 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
 
         held_layers = []
         layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layer))
-        stage_indices = stage_manager.get_stage_index(layers_per_stage)
         if stage_manager.is_first_stage(ignore_chunk=True):
             held_layers.append(module.embeddings)
-        for start_idx, end_idx in stage_indices:
-            held_layers.extend(module.encoder.layer[start_idx:end_idx])
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        held_layers.extend(module.encoder.layer[start_idx:end_idx])
         if stage_manager.is_last_stage(ignore_chunk=True):
             held_layers.append(module.layernorm)
 
