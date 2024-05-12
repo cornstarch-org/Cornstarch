@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import functools
 import itertools
 import warnings
-from functools import partial
 from typing import Callable, Dict, List, cast
 
 from colossalai.shardformer.layer import (
@@ -21,12 +21,18 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import Tensor, nn
 from transformers import PretrainedConfig
-from transformers.models.mixtral import MixtralConfig, MixtralModel
+from transformers.models.mixtral.configuration_mixtral import MixtralConfig
+from transformers.models.mixtral.modeling_mixtral import (
+    MixtralAttention,
+    MixtralFlashAttention2,
+    MixtralModel,
+    MixtralSdpaAttention,
+)
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.mixtral import (
     MixtralForwards,
-    get_lm_forward_with_dist_cross_entropy,
+    MixtralPipelineForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -76,6 +82,7 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
         pass
 
     def preprocess(self) -> nn.Module:
+        self.tie_weight = self.tie_weight_check()
         return self.model
 
     def postprocess(self) -> nn.Module:
@@ -103,7 +110,7 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
             layers_per_stage, stage_manager.stage
         )
         method_replacement = {
-            "forward": partial(
+            "forward": functools.partial(
                 new_forward,
                 stage_manager=stage_manager,
                 stage_index=stage_index,
@@ -125,13 +132,11 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        layers_per_stage = self.distribute_layers(
-            len(module.layers), stage_manager.num_stages
-        )
+        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
 
         if stage_manager.is_first_stage():
             held_layers.append(module.embed_tokens)
-        start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.layers[start_idx:end_idx])
         if stage_manager.is_last_stage():
             held_layers.append(module.norm)
@@ -153,21 +158,18 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
                 "Mistral doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
             )
 
-        self.append_or_create_submodule_replacement(
-            description=SubModuleReplacementDescription(
-                suffix="embed_tokens",
-                target_module=VocabParallelEmbedding1D
-                if self.shard_config.enable_tensor_parallelism
-                else PaddingEmbedding,
-                kwargs={
-                    "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by
-                },
-            ),
-            policy=policy,
-            target_key=MixtralModel,
-        )
-
         if self.shard_config.enable_tensor_parallelism:
+            assert (
+                self.model.config.num_attention_heads
+                % self.shard_config.tensor_parallel_size
+                == 0
+            ), "The number of attention heads must be divisible by tensor parallel size."
+            assert (
+                self.model.config.num_key_value_heads
+                % self.shard_config.tensor_parallel_size
+                == 0
+            ), "The number of key_value heads must be divisible by tensor parallel size."
+
             decoder_attribute_replacement = {
                 "self_attn.hidden_size": self.model.config.hidden_size
                 // self.shard_config.tensor_parallel_size,
@@ -216,6 +218,25 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
                 ]
             )
 
+        embedding_cls = None
+        if self.shard_config.enable_tensor_parallelism:
+            embedding_cls = VocabParallelEmbedding1D
+        elif self.tie_weight:
+            embedding_cls = PaddingEmbedding
+
+        if embedding_cls is not None:
+            self.append_or_create_submodule_replacement(
+                description=SubModuleReplacementDescription(
+                    suffix="embed_tokens",
+                    target_module=embedding_cls,
+                    kwargs={
+                        "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by
+                    },
+                ),
+                policy=policy,
+                target_key=MixtralModel,
+            )
+
         # optimize configuration
         if self.shard_config.enable_fused_normalization:
             self.append_or_create_method_replacement(
@@ -243,7 +264,30 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
             )
 
         if self.shard_config.enable_flash_attention:
-            pass
+            ATTN_IMPLEMENTATION = {
+                "eager": MixtralAttention,
+                "sdpa": MixtralSdpaAttention,
+                "flash_attention_2": MixtralFlashAttention2,
+            }
+            attn_cls = ATTN_IMPLEMENTATION[self.model.config._attn_implementation]
+            self.append_or_create_method_replacement(
+                description={
+                    "forward": MixtralForwards.mixtral_flash_attention_forward
+                },
+                policy=policy,
+                target_key=attn_cls,
+            )
+            if self.pipeline_stage_manager is None:
+                self.append_or_create_method_replacement(
+                    description={
+                        "forward": functools.partial(
+                            MixtralForwards.mixtral_model_forward_for_flash_attention,
+                            shard_config=self.shard_config,
+                        )
+                    },
+                    policy=policy,
+                    target_key=MixtralModel,
+                )
 
         return policy
 
@@ -262,7 +306,7 @@ class MixtralModelPolicy(MixtralPolicy):
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
                 model_cls=MixtralModel,
-                new_forward=MixtralForwards.mixtral_model_forward,
+                new_forward=MixtralPipelineForwards.mixtral_model_forward,
                 policy=policy,
             )
 
@@ -295,46 +339,44 @@ class MixtralForCausalLMPolicy(MixtralPolicy):
         policy = super().module_policy()
 
         if self.shard_config.enable_tensor_parallelism:
-            # add a new item for causal lm
-            new_item = {
-                MixtralForCausalLM: ModulePolicyDescription(
-                    sub_module_replacement=[
-                        SubModuleReplacementDescription(
-                            suffix="lm_head",
-                            target_module=VocabParallelLMHead1D,
-                            kwargs=dict(
-                                gather_output=not self.shard_config.parallel_output,
-                                make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by,
-                            ),
-                        ),
-                    ]
+            target_module = VocabParallelLMHead1D
+            kwargs = {
+                "gather_output": not self.shard_config.parallel_output,
+                "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by,
+            }
+            methods_replacement = {
+                "forward": functools.partial(
+                    MixtralForwards.mixtral_for_causal_lm_forward_with_dist_cross_entropy,
+                    shard_config=self.shard_config,
                 )
             }
-            if self.shard_config.parallel_output:
-                new_item[MixtralForCausalLM].method_replacement = {
-                    "forward": get_lm_forward_with_dist_cross_entropy(self.shard_config)
-                }
         else:
-            new_item = {
+            target_module = PaddingLMHead
+            kwargs = {
+                "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by
+            }
+            methods_replacement = None
+
+        policy.update(
+            {
                 MixtralForCausalLM: ModulePolicyDescription(
                     sub_module_replacement=[
                         SubModuleReplacementDescription(
                             suffix="lm_head",
-                            target_module=PaddingLMHead,
-                            kwargs=dict(
-                                make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by
-                            ),
+                            target_module=target_module,
+                            kwargs=kwargs,
                         )
-                    ]
+                    ],
+                    method_replacement=methods_replacement,
                 )
             }
-        policy.update(new_item)
+        )
 
         if self.pipeline_stage_manager:
             # set None as default
             self.set_pipeline_forward(
                 model_cls=MixtralForCausalLM,
-                new_forward=MixtralForwards.mixtral_for_causal_lm_forward,
+                new_forward=MixtralPipelineForwards.mixtral_for_causal_lm_forward,
                 policy=policy,
             )
 
