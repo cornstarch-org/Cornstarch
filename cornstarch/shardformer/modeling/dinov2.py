@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Union
 
 import torch
 from colossalai.pipeline.stage_manager import PipelineStageManager
+from colossalai.shardformer.layer import ColoAttention
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.modeling_outputs import (
@@ -15,6 +16,7 @@ from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2Encoder,
     Dinov2ForImageClassification,
     Dinov2Model,
+    Dinov2SelfAttention,
 )
 from transformers.utils import logging
 
@@ -337,3 +339,37 @@ class Dinov2PipelineForwards:
             hidden_states=outputs.hidden_states if output_hidden_states else None,
             attentions=outputs.attentions if output_attentions else None,
         )
+
+
+class Dinov2Forwards:
+    def dinov2_flash_attention_forward(
+        self: Dinov2SelfAttention,
+        hidden_states: torch.Tensor,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        """
+        Copied from ColossalAI ViT flash attention forward implementation
+        https://github.com/hpcaitech/ColossalAI/blob/main/colossalai/shardformer/modeling/vit.py
+        """
+        assert head_mask is None, "head_mask is not supported for FlashAttention"
+        mixed_query_layer = self.query(hidden_states)
+
+        key_layer = self.transpose_for_scores(self.key(hidden_states))
+        value_layer = self.transpose_for_scores(self.value(hidden_states))
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+
+        context_layer = ColoAttention.attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            dropout_p=self.dropout.p if self.training else 0.0,
+        )
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(new_context_layer_shape)
+
+        outputs = (context_layer, None) if output_attentions else (context_layer,)
+
+        return outputs
