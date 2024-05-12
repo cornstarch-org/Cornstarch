@@ -21,9 +21,8 @@ from transformers.models.clip.modeling_clip import CLIPVisionTransformer
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.clip import (
+    CLIPForwards,
     CLIPVisionPipelineForwards,
-    get_clip_flash_attention_forward,
-    get_clip_naive_attention_forward,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -102,6 +101,14 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
             )
 
         if self.shard_config.enable_tensor_parallelism:
+            assert (
+                self.model.config.num_attention_heads
+                % self.shard_config.tensor_parallel_size
+                == 0
+            ), (
+                f"The number of attention heads {self.model.config.num_attention_heads} must be divisible "
+                f"by tensor parallel size {self.shard_config.tensor_parallel_size}."
+            )
             policy[CLIPEncoderLayer] = ModulePolicyDescription(
                 attribute_replacement={
                     "self_attn.num_heads": self.model.config.num_attention_heads
@@ -169,27 +176,22 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
             target_key=CLIPVisionTransformer,
         )
 
-        # use flash attention
-        if self.shard_config.enable_flash_attention:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": get_clip_flash_attention_forward(),
-                },
-                policy=policy,
-                target_key=CLIPAttention,
-            )
-        else:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": get_clip_naive_attention_forward(),
-                },
-                policy=policy,
-                target_key=CLIPAttention,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": CLIPForwards.clip_flash_attention_forward
+                if self.shard_config.enable_flash_attention
+                else CLIPForwards.clip_eager_forward,
+            },
+            policy=policy,
+            target_key=CLIPAttention,
+        )
 
-        # use jit operator
-        if self.shard_config.enable_jit_fused:
-            pass
+        if self.pipeline_stage_manager:
+            self.set_pipeline_forward(
+                model_cls=CLIPVisionTransformer,
+                new_forward=CLIPVisionPipelineForwards.clip_vision_transformer_forward,
+                policy=policy,
+            )
 
         return policy
 
@@ -205,12 +207,11 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
 
         held_layers = []
         layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layers))
-        stage_indices = stage_manager.get_stage_index(layers_per_stage)
         if stage_manager.is_first_stage(ignore_chunk=True):
             held_layers.append(module.embeddings)
             held_layers.append(module.pre_layrnorm)
-        for start_idx, end_idx in stage_indices:
-            held_layers.extend(module.encoder.layers[start_idx:end_idx])
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        held_layers.extend(module.encoder.layers[start_idx:end_idx])
         if stage_manager.is_last_stage(ignore_chunk=True):
             held_layers.append(module.post_layernorm)
 
@@ -260,8 +261,9 @@ class CLIPVisionModelPolicy(CLIPVisionTransformerPolicy):
         super().pipeline_template_sanity_check(template)
 
     def module_policy(self):
-        policy = super().module_policy()
         from transformers.models.clip.modeling_clip import CLIPVisionModel
+
+        policy = super().module_policy()
 
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
