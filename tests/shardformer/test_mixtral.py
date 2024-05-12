@@ -23,20 +23,20 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
     ModelOutput,
 )
-from transformers.models.mistral.modeling_mistral import (
-    MistralConfig,
-    MistralForCausalLM,
-    MistralModel,
-    MistralPreTrainedModel,
+from transformers.models.mixtral.modeling_mixtral import (
+    MixtralConfig,
+    MixtralForCausalLM,
+    MixtralModel,
+    MixtralPreTrainedModel,
 )
 
-from cornstarch.shardformer.policies.mistral import (
-    MistralForCausalLMPolicy,
-    MistralModelPolicy,
+from cornstarch.shardformer.policies.mixtral import (
+    MixtralForCausalLMPolicy,
+    MixtralModelPolicy,
 )
 
 
-class MistralPolicyTestClassBase(PolicyTestBase, ABC):
+class MixtralPolicyTestCaseBase(PolicyTestBase, ABC):
     # Implementation for data_gen_fn and loss_fn
     # Copied from colossalai/tests/kit/model_zoo/transformers/mistral.py
     @staticmethod
@@ -47,8 +47,8 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
     @abstractmethod
     def loss_fn(x: ModelOutput) -> torch.Tensor: ...
 
-    model_class: MistralPreTrainedModel
-    config = MistralConfig(
+    model_class: MixtralPreTrainedModel
+    config = MixtralConfig(
         hidden_size=256,
         intermediate_size=256,
         num_attention_heads=64,
@@ -57,10 +57,9 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         # Need to explicitly set use_cache=False
         # https://github.com/huggingface/transformers/issues/28056
         use_cache=False,
-        _attn_implementation="eager",
     )
 
-    def model_fn(self) -> MistralPreTrainedModel:
+    def model_fn(self) -> MixtralPreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
         return self.model_class(config)
@@ -109,8 +108,8 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         tp_group = booster.plugin.tp_group
 
         # unwrap model
-        mistral_model = unwrap_model(org_model, "MistralModel", "model")
-        shard_mistral_model = unwrap_model(sharded_model, "MistralModel", "model")
+        mixtral_model = unwrap_model(org_model, "MixtralModel", "model")
+        shard_mixtral_model = unwrap_model(sharded_model, "MixtralModel", "model")
 
         row_layer_for_check = ["layers[0].self_attn.q_proj", "embed_tokens"]
         col_layer_for_check = ["layers[0].self_attn.o_proj"]
@@ -122,8 +121,8 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         ) and booster.plugin.zero_stage == 0:
             atol, rtol = (5e-5, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
             row_layer_grads = get_grad_tensors_for_check(
-                mistral_model,
-                shard_mistral_model,
+                mixtral_model,
+                shard_mixtral_model,
                 row_layer_for_check,
                 tp_group,
                 atol=atol,
@@ -132,8 +131,8 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
                 verbose=False,
             )
             col_layer_grads = get_grad_tensors_for_check(
-                mistral_model,
-                shard_mistral_model,
+                mixtral_model,
+                shard_mixtral_model,
                 col_layer_for_check,
                 tp_group,
                 atol=atol,
@@ -151,7 +150,7 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
             atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
-            if org_model.__class__.__name__ == "MistralModel":
+            if org_model.__class__.__name__ == "MixtralModel":
                 check_output_hidden_state(
                     org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
                 )
@@ -163,8 +162,8 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
             atol, rtol = (2e-4, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
             # embed_tokens have different dimension, so skip to check row_layer weight
             check_weight(
-                mistral_model,
-                shard_mistral_model,
+                mixtral_model,
+                shard_mixtral_model,
                 col_layer_for_check,
                 tp_group,
                 atol=atol,
@@ -178,13 +177,13 @@ class MistralPolicyTestClassBase(PolicyTestBase, ABC):
 
 
 @instantiate_parametrized_tests
-class TestMistralModelPolicy(MistralPolicyTestClassBase):
+class TestMixtralModelPolicy(MixtralPolicyTestCaseBase):
     @staticmethod
     def data_gen_fn() -> dict:
         # Generated from following code snippet
         #
         # from transformers import AutoModelForCausalLM, AutoTokenizer
-        # tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+        # tokenizer = AutoTokenizer.from_pretrained("mistralai/Mixtral-8x7B-Instruct-v0.1")
         # input = 'My favourite condiment is vinegar' (last two words repeated to satisfy length requirement)
         # tokenized_input = tokenizer([input], return_tensors="pt")
         # input_ids = tokenized_input['input_ids']
@@ -201,9 +200,9 @@ class TestMistralModelPolicy(MistralPolicyTestClassBase):
             x.last_hidden_state, torch.ones_like(x.last_hidden_state)
         )
 
-    model_class = MistralModel
+    model_class = MixtralModel
 
-    @parametrize("tp_size, pp_size", [(2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
     @parametrize("precision", ["fp16", "fp32"])
     def test_hybrid_parallel(
@@ -211,16 +210,16 @@ class TestMistralModelPolicy(MistralPolicyTestClassBase):
     ):
         with patch(
             "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=MistralModelPolicy(),
+            return_value=MixtralModelPolicy(),
         ):
             self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
 
 
 @instantiate_parametrized_tests
-class TestMistralForCausalLMPolicy(MistralPolicyTestClassBase):
+class TestMixtralForCausalLMPolicy(MixtralPolicyTestCaseBase):
     @staticmethod
     def data_gen_fn() -> dict:
-        data = TestMistralModelPolicy.data_gen_fn()
+        data = TestMixtralModelPolicy.data_gen_fn()
         data["labels"] = data["input_ids"].clone()
         return data
 
@@ -228,7 +227,7 @@ class TestMistralForCausalLMPolicy(MistralPolicyTestClassBase):
     def loss_fn(x: CausalLMOutputWithPast) -> torch.Tensor:
         return x.loss
 
-    model_class = MistralForCausalLM
+    model_class = MixtralForCausalLM
 
     @parametrize("tp_size, pp_size", [(2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
@@ -238,6 +237,6 @@ class TestMistralForCausalLMPolicy(MistralPolicyTestClassBase):
     ):
         with patch(
             "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=MistralForCausalLMPolicy(),
+            return_value=MixtralForCausalLMPolicy(),
         ):
             self.run_hybrid_parallel(tp_size, pp_size, fa, precision)

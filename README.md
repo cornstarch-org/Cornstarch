@@ -11,7 +11,13 @@ Use `pip` to install Cornstarch:
 pip install cornstarch
 ```
 
-Optionally, install [`apex`](https://github.com/nvidia/apex), [`xformers`](https://github.com/facebookresearch/xformers) and [`flash-attn`](https://github.com/Dao-AILab/flash-attention) to boost throughput (follow instructions in each README).
+Then, upgrade `transformers` to 4.40 to use more recent models, e.g. phi-3 or gemma.
+```
+pip install -U transformers==4.40.*
+```
+You will see an error from pip's dependency resolve about version dependency conflict, Cornstarch will address the compatibility issue.
+
+Optionally, install [`apex`](https://github.com/nvidia/apex) to use fused normalization feature.
 
 ## Run
 

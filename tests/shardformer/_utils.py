@@ -132,8 +132,6 @@ def build_model_from_hybrid_plugin(
     if use_lazy_init:
         ctx.materialize(org_model)
     org_model = org_model.cuda()
-    if test_config["precision"] == "fp16":
-        org_model = org_model.to(torch.float16)
     org_optimizer = Adam(org_model.parameters(), lr=1e-3)
     sharded_optimizer = Adam(sharded_model.parameters(), lr=1e-3)
     criterion = loss_fn
