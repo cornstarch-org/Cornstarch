@@ -1,6 +1,10 @@
 import datasets
-from cornstarch import HeterogeneousDataLoader, HeterogeneousParallelPlugin
 from transformers import AutoTokenizer, PreTrainedTokenizer
+
+from cornstarch.plugin.heterogeneous_parallel_plugin import (
+    HeterogeneousDataLoader,
+    HeterogeneousParallelPlugin,
+)
 
 
 class GLUEDataBuilder:

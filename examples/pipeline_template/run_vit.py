@@ -8,11 +8,6 @@ import simple_parsing
 import torch
 from colossalai.booster import Booster
 from colossalai.cluster import DistCoordinator
-from cornstarch import (
-    HeterogeneousDataLoader,
-    HeterogeneousParallelPlugin,
-    PipelineTemplate,
-)
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
@@ -24,6 +19,12 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 from transformers.image_processing_utils import BaseImageProcessor
+
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.heterogeneous_parallel_plugin import (
+    HeterogeneousDataLoader,
+    HeterogeneousParallelPlugin,
+)
 
 
 def transform(batch, image_processor: BaseImageProcessor):
