@@ -210,8 +210,9 @@ def test_get_dp_groups(
 
         return wrapper
 
-    mocker.patch(
-        "test_process_group_mesh.dist.new_group",
+    mocker.patch.object(
+        dist,
+        "new_group",
         wraps=record_new_group_call_decorator(dist.new_group),
     )
 

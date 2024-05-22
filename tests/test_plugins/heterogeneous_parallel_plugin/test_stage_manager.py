@@ -75,8 +75,9 @@ def test_stage_manager_process_group_init_order_matches(
 
         return wrapper
 
-    mocker.patch(
-        "test_stage_manager.dist.new_group",
+    mocker.patch.object(
+        dist,
+        "new_group",
         wraps=record_new_group_call_decorator(dist.new_group),
     )
 

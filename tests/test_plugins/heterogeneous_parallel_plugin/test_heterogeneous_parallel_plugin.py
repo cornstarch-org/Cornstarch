@@ -10,7 +10,6 @@ import torch
 import torch.distributed as dist
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.shardformer.modeling.gpt2 import GPT2PipelineForwards
-from data_builder import GLUEDataBuilder
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LRScheduler
 from torch.testing._internal.common_distributed import (
@@ -39,6 +38,8 @@ from cornstarch.shardformer.policies.gpt2 import (
     GPT2ForSequenceClassificationPolicy,
 )
 from cornstarch.shardformer.shard.placeholder import TensorPlaceholder
+
+from .data_builder import GLUEDataBuilder
 
 config: GPT2Config = GPT2Config.from_pretrained("gpt2")
 config.is_decoder = True
