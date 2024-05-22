@@ -1,8 +1,13 @@
+from typing import Optional
+
 import numpy as np
 import torch.distributed as dist
 from colossalai.pipeline.stage_manager import PipelineStageManager
-from cornstarch.process_group_mesh import HeterogeneousProcessGroupMesh
 from torch.distributed.distributed_c10d import GroupMember
+
+from cornstarch.plugin.heterogeneous_parallel_plugin.heterogeneous_process_group_mesh import (
+    HeterogeneousProcessGroupMesh,
+)
 
 
 class HeterogeneousPipelineStageManager(PipelineStageManager):
@@ -19,7 +24,7 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
         self,
         pg_mesh: HeterogeneousProcessGroupMesh,
         pipeline_axis: int,
-        is_virtual: bool = False,
+        num_layers_per_stage: Optional[list[int]] = None,
     ):
         self.pg_mesh = pg_mesh
         self.pipeline_axis = pipeline_axis
@@ -27,9 +32,9 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
         self.next_rank: int | None = None
         self.p2p_groups: dict[tuple[int, int], dist.ProcessGroup] = {}
         self.is_interleave = False
-
-        if is_virtual:
-            raise NotImplementedError("Virtual pipeline is not supported.")
+        if num_layers_per_stage is not None:
+            assert len(num_layers_per_stage) == self.num_stages
+        self.num_layers_per_stage = num_layers_per_stage
 
         coords = self.pg_mesh.coords
         prev_coord = (

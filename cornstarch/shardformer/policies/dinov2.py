@@ -5,6 +5,8 @@ from typing import Callable, cast
 from colossalai.shardformer.layer import (
     DropoutForParallelInput,
     DropoutForReplicatedInput,
+    FusedLayerNorm,
+    LayerNorm,
     Linear1D_Col,
     Linear1D_Row,
 )
@@ -17,9 +19,15 @@ from torch import nn
 from torch.nn.modules import Module
 from transformers import PretrainedConfig
 from transformers.models.dinov2.configuration_dinov2 import Dinov2Config
+from transformers.models.dinov2.modeling_dinov2 import (
+    Dinov2SelfAttention,
+)
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.dinov2 import Dinov2PipelineForwards
+from cornstarch.shardformer.modeling.dinov2 import (
+    Dinov2Forwards,
+    Dinov2PipelineForwards,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -75,6 +83,7 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         from transformers.models.dinov2.modeling_dinov2 import (
             Dinov2Embeddings,
             Dinov2Layer,
+            Dinov2Model,
         )
 
         policy = {}
@@ -139,15 +148,40 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
 
         # use flash attention
         if self.shard_config.enable_flash_attention:
-            raise NotImplementedError
+            self.append_or_create_method_replacement(
+                description={"forward": Dinov2Forwards.dinov2_flash_attention_forward},
+                policy=policy,
+                target_key=Dinov2SelfAttention,
+            )
 
-        # use jit fused operator
-        if self.shard_config.enable_jit_fused:
-            raise NotImplementedError
+        if self.shard_config.enable_fused_normalization:
+            norm_cls = FusedLayerNorm
+        else:
+            norm_cls = LayerNorm
 
         # use fused operator
-        if self.shard_config.enable_fused_normalization:
-            raise NotImplementedError
+        self.append_or_create_submodule_replacement(
+            description=[
+                SubModuleReplacementDescription(
+                    suffix="norm1",
+                    target_module=norm_cls,
+                ),
+                SubModuleReplacementDescription(
+                    suffix="norm2",
+                    target_module=norm_cls,
+                ),
+            ],
+            policy=policy,
+            target_key=Dinov2Layer,
+        )
+        self.append_or_create_submodule_replacement(
+            description=SubModuleReplacementDescription(
+                suffix="layernorm",
+                target_module=norm_cls,
+            ),
+            policy=policy,
+            target_key=Dinov2Model,
+        )
 
         return policy
 
@@ -164,14 +198,12 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        layers_per_stage = self.distribute_layers(
-            len(module.encoder.layer), stage_manager.num_stages
-        )
-        if stage_manager.is_first_stage():
+        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layer))
+        if stage_manager.is_first_stage(ignore_chunk=True):
             held_layers.append(module.embeddings)
-        start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.encoder.layer[start_idx:end_idx])
-        if stage_manager.is_last_stage():
+        if stage_manager.is_last_stage(ignore_chunk=True):
             held_layers.append(module.layernorm)
 
         return held_layers
@@ -184,16 +216,14 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         if self.pipeline_stage_manager is None:
             return
 
-        stage_manager = self.pipeline_stage_manager
         if self.model.__class__.__name__ in ["Dinov2Model", "Dinov2Backbone"]:
             module = self.model
         else:
             module = self.model.dinov2
 
-        layers_per_stage = self.distribute_layers(
-            len(module.encoder.layer), stage_manager.num_stages
-        )
-        stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        stage_manager = self.pipeline_stage_manager
+        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layer))
+        stage_index = stage_manager.get_stage_index(layers_per_stage)
         method_replacement = {
             "forward": partial(
                 new_forward,
@@ -297,6 +327,17 @@ class Dinov2BackbonePolicy(Dinov2Policy):
     def module_policy(self) -> dict[str | Module, ModulePolicyDescription]:
         policy = super().module_policy()
         from transformers.models.dinov2.modeling_dinov2 import Dinov2Backbone
+
+        self.append_or_create_submodule_replacement(
+            description=SubModuleReplacementDescription(
+                suffix="layernorm",
+                target_module=FusedLayerNorm
+                if self.shard_config.enable_fused_normalization
+                else LayerNorm,
+            ),
+            policy=policy,
+            target_key=Dinov2Backbone,
+        )
 
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(

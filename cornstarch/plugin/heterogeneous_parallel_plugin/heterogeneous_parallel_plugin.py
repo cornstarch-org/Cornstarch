@@ -5,9 +5,6 @@ from typing import Any, Callable, Iterator
 import torch
 import torch.distributed as dist
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
-    DP_AXIS,
-    PP_AXIS,
-    TP_AXIS,
     HybridParallelAMPOptimizer,
     HybridParallelNaiveOptimizer,
     HybridParallelPlugin,
@@ -18,17 +15,22 @@ from colossalai.checkpoint_io import CheckpointIO, HybridParallelCheckpointIO
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule
 from colossalai.shardformer import ShardConfig
-from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
-from cornstarch.plugin.heterogeneous_parallel_module import (
-    HeterogeneousParallelModule,
-)
-from cornstarch.process_group_mesh import HeterogeneousProcessGroupMesh
-from cornstarch.shardformer.policies.auto_policy import get_autopolicy
-from cornstarch.stage_manager import HeterogeneousPipelineStageManager
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, Dataset
+
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.heterogeneous_parallel_plugin import (
+    HeterogeneousDataLoader,
+    HeterogeneousParallelModule,
+)
+from cornstarch.plugin.heterogeneous_parallel_plugin.heterogeneous_process_group_mesh import (
+    HeterogeneousProcessGroupMesh,
+)
+from cornstarch.plugin.heterogeneous_parallel_plugin.heterogeneous_stage_manager import (
+    HeterogeneousPipelineStageManager,
+)
+from cornstarch.shardformer.policies.auto_policy import get_autopolicy
 
 
 class HeterogeneousParallelPlugin(HybridParallelPlugin):
@@ -156,16 +158,21 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             num_microbatches[pipeline] for pipeline in pipelines
         )
 
+        self.dp_axis, self.pp_axis, self.tp_axis = 0, 1, 2
         self.pg_mesh = HeterogeneousProcessGroupMesh(self.pipelines, self.tp_size)
-        self.stage_manager = HeterogeneousPipelineStageManager(self.pg_mesh, PP_AXIS)
-        self.dp_groups = self.pg_mesh.get_group_along_axis(DP_AXIS)
-        self.tp_group = self.pg_mesh.get_group_along_axis(TP_AXIS)
-        self.pp_group = self.pg_mesh.get_group_along_axis(PP_AXIS)
+        self._pipeline_index = self.pg_mesh.coords[0][self.dp_axis]
+        self.stage_manager = HeterogeneousPipelineStageManager(
+            self.pg_mesh,
+            self.pp_axis,
+            self.pipelines[self._pipeline_index].get_num_layers_per_stage(),
+        )
+        self.dp_groups = self.pg_mesh.get_group_along_axis(self.dp_axis)
+        self.tp_group = self.pg_mesh.get_group_along_axis(self.tp_axis)
+        self.pp_group = self.pg_mesh.get_group_along_axis(self.pp_axis)
 
         self.dp_size = len(pipelines)
         self.pp_size = dist.get_world_size(self.pp_group)
 
-        self._pipeline_index = self.pg_mesh.coords[0][DP_AXIS]
         self.schedule = OneForwardOneBackwardSchedule(
             stage_manager=self.stage_manager,
             microbatch_size=self.microbatch_size,
@@ -200,7 +207,6 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
             policy = get_autopolicy(my_pipeline.model_name)
             policy.set_model(module)
-            policy.set_pipeline_template(my_pipeline)
             policy.set_shard_config(self.shard_config)
 
             model = HeterogeneousParallelModule(

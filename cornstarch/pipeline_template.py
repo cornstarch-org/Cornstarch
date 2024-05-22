@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Optional, Type
 
 from colossalai.shardformer.policies.auto_policy import _fullname
@@ -72,6 +73,18 @@ class PipelineTemplate:
         return self.pseudo_latency + self.kstar_latency * (
             num_microbatches - 4 * self.num_stages
         )
+
+    def get_num_layers_per_stage(self) -> list[int]:
+        """
+        Count layers in each stage by checking whether each layer includes an integer number.
+        For example, LlamaModel has `layers` as a `nn.ModuleList` of `LlamaDecoderLayer` objects.
+        Each layer's name is `model.layers.0`, `model.layers.1`, ...,
+        which will be counted by this function.
+        """
+        return [
+            sum(bool(re.search(r"\.\d", s)) for s in modules)
+            for modules in self.modules_per_stage
+        ]
 
     @property
     def num_layers(self) -> int:
