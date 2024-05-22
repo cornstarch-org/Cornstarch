@@ -1,125 +1,96 @@
 import copy
+import os
+import random
+import sys
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
+from unittest.mock import patch
 
+import numpy as np
 import torch
+import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.booster.plugin import HybridParallelPlugin
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelModule
 from colossalai.lazy import LazyInitContext
 from colossalai.pipeline.stage_manager import PipelineStageManager
-from colossalai.shardformer import ShardConfig, ShardFormer
 from colossalai.shardformer._utils import getattr_
-from colossalai.shardformer.policies.auto_policy import Policy
 from colossalai.tensor.d_tensor.api import (
     is_customized_distributed_tensor,
     is_distributed_tensor,
 )
-from torch import Tensor
-from torch import distributed as dist
-from torch.distributed import ProcessGroup
-from torch.nn import Module
+from torch import Tensor, nn
 from torch.optim import Adam, Optimizer
 from torch.testing import assert_close
+from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
+from torch.testing._internal.common_utils import FILE_SCHEMA
 
 
-def build_model(
-    model_fn,
-    enable_fused_normalization=True,
-    enable_tensor_parallelism=True,
-    enable_flash_attention=False,
-    enable_jit_fused=False,
-    enable_sequence_parallelism=False,
-    use_lazy_init: bool = False,
-    dtype=torch.float32,
-):
-    # create new model
-    ctx = LazyInitContext() if use_lazy_init else nullcontext()
-    with ctx:
-        # create new model
-        org_model = model_fn()
-        model_copy = copy.deepcopy(org_model)
-    if use_lazy_init:
-        ctx.materialize(org_model)
-    # shard model
-    shard_config = ShardConfig(
-        enable_fused_normalization=enable_fused_normalization,
-        enable_tensor_parallelism=enable_tensor_parallelism,
-        enable_flash_attention=enable_flash_attention,
-        enable_jit_fused=enable_jit_fused,
-        enable_sequence_parallelism=enable_sequence_parallelism,
-    )
-    model_copy = copy.deepcopy(org_model)
-    shard_former = ShardFormer(shard_config=shard_config)
-    sharded_model, shared_params = shard_former.optimize(model_copy)
-    return org_model.cuda().to(dtype), sharded_model.cuda().to(dtype)
+class PolicyTestBase(MultiProcessTestCase):
+    @property
+    def world_size(self) -> int:
+        return 4
 
+    def setUp(self) -> None:
+        super().setUp()
+        with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
+            self._spawn_processes()
 
-def build_pipeline_model(
-    model_fn,
-    stage_manager=None,
-    enable_fused_normalization=False,
-    enable_tensor_parallelism=False,
-    use_lazy_init: bool = False,
-    policy: Optional[Policy] = None,
-):
-    ctx = LazyInitContext() if use_lazy_init else nullcontext()
-    with ctx:
-        # create new model
-        org_model = model_fn()
-        model_copy = copy.deepcopy(org_model)
-    if use_lazy_init:
-        ctx.materialize(org_model)
+    def tearDown(self) -> None:
+        return super().tearDown()
 
-    # shard model
-    shard_config = ShardConfig(
-        enable_fused_normalization=enable_fused_normalization,
-        enable_tensor_parallelism=enable_tensor_parallelism,
-        pipeline_stage_manager=stage_manager,
-    )
+    @classmethod
+    def _run(cls, rank: int, test_name: str, file_name: str, pipe) -> None:
+        # Copy from: torch/testing/_internal/common_fsdp.py FSDPTest._run
+        self = cls(test_name)
+        self.rank = rank
+        self.file_name = file_name
 
-    shard_former = ShardFormer(shard_config=shard_config)
-    sharded_model, shared_params = shard_former.optimize(model_copy, policy=policy)
-    return org_model.cuda(), sharded_model.cuda()
+        print(f"dist init r={self.rank}, world={self.world_size}")
 
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
 
-def run_forward(
-    original_model, sharded_model, data_gen_fn, output_transform_fn, loss_fn
-):
-    # prepare input
-    data = data_gen_fn()
-    data = {k: v.cuda() for k, v in data.items()}
-    # switch to train mode
-    original_model.train()
-    sharded_model.train()
-    # run forward
-    org_output = original_model(**data)
-    org_output = output_transform_fn(org_output)
-    org_loss = loss_fn(org_output)
+        try:
+            dist.init_process_group(
+                init_method=f"{FILE_SCHEMA}{self.file_name}",
+                backend=backend,
+                world_size=int(self.world_size),
+                rank=self.rank,
+            )
+        except RuntimeError as e:
+            if "recompile" in e.args[0]:
+                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
 
-    shard_output = sharded_model(**data)
-    shard_output = output_transform_fn(shard_output)
-    shard_loss = loss_fn(shard_output)
-    return org_output, org_loss, shard_output, shard_loss
+            raise
 
+        device_ids = None
+        if torch.cuda.is_available() and torch.cuda.device_count():
+            device_id = self.rank % torch.cuda.device_count()
+            torch.cuda.set_device(device_id)
+            device_ids = [device_id]
 
-def check_state_dict(org_model: Module, sharded_model: Module, name: str = ""):
-    org_sd = org_model.state_dict()
-    shard_sd = sharded_model.state_dict()
-    for k, v in org_sd.items():
-        assert k in shard_sd, f"{name} {k} not in sharded model"
-        shard_v = shard_sd[k]
-        assert (
-            v.shape == shard_v.shape
-        ), f"{name} {k} shape mismatch, {v.shape} vs {shard_v.shape}"
-        assert (
-            v.dtype == shard_v.dtype
-        ), f"{name} {k} dtype mismatch, {v.dtype} vs {shard_v.dtype}"
-        assert torch.equal(v, shard_v), f"{name} {k} value mismatch"
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        random.seed(0)
+        np.random.seed(0)
+
+        # Execute barrier prior to running test to ensure that every process
+        # has finished initialization and that the following test
+        # immediately exiting due to a skip doesn't cause flakiness.
+        dist.barrier(device_ids=device_ids)
+
+        with torch.backends.cudnn.flags(
+            enabled=True, deterministic=True, benchmark=True
+        ):
+            self.run_test(test_name, pipe)
+
+        dist.barrier(device_ids=device_ids)
+
+        dist.destroy_process_group()
 
 
 def build_model_from_hybrid_plugin(
-    model_fn: Callable, loss_fn: Callable, test_config: Dict[str, Any]
+    model_fn: Callable, loss_fn: Callable, test_config: dict[str, Any]
 ):
     use_lazy_init = False
     if "use_lazy_init" in test_config:
@@ -153,8 +124,8 @@ def build_model_from_hybrid_plugin(
 
 
 def run_forward_backward_with_hybrid_plugin(
-    org_model: Module,
-    sharded_model: Module,
+    org_model: nn.Module,
+    sharded_model: nn.Module,
     sharded_optimizer: Optimizer,
     data_gen_fn: Callable,
     output_transform_fn: Callable,
@@ -244,10 +215,10 @@ def check_loss(
 
 
 def check_weight(
-    org_model: Module,
-    sharded_model: Module,
-    layer_suffix: List[str],
-    tp_group: Optional[ProcessGroup] = None,
+    org_model: nn.Module,
+    sharded_model: nn.Module,
+    layer_suffix: list[str],
+    tp_group: Optional[dist.ProcessGroup] = None,
     dim: int = 0,
     atol: float = 1e-5,
     rtol: float = 1e-3,
@@ -278,10 +249,10 @@ def check_weight(
 
 
 def get_grad_tensors_for_check(
-    org_model: Module,
-    sharded_model: Module,
-    layer_suffix: List[str],
-    tp_group: ProcessGroup = None,
+    org_model: nn.Module,
+    sharded_model: nn.Module,
+    layer_suffix: list[str],
+    tp_group: dist.ProcessGroup = None,
     dim: int = 0,
     atol: float = 1e-5,
     rtol: float = 1e-3,
@@ -321,10 +292,10 @@ def get_grad_tensors_for_check(
 
 # used by sam/blip2
 def check_grad(
-    org_model: Module,
-    sharded_model: Module,
-    layer_suffix: List[str],
-    tp_group: ProcessGroup = None,
+    org_model: nn.Module,
+    sharded_model: nn.Module,
+    layer_suffix: list[str],
+    tp_group: dist.ProcessGroup = None,
     dim: int = 0,
     atol: float = 1e-5,
     rtol: float = 1e-3,
@@ -354,7 +325,7 @@ def check_grad(
 
 
 def unwrap_model(
-    module: Module,
+    module: nn.Module,
     base_model_class_name: Optional[str] = None,
     base_model_attribute_name: Optional[str] = None,
 ):

@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from unittest.mock import patch
 
 import torch
-from conftest import PolicyTestBase
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -26,6 +25,7 @@ from cornstarch.shardformer.policies.mixtral import (
 )
 
 from ._utils import (
+    PolicyTestBase,
     build_model_from_hybrid_plugin,
     check_all_grad_tensors,
     check_loss,
