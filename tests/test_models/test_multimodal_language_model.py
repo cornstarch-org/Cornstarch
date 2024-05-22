@@ -11,6 +11,7 @@ from transformers.models.dinov2 import Dinov2Config
 from cornstarch.models.multimodal_language_model import (
     MultimodalLanguageModel,
     MultimodalLanguageModelConfig,
+    MultimodalLanguageModelProjectorConfig,
 )
 
 vision_model_names = [
@@ -44,8 +45,21 @@ def test_build_empty_model(
         language_model_name, trust_remote_code=True
     )
 
+    projector_config = MultimodalLanguageModelProjectorConfig(
+        encoder_config=vision_config,
+        text_config=language_config,
+        projection_type="linear",
+    )
+
     mm_config = MultimodalLanguageModelConfig(
-        text_config=language_config, vision_config=vision_config
+        text_config=language_config,
+        vision_config=vision_config,
+        vision_projector_config=projector_config,
     )
     with init_empty_weights():
-        model = MultimodalLanguageModel(config=mm_config, trust_remote_code=True)
+        model = MultimodalLanguageModel(
+            config=mm_config,
+            padding_side="left",
+            image_token_id=0,
+            trust_remote_code=True,
+        )
