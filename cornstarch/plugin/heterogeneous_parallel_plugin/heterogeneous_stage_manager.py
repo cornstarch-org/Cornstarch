@@ -32,6 +32,7 @@ class HeterogeneousPipelineStageManager(PipelineStageManager):
         self.next_rank: int | None = None
         self.p2p_groups: dict[tuple[int, int], dist.ProcessGroup] = {}
         self.is_interleave = False
+        self.num_model_chunks = 1
         if num_layers_per_stage is not None:
             assert len(num_layers_per_stage) == self.num_stages
         self.num_layers_per_stage = num_layers_per_stage
