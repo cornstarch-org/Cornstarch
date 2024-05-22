@@ -101,8 +101,12 @@ _POLICY_LIST = {
     "transformers.models.mistral.modeling_mistral.MistralForCausalLM": PolicyLocation(
         file_name="mistral", class_name="MistralForCausalLMPolicy"
     ),
-    "transformers.models.mistral.modeling_mistral.MistralForSequenceClassification": PolicyLocation(
-        file_name="mistral", class_name="MistralForSequenceClassificationPolicy"
+    # Mixtral
+    "transformers.models.mixtral.modeling_mixtral.MixtralModel": PolicyLocation(
+        file_name="mixtral", class_name="MixtralModelPolicy"
+    ),
+    "transformers.models.mixtral.modeling_mixtral.MixtralForCausalLM": PolicyLocation(
+        file_name="mixtral", class_name="MixtralForCausalLMPolicy"
     ),
     # DINOv2
     "transformers.models.dinov2.modeling_dinov2.Dinov2Model": PolicyLocation(

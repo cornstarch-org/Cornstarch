@@ -12,7 +12,6 @@ from _utils import (
     run_forward_backward_with_hybrid_plugin,
     unwrap_model,
 )
-from colossalai.shardformer.policies.base_policy import Policy
 from conftest import PolicyTestBase
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -61,7 +60,12 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
         return self.model_class(self.config)
 
     def run_hybrid_parallel(
-        self, tp_size: int, pp_size: int, base_model_class_name: str
+        self,
+        tp_size: int,
+        pp_size: int,
+        base_model_class_name: str,
+        fa: bool,
+        precision: str,
     ):
         (
             org_model,
@@ -76,9 +80,11 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
             test_config={
                 "tp_size": tp_size,
                 "pp_size": pp_size,
-                "precision": "fp32",
+                "precision": precision,
                 "zero_stage": 0,
                 "num_microbatches": 4,
+                "initial_scale": 1,
+                "enable_flash_attention": fa,
             },
         )
 
@@ -107,6 +113,8 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
         row_layer_for_check = ["encoder.layer[0].attention.attention.query"]
         col_layer_for_check = ["encoder.layer[0].attention.output.dense"]
 
+        atol, rtol = (5e-5, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
+
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
         if (
@@ -117,8 +125,8 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
                 shard_dino_model,
                 row_layer_for_check,
                 tp_group,
-                atol=2e-5,
-                rtol=1e-3,
+                atol=atol,
+                rtol=rtol,
                 dim=0,
                 verbose=False,
             )
@@ -127,8 +135,8 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
                 shard_dino_model,
                 col_layer_for_check,
                 tp_group,
-                atol=2e-5,
-                rtol=1e-3,
+                atol=atol,
+                rtol=rtol,
                 dim=1,
                 verbose=False,
             )
@@ -143,9 +151,9 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
         if stage_manager is None or stage_manager.is_last_stage():
             if org_model.__class__.__name__ == "Dinov2Model":
                 check_output_hidden_state(
-                    org_output, sharded_output, stage_manager, atol=2e-3, rtol=1e-3
+                    org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
                 )
-            check_loss(org_loss, sharded_loss, atol=2e-3, rtol=1e-3)
+            check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage():
@@ -154,8 +162,8 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
                 shard_dino_model,
                 row_layer_for_check,
                 tp_group,
-                atol=5e-3,
-                rtol=1e-3,
+                atol=atol,
+                rtol=rtol,
                 dim=0,
                 verbose=False,
             )
@@ -164,8 +172,8 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
                 shard_dino_model,
                 col_layer_for_check,
                 tp_group,
-                atol=5e-3,
-                rtol=1e-3,
+                atol=atol,
+                rtol=rtol,
                 dim=1,
                 verbose=False,
             )
@@ -174,6 +182,7 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
         check_all_grad_tensors(grads_to_check)
 
 
+@instantiate_parametrized_tests
 class TestDinov2ModelPolicy(Dinov2PolicyTestClassBase):
     @staticmethod
     def data_gen_fn() -> dict:
@@ -187,26 +196,19 @@ class TestDinov2ModelPolicy(Dinov2PolicyTestClassBase):
     model_class = Dinov2Model
 
     @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
-    def test_hybrid_parallel(self, tp_size: int, pp_size: int):
-        with (
-            patch(
-                "colossalai.shardformer.shard.sharder.get_autopolicy",
-                return_value=Dinov2ModelPolicy(),
-            ),
-            patch.object(
-                Dinov2ModelPolicy,
-                "distribute_layers",
-                new=lambda _, *args: Policy.distribute_layers(*args),
-            ),
-            patch.object(
-                Dinov2ModelPolicy,
-                "get_stage_index",
-                new=lambda _, *args: Policy.get_stage_index(*args),
-            ),
+    @parametrize("fa", [True, False])
+    @parametrize("precision", ["fp32", "fp16"])
+    def test_hybrid_parallel(
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
+    ):
+        with patch(
+            "colossalai.shardformer.shard.sharder.get_autopolicy",
+            return_value=Dinov2ModelPolicy(),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Model")
+            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Model", fa, precision)
 
 
+@instantiate_parametrized_tests
 class TestDinov2ForImageClassificationPolicy(Dinov2PolicyTestClassBase):
     @staticmethod
     def data_gen_fn() -> dict:
@@ -221,26 +223,19 @@ class TestDinov2ForImageClassificationPolicy(Dinov2PolicyTestClassBase):
     model_class = Dinov2ForImageClassification
 
     @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
-    def test_hybrid_parallel(self, tp_size: int, pp_size: int):
-        with (
-            patch(
-                "colossalai.shardformer.shard.sharder.get_autopolicy",
-                return_value=Dinov2ForImageClassificationPolicy(),
-            ),
-            patch.object(
-                Dinov2ForImageClassificationPolicy,
-                "distribute_layers",
-                new=lambda _, *args: Policy.distribute_layers(*args),
-            ),
-            patch.object(
-                Dinov2ForImageClassificationPolicy,
-                "get_stage_index",
-                new=lambda _, *args: Policy.get_stage_index(*args),
-            ),
+    @parametrize("fa", [True, False])
+    @parametrize("precision", ["fp32", "fp16"])
+    def test_hybrid_parallel(
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
+    ):
+        with patch(
+            "colossalai.shardformer.shard.sharder.get_autopolicy",
+            return_value=Dinov2ForImageClassificationPolicy(),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Model")
+            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Model", fa, precision)
 
 
+@instantiate_parametrized_tests
 class TestDinov2BackbonePolicy(Dinov2PolicyTestClassBase):
     @staticmethod
     def data_gen_fn() -> dict:
@@ -253,26 +248,13 @@ class TestDinov2BackbonePolicy(Dinov2PolicyTestClassBase):
     model_class = Dinov2Backbone
 
     @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
-    def test_hybrid_parallel(self, tp_size: int, pp_size: int):
-        with (
-            patch(
-                "colossalai.shardformer.shard.sharder.get_autopolicy",
-                return_value=Dinov2BackbonePolicy(),
-            ),
-            patch.object(
-                Dinov2BackbonePolicy,
-                "distribute_layers",
-                new=lambda _, *args: Policy.distribute_layers(*args),
-            ),
-            patch.object(
-                Dinov2BackbonePolicy,
-                "get_stage_index",
-                new=lambda _, *args: Policy.get_stage_index(*args),
-            ),
+    @parametrize("fa", [True, False])
+    @parametrize("precision", ["fp32", "fp16"])
+    def test_hybrid_parallel(
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
+    ):
+        with patch(
+            "colossalai.shardformer.shard.sharder.get_autopolicy",
+            return_value=Dinov2BackbonePolicy(),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Backbone")
-
-
-instantiate_parametrized_tests(TestDinov2ModelPolicy)
-instantiate_parametrized_tests(TestDinov2ForImageClassificationPolicy)
-instantiate_parametrized_tests(TestDinov2BackbonePolicy)
+            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Backbone", fa, precision)

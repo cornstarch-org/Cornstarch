@@ -4,10 +4,13 @@ from collections import defaultdict
 import numpy as np
 import pytest
 import torch.distributed as dist
-from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.process_group_mesh import HeterogeneousProcessGroupMesh
 from pytest_mock import MockerFixture
 from torch.testing._internal.distributed.fake_pg import FakeStore
+
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.heterogeneous_parallel_plugin import (
+    HeterogeneousProcessGroupMesh,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -207,8 +210,9 @@ def test_get_dp_groups(
 
         return wrapper
 
-    mock = mocker.patch(
-        "test_process_group_mesh.dist.new_group",
+    mocker.patch.object(
+        dist,
+        "new_group",
         wraps=record_new_group_call_decorator(dist.new_group),
     )
 

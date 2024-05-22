@@ -18,11 +18,15 @@ classifiers = [
 ]
 dependencies = [
     "torch",
-    "transformers==4.36.0",
-    "colossalai==0.3.6",
+    "transformers",
+    "colossalai>=0.3.7",
     "loguru",
     "simple_parsing",
     "datasets",
+    "tensorboard",
+    "click",
+    "timm",
+    "flash-attn",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +35,7 @@ dev = [
     "ruff",
     "black>=23.0",
     "isort>=5.12",
-    "pytest",
+    "pytest<=8.1",
     "pytest-mock",
     "expecttest",
     "accelerate",
