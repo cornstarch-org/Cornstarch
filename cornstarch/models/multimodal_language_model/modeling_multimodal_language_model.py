@@ -1053,7 +1053,7 @@ class MultimodalLanguageModel(PreTrainedModel):
             projection = init_projection_layer()
         else:
             try:
-                projection = AutoModel.from_pretrained(
+                projection = MultimodalProjectorModel.from_pretrained(
                     vision_projector_model_name_or_path
                 )
             except EnvironmentError as e:

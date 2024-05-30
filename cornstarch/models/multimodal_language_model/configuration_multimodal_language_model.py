@@ -17,12 +17,13 @@ class MultimodalLanguageModelProjectorConfig(PretrainedConfig):
 
     def __init__(
         self,
-        encoder_config: PretrainedConfig,
-        text_config: PretrainedConfig,
+        encoder_config: PretrainedConfig = None,
+        text_config: PretrainedConfig = None,
         projection_type: str = "linear",
         activation: str = None,
+        **kwargs
     ):
-        super().__init__()
+        super().__init__(**kwargs)
 
         if projection_type not in ["linear", "mlp", "qformer"]:
             raise ValueError(
@@ -38,8 +39,11 @@ class MultimodalLanguageModelProjectorConfig(PretrainedConfig):
         self.projection_type = projection_type
         self.activation = activation
 
-        self.in_features = encoder_config.hidden_size
-        self.out_features = text_config.hidden_size
+        if encoder_config != None:
+            self.in_features = encoder_config.hidden_size
+        
+        if text_config != None:
+            self.out_features = text_config.hidden_size
 
 
 class MultimodalLanguageModelConfig(PretrainedConfig):
