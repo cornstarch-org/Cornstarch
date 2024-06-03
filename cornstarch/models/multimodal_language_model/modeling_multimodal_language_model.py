@@ -1100,13 +1100,15 @@ class MultimodalLanguageModel(PreTrainedModel):
         pretrained_interface.set_pretrained_path(
             model,
             {
-                "vision": pretrained_interface.get_pretrained_path(
+                "vision_model.encoder": pretrained_interface.get_pretrained_path(
                     model.vision_model.encoder
                 ),
-                "vision_projector": pretrained_interface.get_pretrained_path(
+                "vision_model.projector": pretrained_interface.get_pretrained_path(
                     model.vision_model.projector
                 ),
-                "llm": pretrained_interface.get_pretrained_path(model.language_model),
+                "language_model": pretrained_interface.get_pretrained_path(
+                    model.language_model
+                ),
             },
         )
 
