@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional, Type
 
 import torch
 import torch.nn as nn
+from colossalai.interface import pretrained as pretrained_interface
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.peft_model import PeftModelForCausalLM
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
@@ -1094,6 +1095,19 @@ class MultimodalLanguageModel(PreTrainedModel):
             image_token_id=image_token_id,
             language_model=language_model,
             vision_model=MultimodalEncoderProjector(vision_model, projection),
+        )
+
+        pretrained_interface.set_pretrained_path(
+            model,
+            {
+                "vision": pretrained_interface.get_pretrained_path(
+                    model.vision_model.encoder
+                ),
+                "vision_projector": pretrained_interface.get_pretrained_path(
+                    model.vision_model.projector
+                ),
+                "llm": pretrained_interface.get_pretrained_path(model.language_model),
+            },
         )
 
         return model
