@@ -20,3 +20,4 @@ runs
 
 # wandb
 wandb/*
+logs/*
