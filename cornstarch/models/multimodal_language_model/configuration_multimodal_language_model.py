@@ -20,7 +20,7 @@ class ProjectorModelConfig(PretrainedConfig):
         encoder_config: PretrainedConfig,
         text_config: PretrainedConfig,
         projection_type: str = "linear",
-        activation: str = None,
+        activation: str = "gelu",
     ):
         super().__init__()
 
@@ -36,10 +36,13 @@ class ProjectorModelConfig(PretrainedConfig):
             )
 
         self.projection_type = projection_type
-        self.activation = activation
+        self.activation = ACT2CLS[activation]
 
         self.in_features = encoder_config.hidden_size
         self.out_features = text_config.hidden_size
+
+        self.encoder_model_type = encoder_config.model_type
+        self.language_model_type = text_config.model_type
 
 
 # class MultimodalLanguageModelConfig(PretrainedConfig):

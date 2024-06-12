@@ -32,6 +32,8 @@ class ProjectorModel(PreTrainedModel):
     main_input_name = "inputs_embeds"
     supports_gradient_checkpointing = True
 
+    config: ProjectorModelConfig
+
     def __init__(self, config: ProjectorModelConfig):
         super().__init__(config)
         self.gradient_checkpointing = False
@@ -138,6 +140,8 @@ class MultimodalModel(nn.Module):
         self,
         encoders: dict[str, ModalModule],
         language_model: Optional[PreTrainedModel] = None,
+        init_projector_type: str = "linear",
+        init_activation: str = "gelu",
     ):
         """
         A representation of multimodal model, with arbitrary number of
@@ -150,8 +154,44 @@ class MultimodalModel(nn.Module):
         self.language_model = language_model
 
         for modal_key, modal_module in encoders.items():
-            # TODO: if projector is None while language model is given,
-            # generate a projector layer.
+            if language_model is not None:
+                if modal_module.projector is None:
+                    warnings.warn(
+                        f"A projector for {modal_key} encoder is not given, "
+                        "while it is required in multimodal with a language model. "
+                        f"Creating a {init_projector_type} projector layer for the encoder. "
+                        "If you want to load a pretrained projector, "
+                        "please explicitly specify a projector in `ModalModule`."
+                    )
+                    projector_config = ProjectorModelConfig(
+                        encoder_config=modal_module.module.config,
+                        text_config=language_model.config,
+                        projection_type=init_projector_type,
+                        activation=init_activation,
+                    )
+                    modal_module.projector = ProjectorModel(projector_config)
+
+                # Check if the projector is compatible with the encoder and the language model
+                projector_config: ProjectorModelConfig = modal_module.projector.config
+                if (
+                    projector_config.in_features
+                    != modal_module.module.config.hidden_size
+                    or projector_config.out_features
+                    != language_model.config.hidden_size
+                    or projector_config.encoder_model_type
+                    != modal_module.module.config.model_type
+                    or projector_config.language_model_type
+                    != language_model.config.model_type
+                ):
+                    raise ValueError(
+                        f"Projector configuration for {modal_key} encoder is incompatible "
+                        "to the current configuration: "
+                        f"in_features (expected: {modal_module.module.config.hidden_size}, got: {projector_config.in_features}), "
+                        f"out_features (expected: {language_model.config.hidden_size}, got: {projector_config.out_features}), "
+                        f"encoder_model_type (expected: {modal_module.module.config.model_type}, got: {projector_config.encoder_model_type=}), "
+                        f"language_model_type (expected: {language_model.config.model_type}, got: {projector_config.language_model_type=})."
+                    )
+
             self.add_module(f"{modal_key}_encoder", modal_module)
             self.encoders_args.append(
                 list(inspect.signature(modal_module.module.forward).parameters.keys())
@@ -168,8 +208,6 @@ class MultimodalModel(nn.Module):
             encoder_module = getattr(self, f"{modal_key}_encoder")
             args = {arg: kwargs[arg] for arg in self.encoders_args[modal_key]}
             encoders_outputs.append(encoder_module(**args))
-
-        # TODO: append encoders_outputs to language model inputs_embeds
 
         args = {arg: kwargs[arg] for arg in self.language_model_args}
         return self.language_model(**args)
