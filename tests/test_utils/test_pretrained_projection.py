@@ -27,9 +27,8 @@ language_model_name_or_path_list = [
 def test_load_and_save_projection(
     vision_model_name_or_path: tuple[str, Type[PretrainedConfig]],
     text_model_name_or_path: str,
-    tmp_path: pathlib.Path
+    tmp_path: pathlib.Path,
 ):
-    
     vision_config = vision_model_name_or_path[1].from_pretrained(
         vision_model_name_or_path[0]
     )
@@ -47,10 +46,16 @@ def test_load_and_save_projection(
 
     vision_projector = MultimodalProjectorModel(projector_config)
 
+    assert len(list(tmp_path.iterdir())) == 0
+
     vision_projector.save_pretrained(tmp_path)
 
-    vision_project_from_pretrained = MultimodalProjectorModel.from_pretrained(
-        tmp_path
+    assert len(list(tmp_path.iterdir())) > 0
+
+    vision_project_from_pretrained = MultimodalProjectorModel.from_pretrained(tmp_path)
+
+    assert sorted(vision_projector.state_dict().keys()) == sorted(
+        vision_project_from_pretrained.state_dict().keys()
     )
 
     for p_key in vision_projector.state_dict().keys():
