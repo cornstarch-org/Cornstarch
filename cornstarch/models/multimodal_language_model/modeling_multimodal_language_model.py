@@ -86,12 +86,6 @@ class ProjectorModel(PreTrainedModel):
         return outputs
 
 
-class ModalType(Enum):
-    Vision = "vision"
-    Text = "text"
-    Audio = "audio"
-
-
 class ModalModuleType(Enum):
     Encoder = auto()
     Decoder = auto()
@@ -142,7 +136,7 @@ class ModalModule(nn.Module):
 class MultimodalModel(nn.Module):
     def __init__(
         self,
-        encoders: dict[ModalType, ModalModule],
+        encoders: dict[str, ModalModule],
         language_model: Optional[PreTrainedModel] = None,
     ):
         """
@@ -158,7 +152,7 @@ class MultimodalModel(nn.Module):
         for modal_key, modal_module in encoders.items():
             # TODO: if projector is None while language model is given,
             # generate a projector layer.
-            self.add_module(f"{modal_key.value}_encoder", modal_module)
+            self.add_module(f"{modal_key}_encoder", modal_module)
             self.encoders_args.append(
                 list(inspect.signature(modal_module.module.forward).parameters.keys())
             )
@@ -171,7 +165,7 @@ class MultimodalModel(nn.Module):
     def forward(self, **kwargs):
         encoders_outputs = []
         for modal_key in self.encoders.keys():
-            encoder_module = getattr(self, f"{modal_key.value}_encoder")
+            encoder_module = getattr(self, f"{modal_key}_encoder")
             args = {arg: kwargs[arg] for arg in self.encoders_args[modal_key]}
             encoders_outputs.append(encoder_module(**args))
 

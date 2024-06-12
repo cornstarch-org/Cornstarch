@@ -3,7 +3,6 @@ from transformers import AutoConfig, AutoModel
 from .configuration_multimodal_language_model import ProjectorModelConfig
 from .modeling_multimodal_language_model import (
     ModalModule,
-    ModalType,
     MultimodalModel,
     ProjectorModel,
 )
