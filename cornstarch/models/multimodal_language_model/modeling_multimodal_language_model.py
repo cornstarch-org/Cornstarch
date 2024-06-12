@@ -18,23 +18,23 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
 
-from cornstarch.models.multimodal_language_model import ProjectorModelConfig
+from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 
-class ProjectorModel(PreTrainedModel):
+class MultimodalProjector(PreTrainedModel):
     """
     An abstract class to handle weights initialization of projector layers
     between encoders and a language model.
     """
 
-    config_class = ProjectorModelConfig
+    config_class = MultimodalProjectorConfig
     base_model_prefix = ""
     main_input_name = "inputs_embeds"
     supports_gradient_checkpointing = True
 
-    config: ProjectorModelConfig
+    config: MultimodalProjectorConfig
 
-    def __init__(self, config: ProjectorModelConfig):
+    def __init__(self, config: MultimodalProjectorConfig):
         super().__init__(config)
         self.gradient_checkpointing = False
 
@@ -105,7 +105,7 @@ class ModalModule(nn.Module):
     def __init__(
         self,
         model: PreTrainedModel,
-        projector: Optional[ProjectorModel] = None,
+        projector: Optional[MultimodalProjector] = None,
         modal_type: ModalModuleType = ModalModuleType.Encoder,
     ):
         super().__init__()
@@ -222,16 +222,18 @@ class MultimodalModel(nn.Module):
                         "If you want to load a pretrained projector, "
                         "please explicitly specify a projector in `ModalModule`."
                     )
-                    projector_config = ProjectorModelConfig(
+                    projector_config = MultimodalProjectorConfig(
                         encoder_config=modal_module.module.config,
                         text_config=language_model.config,
                         projection_type=init_projector_type,
                         activation=init_activation,
                     )
-                    modal_module.projector = ProjectorModel(projector_config)
+                    modal_module.projector = MultimodalProjector(projector_config)
 
                 # Check if the projector is compatible with the encoder and the language model
-                projector_config: ProjectorModelConfig = modal_module.projector.config
+                projector_config: MultimodalProjectorConfig = (
+                    modal_module.projector.config
+                )
                 if (
                     projector_config.in_features
                     != modal_module.module.config.hidden_size

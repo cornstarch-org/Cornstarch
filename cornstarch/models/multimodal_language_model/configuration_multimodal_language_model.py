@@ -12,8 +12,8 @@ VISION_MODEL_CONFIGS = {
 }
 
 
-class ProjectorModelConfig(PretrainedConfig):
-    model_type = "projector-model"
+class MultimodalProjectorConfig(PretrainedConfig):
+    model_type = "multimodal-projector"
 
     def __init__(
         self,

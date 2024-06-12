@@ -1,12 +1,12 @@
 from transformers import AutoConfig, AutoModel
 
-from .configuration_multimodal_language_model import ProjectorModelConfig
+from .configuration_multimodal_language_model import MultimodalProjectorConfig
 from .modeling_multimodal_language_model import (
     ModalModule,
     MultimodalModel,
-    ProjectorModel,
+    MultimodalProjector,
 )
 from .processing_multimodal_language_model import MultimodalLanguageModelProcessor
 
-AutoConfig.register("projector-model", ProjectorModelConfig)
-AutoModel.register(ProjectorModelConfig, ProjectorModel)
+AutoConfig.register("multimodal-projector", MultimodalProjectorConfig)
+AutoModel.register(MultimodalProjectorConfig, MultimodalProjector)
