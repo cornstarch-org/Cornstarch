@@ -1,3 +1,4 @@
+import pathlib
 from typing import Type
 
 import pytest
@@ -18,23 +19,17 @@ language_model_name_or_path_list = [
     "meta-llama/Meta-Llama-3-8B",
 ]
 
-vision_projector_name_or_path_list = [
-    "./tests/test_utils/projector_ckpt",
-]
-
 
 @pytest.mark.parametrize(
     "vision_model_name_or_path", vision_model_name_or_path_list, ids=lambda x: x[0]
 )
 @pytest.mark.parametrize("text_model_name_or_path", language_model_name_or_path_list)
-@pytest.mark.parametrize(
-    "vision_projector_name_or_path", vision_projector_name_or_path_list
-)
 def test_load_and_save_projection(
     vision_model_name_or_path: tuple[str, Type[PretrainedConfig]],
     text_model_name_or_path: str,
-    vision_projector_name_or_path: str,
+    tmp_path: pathlib.Path
 ):
+    
     vision_config = vision_model_name_or_path[1].from_pretrained(
         vision_model_name_or_path[0]
     )
@@ -52,10 +47,10 @@ def test_load_and_save_projection(
 
     vision_projector = MultimodalProjectorModel(projector_config)
 
-    vision_projector.save_pretrained(vision_projector_name_or_path)
+    vision_projector.save_pretrained(tmp_path)
 
     vision_project_from_pretrained = MultimodalProjectorModel.from_pretrained(
-        vision_projector_name_or_path
+        tmp_path
     )
 
     for p_key in vision_projector.state_dict().keys():
