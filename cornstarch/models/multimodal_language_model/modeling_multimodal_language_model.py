@@ -151,6 +151,61 @@ class MultimodalModel(nn.Module):
         """
         A representation of multimodal model, with arbitrary number of
         different types of encoders, and an optional large language model.
+
+        Args:
+            encoders (`dict[str, ModalModule]`):
+                A dictionary of modal key and modal module.
+                The modal module should be an instance of `ModalModule`.
+            language_model (`PreTrainedModel`, *optional*):
+                A language model to be used as a decoder.
+                If not given, the model will be trained as an encoder-only model.
+            init_projector_type (`str`, *optional*, defaults to `linear`):
+                The type of projector layer to be initialized.
+                If some encoder does not have a projector, it will be created
+                using this argument.
+                Supported types are `linear`, `mlp`, and `qformer`.
+            init_activation (`str`, *optional*, defaults to `gelu`):
+                The activation function when creating a projector layer.
+
+        Examples:
+        - An example of creating a VLM with CLIP vision encoder and llama-3
+            ```
+            from transformers.models.clip.modeling_clip import CLIPVisionModel
+            from transformers.models.llama.modeling_llama import LlamaForCausalLM
+            from cornstarch.models.multimodal_language_model import MultimodalModel, ModalModule
+
+            vision_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch16")
+            vision_module = ModalModule(vision_encoder)
+
+            language_model = LlamaForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
+
+            vision_module.train()
+            language_model.train()
+
+            mm = MultimodalModel({"vision": vision_module}, language_model=language_model)
+            ```
+
+        - An example of using peft to fine-tune the pretrained models
+            ```
+            from cornstarch.models.multimodal_language_model import MultimodalModel, ModalModule
+
+            from transformers.models.clip.modeling_clip import CLIPVisionModel
+            from transformers.models.llama.modeling_llama import LlamaForCausalLM
+            from accelerate import init_empty_weights
+            from peft import get_peft_model, LoraConfig, TaskType
+
+            with init_empty_weights():
+                vision_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch16")
+                peft_config = LoraConfig(task_type=None, inference_mode=False, target_modules="all-linear")
+                vision_encoder = get_peft_model(vision_encoder, peft_config)
+                vision_module = ModalModule(vision_encoder)
+
+                language_model = LlamaForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
+                peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM, inference_mode=False)
+                language_model = get_peft_model(language_model, peft_config)
+
+            mm = MultimodalModel({"vision": vision_module}, language_model=language_model)
+            ```
         """
         super().__init__()
 
