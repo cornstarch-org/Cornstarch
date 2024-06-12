@@ -134,6 +134,11 @@ class ModalModule(nn.Module):
         else:
             return self.module(self.projector(*args, **kwargs))
 
+    def train(self, mode: bool = True) -> ModalModule:
+        self.module.train(mode)
+        self.projector.train(mode)
+        return self
+
 
 class MultimodalModel(nn.Module):
     def __init__(
