@@ -151,7 +151,6 @@ class MultimodalModel(nn.Module):
 
         self.encoders = encoders
         self.encoders_args: list[list[str]] = []
-        self.language_model = language_model
 
         for modal_key, modal_module in encoders.items():
             if language_model is not None:
@@ -197,6 +196,7 @@ class MultimodalModel(nn.Module):
                 list(inspect.signature(modal_module.module.forward).parameters.keys())
             )
 
+        self.language_model = language_model
         self.add_module("language_model", language_model)
         self.language_model_args = list(
             inspect.signature(language_model.forward).parameters.keys()
