@@ -17,3 +17,7 @@ __pycache__/
 
 # tensorboard
 runs
+
+# wandb
+wandb/*
+logs/*
