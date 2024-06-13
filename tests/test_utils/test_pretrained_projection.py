@@ -80,6 +80,31 @@ def test_load_and_save_projection(
 
     vision_project_from_pretrained = MultimodalProjector.from_pretrained(tmp_path)
 
+    # Check loaded config attributes
+    assert (
+        projector.config.projection_type
+        == vision_project_from_pretrained.config.projection_type
+    )
+    assert (
+        projector.config.activation == vision_project_from_pretrained.config.activation
+    )
+    assert (
+        projector.config.in_features
+        == vision_project_from_pretrained.config.in_features
+    )
+    assert (
+        projector.config.out_features
+        == vision_project_from_pretrained.config.out_features
+    )
+    assert (
+        projector.config.encoder_model_type
+        == vision_project_from_pretrained.config.encoder_model_type
+    )
+    assert (
+        projector.config.language_model_type
+        == vision_project_from_pretrained.config.language_model_type
+    )
+
     assert sorted(projector.state_dict().keys()) == sorted(
         vision_project_from_pretrained.state_dict().keys()
     )
