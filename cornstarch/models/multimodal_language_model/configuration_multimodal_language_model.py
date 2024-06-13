@@ -47,13 +47,7 @@ class MultimodalProjectorConfig(PretrainedConfig):
         if encoder_config is not None:
             self.in_features = encoder_config.hidden_size
             self.encoder_model_type = encoder_config.model_type
-        else:
-            self.in_features = 0
-            self.encoder_model_type = None
 
         if text_config is not None:
             self.out_features = text_config.hidden_size
             self.language_model_type = text_config.model_type
-        else:
-            self.out_features = 0
-            self.language_model_type = None
