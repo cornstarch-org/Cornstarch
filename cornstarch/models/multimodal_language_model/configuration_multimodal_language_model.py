@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+import os
+from typing import Union
+
 from transformers.activations import ACT2CLS
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.clip.configuration_clip import CLIPVisionConfig
@@ -37,13 +42,18 @@ class MultimodalProjectorConfig(PretrainedConfig):
             )
 
         self.projection_type = projection_type
-        self.activation = ACT2CLS[activation]
+        self.activation = activation
 
-        if encoder_config != None:
+        if encoder_config is not None:
             self.in_features = encoder_config.hidden_size
+            self.encoder_model_type = encoder_config.model_type
+        else:
+            self.in_features = 0
+            self.encoder_model_type = None
 
-        if text_config != None:
+        if text_config is not None:
             self.out_features = text_config.hidden_size
-
-        self.encoder_model_type = encoder_config.model_type
-        self.language_model_type = text_config.model_type
+            self.language_model_type = text_config.model_type
+        else:
+            self.out_features = 0
+            self.language_model_type = None
