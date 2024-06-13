@@ -228,7 +228,9 @@ class MultimodalModel(nn.Module):
                         projection_type=init_projector_type,
                         activation=init_activation,
                     )
-                    modal_module.projector = MultimodalProjector(projector_config)
+                    modal_module.projector = MultimodalProjector(projector_config).to(
+                        modal_module.module.device
+                    )
 
                 # Check if the projector is compatible with the encoder and the language model
                 projector_config: MultimodalProjectorConfig = (
