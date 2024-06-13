@@ -263,6 +263,14 @@ class MultimodalModel(nn.Module):
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        for encoder in self.encoders.values():
+            encoder.module.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+            encoder.projector.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs
+            )
+        self.language_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
