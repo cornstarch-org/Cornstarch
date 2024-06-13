@@ -260,19 +260,106 @@ class MultimodalModel(nn.Module):
 
         self.language_model = language_model
         self.add_module("language_model", language_model)
-        self.language_model_args = list(
-            inspect.signature(language_model.forward).parameters.keys()
-        )
 
-    def forward(self, **kwargs):
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[tuple[tuple[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = True,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ):
+        """
+        Args:
+            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you provide it.
+            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`):
+                Mask to avoid performing attention on padding token indices.
+                Mask values selected in `[0, 1]`:
+
+                - 1 for tokens that are **not masked**,
+                - 0 for tokens that are **masked**.
+            position_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                Indices of positions of each input sequence tokens in the position embeddings.
+                Selected in the range `[0, config.n_positions - 1]`.
+            past_key_values (`tuple(tuple(torch.FloatTensor))`, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+                Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of shape
+                `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of shape
+                `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`.
+
+                Contains pre-computed hidden-states (key and values in the self-attention blocks and in the cross-attention
+                blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
+
+                If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those that
+                don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of all
+                `decoder_input_ids` of shape `(batch_size, sequence_length)`.
+            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
+                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
+                than the model's internal embedding lookup matrix.
+            use_cache (`bool`):
+                If set to `True`, `past_key_values` key value states are returned and
+                can be used to speed up decoding (see `past_key_values`).
+            output_attentions (`bool`):
+                Whether or not to return the attentions tensors of all attention layers.
+                See `attentions` under returned tensors for more detail.
+            output_hidden_states (`bool`):
+                Whether or not to return the hidden states of all layers.
+                See `hidden_states` under returned tensors for more detail.
+            return_dict (`bool`):
+                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+
+            Inputs for modalities are passed as kwargs.
+        """
+        if self.language_model is None:
+            # Does not support CLIP-like encoder only multimodal model yet
+            raise NotImplementedError
+
+        # step 1. forward the modal inputs to the encoders,
+        # to get encoder embeddings of shape (batch_size, seq_len, hidden_size)
         encoders_outputs = []
         for modal_key in self.encoders.keys():
             encoder_module = getattr(self, f"{modal_key}_encoder")
             args = {arg: kwargs[arg] for arg in self.encoders_args[modal_key]}
-            encoders_outputs.append(encoder_module(**args))
+            args["return_dict"] = True
+            encoders_outputs.append(encoder_module(**args).last_hidden_state)
 
-        args = {arg: kwargs[arg] for arg in self.language_model_args}
-        return self.language_model(**args)
+        encoders_outputs = torch.cat(encoders_outputs, dim=1)
+        encoders_attention_mask = torch.ones(
+            encoders_outputs.size()[:-1],
+            dtype=torch.long,
+            device=encoders_outputs.device,
+        )
+
+        # step 2. merge encoded multimodal features into text embeddings
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
+
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids).to(
+                encoders_attention_mask.device
+            )
+        attention_mask = torch.cat([encoders_attention_mask, attention_mask], dim=1)
+
+        return self.language_model(
+            input_ids=None,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            labels=labels,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
 
 
 # class MultimodalEncoderProjector(nn.Module):
