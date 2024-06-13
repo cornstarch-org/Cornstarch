@@ -7,8 +7,9 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from torch.nn import CrossEntropyLoss
 from transformers.activations import get_activation
-from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
@@ -118,14 +119,14 @@ class ModalModule(nn.Module):
                     f"should be equal to hidden size of model ({model.config.hidden_size})."
                 )
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, **kwargs) -> torch.Tensor:
         if self.projector is None:
             return self.module(*args, **kwargs)
 
         if self.modal_type == ModalModuleType.Encoder:
-            return self.projector(self.module(*args, **kwargs))
+            return self.projector(self.module(*args, **kwargs)[0])
         else:
-            return self.module(self.projector(*args, **kwargs))
+            return self.module(self.projector(*args, **kwargs))[0]
 
     def train(self, mode: bool = True) -> ModalModule:
         self.module.train(mode)
@@ -203,9 +204,14 @@ class MultimodalModel(nn.Module):
         super().__init__()
 
         self.encoders = encoders
-        self.encoders_args: list[list[str]] = []
+        self.encoders_args: dict[str, list[str]] = {}
 
         for modal_key, modal_module in encoders.items():
+            if not isinstance(modal_module, ModalModule):
+                raise ValueError(
+                    f"Value of {modal_key} encoder should be an instance of ModalModule."
+                )
+
             if language_model is not None:
                 if modal_module.projector is None:
                     warnings.warn(
@@ -249,8 +255,8 @@ class MultimodalModel(nn.Module):
                     )
 
             self.add_module(f"{modal_key}_encoder", modal_module)
-            self.encoders_args.append(
-                list(inspect.signature(modal_module.module.forward).parameters.keys())
+            self.encoders_args[modal_key] = list(
+                inspect.signature(modal_module.module.forward).parameters.keys()
             )
 
         self.language_model = language_model
@@ -288,7 +294,7 @@ class MultimodalModel(nn.Module):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         **kwargs,
-    ) -> BaseModelOutputWithPast:
+    ) -> CausalLMOutputWithPast:
         """
         Args:
             input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
@@ -336,14 +342,33 @@ class MultimodalModel(nn.Module):
             # Does not support CLIP-like encoder only multimodal model yet
             raise NotImplementedError
 
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.language_model.config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.language_model.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.language_model.config.return_dict
+        )
+
         # step 1. forward the modal inputs to the encoders,
         # to get encoder embeddings of shape (batch_size, seq_len, hidden_size)
         encoders_outputs = []
         for modal_key in self.encoders.keys():
             encoder_module = getattr(self, f"{modal_key}_encoder")
-            args = {arg: kwargs[arg] for arg in self.encoders_args[modal_key]}
-            args["return_dict"] = True
-            encoders_outputs.append(encoder_module(**args).last_hidden_state)
+            args = {
+                arg: kwargs[arg]
+                for arg in self.encoders_args[modal_key]
+                if arg in kwargs
+            }
+            encoders_outputs.append(encoder_module(**args))
 
         encoders_outputs = torch.cat(encoders_outputs, dim=1)
         encoders_attention_mask = torch.ones(
@@ -362,15 +387,48 @@ class MultimodalModel(nn.Module):
             )
         attention_mask = torch.cat([encoders_attention_mask, attention_mask], dim=1)
 
-        return self.language_model(
+        outputs = self.language_model(
             input_ids=None,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            labels=labels,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+        )
+
+        logits = outputs.logits if return_dict else outputs[0]
+        loss = None
+        # we compute the loss here since we need to take into account the sequence length of the query embeds
+        if labels is not None:
+            labels = labels.to(logits.device)
+            logits = logits[:, -labels.size(1) :, :]
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous().to(logits.device)
+
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(
+                shift_logits.view(-1, self.language_model.config.vocab_size),
+                shift_labels.view(-1),
+            )
+
+        if not return_dict:
+            output = (
+                logits,
+                past_key_values,
+                outputs.hidden_states,
+                outputs.attentions,
+            )
+            return ((loss,) + output) if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
