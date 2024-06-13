@@ -469,9 +469,9 @@ class ImageProcessorWrapper(BaseImageProcessor):
         return self.image_processor.model_input_names
 
 
-class MultimodalLanguageModelProcessor(ProcessorMixin):
+class MultimodalModelProcessor(ProcessorMixin):
     """
-    MultimodalLanguageModelProcessor is a class that processes text and images for multimodal language models.
+    MultimodalModelProcessor is a class that processes text and images for multimodal language models.
     It is a composition of an image processor and a tokenizer.
 
     Inspired by LLaVA-NeXT, it supports additional techniques for processing
@@ -489,7 +489,7 @@ class MultimodalLanguageModelProcessor(ProcessorMixin):
         **kwargs,
     ):
         super().__init__(image_processor, tokenizer)
-        self.image_processor = ImageProcessorWrapper(image_processor)
+        self.image_processor = image_processor
         self.tokenizer = tokenizer
 
         self.tokenizer.add_tokens("<unk>", special_tokens=True)
@@ -497,12 +497,6 @@ class MultimodalLanguageModelProcessor(ProcessorMixin):
         print(
             f"Setting `pad_token_id` to `unk_token_id`: {self.tokenizer.unk_token_id}."
         )
-
-        if self.image_processor is not None:
-            self.tokenizer.add_tokens("<image>", special_tokens=True)
-            self.image_token_id = self.tokenizer.convert_tokens_to_ids("<image>")
-        else:
-            self.image_token_id = None
 
     def __call__(
         self,
@@ -531,9 +525,6 @@ class MultimodalLanguageModelProcessor(ProcessorMixin):
 
     def decode(self, *args, **kwargs):
         return self.tokenizer.decode(*args, **kwargs)
-
-    def train(self):
-        self.tokenizer.padding_side = "right"
 
     @property
     def model_input_names(self):

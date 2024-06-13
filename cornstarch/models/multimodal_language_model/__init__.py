@@ -6,7 +6,7 @@ from .modeling_multimodal_language_model import (
     MultimodalModel,
     MultimodalProjector,
 )
-from .processing_multimodal_language_model import MultimodalLanguageModelProcessor
+from .processing_multimodal_language_model import MultimodalModelProcessor
 
 AutoConfig.register("multimodal-projector", MultimodalProjectorConfig)
 AutoModel.register(MultimodalProjectorConfig, MultimodalProjector)
