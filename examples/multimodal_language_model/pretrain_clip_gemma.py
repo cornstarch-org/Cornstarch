@@ -10,25 +10,26 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
-    CLIPImageProcessor,
     get_linear_schedule_with_warmup,
 )
-from transformers.models.gemma.tokenization_gemma_fast import GemmaTokenizerFast
+from transformers.models.clip import CLIPImageProcessor, CLIPVisionModel
+from transformers.models.gemma import GemmaForCausalLM, GemmaTokenizerFast
 
 from cornstarch.models.multimodal_language_model import (
-    MultimodalLanguageModel,
-    MultimodalLanguageModelProcessor,
+    ModalModule,
+    MultimodalModel,
+    MultimodalModelProcessor,
 )
 
 
 def collate_fn_llava_pretrain(
-    batches: list[dict], processor: MultimodalLanguageModelProcessor, dataset_dir: Path
+    batches: list[dict], processor: MultimodalModelProcessor, dataset_dir: Path
 ):
     images = []
     texts = []
 
     for batch in batches:
-        assert ["image", "id", "conversations"] == list(batch.keys())
+        assert set(["image", "id", "conversations"]) == set(batch.keys())
         assert (
             isinstance(batch["conversations"], list)
             and len(batch["conversations"]) == 2
@@ -40,14 +41,9 @@ def collate_fn_llava_pretrain(
         image = Image.open(f"{dataset_dir}/{batch['image']}")
         images.append(image)
 
-        texts.append(f"<image> {batch['conversations'][1]['value']}")
+        texts.append(batch["conversations"][1]["value"])
 
-    inputs = processor(
-        images=images,
-        text=texts,
-        return_tensors="pt",
-        padding=True,
-    )
+    inputs = processor(images=images, text=texts, return_tensors="pt")
     for k, v in inputs.items():
         if isinstance(v, torch.Tensor):
             inputs[k] = v.to("cuda").requires_grad_(v.is_floating_point())
@@ -68,25 +64,25 @@ def pretrain(
     torch.cuda.set_device(0)
 
     # Create a model
-    model: MultimodalLanguageModel = (
-        MultimodalLanguageModel.from_encoders_llm_pretrained(
-            text_model_name_or_path="google/gemma-1.1-2b-it",
-            vision_model_name_or_path="openai/clip-vit-base-patch32",
-        ).to(dtype=torch.bfloat16, device="cuda")
-    )
+    vision_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
+    language_model = GemmaForCausalLM.from_pretrained("google/gemma-1.1-2b-it")
+
+    model = MultimodalModel(
+        encoders={"vision": ModalModule(vision_encoder)},
+        language_model=language_model,
+    ).to(dtype=torch.bfloat16, device="cuda")
     model.gradient_checkpointing_enable()
+    model.train()
 
     # Create a processor
     image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32")
     text_processor = GemmaTokenizerFast.from_pretrained(
         "google/gemma-1.1-2b-it",
     )
-    processor = MultimodalLanguageModelProcessor(
+    processor = MultimodalModelProcessor(
         tokenizer=text_processor,
         image_processor=image_processor,
     )
-    # Must resize embedding otherwise embedding will experience out of index error
-    model.resize_token_embeddings(len(processor.tokenizer))
 
     """
     Examples of loading some datasets:
@@ -118,13 +114,6 @@ def pretrain(
         ),
     )
 
-    model = model.train(
-        train_language_model="frozen",
-        train_vision_model="frozen",
-        train_projection="full",
-    )
-    processor.train()
-
     optimizer = Adam(model.parameters())
     optimizer.zero_grad()
 
@@ -153,9 +142,6 @@ def pretrain(
                 optimizer.zero_grad()
 
                 pbar.set_postfix({"loss": loss.item()})
-
-    print("Saving projection module...")
-    torch.save(model.vision_model.projection, "clip_gemma_vision_projection.pth")
 
 
 if __name__ == "__main__":
