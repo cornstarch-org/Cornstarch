@@ -8,7 +8,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader
 
-from cornstarch.models.multimodal_language_model import MultimodalLanguageModel
+from cornstarch.models.multimodal_language_model import MultimodalModel
 from cornstarch.plugin.multimodal_parallel_plugin import ModalParallelPlugin
 
 
@@ -50,7 +50,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
 
     def configure(
         self,
-        model: MultimodalLanguageModel,
+        model: MultimodalModel,
         optimizer: Optimizer | None = None,
         criterion: Callable[..., Any] | None = None,
         dataloader: DataLoader | None = None,

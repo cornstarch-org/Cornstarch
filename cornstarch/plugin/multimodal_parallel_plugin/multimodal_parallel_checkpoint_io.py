@@ -5,7 +5,7 @@ from colossalai.checkpoint_io import GeneralCheckpointIO, HybridParallelCheckpoi
 from colossalai.cluster import DistCoordinator
 from colossalai.interface import ModelWrapper
 
-from cornstarch.models.multimodal_language_model import MultimodalLanguageModel
+from cornstarch.models.multimodal_language_model import MultimodalModel
 
 
 class MultimodalParallelCheckpointIO(HybridParallelCheckpointIO):
@@ -36,7 +36,7 @@ class MultimodalParallelCheckpointIO(HybridParallelCheckpointIO):
         """
         Load model from checkpoints.
 
-        MultimodalLanguageModel includes multiple modalities, each of which has
+        MultimodalModel includes multiple modalities, each of which has
         its own checkpoint. This function loads the checkpoint of each modality
         and initializes the corresponding model.
         """
@@ -46,10 +46,10 @@ class MultimodalParallelCheckpointIO(HybridParallelCheckpointIO):
         # return the original model instead of the unwrapped model
         origin_model = model
 
-        model: MultimodalLanguageModel = model.unwrap()
+        model: MultimodalModel = model.unwrap()
         assert isinstance(
-            model, MultimodalLanguageModel
-        ), "Wrapped model must be MultimodalLanguageModel!"
+            model, MultimodalModel
+        ), "Wrapped model must be MultimodalModel!"
 
         for key, checkpoint_path in checkpoint.items():
             if checkpoint_path is None:
