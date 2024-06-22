@@ -1,3 +1,4 @@
+import copy
 import itertools
 from collections import defaultdict, deque
 
@@ -30,8 +31,11 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
             ), f"{from_modal} not in modal_templates."
             assert to_modal in modal_templates, f"{to_modal} not in modal_templates."
 
-        topological_sorted_modals = self.topological_sort(execution_order)
-        assert len(modal_templates) == len(topological_sorted_modals)
+        self.execution_order = execution_order
+        self.topological_sorted_modals = self.topological_sort(execution_order)
+        assert len(modal_templates) == len(self.topological_sorted_modals)
+
+        self.pp_axis, self.dp_axis, self.tp_axis = 0, 1, 2
 
         assert (
             dist.get_world_size()
@@ -46,14 +50,15 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
             for template, tp_size in modal_templates.items()
         )
 
-        mesh = []
         max_tp_size = max(modal_templates.values())
+        meshes: list[list[list[int]]] = [[] for _ in range(dp_size)]
         rank_index = 0
-        for _ in range(dp_size):
-            dp_mesh = []
-            for modal in topological_sorted_modals:
-                tp_size = modal_templates[modal]
-                for _ in range(modal.num_stages):
+        modal_to_ranks: dict[PipelineTemplate, list[int]] = defaultdict(list)
+
+        for modal in self.topological_sorted_modals:
+            tp_size = modal_templates[modal]
+            for _ in range(modal.num_stages):
+                for dp_index in range(dp_size):
                     # create a list of ranks with length `max_tp_size`, where each rank is repeated `max_tp_size // tp_size` times.
                     # Example: [0, 0, 1, 1] for tp_size=2 and max_tp_size=4
                     ranks = [
@@ -61,13 +66,18 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
                         for i in range(rank_index, rank_index + tp_size)
                         for _ in range(max_tp_size // tp_size)
                     ]
-                    dp_mesh.append(ranks)
                     rank_index += tp_size
-            mesh.append(dp_mesh)
-        self._mesh = np.array(mesh)
-        self._shape = self._mesh.shape
+
+                    modal_to_ranks[modal].extend(ranks)
+                    meshes[dp_index].append(ranks)
 
         self._rank = dist.get_rank()
+        self._mesh = np.array(meshes)
+        self._shape = self._mesh.shape
+        self.modal_to_ranks = {
+            modal: list(set(ranks)) for modal, ranks in modal_to_ranks.items()
+        }
+
         self._coords = MultiModalProcessGroupMesh.unravel(self._rank, self._mesh)
         self._ranks_to_group: dict[tuple[int, ...], dist.ProcessGroup] = {}
         self._group_to_ranks: dict[dist.ProcessGroup, tuple[int, ...]] = {}
@@ -82,7 +92,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         return self._coords
 
     @property
-    def mesh(self) -> np.ndarray:
+    def mesh(self) -> dict[PipelineTemplate, np.ndarray]:
         """The process rank mesh.
 
         Returns:
@@ -116,12 +126,19 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         """
         graph: dict[PipelineTemplate, list[PipelineTemplate]] = defaultdict(list)
         in_degree: dict[PipelineTemplate, int] = defaultdict(int)
+        out_degree: dict[PipelineTemplate, int] = defaultdict(int)
 
         for from_modal, to_modal in execution_order:
             graph[from_modal].append(to_modal)
             in_degree[to_modal] += 1
+            out_degree[from_modal] += 1
             if from_modal not in in_degree:
                 in_degree[from_modal] = 0
+            if to_modal not in in_degree:
+                in_degree[to_modal] = 0
+
+        self.in_degree = copy.deepcopy(in_degree)
+        self.out_degree = copy.deepcopy(out_degree)
 
         # Find all modals with no incoming edges
         zero_in_degree = deque([modal for modal in in_degree if in_degree[modal] == 0])

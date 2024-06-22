@@ -33,7 +33,7 @@ llm_template_4stages = PipelineTemplate(
 
 
 @pytest.mark.parametrize(
-    "world_size, modal_template, execution_order, expected_mesh",
+    "world_size, modal_template, execution_order, expected_mesh, expected_ranks",
     [
         (
             24,
@@ -41,18 +41,22 @@ llm_template_4stages = PipelineTemplate(
             [(encoder1_template, llm_template_2stages)],
             [
                 [
-                    [0, 0, 1, 1],  # encoder1, stage1
-                    [2, 2, 3, 3],  # encoder1, stage2
-                    [4, 5, 6, 7],  # llm, stage1
-                    [8, 9, 10, 11],  # llm, stage2
+                    [0, 0, 1, 1],
+                    [4, 4, 5, 5],
+                    [8, 9, 10, 11],
+                    [16, 17, 18, 19],
                 ],
                 [
-                    [12, 12, 13, 13],
-                    [14, 14, 15, 15],
-                    [16, 17, 18, 19],
+                    [2, 2, 3, 3],
+                    [6, 6, 7, 7],
+                    [12, 13, 14, 15],
                     [20, 21, 22, 23],
                 ],
             ],
+            {
+                encoder1_template: list(range(0, 8)),
+                llm_template_2stages: list(range(8, 24)),
+            },
         ),
         (
             18,
@@ -63,15 +67,20 @@ llm_template_4stages = PipelineTemplate(
             ],
             [
                 [
-                    [0, 0, 1, 1],  # encoder1, stage1
-                    [2, 2, 3, 3],  # encoder1, stage2
-                    [4, 4, 5, 5],  # encoder2, stage1
-                    [6, 6, 7, 7],  # encoder2, stage2
-                    [8, 8, 9, 9],  # encoder2, stage3
-                    [10, 11, 12, 13],  # llm, stage1
-                    [14, 15, 16, 17],  # llm, stage2
+                    [0, 0, 1, 1],
+                    [2, 2, 3, 3],
+                    [4, 4, 5, 5],
+                    [6, 6, 7, 7],
+                    [8, 8, 9, 9],
+                    [10, 11, 12, 13],
+                    [14, 15, 16, 17],
                 ],
             ],
+            {
+                encoder1_template: list(range(0, 4)),
+                encoder2_template: list(range(4, 10)),
+                llm_template_2stages: list(range(10, 18)),
+            },
         ),
         (
             84,
@@ -79,33 +88,37 @@ llm_template_4stages = PipelineTemplate(
             [(encoder2_template, llm_template_4stages)],
             [
                 [
-                    [0, 1, 2, 3],  # encoder2, stage1
-                    [4, 5, 6, 7],  # encoder2, stage2
-                    [8, 9, 10, 11],  # encoder2, stage3
-                    [12, 13, 14, 15],  # llm, stage1
-                    [16, 17, 18, 19],  # llm, stage2
-                    [20, 21, 22, 23],  # llm, stage3
-                    [24, 25, 26, 27],  # llm, stage4
-                ],
-                [
-                    [28, 29, 30, 31],
-                    [32, 33, 34, 35],
+                    [0, 1, 2, 3],
+                    [12, 13, 14, 15],
+                    [24, 25, 26, 27],
                     [36, 37, 38, 39],
-                    [40, 41, 42, 43],
-                    [44, 45, 46, 47],
                     [48, 49, 50, 51],
-                    [52, 53, 54, 55],
+                    [60, 61, 62, 63],
+                    [72, 73, 74, 75],
                 ],
                 [
-                    [56, 57, 58, 59],
-                    [60, 61, 62, 63],
+                    [4, 5, 6, 7],
+                    [16, 17, 18, 19],
+                    [28, 29, 30, 31],
+                    [40, 41, 42, 43],
+                    [52, 53, 54, 55],
                     [64, 65, 66, 67],
-                    [68, 69, 70, 71],
-                    [72, 73, 74, 75],
                     [76, 77, 78, 79],
+                ],
+                [
+                    [8, 9, 10, 11],
+                    [20, 21, 22, 23],
+                    [32, 33, 34, 35],
+                    [44, 45, 46, 47],
+                    [56, 57, 58, 59],
+                    [68, 69, 70, 71],
                     [80, 81, 82, 83],
                 ],
             ],
+            {
+                encoder2_template: list(range(0, 24)),
+                llm_template_4stages: list(range(24, 84)),
+            },
         ),
     ],
 )
@@ -113,7 +126,8 @@ def test_get_group(
     world_size: int,
     modal_template: dict[PipelineTemplate, int],
     execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
-    expected_mesh: list[list[list[int]]],
+    expected_mesh: list[list[list[list[int]]]],
+    expected_ranks: dict[PipelineTemplate, list[int]],
     mocker: MockerFixture,
 ):
     recorded_new_group_calls: dict[int, list] = defaultdict(list)
@@ -140,10 +154,11 @@ def test_get_group(
 
         mesh = MultiModalProcessGroupMesh(modal_template, execution_order)
         assert (mesh.mesh == expected_mesh).all()
+        assert mesh.modal_to_ranks == expected_ranks
         meshes.append(mesh)
-        mesh.get_group_along_axis(0)
+        group = mesh.get_group_along_axis(mesh.dp_axis)
 
         dist.destroy_process_group()
 
     for rank, group_calls in recorded_new_group_calls.items():
-        assert group_calls == record_new_group_call_decorator[0]
+        assert group_calls == recorded_new_group_calls[0]
