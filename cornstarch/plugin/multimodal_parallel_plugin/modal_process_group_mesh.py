@@ -1,12 +1,56 @@
+from __future__ import annotations
+
 import copy
 import itertools
 from collections import defaultdict, deque
+from dataclasses import dataclass
 
 import numpy as np
 import torch.distributed as dist
 from colossalai.cluster.process_group_mesh import ProcessGroupMesh
 
 from cornstarch.pipeline_template import PipelineTemplate
+
+
+@dataclass
+class ModalDependencies:
+    modal: PipelineTemplate
+    previous: list[PipelineTemplate]
+    next: list[PipelineTemplate]
+
+    @classmethod
+    def create_from_execution_order(
+        cls: ModalDependencies,
+        execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
+    ) -> list[ModalDependencies]:
+        modal_graph = defaultdict(lambda: {"previous": [], "next": []})
+        in_degree, out_degree = defaultdict(int), defaultdict(int)
+        for from_modal, to_modal in execution_order:
+            modal_graph[from_modal]["next"].append(to_modal)
+            modal_graph[to_modal]["previous"].append(from_modal)
+            if from_modal not in in_degree:
+                in_degree[from_modal] = 0
+            if to_modal not in out_degree:
+                out_degree[to_modal] = 0
+            in_degree[to_modal] += 1
+            out_degree[from_modal] += 1
+
+        # Connect the last modals and the first modals
+        zero_in_degree = [modal for modal, degree in in_degree.items() if degree == 0]
+        zero_out_degree = [modal for modal, degree in out_degree.items() if degree == 0]
+        for first_modal in zero_in_degree:
+            for last_modal in zero_out_degree:
+                modal_graph[first_modal]["previous"].append(last_modal)
+                modal_graph[last_modal]["next"].append(first_modal)
+
+        return [
+            ModalDependencies(
+                modal=modal,
+                previous=dependencies["previous"],
+                next=dependencies["next"],
+            )
+            for modal, dependencies in modal_graph.items()
+        ]
 
 
 class MultiModalProcessGroupMesh(ProcessGroupMesh):
@@ -45,7 +89,9 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
             ), f"{from_modal} not in modal_templates."
             assert to_modal in modal_templates, f"{to_modal} not in modal_templates."
 
-        self.execution_order = execution_order
+        self.modal_dependencies: list[ModalDependencies] = (
+            ModalDependencies.create_from_execution_order(execution_order)
+        )
         self.topological_sorted_modals = self.topological_sort(execution_order)
         assert len(modal_templates) == len(self.topological_sorted_modals)
 
@@ -88,13 +134,19 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         self._rank = dist.get_rank()
         self._mesh = np.array(meshes)
         self._shape = self._mesh.shape
-        self.modal_to_ranks = {
-            modal: list(set(ranks)) for modal, ranks in modal_to_ranks.items()
-        }
 
         self._coords = MultiModalProcessGroupMesh.unravel(self._rank, self._mesh)
         self._ranks_to_group: dict[tuple[int, ...], dist.ProcessGroup] = {}
         self._group_to_ranks: dict[dist.ProcessGroup, tuple[int, ...]] = {}
+
+        self.modal_to_ranks = {
+            modal: list(set(ranks)) for modal, ranks in modal_to_ranks.items()
+        }
+        self.stage_index_to_modal = list(
+            itertools.chain.from_iterable(
+                [modal] * modal.num_stages for modal in self.topological_sorted_modals
+            )
+        )
 
     @property
     def coords(self) -> list[tuple[int, ...]]:
