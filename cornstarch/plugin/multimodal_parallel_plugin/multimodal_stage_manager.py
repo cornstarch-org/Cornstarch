@@ -116,8 +116,8 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                 )
 
         self.prev_ranks: list[int] = list(
-            set([self.pg_mesh.mesh[prev_coord] for prev_coord in prev_coords])
+            sorted(set([self.pg_mesh.mesh[prev_coord] for prev_coord in prev_coords]))
         )
         self.next_ranks: list[int] = list(
-            set([self.pg_mesh.mesh[next_coord] for next_coord in next_coords])
+            sorted(set([self.pg_mesh.mesh[next_coord] for next_coord in next_coords]))
         )
