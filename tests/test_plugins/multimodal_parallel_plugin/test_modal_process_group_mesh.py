@@ -182,10 +182,10 @@ def test_init_process_group_mesh(
                 MultiModalProcessGroupMesh.pp_axis: [
                     (0, 4, 8, 16),
                     (0, 4, 9, 17),
-                    (2, 6, 12, 20),
-                    (2, 6, 13, 21),
                     (1, 5, 10, 18),
                     (1, 5, 11, 19),
+                    (2, 6, 12, 20),
+                    (2, 6, 13, 21),
                     (3, 7, 14, 22),
                     (3, 7, 15, 23),
                 ],
@@ -248,7 +248,7 @@ def test_init_process_group_mesh(
             {
                 # (0, 12, 24, 36, 48, 60, 72), (1, 13, 25, 37, 49, 61, 73), ...
                 MultiModalProcessGroupMesh.pp_axis: [
-                    tuple(range(i, i + 12 * 6, 12)) for i in range(12)
+                    tuple(range(i, i + 12 * 7, 12)) for i in range(12)
                 ],
                 # (0, 4, 8), (1, 5, 9), (2, 6, 10), (3, 7, 11), (12, 16, 20), (13, 17, 21), ...
                 MultiModalProcessGroupMesh.dp_axis: [

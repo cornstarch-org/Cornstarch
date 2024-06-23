@@ -192,7 +192,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         axis: int,
         indices_at_axis: list[int] | None = None,
         backend: str | None = None,
-    ) -> dist.ProcessGroup:
+    ) -> dist.ProcessGroup | list[dist.ProcessGroup]:
         """Get the process group along the given axis which the current process belongs to.
         If the process group doesn't exist, it will be created.
 
@@ -210,10 +210,52 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         """
         indices_at_axis = indices_at_axis or list(range(self._shape[axis]))
 
-        coords_in_group = self.get_coords_along_axis(
-            self._coords[0], axis, indices_at_axis
-        )
-        ranks_in_group = tuple(set([self._mesh[coord] for coord in coords_in_group]))
-        if ranks_in_group not in self._ranks_to_group:
-            return self.create_group_along_axis(axis, indices_at_axis, backend=backend)
-        return self._ranks_to_group[ranks_in_group]
+        if axis == MultiModalProcessGroupMesh.pp_axis:
+            coords_in_group = [
+                self.get_coords_along_axis(coord, axis, indices_at_axis)
+                for coord in self._coords
+            ]
+        else:
+            coords_in_group = [
+                self.get_coords_along_axis(self._coords[0], axis, indices_at_axis)
+            ]
+
+        ranks_in_group = [
+            tuple(sorted(set([self._mesh[coord] for coord in coords])))
+            for coords in coords_in_group
+        ]
+
+        process_group_list: list[dist.ProcessGroup] = []
+        for ranks in ranks_in_group:
+            if ranks not in self._ranks_to_group:
+                group = self.create_group_along_axis(axis, indices_at_axis, backend)
+                process_group_list.append(group)
+            else:
+                process_group_list.append(self._ranks_to_group[ranks])
+
+        if len(process_group_list) == 1:
+            return process_group_list[0]
+        else:
+            return process_group_list
+
+        if axis == MultiModalProcessGroupMesh.pp_axis:
+            coords_in_group = [
+                self.get_coords_along_axis(coord, axis, indices_at_axis)
+                for coord in self._coords
+            ]
+            ranks_in_group = [
+                tuple(set([self._mesh[coord] for coord in coords]))
+                for coords in coords_in_group
+            ]
+        else:
+            coords_in_group = self.get_coords_along_axis(
+                self._coords[0], axis, indices_at_axis
+            )
+            ranks_in_group = tuple(
+                set([self._mesh[coord] for coord in coords_in_group])
+            )
+            if ranks_in_group not in self._ranks_to_group:
+                return self.create_group_along_axis(
+                    axis, indices_at_axis, backend=backend
+                )
+            return self._ranks_to_group[ranks_in_group]
