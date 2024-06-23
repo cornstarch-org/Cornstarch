@@ -140,8 +140,8 @@ llm_template_4stages = PipelineTemplate(
                 ],
             ],
             {
-                encoder2_template: list(range(0, 24)),
-                llm_template_4stages: list(range(24, 84)),
+                encoder2_template: list(range(0, 36)),
+                llm_template_4stages: list(range(36, 84)),
             },
         ),
     ],
