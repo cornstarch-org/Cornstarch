@@ -11,11 +11,23 @@ from cornstarch.pipeline_template import PipelineTemplate
 
 class MultiModalProcessGroupMesh(ProcessGroupMesh):
     """
-    Different from the original `ProcessGroupMesh`, which assumes a unimodal model is given,
-    `MultimodalProcessGroupMesh` manages graph of models.
+    A helper class to manage the process group mesh.
 
-    This makes several differences in implementation:
-    - First stage rank may be in the middle of the rank array.
+    We use a ND-tuple to represent the process group mesh,
+    and a ND-coordinate is to represent each process.
+    For example, ``(0, 1, 0)`` represents the process whose rank is 2 in
+    a 3D process group mesh with size ``(2, 2, 2)``.
+
+    Different from the original `ProcessGroupMesh`, `MultiModalProcessGroupMesh`
+    takes multiple modal templates and execution order as input, and creates
+    a single unified mesh for the glued multimodal model.
+
+    Args:
+        modal_templates (dict[PipelineTemplate, int]): The modal templates and their tp sizes.
+            Each modal may have different number of stages and different tp sizes.
+        execution_order (list[tuple[PipelineTemplate, PipelineTemplate]]): The execution order of the modals.
+            `MultiModalProcessGroupMesh` uses topological sort to determine the order of the modals.
+            This is not related to actual execution order, but only used to assign ranks to modal models.
     """
 
     pp_axis, dp_axis, tp_axis = 0, 1, 2
@@ -196,9 +208,10 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         """Get the process group along the given axis which the current process belongs to.
         If the process group doesn't exist, it will be created.
 
-        A rank may exist multiple times in the mesh, but it should belong to the same tp group.
-        If axis is DP, it may belong to different dp groups; however, all dp groups must have
-        the same set of ranks, thus it should return only one process group.
+        A rank may exist multiple times in the mesh as modals may have different number of stages and tp sizes.
+        If `axis` is dp_axis, no matter how many times a rank exists in the mesh,
+        it should belong to the same dp group, thus return a single `dist.ProcessGroup`.
+        If `axis` is pp_axis, a rank may belong to multiple pp groups, thus return a list of `dist.ProcessGroup`.
 
         Args:
             axis (int): The axis along which the group is created.
@@ -207,6 +220,8 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
 
         Returns:
             ProcessGroup: The process group along the given axis which the current process belongs to.
+            list[ProcessGroup]: if `axis` == pp_axis, a single rank may belong to multiple pp groups.
+                In such case, a list of process groups will be returned.
         """
         indices_at_axis = indices_at_axis or list(range(self._shape[axis]))
 
@@ -237,25 +252,3 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
             return process_group_list[0]
         else:
             return process_group_list
-
-        if axis == MultiModalProcessGroupMesh.pp_axis:
-            coords_in_group = [
-                self.get_coords_along_axis(coord, axis, indices_at_axis)
-                for coord in self._coords
-            ]
-            ranks_in_group = [
-                tuple(set([self._mesh[coord] for coord in coords]))
-                for coords in coords_in_group
-            ]
-        else:
-            coords_in_group = self.get_coords_along_axis(
-                self._coords[0], axis, indices_at_axis
-            )
-            ranks_in_group = tuple(
-                set([self._mesh[coord] for coord in coords_in_group])
-            )
-            if ranks_in_group not in self._ranks_to_group:
-                return self.create_group_along_axis(
-                    axis, indices_at_axis, backend=backend
-                )
-            return self._ranks_to_group[ranks_in_group]
