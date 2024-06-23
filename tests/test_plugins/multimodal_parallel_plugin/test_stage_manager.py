@@ -28,12 +28,12 @@ def destroy_process_group():
 args = [
     dict(
         world_size=24,
-        modal_template={encoder1_template: 2, llm_template_2stages: 4},
+        modal_templates={encoder1_template: 2, llm_template_2stages: 4},
         execution_order=[(encoder1_template, llm_template_2stages)],
     ),
     dict(
         world_size=18,
-        modal_template={
+        modal_templates={
             encoder1_template: 2,
             encoder2_template: 2,
             llm_template_2stages: 4,
@@ -45,7 +45,7 @@ args = [
     ),
     dict(
         world_size=84,
-        modal_template={encoder2_template: 4, llm_template_4stages: 4},
+        modal_templates={encoder2_template: 4, llm_template_4stages: 4},
         execution_order=[(encoder2_template, llm_template_4stages)],
     ),
 ]

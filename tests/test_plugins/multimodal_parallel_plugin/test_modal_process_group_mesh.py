@@ -39,7 +39,7 @@ def destroy_process_group():
 
 
 @pytest.mark.parametrize(
-    "world_size, modal_template, execution_order, expected_mesh, expected_ranks",
+    "world_size, modal_templates, execution_order, expected_mesh, expected_ranks",
     [
         (
             24,
@@ -154,7 +154,7 @@ def destroy_process_group():
 )
 def test_init_process_group_mesh(
     world_size: int,
-    modal_template: dict[PipelineTemplate, int],
+    modal_templates: dict[PipelineTemplate, int],
     execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
     expected_mesh: list[list[list[list[int]]]],
     expected_ranks: dict[PipelineTemplate, list[int]],
@@ -164,7 +164,7 @@ def test_init_process_group_mesh(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
 
-        mesh = MultiModalProcessGroupMesh(modal_template, execution_order)
+        mesh = MultiModalProcessGroupMesh(modal_templates, execution_order)
         assert (mesh.mesh == expected_mesh).all()
         assert mesh.modal_to_ranks == expected_ranks
 
@@ -172,7 +172,7 @@ def test_init_process_group_mesh(
 
 
 @pytest.mark.parametrize(
-    "world_size, modal_template, execution_order, expected_group_ranks",
+    "world_size, modal_templates, execution_order, expected_group_ranks",
     (
         (
             24,
@@ -274,7 +274,7 @@ def test_init_process_group_mesh(
 )
 def test_get_group_along_axis(
     world_size: int,
-    modal_template: dict[PipelineTemplate, int],
+    modal_templates: dict[PipelineTemplate, int],
     execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
     expected_group_ranks: dict[int, list[tuple[int, ...]]],
     axis: int,
@@ -301,7 +301,7 @@ def test_get_group_along_axis(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
 
-        mesh = MultiModalProcessGroupMesh(modal_template, execution_order)
+        mesh = MultiModalProcessGroupMesh(modal_templates, execution_order)
         mesh.get_group_along_axis(axis)
         assert list(mesh._ranks_to_group.keys()) == expected_group_ranks[axis]
         dist.destroy_process_group()
