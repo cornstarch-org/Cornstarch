@@ -51,14 +51,15 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         )
 
         max_tp_size = max(modal_templates.values())
-        meshes: list[list[list[int]]] = [[] for _ in range(dp_size)]
+        meshes: list[list[list[int]]] = []
         rank_index = 0
         modal_to_ranks: dict[PipelineTemplate, list[int]] = defaultdict(list)
 
         for modal in self.topological_sorted_modals:
             tp_size = modal_templates[modal]
             for _ in range(modal.num_stages):
-                for dp_index in range(dp_size):
+                stage_mesh = []
+                for _ in range(dp_size):
                     # create a list of ranks with length `max_tp_size`, where each rank is repeated `max_tp_size // tp_size` times.
                     # Example: [0, 0, 1, 1] for tp_size=2 and max_tp_size=4
                     ranks = [
@@ -68,8 +69,9 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
                     ]
                     rank_index += tp_size
 
+                    stage_mesh.append(ranks)
                     modal_to_ranks[modal].extend(ranks)
-                    meshes[dp_index].append(ranks)
+                meshes.append(stage_mesh)
 
         self._rank = dist.get_rank()
         self._mesh = np.array(meshes)
