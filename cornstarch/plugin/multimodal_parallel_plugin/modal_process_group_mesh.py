@@ -18,6 +18,8 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
     - First stage rank may be in the middle of the rank array.
     """
 
+    pp_axis, dp_axis, tp_axis = 0, 1, 2
+
     def __init__(
         self,
         modal_templates: dict[PipelineTemplate, int],
@@ -34,8 +36,6 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         self.execution_order = execution_order
         self.topological_sorted_modals = self.topological_sort(execution_order)
         assert len(modal_templates) == len(self.topological_sorted_modals)
-
-        self.pp_axis, self.dp_axis, self.tp_axis = 0, 1, 2
 
         assert (
             dist.get_world_size()
