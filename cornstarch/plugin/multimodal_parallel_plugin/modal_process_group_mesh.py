@@ -15,6 +15,8 @@ from cornstarch.pipeline_template import PipelineTemplate
 @dataclass
 class ModalDependencies:
     modal: PipelineTemplate
+    in_degree: int
+    out_degree: int
     previous: list[PipelineTemplate]
     next: list[PipelineTemplate]
 
@@ -46,6 +48,8 @@ class ModalDependencies:
         return [
             ModalDependencies(
                 modal=modal,
+                in_degree=in_degree[modal],
+                out_degree=out_degree[modal],
                 previous=dependencies["previous"],
                 next=dependencies["next"],
             )

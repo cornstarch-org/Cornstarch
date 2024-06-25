@@ -143,3 +143,75 @@ def test_multimodal_pipeline_stage_manager(
         assert stage_manager.next_ranks == expected_prev_next_ranks[rank]["next"]
 
         dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size, modal_templates, execution_order, expected_first_last_stages",
+    [
+        (
+            24,
+            {encoder1_template: 2, llm_template_2stages: 4},
+            [(encoder1_template, llm_template_2stages)],
+            {
+                (0, 1, 2, 3): (True, False),
+                tuple(range(4, 16)): (False, False),
+                tuple(range(16, 24)): (False, True),
+            },
+        ),
+        (
+            18,
+            {
+                encoder1_template: 2,
+                encoder2_template: 2,
+                llm_template_2stages: 4,
+            },
+            [
+                (encoder1_template, llm_template_2stages),
+                (encoder2_template, llm_template_2stages),
+            ],
+            {
+                (0, 1, 4, 5): (True, False),
+                (2, 3) + tuple(range(6, 14)): (False, False),
+                (14, 15, 16, 17): (False, True),
+            },
+        ),
+        (
+            84,
+            {encoder2_template: 4, llm_template_4stages: 4},
+            [(encoder2_template, llm_template_4stages)],
+            {
+                tuple(range(0, 12)): (True, False),
+                tuple(range(12, 72)): (False, False),
+                tuple(range(72, 84)): (False, True),
+            },
+        ),
+    ],
+)
+# expected_first_last_stage: dict of list of ranks -> tuple of expected (is_first_stage, is_last_stage)
+def test_first_last_stage(
+    world_size: int,
+    modal_templates: dict[PipelineTemplate, int],
+    execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
+    expected_first_last_stages: dict[tuple[int], tuple[bool, bool]],
+):
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        mesh = MultiModalProcessGroupMesh(modal_templates, execution_order)
+        stage_manager = MultiModalPipelineStageManager(mesh, mesh.pp_axis)
+
+        expected_first_last_stage = next(
+            value
+            for ranks, value in expected_first_last_stages.items()
+            if rank in ranks
+        )
+        assert expected_first_last_stage == (
+            stage_manager.is_first_stage(),
+            stage_manager.is_last_stage(),
+        ), (
+            f"rank {rank} expected to have {expected_first_last_stage} as first and last stage, "
+            f"but got ({stage_manager.is_first_stage(), stage_manager.is_last_stage()})."
+        )
+
+        dist.destroy_process_group()
