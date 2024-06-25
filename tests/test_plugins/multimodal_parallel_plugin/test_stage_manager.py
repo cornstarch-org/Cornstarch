@@ -1,5 +1,3 @@
-from typing import Any
-
 import pytest
 import torch.distributed as dist
 from torch.testing._internal.distributed.fake_pg import FakeStore
