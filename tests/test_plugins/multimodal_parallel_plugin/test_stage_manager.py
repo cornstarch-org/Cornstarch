@@ -1,5 +1,9 @@
+import functools
+from collections import defaultdict
+
 import pytest
 import torch.distributed as dist
+from pytest_mock import MockerFixture
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.pipeline_template import PipelineTemplate
@@ -215,3 +219,200 @@ def test_first_last_stage(
         )
 
         dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size, modal_templates, execution_order, expected_ranks_in_stage",
+    [
+        (
+            24,
+            {encoder1_template: 2, llm_template_2stages: 4},
+            [(encoder1_template, llm_template_2stages)],
+            {
+                (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
+                (0, 2): [
+                    [0, 8],
+                    [0, 9],
+                    [1, 10],
+                    [1, 11],
+                    [2, 12],
+                    [2, 13],
+                    [3, 14],
+                    [3, 15],
+                ],
+                (0, 3): [
+                    [0, 16],
+                    [0, 17],
+                    [1, 18],
+                    [1, 19],
+                    [2, 20],
+                    [2, 21],
+                    [3, 22],
+                    [3, 23],
+                ],
+                (1, 2): [
+                    [4, 8],
+                    [4, 9],
+                    [5, 10],
+                    [5, 11],
+                    [6, 12],
+                    [6, 13],
+                    [7, 14],
+                    [7, 15],
+                ],
+                (0, 1, 3): [
+                    [0, 4, 16],
+                    [0, 4, 17],
+                    [1, 5, 18],
+                    [1, 5, 19],
+                    [2, 6, 20],
+                    [2, 6, 21],
+                    [3, 7, 22],
+                    [3, 7, 23],
+                ],
+            },
+        ),
+        (
+            18,
+            {
+                encoder1_template: 2,
+                encoder2_template: 2,
+                llm_template_2stages: 4,
+            },
+            [
+                (encoder1_template, llm_template_2stages),
+                (encoder2_template, llm_template_2stages),
+            ],
+            {
+                (0, 1): [[0, 2], [1, 3]],
+                (0, 2): [[0, 4], [1, 5]],
+                (0, 3): [[0, 6], [1, 7]],
+                (1, 2): [[2, 4], [3, 5]],
+                (0, 1, 2): [[0, 2, 4], [1, 3, 5]],
+                (0, 5): [[0, 10], [0, 11], [1, 12], [1, 13]],
+                (4, 5): [[8, 10], [8, 11], [9, 12], [9, 13]],
+                (2, 5, 6): [[4, 10, 14], [4, 11, 15], [5, 12, 16], [5, 13, 17]],
+                (3, 5, 6): [[6, 10, 14], [6, 11, 15], [7, 12, 16], [7, 13, 17]],
+            },
+        ),
+        (
+            84,
+            {encoder2_template: 4, llm_template_4stages: 4},
+            [(encoder2_template, llm_template_4stages)],
+            {
+                (0, 1): [
+                    [0, 12],
+                    [1, 13],
+                    [2, 14],
+                    [3, 15],
+                    [4, 16],
+                    [5, 17],
+                    [6, 18],
+                    [7, 19],
+                    [8, 20],
+                    [9, 21],
+                    [10, 22],
+                    [11, 23],
+                ],
+                (0, 2): [
+                    [0, 24],
+                    [1, 25],
+                    [2, 26],
+                    [3, 27],
+                    [4, 28],
+                    [5, 29],
+                    [6, 30],
+                    [7, 31],
+                    [8, 32],
+                    [9, 33],
+                    [10, 34],
+                    [11, 35],
+                ],
+                (1, 3): [
+                    [12, 36],
+                    [13, 37],
+                    [14, 38],
+                    [15, 39],
+                    [16, 40],
+                    [17, 41],
+                    [18, 42],
+                    [19, 43],
+                    [20, 44],
+                    [21, 45],
+                    [22, 46],
+                    [23, 47],
+                ],
+                (4, 5, 6): [
+                    [48, 60, 72],
+                    [49, 61, 73],
+                    [50, 62, 74],
+                    [51, 63, 75],
+                    [52, 64, 76],
+                    [53, 65, 77],
+                    [54, 66, 78],
+                    [55, 67, 79],
+                    [56, 68, 80],
+                    [57, 69, 81],
+                    [58, 70, 82],
+                    [59, 71, 83],
+                ],
+            },
+        ),
+    ],
+)
+# expected_ranks_in_stage: list of stage indices -> list of list of ranks
+def test_process_group_by_stages(
+    world_size: int,
+    modal_templates: dict[PipelineTemplate, int],
+    execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
+    expected_ranks_in_stage: dict[tuple[int], list[list[int]]],
+    mocker: MockerFixture,
+):
+    recorded_new_group_calls: dict[int, list] = defaultdict(list)
+    group_by_stages: dict[int, set[tuple[int]]] = defaultdict(set)
+
+    def record_new_group_call_decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            recorded_new_group_calls[dist.get_rank()].append(args[0])
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    mocker.patch.object(
+        dist,
+        "new_group",
+        wraps=record_new_group_call_decorator(dist.new_group),
+    )
+
+    for stage_indices, expected_ranks in expected_ranks_in_stage.items():
+        for rank in range(world_size):
+            dist.init_process_group(
+                backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+            )
+            mesh = MultiModalProcessGroupMesh(modal_templates, execution_order)
+            stage_manager = MultiModalPipelineStageManager(mesh, mesh.pp_axis)
+            groups = stage_manager.init_process_group_by_stages(stage_indices)
+
+            if not isinstance(groups, list):
+                groups = [groups]
+
+            for group in groups:
+                if group == dist.GroupMember.NON_GROUP_MEMBER or group is None:
+                    continue
+
+                group_by_stages[rank].add(tuple(dist.get_process_group_ranks(group)))
+
+            # check the ranks in the group are as expected
+            expected_ranks_with_rank = set(
+                tuple(ranks) for ranks in expected_ranks if rank in ranks
+            )
+            assert group_by_stages[rank] == expected_ranks_with_rank
+
+            dist.destroy_process_group()
+
+        # check new_group call order is all the same across all ranks
+        for rank, calls in recorded_new_group_calls.items():
+            assert calls == recorded_new_group_calls[0]
+
+        group_by_stages.clear()

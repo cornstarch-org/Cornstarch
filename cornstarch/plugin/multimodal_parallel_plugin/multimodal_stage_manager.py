@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import itertools
 from typing import Optional
 
 import torch.distributed as dist
@@ -31,11 +34,17 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             for template, num_layers_per_stage in num_layers_per_stage.items():
                 assert len(num_layers_per_stage) == template.num_stages
         self.num_layers_per_stage = num_layers_per_stage
+        self.stage_index_to_modal = list(
+            itertools.chain.from_iterable(
+                [modal] * modal.num_stages
+                for modal in pg_mesh.topological_sorted_modals
+            )
+        )
 
         coords = self.pg_mesh.coords
         prev_coords = []
         next_coords = []
-        my_modal = self.pg_mesh.stage_index_to_modal[coords[0][self.pipeline_axis]]
+        my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
         modal_dependency = next(
             md for md in self.pg_mesh.modal_dependencies if md.modal == my_modal
         )
@@ -45,17 +54,14 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                 coords[i][self.pipeline_axis] == 0
             ) or (
                 # if previous stage is in the different modal
-                self.pg_mesh.stage_index_to_modal[coords[i][self.pipeline_axis] - 1]
-                != my_modal
+                self.stage_index_to_modal[coords[i][self.pipeline_axis] - 1] != my_modal
             ):
                 last_stage_indices_of_previous_modals = []
                 for previous_modal in modal_dependency.previous:
                     last_stage_indices_of_previous_modals.append(
                         [
                             index
-                            for index, modal in enumerate(
-                                self.pg_mesh.stage_index_to_modal
-                            )
+                            for index, modal in enumerate(self.stage_index_to_modal)
                             if modal == previous_modal
                         ][-1]
                     )
@@ -84,17 +90,14 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                 == self.pg_mesh.shape[self.pipeline_axis] - 1
             ) or (
                 # if next stage is in the different modal
-                self.pg_mesh.stage_index_to_modal[coords[i][self.pipeline_axis] + 1]
-                != my_modal
+                self.stage_index_to_modal[coords[i][self.pipeline_axis] + 1] != my_modal
             ):
                 first_stage_indices_of_next_modals = []
                 for next_modal in modal_dependency.next:
                     first_stage_indices_of_next_modals.append(
                         [
                             index
-                            for index, modal in enumerate(
-                                self.pg_mesh.stage_index_to_modal
-                            )
+                            for index, modal in enumerate(self.stage_index_to_modal)
                             if modal == next_modal
                         ][0]
                     )
@@ -135,13 +138,13 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             bool: Whether the current stage is the first stage.
         """
         coords = self.pg_mesh.coords
-        my_modal = self.pg_mesh.stage_index_to_modal[coords[0][self.pipeline_axis]]
+        my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
         modal_dependency = next(
             md for md in self.pg_mesh.modal_dependencies if md.modal == my_modal
         )
         stage_indices_of_modal = [
             index
-            for index, modal in enumerate(self.pg_mesh.stage_index_to_modal)
+            for index, modal in enumerate(self.stage_index_to_modal)
             if modal == my_modal
         ]
 
@@ -165,13 +168,13 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             bool: Whether the current stage is the last stage.
         """
         coords = self.pg_mesh.coords
-        my_modal = self.pg_mesh.stage_index_to_modal[coords[0][self.pipeline_axis]]
+        my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
         modal_dependency = next(
             md for md in self.pg_mesh.modal_dependencies if md.modal == my_modal
         )
         stage_indices_of_modal = [
             index
-            for index, modal in enumerate(self.pg_mesh.stage_index_to_modal)
+            for index, modal in enumerate(self.stage_index_to_modal)
             if modal == my_modal
         ]
 
@@ -201,6 +204,20 @@ class MultiModalPipelineStageManager(PipelineStageManager):
 
     def get_next_ranks(self) -> list[int]:
         return self.next_ranks
+
+    def init_process_group_by_stages(
+        self, stages: list[int]
+    ) -> dist.ProcessGroup | list[dist.ProcessGroup]:
+        """Get the process group of the given stages.
+
+        Args:
+            stages (list[int]): List of stages.
+
+        Returns:
+            ProcessGrooup | list[ProcessGroup]: Process groups of the given stages.
+            Returns a list only when there are multiple process groups.
+        """
+        return self.pg_mesh.get_group_along_axis(self.pipeline_axis, stages)
 
     @property
     def num_stages(self) -> int:

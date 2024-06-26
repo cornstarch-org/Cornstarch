@@ -146,11 +146,6 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         self.modal_to_ranks = {
             modal: list(set(ranks)) for modal, ranks in modal_to_ranks.items()
         }
-        self.stage_index_to_modal = list(
-            itertools.chain.from_iterable(
-                [modal] * modal.num_stages for modal in self.topological_sorted_modals
-            )
-        )
 
     @property
     def coords(self) -> list[tuple[int, ...]]:
@@ -234,6 +229,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         self,
         axis: int,
         indices_at_axis: list[int],
+        target_ranks_in_group: tuple[int],
         backend: str | None = None,
     ) -> dist.ProcessGroup:
         indices_at_axis = indices_at_axis or list(range(self._shape[axis]))
@@ -247,11 +243,11 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
                 base_coord, axis, indices_at_axis
             )
             ranks_in_group = tuple(
-                set([self._mesh[coord] for coord in coords_in_group])
+                sorted(set([self._mesh[coord] for coord in coords_in_group]))
             )
 
             group = self.get_group(ranks_in_group, backend=backend)
-            if self._rank in ranks_in_group:
+            if target_ranks_in_group == ranks_in_group:
                 target_group = group
         return target_group
 
@@ -299,7 +295,9 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         process_group_list: list[dist.ProcessGroup] = []
         for ranks in ranks_in_group:
             if ranks not in self._ranks_to_group:
-                group = self.create_group_along_axis(axis, indices_at_axis, backend)
+                group = self.create_group_along_axis(
+                    axis, indices_at_axis, ranks, backend
+                )
                 process_group_list.append(group)
             else:
                 process_group_list.append(self._ranks_to_group[ranks])
