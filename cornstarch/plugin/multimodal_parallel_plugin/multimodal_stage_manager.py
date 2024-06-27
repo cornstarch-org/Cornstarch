@@ -227,11 +227,3 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             return 1
 
         return self.pg_mesh.shape[self.pipeline_axis]
-
-    def distribute_layers(
-        self,
-        num_layers: int,
-        num_stages: Optional[int] = None,
-        num_model_chunks: Optional[int] = None,
-    ) -> list[int]:
-        raise NotImplementedError
