@@ -226,7 +226,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             # This is one-stage pipeline
             return 1
 
-        return len(self.pg_mesh.get_ranks_in_group(group))
+        return self.pg_mesh.shape[self.pipeline_axis]
 
     def distribute_layers(
         self,
