@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import itertools
-from typing import Optional
 
 import torch.distributed as dist
 from colossalai.pipeline.stage_manager import PipelineStageManager
 
-from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh import (
     MultiModalProcessGroupMesh,
 )
@@ -23,17 +21,12 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         self,
         pg_mesh: MultiModalProcessGroupMesh,
         pipeline_axis: int,
-        num_layers_per_stage: Optional[dict[PipelineTemplate, list[int]]] = None,
     ):
         self.pg_mesh = pg_mesh
         self.pipeline_axis = pipeline_axis
         self.p2p_groups: dict[tuple[int, int], dist.ProcessGroup] = {}
         self.is_interleave = False
         self.num_model_chunks = 1
-        if num_layers_per_stage is not None:
-            for template, num_layers_per_stage in num_layers_per_stage.items():
-                assert len(num_layers_per_stage) == template.num_stages
-        self.num_layers_per_stage = num_layers_per_stage
         self.stage_index_to_modal = list(
             itertools.chain.from_iterable(
                 [modal] * modal.num_stages
