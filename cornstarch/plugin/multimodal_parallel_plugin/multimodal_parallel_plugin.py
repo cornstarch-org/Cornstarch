@@ -150,7 +150,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
-        # TODO: implement it!
+        # TODO: implement a new one if needed!
         self.schedule = OneForwardOneBackwardSchedule(
             self.stage_manager, self.num_microbatches, self.microbatch_size
         )
@@ -173,36 +173,28 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         assert dist.is_initialized(), "torch.distributed is not initialized."
         self.init_distributed()
 
-        def get_ranks_along_pp_axis(
-            target_modal: PipelineTemplate,
-            stage_manager: MultiModalPipelineStageManager,
-        ) -> list:
-            pg_mesh = stage_manager.pg_mesh
-            stage_indices = [
-                index
-                for index, modal in enumerate(stage_manager.stage_index_to_modal)
-                if modal == target_modal
-            ]
-            return np.take(pg_mesh.mesh, stage_indices, axis=pg_mesh.pp_axis)
+        # def get_ranks_along_pp_axis(
+        #     target_modal: PipelineTemplate,
+        #     stage_manager: MultiModalPipelineStageManager,
+        # ) -> list:
+        #     pg_mesh = stage_manager.pg_mesh
+        #     stage_indices = [
+        #         index
+        #         for index, modal in enumerate(stage_manager.stage_index_to_modal)
+        #         if modal == target_modal
+        #     ]
+        #     return np.take(pg_mesh.mesh, stage_indices, axis=pg_mesh.pp_axis)
 
         if not isinstance(model, ModelWrapper):
             for modal_name, encoder in self.encoder_plugins.items():
                 module = model.get_submodule(f"{modal_name}_encoder")
                 module = encoder.configure(
-                    module,
-                    ranks=get_ranks_along_pp_axis(
-                        encoder.pipeline_template, self.stage_manager
-                    ),
+                    module, self.shard_config, self.stage_manager
                 )
                 model.add_module(modal_name, module)
 
             module = model.get_submodule("language_model")
-            module = self.language_model_plugin.configure(
-                module,
-                ranks=get_ranks_along_pp_axis(
-                    self.language_model_plugin.pipeline_template, self.stage_manager
-                ),
-            )
+            module = self.language_model_plugin.configure(module)
             model.add_module("language_model", module)
 
             model = MultimodalParallelModule(model)

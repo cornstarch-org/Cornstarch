@@ -16,7 +16,11 @@ from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader, Dataset
 
 from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
+    MultiModalPipelineStageManager,
+)
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+from cornstarch.shardformer.shard.shardformer import ShardFormer
 
 
 class ModalParallelPlugin(PipelinePluginBase):
@@ -72,47 +76,18 @@ class ModalParallelPlugin(PipelinePluginBase):
         self,
         tp_size: int,
         pipeline_template: PipelineTemplate = None,
-        precision: str = "fp16",
-        enable_fused_normalization: bool = False,
-        enable_flash_attention: bool = False,
-        enable_jit_fused: bool = False,
-        parallel_output: bool = True,
         cpu_offload: bool = False,
         custom_policy: Policy = None,
-        make_vocab_size_divisible_by: int = 64,
     ):
         super().__init__()
 
         self.tp_size = tp_size
         self.pipeline_template = pipeline_template
-        self.precision = precision
         self.cpu_offload = cpu_offload
         self.custom_policy = custom_policy
 
         if self.cpu_offload:
             raise NotImplementedError("CPU offload is not supported yet.")
-
-        self.stage_manager: PipelineStageManager = None
-        self.pg_mesh: ProcessGroupMesh = None
-        self.schedule: Type[PipelineSchedule] = None
-        self.tp_group: dist.ProcessGroup = None
-        self.dp_group: dist.ProcessGroup = None
-        self.pp_group: dist.ProcessGroup = None
-
-        self.shard_config = ShardConfig(
-            tensor_parallel_process_group=None,
-            pipeline_stage_manager=None,
-            enable_tensor_parallelism=False,
-            enable_all_optimization=False,
-            enable_flash_attention=enable_flash_attention,
-            enable_fused_normalization=enable_fused_normalization,
-            enable_jit_fused=enable_jit_fused,
-            enable_sequence_parallelism=False,
-            enable_sequence_overlap=False,
-            sequence_parallel_process_group=None,
-            parallel_output=parallel_output,
-            make_vocab_size_divisible_by=make_vocab_size_divisible_by,
-        )
 
     @property
     def enable_pipeline_parallelism(self) -> bool:
@@ -142,18 +117,29 @@ class ModalParallelPlugin(PipelinePluginBase):
     def configure(
         self,
         model: nn.Module,
-        ranks: list[list[list[int]]],
-        optimizer: Optional[Optimizer] = None,
-        criterion: Optional[Callable] = None,
-        dataloader: Optional[DataLoader] = None,
-        lr_scheduler: Optional[LRScheduler] = None,
-    ) -> Tuple[nn.Module, OptimizerWrapper, Callable, DataLoader, LRScheduler]:
+        shard_config: ShardConfig,
+        stage_manager: MultiModalPipelineStageManager,
+    ) -> nn.Module:
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
-        if not isinstance(model, ModelWrapper):
-            policy = get_autopolicy(self.pipeline_template.model_name)
-            policy.set_model(model)
-            policy.set_shard_config(self.shard_config)
+        policy = get_autopolicy(self.pipeline_template.model_name)
+        policy.set_model(model)
+        policy.set_shard_config(shard_config)
+
+        shardformer = ShardFormer(shard_config)
+        module, self.shared_params = shardformer.optimize(model, policy=policy)
+
+        # TODO: setting process groups for shared parameters
+        self.shared_param_process_groups = []
+        for shared_param in self.shared_params:
+            if len(shared_param) > 0:
+                self.shared_param_process_groups.append(
+                    stage_manager.init_process_group_by_stages(
+                        list(shared_param.keys())
+                    )
+                )
+
+        return module
 
     def execute_pipeline(
         self,

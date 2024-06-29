@@ -1,5 +1,9 @@
+import copy
+
 import pytest
 import torch
+import torch.distributed as dist
+from torch.testing._internal.distributed.fake_pg import FakeStore
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 
 # from transformers.models.llama import LlamaConfig, LlamaForCausalLM
@@ -32,14 +36,14 @@ def test_initialize_plugin():
         tp_size=2,
         pipeline_template=PipelineTemplate(
             PipelineTemplate.get_model_name(vision_encoder),
-            PipelineTemplate.get_modules(vision_encoder),
+            [PipelineTemplate.get_modules(vision_encoder)],
         ),
     )
     language_plugin = ModalParallelPlugin(
         tp_size=2,
         pipeline_template=PipelineTemplate(
             PipelineTemplate.get_model_name(language_module),
-            PipelineTemplate.get_modules(language_module),
+            [PipelineTemplate.get_modules(language_module)],
         ),
     )
 
@@ -49,3 +53,11 @@ def test_initialize_plugin():
         num_microbatches=4,
         microbatch_size=1,
     )
+
+    world_size = 4
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        plugin.configure(model)
+        dist.destroy_process_group()

@@ -302,7 +302,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
             else:
                 process_group_list.append(self._ranks_to_group[ranks])
 
-        if len(process_group_list) == 1:
+        if len(process_group_list) == 1 and axis != MultiModalProcessGroupMesh.pp_axis:
             return process_group_list[0]
         else:
             return process_group_list

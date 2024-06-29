@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+from typing import Optional
 
 import torch.distributed as dist
 from colossalai.pipeline.stage_manager import PipelineStageManager
@@ -220,3 +221,23 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             return 1
 
         return self.pg_mesh.shape[self.pipeline_axis]
+
+    def distribute_layers(
+        self,
+        num_layers: int,
+        num_stages: Optional[int] = None,
+        num_model_chunks: Optional[int] = None,
+    ) -> list[int]:
+        assert num_layers == sum(
+            modal.num_layers for modal in self.pg_mesh.topological_sorted_modals
+        ), (
+            f"num_layers ({num_layers}) does not match the total number of layers "
+            f"({sum(modal.num_layers for modal in self.pg_mesh.topological_sorted_modals)})"
+        )
+
+        return list(
+            itertools.chain(
+                modal.get_num_layers_per_stage()
+                for modal in self.pg_mesh.topological_sorted_modals
+            )
+        )
