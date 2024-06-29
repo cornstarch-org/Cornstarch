@@ -15,11 +15,13 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader, Dataset
 
+from cornstarch.models.multimodal_language_model import ModalModule
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+from cornstarch.shardformer.policies.multimodal import ModalModulePolicy
 from cornstarch.shardformer.shard.shardformer import ShardFormer
 
 
@@ -116,13 +118,16 @@ class ModalParallelPlugin(PipelinePluginBase):
 
     def configure(
         self,
-        model: nn.Module,
+        model: ModalModule,
         shard_config: ShardConfig,
         stage_manager: MultiModalPipelineStageManager,
     ) -> nn.Module:
         assert dist.is_initialized(), "torch.distributed is not initialized."
+        assert isinstance(
+            model, ModalModule
+        ), "model must be an instance of ModalModule."
 
-        policy = get_autopolicy(self.pipeline_template.model_name)
+        policy = ModalModulePolicy()
         policy.set_model(model)
         policy.set_shard_config(shard_config)
 

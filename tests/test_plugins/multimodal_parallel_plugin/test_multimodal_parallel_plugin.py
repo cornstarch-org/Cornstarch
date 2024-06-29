@@ -35,8 +35,8 @@ def test_initialize_plugin():
     vision_plugin = ModalParallelPlugin(
         tp_size=2,
         pipeline_template=PipelineTemplate(
-            PipelineTemplate.get_model_name(vision_encoder),
-            [PipelineTemplate.get_modules(vision_encoder)],
+            PipelineTemplate.get_model_name(vision_module),
+            [PipelineTemplate.get_modules(vision_module)],
         ),
     )
     language_plugin = ModalParallelPlugin(
