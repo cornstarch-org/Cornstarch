@@ -228,16 +228,22 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         num_stages: Optional[int] = None,
         num_model_chunks: Optional[int] = None,
     ) -> list[int]:
-        assert num_layers == sum(
-            modal.num_layers for modal in self.pg_mesh.topological_sorted_modals
-        ), (
-            f"num_layers ({num_layers}) does not match the total number of layers "
-            f"({sum(modal.num_layers for modal in self.pg_mesh.topological_sorted_modals)})"
-        )
+        raise NotImplementedError
+        # return list(
+        #     itertools.chain(
+        #         modal.get_num_layers_per_stage()
+        #         for modal in self.pg_mesh.topological_sorted_modals
+        #     )
+        # )
 
-        return list(
-            itertools.chain(
-                modal.get_num_layers_per_stage()
-                for modal in self.pg_mesh.topological_sorted_modals
-            )
-        )
+    def get_stage_index(
+        self,
+        layers_per_stage: list[int],
+        stage: int | None = None,
+        num_model_chunks: int | None = None,
+        num_stages: int | None = None,
+    ) -> tuple[int, int] | list[tuple[int, int]]:
+        """
+        Get the start index and end index of layers for each stage.
+        """
+        raise NotImplementedError
