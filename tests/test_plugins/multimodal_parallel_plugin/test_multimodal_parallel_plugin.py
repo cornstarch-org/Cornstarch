@@ -3,6 +3,8 @@ import copy
 import pytest
 import torch
 import torch.distributed as dist
+from colossalai.device import device_mesh
+from pytest_mock import MockerFixture
 from torch.testing._internal.distributed.fake_pg import FakeStore
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 
@@ -22,7 +24,13 @@ language_model_config = MistralConfig.from_pretrained("mistralai/Mistral-7B-v0.3
 language_model_config.num_hidden_layers = 3
 
 
-def test_initialize_plugin():
+def test_initialize_plugin(mocker: MockerFixture):
+    mocker.patch.object(
+        device_mesh.DeviceMesh,
+        "_DIST_BACKEND",
+        {"cuda": "nccl", "cpu": "gloo", "npu": "hccl", None: "fake"},
+    )
+
     vision_encoder = CLIPVisionModel(vision_config)
     vision_module = ModalModule(vision_encoder)
     language_module = MistralForCausalLM(language_model_config)

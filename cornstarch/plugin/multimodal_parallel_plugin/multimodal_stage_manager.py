@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 from typing import Optional
 
+import numpy as np
 import torch.distributed as dist
 from colossalai.pipeline.stage_manager import PipelineStageManager
 
@@ -222,28 +223,83 @@ class MultiModalPipelineStageManager(PipelineStageManager):
 
         return self.pg_mesh.shape[self.pipeline_axis]
 
+    @property
+    def stage(self) -> int:
+        return self.pg_mesh.coords[0][self.pipeline_axis]
+
     def distribute_layers(
         self,
         num_layers: int,
         num_stages: Optional[int] = None,
         num_model_chunks: Optional[int] = None,
     ) -> list[int]:
-        raise NotImplementedError
-        # return list(
-        #     itertools.chain(
-        #         modal.get_num_layers_per_stage()
-        #         for modal in self.pg_mesh.topological_sorted_modals
-        #     )
-        # )
+        """
+        Distributed layers across stages.
+
+        Returns:
+            - list[int]: the number of layers for each stage
+        """
+        return list(
+            itertools.chain.from_iterable(
+                modal.get_num_layers_per_stage()
+                for modal in self.pg_mesh.topological_sorted_modals
+            )
+        )
+
+    def _check_my_rank_in_the_stage(self, stage_index: int) -> bool:
+        """
+        Check if the current rank is in the stage.
+
+        Args:
+            stage_index (int): the stage index
+
+        Returns:
+            - bool: whether the current rank is in the stage
+        """
+        ranks_in_modal = next(
+            ranks
+            for modal, ranks in self.pg_mesh.modal_to_ranks.items()
+            if self.stage_index_to_modal[stage_index] == modal
+        )
+        return dist.get_rank() in ranks_in_modal
 
     def get_stage_index(
         self,
         layers_per_stage: list[int],
-        stage: int | None = None,
-        num_model_chunks: int | None = None,
-        num_stages: int | None = None,
-    ) -> tuple[int, int] | list[tuple[int, int]]:
+        stage: Optional[int] = None,
+        num_model_chunks: Optional[int] = None,
+        num_stages: Optional[int] = None,
+    ) -> tuple[int, int]:
         """
-        Get the start index and end index of layers for each stage.
+        Get the start index and end index of layers for each stage in the coresponding modal.
+        If this rank is not in the modal, return [0, 0].
+
+        Args:
+            layers_per_stage (list[int]): number of layers for each stage
+            stage (int): the stage index
+            num_stages (int): number of stages
+            num_model_chunks (int): number of model chunks
+
+        Returns:
+            - tuple[int, int]: the start index and end index of this stage
         """
-        raise NotImplementedError
+        stage = self.stage if stage is None else stage
+        num_stages = self.num_stages if num_stages is None else num_stages
+
+        if not self._check_my_rank_in_the_stage(stage):
+            return (0, 0)
+
+        # Find the first stage index of this modal and subtract it from stage
+        # to make it zero-based index
+        first_stage_index = next(
+            index
+            for index, modal in enumerate(self.stage_index_to_modal)
+            if modal == self.stage_index_to_modal[stage]
+        )
+        stage -= first_stage_index
+
+        num_layers_per_stage_accumulated = np.insert(np.cumsum(layers_per_stage), 0, 0)
+        return (
+            num_layers_per_stage_accumulated[stage],
+            num_layers_per_stage_accumulated[stage + 1],
+        )
