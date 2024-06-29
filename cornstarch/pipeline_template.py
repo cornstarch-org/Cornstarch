@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
-from typing import Optional, Type
+from typing import Optional, Type, cast
 
 from colossalai.shardformer.policies.auto_policy import _fullname
 from torch import nn
+
+from cornstarch.models.multimodal_language_model import ModalModule
 
 
 class PipelineTemplate:
@@ -26,13 +28,31 @@ class PipelineTemplate:
             PipelineTemplatePolicyBase,
         )
 
-        policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
-            PipelineTemplate.get_model_name(model)
-        )
-        assert issubclass(
-            policy, PipelineTemplatePolicyBase
-        ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
-        return policy.get_all_modules(model.config)
+        modules = []
+
+        if isinstance(model, ModalModule):
+            model = cast(ModalModule, model)
+            # ModalModule doesn't have its own config, so gather modules from submodules
+
+            submodules = model.get_modules()
+            for module in submodules:
+                policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
+                    PipelineTemplate.get_model_name(module)
+                )
+                assert issubclass(
+                    policy, PipelineTemplatePolicyBase
+                ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
+                modules.extend(policy.get_all_modules(module.config))
+        else:
+            policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
+                PipelineTemplate.get_model_name(model)
+            )
+            assert issubclass(
+                policy, PipelineTemplatePolicyBase
+            ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
+            modules.extend(policy.get_all_modules(model.config))
+
+        return modules
 
     @staticmethod
     def find_pipeline_template(

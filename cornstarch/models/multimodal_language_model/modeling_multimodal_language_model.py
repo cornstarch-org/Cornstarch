@@ -133,6 +133,12 @@ class ModalModule(nn.Module):
         self.projector.train(mode)
         return self
 
+    def get_modules(self) -> list[nn.Module]:
+        modules = [self.module]
+        if self.projector is not None:
+            modules.append(self.projector)
+        return modules
+
 
 class MultimodalModel(nn.Module):
     def __init__(
