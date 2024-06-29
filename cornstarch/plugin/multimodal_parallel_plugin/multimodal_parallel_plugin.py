@@ -5,6 +5,7 @@ import torch.distributed as dist
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelPlugin
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
+from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
 from colossalai.shardformer import ShardConfig
 from torch.nn import Module
 from torch.optim import Optimizer
@@ -150,11 +151,15 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
         # TODO: implement it!
-        self.schedule = None
+        self.schedule = OneForwardOneBackwardSchedule(
+            self.stage_manager, self.num_microbatches, self.microbatch_size
+        )
 
         self.shard_config.tensor_parallel_process_group = self.tp_group
         self.shard_config.pipeline_stage_manager = self.stage_manager
-        self.shard_config.enable_tensor_parallelism = self.tp_size > 1
+        self.shard_config.enable_tensor_parallelism = (
+            dist.get_world_size(self.tp_group) > 1
+        )
         self.shard_config.__post_init__()
 
     def configure(
@@ -182,7 +187,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
 
         if not isinstance(model, ModelWrapper):
             for modal_name, encoder in self.encoder_plugins.items():
-                module = model.get_submodule(modal_name)
+                module = model.get_submodule(f"{modal_name}_encoder")
                 module = encoder.configure(
                     module,
                     ranks=get_ranks_along_pp_axis(
