@@ -10,6 +10,10 @@ __all__ = ["get_policy_type", "get_autopolicy", "import_policy"]
 
 
 _POLICY_LIST = {
+    # Multimodal
+    "cornstarch.models.multimodal_language_model.MultimodalProjector": PolicyLocation(
+        file_name="multimodal", class_name="MultimodalProjectorPolicy"
+    ),
     # BERT
     "transformers.models.bert.modeling_bert.BertModel": PolicyLocation(
         file_name="bert", class_name="BertModelPolicy"
