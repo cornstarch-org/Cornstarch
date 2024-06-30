@@ -1,5 +1,6 @@
 from typing import Dict, cast
 
+import torch.distributed as dist
 from colossalai.shardformer.layer import Linear1D_Col, Linear1D_Row
 from colossalai.shardformer.policies.auto_policy import _fullname
 from colossalai.shardformer.policies.base_policy import (
@@ -15,9 +16,13 @@ from cornstarch.models.multimodal_language_model import (
     MultimodalProjectorConfig,
 )
 from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
+    MultiModalPipelineStageManager,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
+from cornstarch.shardformer.shard.shard_config import ShardConfig
 
 
 class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
@@ -143,8 +148,13 @@ class ModalModulePolicy(Policy):
 
         model = cast(ModalModule, self.model)
         stage_manager = self.pipeline_stage_manager
-        held_layers = []
+        shard_config: ShardConfig = self.shard_config
 
+        # TODO: policy must know both the module and pipeline template to know if it should hold the module
+        if not self.should_hold_module(shard_config.pipeline_template):
+            return []
+
+        held_layers = []
         policy = get_autopolicy(_fullname(model.module))
         policy.set_model(model.module)
         policy.set_shard_config(self.shard_config)
@@ -157,3 +167,10 @@ class ModalModulePolicy(Policy):
             held_layers.extend(policy.get_held_layers())
 
         return held_layers
+
+    def should_hold_module(self, modal: PipelineTemplate) -> bool:
+        assert self.pipeline_stage_manager is not None
+
+        stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
+        assert isinstance(stage_manager, MultiModalPipelineStageManager)
+        return dist.get_rank() in stage_manager.pg_mesh.modal_to_ranks[modal]

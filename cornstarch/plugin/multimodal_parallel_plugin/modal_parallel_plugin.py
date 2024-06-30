@@ -1,19 +1,16 @@
-from typing import Any, Callable, Dict, Iterator, Optional, Tuple, Type
+from typing import Any, Callable, Iterator
 
 import torch.distributed as dist
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelCheckpointIO
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.checkpoint_io import CheckpointIO
-from colossalai.cluster import ProcessGroupMesh
 from colossalai.interface import ModelWrapper, OptimizerWrapper
-from colossalai.pipeline.schedule import PipelineSchedule
-from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer import ShardConfig
+from colossalai.shardformer.policies.auto_policy import _fullname
 from colossalai.shardformer.policies.base_policy import Policy
 from torch import Tensor, nn
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
+from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import ModalModule
 from cornstarch.pipeline_template import PipelineTemplate
@@ -123,13 +120,16 @@ class ModalParallelPlugin(PipelinePluginBase):
         stage_manager: MultiModalPipelineStageManager,
     ) -> nn.Module:
         assert dist.is_initialized(), "torch.distributed is not initialized."
-        assert isinstance(
-            model, ModalModule
-        ), "model must be an instance of ModalModule."
 
-        policy = ModalModulePolicy()
-        policy.set_model(model)
-        policy.set_shard_config(shard_config)
+        if isinstance(model, ModalModule):
+            policy = ModalModulePolicy()
+            policy.set_model(model)
+            policy.set_shard_config(shard_config)
+        else:
+            assert isinstance(model, PreTrainedModel)
+            policy = get_autopolicy(_fullname(model))
+            policy.set_model(model)
+            policy.set_shard_config(shard_config)
 
         shardformer = ShardFormer(shard_config)
         module, self.shared_params = shardformer.optimize(model, policy=policy)
@@ -154,7 +154,7 @@ class ModalParallelPlugin(PipelinePluginBase):
         optimizer: OptimizerWrapper | None = None,
         return_loss: bool = True,
         return_outputs: bool = False,
-    ) -> Dict:
+    ) -> dict:
         raise NotImplementedError
 
     def no_sync(self, model: nn.Module, optimizer: OptimizerWrapper) -> Iterator[None]:

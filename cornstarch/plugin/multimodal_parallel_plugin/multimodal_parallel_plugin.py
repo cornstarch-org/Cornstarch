@@ -1,12 +1,11 @@
+from dataclasses import replace
 from typing import Any, Callable, Tuple
 
-import numpy as np
 import torch.distributed as dist
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelPlugin
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
-from colossalai.shardformer import ShardConfig
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
@@ -23,6 +22,7 @@ from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh impor
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
+from cornstarch.shardformer.shard.shard_config import ShardConfig
 
 
 class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
@@ -187,14 +187,22 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
 
         if not isinstance(model, ModelWrapper):
             for modal_name, encoder in self.encoder_plugins.items():
-                module = model.get_submodule(f"{modal_name}_encoder")
-                module = encoder.configure(
-                    module, self.shard_config, self.stage_manager
+                shard_config = replace(
+                    self.shard_config, pipeline_template=encoder.pipeline_template
                 )
+                shard_config.pipeline_template = encoder.pipeline_template
+                module = model.get_submodule(f"{modal_name}_encoder")
+                module = encoder.configure(module, shard_config, self.stage_manager)
                 model.add_module(modal_name, module)
 
+            shard_config = replace(
+                self.shard_config,
+                pipeline_template=self.language_model_plugin.pipeline_template,
+            )
             module = model.get_submodule("language_model")
-            module = self.language_model_plugin.configure(module)
+            module = self.language_model_plugin.configure(
+                module, shard_config, self.stage_manager
+            )
             model.add_module("language_model", module)
 
             model = MultimodalParallelModule(model)
