@@ -23,23 +23,28 @@ class PipelineTemplate:
         from cornstarch.shardformer.policies.auto_policy import (
             get_policy_type,
         )
+        from cornstarch.shardformer.policies.multimodal import MultimodalProjectorPolicy
         from cornstarch.shardformer.policies.pipeline_template_policy import (
             PipelineTemplatePolicyBase,
         )
 
         if isinstance(model, ModalModule):
-            submodules = model.get_modules()
-
             modules = []
-            for module in submodules:
-                policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
-                    PipelineTemplate.get_model_name(module)
-                )
-                assert issubclass(
-                    policy, PipelineTemplatePolicyBase
-                ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
 
-                modules.extend(policy.get_all_modules(module.config))
+            policy = get_policy_type(PipelineTemplate.get_model_name(model.module))
+            assert issubclass(
+                policy, PipelineTemplatePolicyBase
+            ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
+            modules.extend(
+                [
+                    f"module.{module}"
+                    for module in policy.get_all_modules(model.module.config)
+                ]
+            )
+
+            modules.extend(
+                MultimodalProjectorPolicy.get_all_modules(model.projector.config)
+            )
 
             return modules
 
