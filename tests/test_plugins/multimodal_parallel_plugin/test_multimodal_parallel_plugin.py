@@ -20,8 +20,10 @@ from cornstarch.plugin.multimodal_parallel_plugin.multimodal_parallel_plugin imp
 
 vision_config = CLIPVisionConfig.from_pretrained("openai/clip-vit-base-patch32")
 vision_config.num_hidden_layers = 2
+vision_config._attn_implementation = "eager"
 language_model_config = MistralConfig.from_pretrained("mistralai/Mistral-7B-v0.3")
 language_model_config.num_hidden_layers = 3
+language_model_config._attn_implementation = "eager"
 
 
 def test_initialize_plugin(mocker: MockerFixture):
