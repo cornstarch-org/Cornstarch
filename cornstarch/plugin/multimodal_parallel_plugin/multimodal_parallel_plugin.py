@@ -193,7 +193,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 shard_config.pipeline_template = encoder.pipeline_template
                 module = model.get_submodule(f"{modal_name}_encoder")
                 module = encoder.configure(module, shard_config, self.stage_manager)
-                model.add_module(modal_name, module)
+                model.add_module(f"{modal_name}_encoder", module)
 
             shard_config = replace(
                 self.shard_config,
