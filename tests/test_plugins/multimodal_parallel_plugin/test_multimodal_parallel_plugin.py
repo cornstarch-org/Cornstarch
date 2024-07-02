@@ -36,7 +36,7 @@ expected_vision_module_layers = [
     "module.vision_model.encoder.layers.0",
     "module.vision_model.encoder.layers.1",
     "module.vision_model.post_layernorm",
-    "projection",
+    "projector.projection",
 ]
 expected_language_module_layers = [
     "model.embed_tokens",
@@ -150,18 +150,18 @@ expected_vision_module_params_per_stage = {
     1: [
         "module.vision_model.encoder.layers.1",
         "module.vision_model.post_layernorm",
-        "projection",
+        "projector.projection",
     ],
 }
 expected_language_module_params_per_stage = {
-    0: [
+    2: [
         "model.embed_tokens",
         "model.layers.0",
     ],
-    1: [
+    3: [
         "model.layers.1",
     ],
-    2: [
+    4: [
         "model.layers.2",
         "model.norm",
         "lm_head",
@@ -220,22 +220,35 @@ def test_params_parallelized(mocker: MockerFixture):
         (24, 25, 26, 27, 28, 29, 30, 31): 4,
     }
     for rank in range(world_size):
+        per_rank_plugin = copy.deepcopy(plugin)
+        per_rank_model = copy.deepcopy(model)
         dist.init_process_group(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
-        module = plugin.configure(model)[0]
+        module = per_rank_plugin.configure(per_rank_model)[0]
 
         stage_index = next(
             stage_index for ranks, stage_index in stage_indices.items() if rank in ranks
         )
 
-        assert check_layers_cover_all_params(
-            expected_vision_module_params_per_stage[stage_index],
-            list(name for name, _ in module.module.vision_encoder.named_parameters()),
-        )
-        assert check_layers_cover_all_params(
-            expected_language_module_params_per_stage[stage_index],
-            list(name for name, _ in module.module.language_model.named_parameters()),
-        )
+        if rank in expected_vision_module_params_per_stage:
+            assert check_layers_cover_all_params(
+                expected_vision_module_params_per_stage[stage_index],
+                list(
+                    name for name, _ in module.module.vision_encoder.named_parameters()
+                ),
+            )
+        else:
+            assert len(list(module.module.vision_encoder.named_parameters())) == 0
+
+        if rank in expected_language_module_params_per_stage:
+            assert check_layers_cover_all_params(
+                expected_language_module_params_per_stage[stage_index],
+                list(
+                    name for name, _ in module.module.language_model.named_parameters()
+                ),
+            )
+        else:
+            assert len(list(module.module.language_model.named_parameters())) == 0
 
         dist.destroy_process_group()
