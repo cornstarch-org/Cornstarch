@@ -18,7 +18,10 @@ from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager impor
     MultiModalPipelineStageManager,
 )
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
-from cornstarch.shardformer.policies.multimodal import ModalModulePolicy
+from cornstarch.shardformer.policies.multimodal import (
+    LanguageModelPolicyWrapper,
+    ModalModulePolicy,
+)
 from cornstarch.shardformer.shard.shardformer import ShardFormer
 
 
@@ -127,7 +130,7 @@ class ModalParallelPlugin(PipelinePluginBase):
             policy.set_shard_config(shard_config)
         else:
             assert isinstance(model, PreTrainedModel)
-            policy = get_autopolicy(_fullname(model))
+            policy = LanguageModelPolicyWrapper(get_autopolicy(_fullname(model)))
             policy.set_model(model)
             policy.set_shard_config(shard_config)
 

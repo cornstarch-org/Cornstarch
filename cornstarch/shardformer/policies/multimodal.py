@@ -1,4 +1,4 @@
-from typing import Dict, cast
+from typing import Any, Dict, List, cast
 
 import torch.distributed as dist
 from colossalai.shardformer.layer import Linear1D_Col, Linear1D_Row
@@ -103,7 +103,18 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
         return []
 
 
-class ModalModulePolicy(Policy):
+class ModalModulePolicyMixin:
+    pipeline_stage_manager: MultiModalPipelineStageManager
+
+    def should_hold_module(self, modal: PipelineTemplate) -> bool:
+        assert self.pipeline_stage_manager is not None
+
+        stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
+        assert isinstance(stage_manager, MultiModalPipelineStageManager)
+        return dist.get_rank() in stage_manager.pg_mesh.modal_to_ranks[modal]
+
+
+class ModalModulePolicy(Policy, ModalModulePolicyMixin):
     def config_sanity_check(self):
         pass
 
@@ -169,9 +180,40 @@ class ModalModulePolicy(Policy):
 
         return held_layers
 
-    def should_hold_module(self, modal: PipelineTemplate) -> bool:
-        assert self.pipeline_stage_manager is not None
 
-        stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
-        assert isinstance(stage_manager, MultiModalPipelineStageManager)
-        return dist.get_rank() in stage_manager.pg_mesh.modal_to_ranks[modal]
+class LanguageModelPolicyWrapper(Policy, ModalModulePolicyMixin):
+    """A policy wrapper for language model.
+
+    This is to inject different stage management in multimodal.
+    """
+
+    def __init__(self, policy: Policy):
+        self.policy = policy
+
+    def set_model(self, model: nn.Module):
+        self.policy.set_model(model)
+
+    def set_shard_config(self, shard_config: ShardConfig):
+        self.policy.set_shard_config(shard_config)
+
+    def config_sanity_check(self):
+        pass
+
+    def preprocess(self) -> nn.Module:
+        return self.policy.preprocess()
+
+    def postprocess(self) -> nn.Module:
+        return self.policy.postprocess()
+
+    def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
+        return self.policy.module_policy()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.policy, name)
+
+    def get_held_layers(self) -> list[nn.Module]:
+        shard_config: ShardConfig = self.policy.shard_config
+        if not self.should_hold_module(shard_config.pipeline_template):
+            return []
+
+        return self.policy.get_held_layers()

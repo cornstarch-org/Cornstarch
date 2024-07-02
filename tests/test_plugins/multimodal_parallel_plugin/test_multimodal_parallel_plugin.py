@@ -231,7 +231,7 @@ def test_params_parallelized(mocker: MockerFixture):
             stage_index for ranks, stage_index in stage_indices.items() if rank in ranks
         )
 
-        if rank in expected_vision_module_params_per_stage:
+        if stage_index in expected_vision_module_params_per_stage:
             assert check_layers_cover_all_params(
                 expected_vision_module_params_per_stage[stage_index],
                 list(
@@ -241,7 +241,7 @@ def test_params_parallelized(mocker: MockerFixture):
         else:
             assert len(list(module.module.vision_encoder.named_parameters())) == 0
 
-        if rank in expected_language_module_params_per_stage:
+        if stage_index in expected_language_module_params_per_stage:
             assert check_layers_cover_all_params(
                 expected_language_module_params_per_stage[stage_index],
                 list(
