@@ -188,9 +188,9 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         if not isinstance(model, ModelWrapper):
             for modal_name, encoder in self.encoder_plugins.items():
                 shard_config = replace(
-                    self.shard_config, pipeline_template=encoder.pipeline_template
+                    self.shard_config,
+                    pipeline_template=encoder.pipeline_template,
                 )
-                shard_config.pipeline_template = encoder.pipeline_template
                 module = model.get_submodule(f"{modal_name}_encoder")
                 module = encoder.configure(module, shard_config, self.stage_manager)
                 model.add_module(f"{modal_name}_encoder", module)
