@@ -122,7 +122,9 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             sorted(set([self.pg_mesh.mesh[next_coord] for next_coord in next_coords]))
         )
 
-    def is_first_stage(self, ignore_chunk: bool = False) -> bool:
+    def is_first_stage(
+        self, ignore_chunk: bool = False, check_only_in_modal: bool = True
+    ) -> bool:
         """Is the current stage the first stage.
 
         NOTE:
@@ -143,16 +145,25 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             if modal == my_modal
         ]
 
-        # This is the first stage only if in_degree is 0 and this stage is the first one of the modal
-        if (
-            modal_dependency.in_degree == 0
-            and coords[0][self.pipeline_axis] == stage_indices_of_modal[0]
-        ):
-            return True
+        if check_only_in_modal:
+            # If `check_only_in_modal` is set True, check only if the rank is the first in the modal
+            if coords[0][self.pipeline_axis] == stage_indices_of_modal[0]:
+                return True
+            else:
+                return False
         else:
-            return False
+            # This is the first stage only if in_degree is 0 and this stage is the first one of the modal
+            if (
+                modal_dependency.in_degree == 0
+                and coords[0][self.pipeline_axis] == stage_indices_of_modal[0]
+            ):
+                return True
+            else:
+                return False
 
-    def is_last_stage(self, ignore_chunk: bool = False) -> bool:
+    def is_last_stage(
+        self, ignore_chunk: bool = False, check_only_in_modal: bool = True
+    ) -> bool:
         """Is the current stage the last stage.
 
         NOTE:
@@ -173,14 +184,21 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             if modal == my_modal
         ]
 
-        # This is the last stage only if out_degree is 0 and this stage is the last one of the modal
-        if (
-            modal_dependency.out_degree == 0
-            and coords[0][self.pipeline_axis] == stage_indices_of_modal[-1]
-        ):
-            return True
+        if check_only_in_modal:
+            # If `check_only_in_modal` is set True, check only if the rank is the last in the modal
+            if coords[0][self.pipeline_axis] == stage_indices_of_modal[-1]:
+                return True
+            else:
+                return False
         else:
-            return False
+            # This is the last stage only if out_degree is 0 and this stage is the last one of the modal
+            if (
+                modal_dependency.out_degree == 0
+                and coords[0][self.pipeline_axis] == stage_indices_of_modal[-1]
+            ):
+                return True
+            else:
+                return False
 
     def get_prev_rank(self) -> int:
         raise NotImplementedError(
