@@ -13,6 +13,7 @@ from torch import nn
 from cornstarch.models.multimodal_language_model import (
     ModalModule,
     ModalModuleType,
+    MultimodalProjector,
     MultimodalProjectorConfig,
 )
 from cornstarch.pipeline_template import PipelineTemplate
@@ -86,12 +87,13 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
 
         stage_manager = self.pipeline_stage_manager
         config = cast(MultimodalProjectorConfig, self.model.config)
+        model = cast(MultimodalProjector, self.model)
         held_layers = []
 
         if config.projection_type == "linear":
-            held_layers.append("projection")
+            held_layers.append(model.projection)
         elif config.projection_type == "mlp":
-            held_layers.extend(["in_proj", "activation", "out_proj"])
+            held_layers.extend([model.in_proj, model.activation, model.out_proj])
         elif config.projection_type == "qformer":
             raise NotImplementedError("QFormer is not supported yet.")
 
@@ -150,7 +152,6 @@ class ModalModulePolicy(Policy):
         stage_manager = self.pipeline_stage_manager
         shard_config: ShardConfig = self.shard_config
 
-        # TODO: policy must know both the module and pipeline template to know if it should hold the module
         if not self.should_hold_module(shard_config.pipeline_template):
             return []
 
