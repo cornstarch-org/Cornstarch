@@ -37,11 +37,14 @@ class OPTPolicy(PipelineTemplatePolicyBase, Policy):
         config: OPTConfig = cast(OPTConfig, config)
 
         modules = []
-        modules.extend(
-            ["decoder.embed_tokens", "decoder.embed_positions", "decoder.project_in"]
-        )
+        modules.extend(["decoder.embed_tokens", "decoder.embed_positions"])
+        if config.word_embed_proj_dim != config.hidden_size:
+            modules.append("decoder.project_in")
         modules.extend([f"decoder.layers.{i}" for i in range(config.num_hidden_layers)])
-        modules.extend(["decoder.final_layer_norm", "decoder.project_out"])
+        if config.do_layer_norm_before and not config._remove_final_layer_norm:
+            modules.append("decoder.final_layer_norm")
+        if config.word_embed_proj_dim != config.hidden_size:
+            modules.append("decoder.project_out")
         return modules
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):

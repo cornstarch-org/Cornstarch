@@ -43,7 +43,12 @@ class PipelineTemplate:
             )
 
             modules.extend(
-                MultimodalProjectorPolicy.get_all_modules(model.projector.config)
+                [
+                    f"projector.{module}"
+                    for module in MultimodalProjectorPolicy.get_all_modules(
+                        model.projector.config
+                    )
+                ]
             )
 
             return modules
