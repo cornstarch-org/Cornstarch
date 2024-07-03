@@ -39,7 +39,7 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
 
         modules = []
         modules.extend(["embeddings", "pre_layrnorm"])
-        modules.extend([f"encoder.layer.{i}" for i in range(config.num_hidden_layers)])
+        modules.extend([f"encoder.layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("post_layernorm")
 
         return modules

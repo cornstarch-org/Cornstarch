@@ -19,20 +19,49 @@ class PipelineTemplate:
     def get_modules(model: nn.Module) -> list[str]:
         """Get all modules from the model."""
         # Avoid circular import
+        from cornstarch.models.multimodal_language_model import ModalModule
         from cornstarch.shardformer.policies.auto_policy import (
             get_policy_type,
         )
+        from cornstarch.shardformer.policies.multimodal import MultimodalProjectorPolicy
         from cornstarch.shardformer.policies.pipeline_template_policy import (
             PipelineTemplatePolicyBase,
         )
 
-        policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
-            PipelineTemplate.get_model_name(model)
-        )
-        assert issubclass(
-            policy, PipelineTemplatePolicyBase
-        ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
-        return policy.get_all_modules(model.config)
+        if isinstance(model, ModalModule):
+            modules = []
+
+            policy = get_policy_type(PipelineTemplate.get_model_name(model.module))
+            assert issubclass(
+                policy, PipelineTemplatePolicyBase
+            ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
+            modules.extend(
+                [
+                    f"module.{module}"
+                    for module in policy.get_all_modules(model.module.config)
+                ]
+            )
+
+            modules.extend(
+                [
+                    f"projector.{module}"
+                    for module in MultimodalProjectorPolicy.get_all_modules(
+                        model.projector.config
+                    )
+                ]
+            )
+
+            return modules
+
+        else:
+            policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
+                PipelineTemplate.get_model_name(model)
+            )
+            assert issubclass(
+                policy, PipelineTemplatePolicyBase
+            ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
+
+            return policy.get_all_modules(model.config)
 
     @staticmethod
     def find_pipeline_template(

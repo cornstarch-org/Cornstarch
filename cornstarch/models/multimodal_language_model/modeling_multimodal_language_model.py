@@ -106,6 +106,7 @@ class ModalModule(nn.Module):
         self.module = model
         self.modal_type = modal_type
         self.projector = projector
+        self.config = (model.config, projector.config if projector else None)
 
         if projector is not None:
             if modal_type == ModalModuleType.Encoder:
@@ -132,6 +133,12 @@ class ModalModule(nn.Module):
         self.module.train(mode)
         self.projector.train(mode)
         return self
+
+    def get_modules(self) -> list[nn.Module]:
+        modules = [self.module]
+        if self.projector is not None:
+            modules.append(self.projector)
+        return modules
 
 
 class MultimodalModel(nn.Module):
@@ -230,6 +237,7 @@ class MultimodalModel(nn.Module):
                     modal_module.projector = MultimodalProjector(projector_config).to(
                         modal_module.module.device
                     )
+                    modal_module.config = (modal_module.module.config, projector_config)
 
                 # Check if the projector is compatible with the encoder and the language model
                 projector_config: MultimodalProjectorConfig = (
