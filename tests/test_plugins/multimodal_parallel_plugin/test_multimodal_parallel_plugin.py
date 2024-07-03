@@ -181,8 +181,10 @@ class TestPluginInitializationWithFakeBackend:
             microbatch_size=1,
         )
 
-    @pytest.mark.parametrize("vision_config", vision_configs)
-    @pytest.mark.parametrize("language_model_config", language_configs)
+    @pytest.mark.parametrize("vision_config", vision_configs, ids=["clip"])
+    @pytest.mark.parametrize(
+        "language_model_config", language_configs, ids=["mistral", "llama", "opt"]
+    )
     @pytest.mark.parametrize(
         "world_size, vision_tp_size, language_tp_size, expected_mesh",
         [
@@ -199,6 +201,7 @@ class TestPluginInitializationWithFakeBackend:
                 ],
             )
         ],
+        ids=["tp=(2, 4)"],
     )
     def test_initialize_plugin(
         self,
@@ -267,12 +270,60 @@ class TestPluginInitializationWithFakeBackend:
 
         return sorted(used_prefixes) == sorted(set(layer_names))
 
-    @pytest.mark.parametrize("vision_config", vision_configs)
-    @pytest.mark.parametrize("language_model_config", language_configs)
+    @pytest.mark.parametrize("vision_config", vision_configs, ids=["clip"])
+    @pytest.mark.parametrize(
+        "language_model_config", language_configs, ids=["mistral", "llama", "opt"]
+    )
+    @pytest.mark.parametrize(
+        "world_size, vision_tp_size, language_tp_size, stage_indices",
+        [
+            (
+                32,
+                2,
+                4,
+                {
+                    (0, 1, 2, 3): 0,
+                    (4, 5, 6, 7): 1,
+                    (8, 9, 10, 11, 12, 13, 14, 15): 2,
+                    (16, 17, 18, 19, 20, 21, 22, 23): 3,
+                    (24, 25, 26, 27, 28, 29, 30, 31): 4,
+                },
+            ),
+            (
+                20,
+                4,
+                4,
+                {
+                    (0, 1, 2, 3): 0,
+                    (4, 5, 6, 7): 1,
+                    (8, 9, 10, 11): 2,
+                    (12, 13, 14, 15): 3,
+                    (16, 17, 18, 19): 4,
+                },
+            ),
+            (
+                10,
+                1,
+                1,
+                {
+                    (0, 1): 0,
+                    (2, 3): 1,
+                    (4, 5): 2,
+                    (6, 7): 3,
+                    (8, 9): 4,
+                },
+            ),
+        ],
+        ids=["tp=(2, 4)", "tp=(4, 4)", "tp=(1, 1)"],
+    )
     def test_model_parallelization(
         self,
         vision_config: tuple[str, PretrainedConfig, Type[PreTrainedModel]],
         language_model_config: tuple[str, PretrainedConfig, Type[PreTrainedModel]],
+        world_size: int,
+        vision_tp_size: int,
+        language_tp_size: int,
+        stage_indices: dict[tuple[int], int],
     ):
         vision_model_name = vision_config[0]
         language_model_name = language_model_config[0]
@@ -283,20 +334,12 @@ class TestPluginInitializationWithFakeBackend:
             language_model_config[2],
         )
 
-        world_size = 32
-        stage_indices = {
-            (0, 1, 2, 3): 0,
-            (4, 5, 6, 7): 1,
-            (8, 9, 10, 11, 12, 13, 14, 15): 2,
-            (16, 17, 18, 19, 20, 21, 22, 23): 3,
-            (24, 25, 26, 27, 28, 29, 30, 31): 4,
-        }
         for rank in range(world_size):
             plugin = self.generate_multimodal_plugin(
                 vision_model_name,
                 language_model_name,
-                vision_tp_size=2,
-                language_tp_size=4,
+                vision_tp_size=vision_tp_size,
+                language_tp_size=language_tp_size,
             )
 
             per_rank_model = copy.deepcopy(model)
