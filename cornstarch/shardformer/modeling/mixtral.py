@@ -45,8 +45,9 @@ class MixtralPipelineForwards:
         cache_position: Optional[torch.LongTensor] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        past_router_logits: Optional[torch.FloatTensor] = None,
         stage_index: Optional[list[int]] = None,
-        shard_config: ShardConfig = None,
+        shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, MoeModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -200,6 +201,9 @@ class MixtralPipelineForwards:
                 else next_decoder_cache
             )
 
+        if output_router_logits and past_router_logits is not None:
+            all_router_logits = past_router_logits + all_router_logits
+
         if stage_manager.is_last_stage():
             if not return_dict:
                 return tuple(
@@ -222,7 +226,10 @@ class MixtralPipelineForwards:
             )
 
         # always return dict for intermediate stage
-        return {"hidden_states": hidden_states}
+        return {
+            "hidden_states": hidden_states,
+            "past_router_logits": all_router_logits,
+        }
 
     def mixtral_for_causal_lm_forward(
         self: MixtralForCausalLM,
@@ -240,8 +247,9 @@ class MixtralPipelineForwards:
         cache_position: Optional[torch.LongTensor] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        past_router_logits: Optional[torch.FloatTensor] = None,
         stage_index: Optional[list[int]] = None,
-        shard_config: ShardConfig = None,
+        shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -296,6 +304,7 @@ class MixtralPipelineForwards:
             stage_manager=stage_manager,
             hidden_states=hidden_states,
             stage_index=stage_index,
+            past_router_logits=past_router_logits,
             shard_config=shard_config,
         )
 
@@ -360,11 +369,16 @@ class MixtralPipelineForwards:
                 router_logits=outputs.router_logits,
             )
 
+        out = {}
         hidden_states = outputs.get("hidden_states")
-        return {"hidden_states": hidden_states}
+        out["hidden_states"] = hidden_states
+        if output_router_logits:
+            out["past_router_logits"] = outputs["past_router_logits"]
+        return out
 
 
 class MixtralForwards:
+    @staticmethod
     def mixtral_model_forward_for_flash_attention(
         self: MixtralModel,
         input_ids: torch.LongTensor = None,
@@ -534,6 +548,7 @@ class MixtralForwards:
             router_logits=all_router_logits,
         )
 
+    @staticmethod
     def mixtral_flash_attention_forward(
         self: Union[MixtralAttention, MixtralSdpaAttention],
         hidden_states: torch.Tensor,
