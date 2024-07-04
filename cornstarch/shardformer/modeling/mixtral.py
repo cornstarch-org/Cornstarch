@@ -7,10 +7,6 @@ from colossalai.shardformer.layer import ColoAttention, cross_entropy_1d
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch.nn import CrossEntropyLoss
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_attn_mask_utils import (
-    _prepare_4d_causal_attention_mask,
-    _prepare_4d_causal_attention_mask_for_sdpa,
-)
 from transformers.modeling_outputs import (
     MoeCausalLMOutputWithPast,
     MoeModelOutputWithPast,
@@ -46,6 +42,7 @@ class MixtralPipelineForwards:
         output_hidden_states: Optional[bool] = None,
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[list[int]] = None,
@@ -72,29 +69,6 @@ class MixtralPipelineForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        # retrieve input_ids and input_embeds
-        if stage_manager.is_first_stage():
-            if input_ids is not None and inputs_embeds is not None:
-                raise ValueError(
-                    "You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time"
-                )
-            elif input_ids is not None:
-                batch_size, seq_length = input_ids.shape
-            elif inputs_embeds is not None:
-                batch_size, seq_length, _ = inputs_embeds.shape
-            else:
-                raise ValueError(
-                    "You have to specify either decoder_input_ids or decoder_inputs_embeds"
-                )
-
-            if inputs_embeds is None:
-                inputs_embeds = self.embed_tokens(input_ids)
-            hidden_states = inputs_embeds
-        else:
-            batch_size, seq_length, _ = hidden_states.shape
-
-        past_key_values_length = 0
-
         if self.gradient_checkpointing and self.training:
             if use_cache:
                 logger.warning_once(
@@ -102,36 +76,47 @@ class MixtralPipelineForwards:
                 )
                 use_cache = False
 
-        if use_cache:
-            use_legacy_cache = not isinstance(past_key_values, Cache)
-            if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
+        use_legacy_cache = False
+        if use_cache and not isinstance(past_key_values, Cache):
+            use_legacy_cache = True
+            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            logger.warning_once(
+                "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
+                "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
+            )
+
+        # retrieve input_ids and input_embeds
+        if stage_manager.is_first_stage():
+            if (input_ids is None) ^ (inputs_embeds is not None):
+                raise ValueError(
+                    "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
+                )
+
+            if input_ids is not None:
+                batch_size, seq_length = input_ids.shape[:2]
+            elif inputs_embeds is not None:
+                batch_size, seq_length, _ = inputs_embeds.shape[:2]
+
+            if inputs_embeds is None:
+                inputs_embeds = self.embed_tokens(input_ids)
+
+            hidden_states = inputs_embeds
+        else:
+            input_shape = hidden_states.shape[:-1]
+            batch_size, seq_length = input_shape
+
+        if cache_position is None:
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + hidden_states.shape[1],
+                device=hidden_states.device,
+            )
 
         if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            position_ids = torch.arange(
-                past_key_values_length,
-                seq_length + past_key_values_length,
-                dtype=torch.long,
-                device=device,
-            )
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
-        else:
-            position_ids = position_ids.view(-1, seq_length).long()
-
-        if (
-            attention_mask is not None
-            and self._attn_implementation == "flash_attention_2"
-            and use_cache
-        ):
-            is_padding_right = attention_mask[:, -1].sum().item() != batch_size
-            if is_padding_right:
-                raise ValueError(
-                    "You are attempting to perform batched generation with padding_side='right'"
-                    " this may lead to unexpected behaviour for Flash Attention version of Mixtral. Make sure to "
-                    " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
-                )
+            position_ids = cache_position.unsqueeze(0)
 
         if shard_config.enable_flash_attention:
             # in this case, attention_mask is a dict rather than a tensor
@@ -144,32 +129,13 @@ class MixtralPipelineForwards:
                 is_causal=True,
             )
         else:
-            if self._attn_implementation == "flash_attention_2":
-                # 2d mask is passed through the layers
-                attention_mask = (
-                    attention_mask
-                    if (attention_mask is not None and 0 in attention_mask)
-                    else None
-                )
-            elif self._attn_implementation == "sdpa" and not output_attentions:
-                # output_attentions=True can not be supported when using SDPA, and we fall back on
-                # the manual implementation that requires a 4D causal mask in all cases.
-                attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                    attention_mask,
-                    (batch_size, seq_length),
-                    hidden_states,
-                    past_key_values_length,
-                    sliding_window=self.config.sliding_window,
-                )
-            else:
-                # 4d mask is passed through the layers
-                attention_mask = _prepare_4d_causal_attention_mask(
-                    attention_mask,
-                    (batch_size, seq_length),
-                    hidden_states,
-                    past_key_values_length,
-                    sliding_window=self.config.sliding_window,
-                )
+            attention_mask = self._update_causal_mask(
+                attention_mask,
+                hidden_states,
+                cache_position,
+                past_key_values,
+                output_attentions,
+            )
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -194,6 +160,7 @@ class MixtralPipelineForwards:
                     output_attentions,
                     output_router_logits,
                     use_cache,
+                    cache_position,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -204,6 +171,7 @@ class MixtralPipelineForwards:
                     output_attentions=output_attentions,
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
+                    cache_position=cache_position,
                 )
 
             hidden_states = layer_outputs[0]
@@ -269,6 +237,7 @@ class MixtralPipelineForwards:
         output_hidden_states: Optional[bool] = None,
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[list[int]] = None,
@@ -323,6 +292,7 @@ class MixtralPipelineForwards:
             output_hidden_states=output_hidden_states,
             output_router_logits=output_router_logits,
             return_dict=return_dict,
+            cache_position=cache_position,
             stage_manager=stage_manager,
             hidden_states=hidden_states,
             stage_index=stage_index,
@@ -406,6 +376,7 @@ class MixtralForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         output_router_logits: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, MoeModelOutputWithPast]:
@@ -430,65 +401,45 @@ class MixtralForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        # retrieve input_ids and input_embeds
-        if input_ids is not None and inputs_embeds is not None:
+        if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
-                "You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time"
-            )
-        elif input_ids is not None:
-            batch_size, seq_length = input_ids.shape
-        elif inputs_embeds is not None:
-            batch_size, seq_length, _ = inputs_embeds.shape
-        else:
-            raise ValueError(
-                "You have to specify either decoder_input_ids or decoder_inputs_embeds"
+                "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
             )
 
-        past_key_values_length = 0
-
-        if self.gradient_checkpointing and self.training:
+        if self.gradient_checkpointing and self.training and use_cache:
             if use_cache:
                 logger.warning_once(
                     "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
                 )
                 use_cache = False
 
-        if use_cache:
-            use_legacy_cache = not isinstance(past_key_values, Cache)
-            if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
-
-        if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            position_ids = torch.arange(
-                past_key_values_length,
-                seq_length + past_key_values_length,
-                dtype=torch.long,
-                device=device,
+        use_legacy_cache = False
+        if use_cache and not isinstance(past_key_values, Cache):
+            use_legacy_cache = True
+            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            logger.warning_once(
+                "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
+                "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
             )
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
-        else:
-            position_ids = position_ids.view(-1, seq_length).long()
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if (
-            attention_mask is not None
-            and self._attn_implementation == "flash_attention_2"
-            and use_cache
-        ):
-            is_padding_right = attention_mask[:, -1].sum().item() != batch_size
-            if is_padding_right:
-                raise ValueError(
-                    "You are attempting to perform batched generation with padding_side='right'"
-                    " this may lead to unexpected behaviour for Flash Attention version of Mixtral. Make sure to "
-                    " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
-                )
+        if cache_position is None:
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
+            )
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
 
         if shard_config.enable_flash_attention:
             # in this case, attention_mask is a dict rather than a tensor
+            batch_size, seq_length, _ = inputs_embeds.shape
             mask_shape = (batch_size, 1, seq_length, seq_length)
             attention_mask = ColoAttention.prepare_attn_kwargs(
                 mask_shape,
@@ -498,32 +449,9 @@ class MixtralForwards:
                 is_causal=True,
             )
         else:
-            if self._attn_implementation == "flash_attention_2":
-                # 2d mask is passed through the layers
-                attention_mask = (
-                    attention_mask
-                    if (attention_mask is not None and 0 in attention_mask)
-                    else None
-                )
-            elif self._attn_implementation == "sdpa" and not output_attentions:
-                # output_attentions=True can not be supported when using SDPA, and we fall back on
-                # the manual implementation that requires a 4D causal mask in all cases.
-                attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                    attention_mask,
-                    (batch_size, seq_length),
-                    inputs_embeds,
-                    past_key_values_length,
-                    sliding_window=self.config.sliding_window,
-                )
-            else:
-                # 4d mask is passed through the layers
-                attention_mask = _prepare_4d_causal_attention_mask(
-                    attention_mask,
-                    (batch_size, seq_length),
-                    inputs_embeds,
-                    past_key_values_length,
-                    sliding_window=self.config.sliding_window,
-                )
+            attention_mask = self._update_causal_mask(
+                attention_mask, inputs_embeds, cache_position, past_key_values
+            )
 
         hidden_states = inputs_embeds
 
@@ -547,6 +475,7 @@ class MixtralForwards:
                     output_attentions,
                     output_router_logits,
                     use_cache,
+                    cache_position,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -557,6 +486,7 @@ class MixtralForwards:
                     output_attentions=output_attentions,
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
+                    cache_position=cache_position,
                 )
 
             hidden_states = layer_outputs[0]
@@ -612,6 +542,7 @@ class MixtralForwards:
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if "padding_mask" in kwargs:
@@ -650,7 +581,8 @@ class MixtralForwards:
         )
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            # Specific to RoPE models
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
@@ -686,6 +618,7 @@ class MixtralForwards:
         output_hidden_states: Optional[bool] = None,
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         output_attentions = (
@@ -720,6 +653,7 @@ class MixtralForwards:
             output_hidden_states=output_hidden_states,
             output_router_logits=output_router_logits,
             return_dict=return_dict,
+            cache_position=cache_position,
         )
 
         hidden_states = outputs[0]
