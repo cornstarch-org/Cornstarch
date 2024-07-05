@@ -125,6 +125,13 @@ _POLICY_LIST = {
     "transformers.models.dinov2.modeling_dinov2.Dinov2Backbone": PolicyLocation(
         file_name="dinov2", class_name="Dinov2BackbonePolicy"
     ),
+    # Gemma
+    "transformers.models.gemma.modeling_gemma.GemmaModel": PolicyLocation(
+        file_name="gemma", class_name="GemmaModelPolicy"
+    ),
+    "transformers.models.gemma.modeling_gemma.GemmaForCausalLM": PolicyLocation(
+        file_name="gemma", class_name="GemmaForCausalLMPolicy"
+    ),
 }
 
 
