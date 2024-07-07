@@ -267,7 +267,7 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
                 target_key=attn_cls,
             )
             if self.pipeline_stage_manager is None:
-                # replace llama model forward method
+                # replace mistral model forward method
                 self.append_or_create_method_replacement(
                     description={
                         "forward": functools.partial(
