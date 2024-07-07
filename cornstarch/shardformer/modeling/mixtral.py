@@ -93,18 +93,10 @@ class MixtralPipelineForwards:
                     "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
                 )
 
-            if input_ids is not None:
-                batch_size, seq_length = input_ids.shape[:2]
-            elif inputs_embeds is not None:
-                batch_size, seq_length, _ = inputs_embeds.shape[:2]
-
             if inputs_embeds is None:
                 inputs_embeds = self.embed_tokens(input_ids)
 
             hidden_states = inputs_embeds
-        else:
-            input_shape = hidden_states.shape[:-1]
-            batch_size, seq_length = input_shape
 
         if cache_position is None:
             past_seen_tokens = (
@@ -121,8 +113,9 @@ class MixtralPipelineForwards:
 
         if shard_config.enable_flash_attention:
             # in this case, attention_mask is a dict rather than a tensor
+            batch_size, seq_length = hidden_states.shape[:2]
             mask_shape = (batch_size, 1, seq_length, seq_length)
-            attention_mask = ColoAttention.prepare_attn_kwargs(
+            causal_mask = ColoAttention.prepare_attn_kwargs(
                 mask_shape,
                 hidden_states.dtype,
                 hidden_states.device,
@@ -130,7 +123,7 @@ class MixtralPipelineForwards:
                 is_causal=True,
             )
         else:
-            attention_mask = self._update_causal_mask(
+            causal_mask = self._update_causal_mask(
                 attention_mask,
                 hidden_states,
                 cache_position,
@@ -155,7 +148,7 @@ class MixtralPipelineForwards:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    attention_mask,
+                    causal_mask,
                     position_ids,
                     past_key_values,
                     output_attentions,
@@ -166,7 +159,7 @@ class MixtralPipelineForwards:
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=attention_mask,
+                    attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
@@ -226,10 +219,10 @@ class MixtralPipelineForwards:
             )
 
         # always return dict for intermediate stage
-        return {
-            "hidden_states": hidden_states,
-            "past_router_logits": all_router_logits,
-        }
+        out = {"hidden_states": hidden_states}
+        if output_router_logits:
+            out["past_router_logits"] = all_router_logits
+        return out
 
     def mixtral_for_causal_lm_forward(
         self: MixtralForCausalLM,
