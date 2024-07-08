@@ -492,11 +492,16 @@ class MultimodalModelProcessor(ProcessorMixin):
         self.image_processor = image_processor
         self.tokenizer = tokenizer
 
-        self.tokenizer.add_tokens("<unk>", special_tokens=True)
-        self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids("<unk>")
-        print(
-            f"Setting `pad_token_id` to `unk_token_id`: {self.tokenizer.unk_token_id}."
-        )
+        if self.tokenizer.unk_token_id is not None:
+            self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
+            print(
+                f"Setting `pad_token_id` to `unk_token_id`: {self.tokenizer.unk_token_id}."
+            )
+        else:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+            print(
+                f"Setting `pad_token_id` to `eos_token_id`: {self.tokenizer.eos_token_id}."
+            )
 
     def __call__(
         self,
