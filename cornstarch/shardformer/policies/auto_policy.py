@@ -139,6 +139,20 @@ _POLICY_LIST = {
     "transformers.models.gemma2.modeling_gemma2.Gemma2ForCausalLM": PolicyLocation(
         file_name="gemma2", class_name="Gemma2ForCausalLMPolicy"
     ),
+    # Phi3
+    "transformers.models.phi3.modeling_phi3.Phi3Model": PolicyLocation(
+        file_name="phi3", class_name="Phi3ModelPolicy"
+    ),
+    "transformers.models.phi3.modeling_phi3.Phi3ForCausalLM": PolicyLocation(
+        file_name="phi3", class_name="Phi3ForCausalLMPolicy"
+    ),
+    # Qwen2
+    "transformers.models.qwen2.modeling_qwen2.Qwen2Model": PolicyLocation(
+        file_name="qwen2", class_name="Qwen2ModelPolicy"
+    ),
+    "transformers.models.qwen2.modeling_qwen2.Qwen2ForCausalLM": PolicyLocation(
+        file_name="qwen2", class_name="Qwen2ForCausalLMPolicy"
+    ),
 }
 
 
