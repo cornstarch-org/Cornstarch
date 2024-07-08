@@ -174,15 +174,15 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
                         suffix="self_attn.o_proj",
                         target_module=Linear1D_Row,
                     ),
-                    # SubModuleReplacementDescription(
-                    #     suffix="mlp.gate_up_proj",
-                    #     target_module=FusedLinear1D_Col,
-                    #     kwargs=dict(n_fused=2),
-                    # ),
-                    # SubModuleReplacementDescription(
-                    #     suffix="mlp.down_proj",
-                    #     target_module=Linear1D_Row,
-                    # ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.gate_up_proj",
+                        target_module=FusedLinear1D_Col,
+                        kwargs=dict(n_fused=2),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.down_proj",
+                        target_module=Linear1D_Row,
+                    ),
                 ],
             )
 
