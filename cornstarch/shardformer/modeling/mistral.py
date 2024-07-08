@@ -43,7 +43,7 @@ class MistralPipelineForwards:
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
-        shard_config: ShardConfig = None,
+        shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if use_cache:
             logger.warning_once(
@@ -229,7 +229,7 @@ class MistralPipelineForwards:
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
-        shard_config: ShardConfig = None,
+        shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
             output_attentions
