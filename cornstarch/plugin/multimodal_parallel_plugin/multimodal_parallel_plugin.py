@@ -96,6 +96,9 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             max_scale=max_scale,
         )
 
+    def __del__(self):
+        pass
+
     def add_encoder_plugins(self, name: str, plugin: ModalParallelPlugin):
         self.encoder_plugins[name] = plugin
 
