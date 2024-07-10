@@ -3,7 +3,6 @@ import itertools
 import warnings
 from typing import Callable, Dict, List, cast
 
-import torch
 from colossalai.shardformer.layer import (
     FusedLinear1D_Col,
     FusedRMSNorm,

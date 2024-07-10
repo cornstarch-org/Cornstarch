@@ -23,7 +23,7 @@ try:
     from .flash_attention import FlashAttention
 
     has_flash_attn = True
-except:
+except ImportError:
     print("FlashAttention is not installed.")
     has_flash_attn = False
 
