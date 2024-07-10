@@ -5,7 +5,6 @@ from typing import Callable, Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedLayerNorm,
-    LayerNorm,
     Linear1D_Col,
     Linear1D_Row,
 )
@@ -14,7 +13,7 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
-from torch import Tensor, nn
+from torch import nn
 from transformers import PretrainedConfig
 from transformers.models.clip.configuration_clip import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPVisionTransformer
@@ -89,31 +88,25 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
 
         policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
-        if self.shard_config.enable_fused_normalization:
-            norm_cls = FusedLayerNorm
-        else:
-            norm_cls = LayerNorm
-
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
             warnings.warn(
                 "CLIP doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
             )
 
+        config: CLIPVisionConfig = cast(CLIPVisionConfig, self.model.config)
         if self.shard_config.enable_tensor_parallelism:
             assert (
-                self.model.config.num_attention_heads
-                % self.shard_config.tensor_parallel_size
-                == 0
+                config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
             ), (
-                f"The number of attention heads {self.model.config.num_attention_heads} must be divisible "
+                f"The number of attention heads {config.num_attention_heads} must be divisible "
                 f"by tensor parallel size {self.shard_config.tensor_parallel_size}."
             )
             policy[CLIPEncoderLayer] = ModulePolicyDescription(
                 attribute_replacement={
-                    "self_attn.num_heads": self.model.config.num_attention_heads
+                    "self_attn.num_heads": config.num_attention_heads
                     // self.shard_config.tensor_parallel_size,
-                    "self_attn.embed_dim": self.model.config.hidden_size
+                    "self_attn.embed_dim": config.hidden_size
                     // self.shard_config.tensor_parallel_size,
                 },
                 sub_module_replacement=[
@@ -144,37 +137,38 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 ],
             )
 
-        # handle CLIPEncoderLayer layer
-        self.append_or_create_submodule_replacement(
-            description=[
-                SubModuleReplacementDescription(
-                    suffix="layer_norm1",
-                    target_module=norm_cls,
-                ),
-                SubModuleReplacementDescription(
-                    suffix="layer_norm2",
-                    target_module=norm_cls,
-                ),
-            ],
-            policy=policy,
-            target_key=CLIPEncoderLayer,
-        )
+        if self.shard_config.enable_fused_normalization:
+            # handle CLIPEncoderLayer layer
+            self.append_or_create_submodule_replacement(
+                description=[
+                    SubModuleReplacementDescription(
+                        suffix="layer_norm1",
+                        target_module=FusedLayerNorm,
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="layer_norm2",
+                        target_module=FusedLayerNorm,
+                    ),
+                ],
+                policy=policy,
+                target_key=CLIPEncoderLayer,
+            )
 
-        # handle CLIPVisionTransformer layer
-        self.append_or_create_submodule_replacement(
-            description=[
-                SubModuleReplacementDescription(
-                    suffix="pre_layrnorm",  # typo in HF impl
-                    target_module=norm_cls,
-                ),
-                SubModuleReplacementDescription(
-                    suffix="post_layernorm",
-                    target_module=norm_cls,
-                ),
-            ],
-            policy=policy,
-            target_key=CLIPVisionTransformer,
-        )
+            # handle CLIPVisionTransformer layer
+            self.append_or_create_submodule_replacement(
+                description=[
+                    SubModuleReplacementDescription(
+                        suffix="pre_layrnorm",  # typo in HF impl
+                        target_module=FusedLayerNorm,
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="post_layernorm",
+                        target_module=FusedLayerNorm,
+                    ),
+                ],
+                policy=policy,
+                target_key=CLIPVisionTransformer,
+            )
 
         self.append_or_create_method_replacement(
             description={
@@ -278,7 +272,3 @@ class CLIPVisionModelPolicy(CLIPVisionTransformerPolicy):
         """Get pipeline layers for current stage."""
         held_layers = super().get_held_layers()
         return held_layers
-
-    def get_shared_params(self) -> List[Dict[int, Tensor]]:
-        """No shared params in clip model"""
-        return []
