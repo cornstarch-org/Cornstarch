@@ -153,7 +153,6 @@ def run_forward_backward_with_hybrid_plugin(
     for k, v in data.items():
         unshard_test_data[k] = data[k].clone()
 
-    # if dist.get_rank() < 2:
     sharded_model.train()
     if booster.plugin.stage_manager is not None:
         for k, v in shard_test_data.items():
@@ -178,7 +177,7 @@ def run_forward_backward_with_hybrid_plugin(
         sharded_output = sharded_model(**shard_test_data)
         sharded_loss = criterion(sharded_output)
         sharded_optimizer.backward(sharded_loss)
-    # else:
+
     org_model.train()
     if booster.plugin.stage_manager is not None:
         for k, v in unshard_test_data.items():
@@ -240,12 +239,18 @@ def check_weight(
         if is_distributed_tensor(sharded_weight) or is_customized_distributed_tensor(
             sharded_weight
         ):
-            sharded_weight_list = [
-                torch.zeros_like(sharded_weight).to("cuda")
-                for _ in range(dist.get_world_size(tp_group))
-            ]
-            dist.all_gather(sharded_weight_list, sharded_weight, tp_group)
-            sharded_weight = torch.cat(sharded_weight_list, dim=dim)
+            sharded_module = getattr_(sharded_model, suffix)
+            if isinstance(sharded_module, FusedLinear1D_Col):
+                sharded_weight = gather_fused_qkv_in_gpt2_style(
+                    sharded_weight, sharded_module.n_fused, tp_group
+                )
+            else:
+                sharded_weight_list = [
+                    torch.zeros_like(sharded_weight).to("cuda")
+                    for _ in range(dist.get_world_size(tp_group))
+                ]
+                dist.all_gather(sharded_weight_list, sharded_weight, tp_group)
+                sharded_weight = torch.cat(sharded_weight_list, dim=dim)
 
         if verbose and dist.get_rank() == 0:
             print(f"'{suffix}' weight: {org_weight}, {sharded_weight}")
