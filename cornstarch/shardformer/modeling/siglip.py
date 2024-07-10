@@ -4,7 +4,6 @@ import torch
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer.layer import ColoAttention
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from torch import nn
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.models.siglip.modeling_siglip import (
     SiglipAttention,
