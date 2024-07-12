@@ -19,6 +19,15 @@ from transformers.utils import logging
 
 from .configuration_intern_vit import InternVisionConfig
 
+try:
+    from .flash_attention import FlashAttention
+
+    has_flash_attn = True
+except ImportError:
+    print("FlashAttention is not installed.")
+    has_flash_attn = False
+
+
 logger = logging.get_logger(__name__)
 
 
@@ -101,6 +110,11 @@ class InternAttention(nn.Module):
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
+        self.use_flash_attn = config.use_flash_attn and has_flash_attn
+        if config.use_flash_attn and not has_flash_attn:
+            print(
+                "Warning: Flash Attention is not available, use_flash_attn is set to False."
+            )
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
@@ -119,6 +133,8 @@ class InternAttention(nn.Module):
             self.q_norm = InternRMSNorm(self.embed_dim, eps=config.layer_norm_eps)
             self.k_norm = InternRMSNorm(self.embed_dim, eps=config.layer_norm_eps)
 
+        if self.use_flash_attn:
+            self.inner_attn = FlashAttention(attention_dropout=config.attention_dropout)
         self.proj = nn.Linear(self.embed_dim, self.embed_dim)
 
     def _naive_attn(self, x):
@@ -175,7 +191,11 @@ class InternAttention(nn.Module):
         return outs
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        x = self._naive_attn(hidden_states)
+        x = (
+            self._naive_attn(hidden_states)
+            if not self.use_flash_attn
+            else self._flash_attn(hidden_states)
+        )
         return x
 
 
@@ -295,9 +315,8 @@ class InternVisionEncoder(nn.Module):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
             if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    encoder_layer.__call__,
-                    hidden_states,
+                layer_outputs = torch.utils.checkpoint.checkpoint(
+                    encoder_layer, hidden_states, use_reentrant=False
                 )
             else:
                 layer_outputs = encoder_layer(
@@ -319,6 +338,7 @@ class InternVisionModel(PreTrainedModel):
     main_input_name = "pixel_values"
     config_class = InternVisionConfig
     _no_split_modules = ["InternVisionEncoderLayer"]
+    supports_gradient_checkpointing = True
 
     def __init__(self, config: InternVisionConfig):
         super().__init__(config)
