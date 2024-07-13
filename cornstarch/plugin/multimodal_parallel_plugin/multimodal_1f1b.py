@@ -367,6 +367,8 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
         microbatch_size(int): Microbatch size.
     """
 
+    stage_manager: MultiModalPipelineStageManager
+
     def __init__(
         self,
         stage_manager: MultiModalPipelineStageManager,
@@ -391,36 +393,37 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
         self.microbatch_offset: Optional[int] = None
 
     def recv_forward(self, prev_rank: int = None) -> Any:
-        if not isinstance(prev_rank, list):
-            prev_rank = [prev_rank]
+        input_tensors = None
+        if not self.stage_manager.is_first_stage(check_only_in_modal=False):
+            input_tensors = self.comm.recv_forward()
 
-        return super().recv_forward(prev_rank)
+        return input_tensors
 
     def recv_backward(self, next_rank: int = None) -> Any:
-        return super().recv_backward(next_rank)
+        output_tensor_grads = None
+        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
+            output_tensor_grads = self.comm.recv_backward()
+
+        return output_tensor_grads
 
     def send_forward(self, output_tensor: Any, next_rank: int = None) -> None:
-        return super().send_forward(output_tensor, next_rank)
+        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
+            self.comm.send_forward(output_tensor)
 
     def send_backward(self, input_tensor_grad: Any, prev_rank: int = None) -> None:
-        return super().send_backward(input_tensor_grad, prev_rank)
+        if not self.stage_manager.is_first_stage(check_only_in_modal=False):
+            self.comm.send_backward(input_tensor_grad)
 
-    def send_forward_recv_backward(
-        self,
-        output_tensor: Any,
-        next_rank: int = None,
-        send_prior_fallback: bool | None = None,
-    ) -> Any:
-        return super().send_forward_recv_backward(
-            output_tensor, next_rank, send_prior_fallback
-        )
+    def send_forward_recv_backward(self, output_tensor: Any) -> Any:
+        output_tensor_grads = None
+        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
+            output_tensor_grads = self.comm.send_forward_recv_backward(output_tensor)
 
-    def send_backward_recv_forward(
-        self,
-        input_tensor_grad: Any,
-        prev_rank: int = None,
-        send_prior_fallback: bool | None = None,
-    ) -> Any:
-        return super().send_backward_recv_forward(
-            input_tensor_grad, prev_rank, send_prior_fallback
-        )
+        return output_tensor_grads
+
+    def send_backward_recv_forward(self, input_tensor_grad: Any) -> Any:
+        input_tensors = None
+        if not self.stage_manager.is_first_stage():
+            input_tensors = self.comm.send_backward_recv_forward(input_tensor_grad)
+
+        return input_tensors
