@@ -292,62 +292,66 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
             assert isinstance(metadata, P2PMetadata)
             tree_spec = metadata.tree_spec
             non_tensor_object_indices = metadata.non_tensor_obj_idx
-            non_tensor_objectss = metadata.non_tensor_objs
+            non_tensor_objects = metadata.non_tensor_objs
 
             if recv_tensor_objects is None:
                 recv_tensor_objects = []
 
             local_received_objects = []
             for idx in non_tensor_object_indices:
-                local_received_objects.insert(idx, non_tensor_objectss.pop(0))
-            local_received_objects = tree_unflatten(local_received_objects, tree_spec)
+                local_received_objects.insert(idx, non_tensor_objects.pop(0))
+            local_received_objects = tree_unflatten(recv_tensor_object, tree_spec)
             received_objects.append(local_received_objects)
 
         return received_objects
 
     def recv_forward(self) -> Any:
-        raise NotImplementedError
+        input_tensors = self._communicate(
+            object=None,
+            send_ranks=[],
+            recv_ranks=self.stage_manager.get_prev_ranks(),
+        )
+
+        return input_tensors
 
     def recv_backward(self) -> Any:
-        raise NotImplementedError
+        output_tensor_grads = self._communicate(
+            object=None,
+            send_ranks=[],
+            recv_ranks=self.stage_manager.get_next_ranks(),
+        )
 
-    def send_forward(
-        self,
-        output_object: Any,
-        next_rank: Optional[int] = None,
-        send_metadata: bool = True,
-    ) -> None:
-        raise NotImplementedError
+        return output_tensor_grads
 
-    def send_backward(
-        self,
-        input_object: Any,
-        prev_rank: Optional[int] = None,
-        send_metadata: bool = True,
-    ) -> None:
-        raise NotImplementedError
+    def send_forward(self, output_object: Any) -> None:
+        self._communicate(
+            object=output_object,
+            send_ranks=self.stage_manager.get_next_ranks(),
+            recv_ranks=[],
+        )
 
-    def send_forward_recv_backward(
-        self,
-        output_object: Any,
-        is_send: bool,
-        is_recv: bool,
-        send_first: bool,
-        send_metadata: bool = True,
-        metadata_recv: P2PMetadata | list[P2PMetadata] = None,
-    ) -> Any:
-        raise NotImplementedError
+    def send_backward(self, input_object: Any) -> None:
+        self._communicate(
+            object=input_object,
+            send_ranks=self.stage_manager.get_prev_ranks(),
+            recv_ranks=[],
+        )
 
-    def send_backward_recv_forward(
-        self,
-        input_object: Any,
-        is_send: bool,
-        is_recv: bool,
-        send_first: bool,
-        send_metadata: bool = True,
-        metadata_recv: P2PMetadata | list[P2PMetadata] = None,
-    ) -> Any:
-        raise NotImplementedError
+    def send_forward_recv_backward(self, output_object: Any, send_first: bool) -> Any:
+        return self._communicate(
+            object=output_object,
+            send_ranks=self.stage_manager.get_next_ranks(),
+            recv_ranks=self.stage_manager.get_prev_ranks(),
+            send_first=send_first,
+        )
+
+    def send_backward_recv_forward(self, input_object: Any, send_first: bool) -> Any:
+        return self._communicate(
+            object=input_object,
+            send_ranks=self.stage_manager.get_prev_ranks(),
+            recv_ranks=self.stage_manager.get_next_ranks(),
+            send_first=send_first,
+        )
 
 
 class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
