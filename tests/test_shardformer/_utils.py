@@ -15,6 +15,10 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelModul
 from colossalai.lazy import LazyInitContext
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer._utils import getattr_
+from colossalai.shardformer.layer.qkv_fused_linear import (
+    FusedLinear1D_Col,
+    gather_fused_qkv_in_gpt2_style,
+)
 from colossalai.tensor.d_tensor.api import (
     is_customized_distributed_tensor,
     is_distributed_tensor,
@@ -235,12 +239,18 @@ def check_weight(
         if is_distributed_tensor(sharded_weight) or is_customized_distributed_tensor(
             sharded_weight
         ):
-            sharded_weight_list = [
-                torch.zeros_like(sharded_weight).to("cuda")
-                for _ in range(dist.get_world_size(tp_group))
-            ]
-            dist.all_gather(sharded_weight_list, sharded_weight, tp_group)
-            sharded_weight = torch.cat(sharded_weight_list, dim=dim)
+            sharded_module = getattr_(sharded_model, suffix)
+            if isinstance(sharded_module, FusedLinear1D_Col):
+                sharded_weight = gather_fused_qkv_in_gpt2_style(
+                    sharded_weight, sharded_module.n_fused, tp_group
+                )
+            else:
+                sharded_weight_list = [
+                    torch.zeros_like(sharded_weight).to("cuda")
+                    for _ in range(dist.get_world_size(tp_group))
+                ]
+                dist.all_gather(sharded_weight_list, sharded_weight, tp_group)
+                sharded_weight = torch.cat(sharded_weight_list, dim=dim)
 
         if verbose and dist.get_rank() == 0:
             print(f"'{suffix}' weight: {org_weight}, {sharded_weight}")
@@ -267,12 +277,18 @@ def get_grad_tensors_for_check(
         if is_distributed_tensor(shard_weight) or is_customized_distributed_tensor(
             shard_weight
         ):
-            shard_grad_list = [
-                torch.zeros_like(shard_grad).to("cuda")
-                for _ in range(dist.get_world_size(tp_group))
-            ]
-            dist.all_gather(shard_grad_list, shard_grad, tp_group)
-            shard_grad = torch.cat(shard_grad_list, dim=dim)
+            sharded_module = getattr_(sharded_model, suffix)
+            if isinstance(sharded_module, FusedLinear1D_Col):
+                shard_grad = gather_fused_qkv_in_gpt2_style(
+                    shard_grad, sharded_module.n_fused, tp_group
+                )
+            else:
+                shard_grad_list = [
+                    torch.zeros_like(shard_grad).to("cuda")
+                    for _ in range(dist.get_world_size(tp_group))
+                ]
+                dist.all_gather(shard_grad_list, shard_grad, tp_group)
+                shard_grad = torch.cat(shard_grad_list, dim=dim)
 
         # embedding may be resized when using tensor parallel
         if shard_grad.shape[0] > org_grad.shape[0]:

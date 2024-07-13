@@ -17,34 +17,28 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
-from colossalai.shardformer.policies.mistral import (
-    MistralForCausalLMPolicy as ColossalMistralForCausalLMPolicy,
-)
-from colossalai.shardformer.policies.mistral import (
-    MistralModelPolicy as ColossalMistralModelPolicy,
-)
-from torch import nn
-from transformers import PretrainedConfig
-from transformers.models.mistral.configuration_mistral import MistralConfig
-from transformers.models.mistral.modeling_mistral import MistralModel
+from torch import Tensor, nn
+from transformers.configuration_utils import PretrainedConfig
+from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
+from transformers.models.gemma2.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Model
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.mistral import (
-    MistralForwards,
-    MistralPipelineForwards,
+from cornstarch.shardformer.modeling.gemma2 import (
+    Gemma2Forwards,
+    Gemma2PipelineForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
 
 
-class MistralPolicy(PipelineTemplatePolicyBase, Policy):
+class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> list[str]:
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
         assert isinstance(
-            config, MistralConfig
-        ), "config must be an instance of MistralConfig"
-        config: MistralConfig = cast(MistralConfig, config)
+            config, Gemma2Config
+        ), f"config must be of type Gemma2Config, but got {type(config)}"
+        config: Gemma2Config = cast(Gemma2Config, config)
 
         modules = []
         modules.append("embed_tokens")
@@ -55,17 +49,18 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
         assert (
-            "transformers.models.mistral.modeling_mistral" in template.model_name
-        ), "The pipeline template is not for the model that the policy is designed for."
+            "trasnformers.models.gemma2.modeling_gemma2" in template.model_name
+        ), "The pipeline template is not for Gemma2 model"
 
-        prefix = "" if self.model.__class__.__name__ == "MistralModel" else "model."
+        prefix = "" if self.model.__class__.__name__ == "Gemma2Model" else "model."
 
         assert hasattr(self.model, "config"), "model must have a config attribute"
         modules = self.get_all_modules(self.model.config)
         modules_in_template = list(itertools.chain(*template.modules_per_stage))
         if modules != modules_in_template:
             raise ValueError(
-                "Modules in the pipeline template do not match the modules in the model."
+                f"modules in the template do not match the modules in the model. "
+                f"Expected: {modules}, Got: {modules_in_template}"
             )
 
         if f"{prefix}embed_tokens" not in modules_in_template[0]:
@@ -74,6 +69,16 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
         if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("norm must be in the last stage.")
 
+    def config_sanity_check(self):
+        pass
+
+    def preprocess(self) -> nn.Module:
+        self.tie_weight = self.tie_weight_check()
+        return self.model
+
+    def postprocess(self) -> nn.Module:
+        return self.model
+
     def set_pipeline_forward(
         self, model_cls: nn.Module, new_forward: Callable, policy: dict
     ):
@@ -81,7 +86,7 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
             return
 
         stage_manager = self.pipeline_stage_manager
-        if self.model.__class__.__name__ == "MistralModel":
+        if self.model.__class__.__name__ == "Gemma2Model":
             module = self.model
         else:
             module = self.model.model
@@ -107,37 +112,44 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
     def get_held_layers(self) -> List[nn.Module]:
         assert self.pipeline_stage_manager is not None
 
-        module: MistralModel
-        if self.model.__class__.__name__ == "MistralModel":
+        module: Gemma2Model
+        if self.model.__class__.__name__ == "Gemma2Model":
             module = self.model
         else:
             module = self.model.model
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
-        if stage_manager.is_first_stage():
-            held_layers.append(module.embed_tokens)
-        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
-        held_layers.extend(module.layers[start_idx:end_idx])
-        if stage_manager.is_last_stage():
-            held_layers.append(module.norm)
+        if stage_manager.is_interleave:
+            assert stage_manager.num_model_chunks is not None
+            layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+            stage_indices = stage_manager.get_stage_index(layers_per_stage)
+            if stage_manager.is_first_stage(ignore_chunk=True):
+                held_layers.append(module.embed_tokens)
+            for start_idx, end_idx in stage_indices:
+                held_layers.extend(module.layers[start_idx:end_idx])
+            if stage_manager.is_last_stage(ignore_chunk=True):
+                held_layers.append(module.norm)
+
+        else:
+            layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+            if stage_manager.is_first_stage():
+                held_layers.append(module.embed_tokens)
+            start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+            held_layers.extend(module.layers[start_idx:end_idx])
+            if stage_manager.is_last_stage():
+                held_layers.append(module.norm)
         return held_layers
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
-        from transformers.models.mistral.modeling_mistral import (
-            MistralAttention,
-            MistralDecoderLayer,
-            MistralFlashAttention2,
-            MistralSdpaAttention,
-        )
+        from transformers.models.gemma2.modeling_gemma2 import Gemma2DecoderLayer
 
         policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
             warnings.warn(
-                "Mistral doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
+                "Gemma doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
             )
 
         if self.shard_config.enable_tensor_parallelism:
@@ -161,7 +173,7 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
                 // self.shard_config.tensor_parallel_size,
             }
 
-            policy[MistralDecoderLayer] = ModulePolicyDescription(
+            policy[Gemma2DecoderLayer] = ModulePolicyDescription(
                 attribute_replacement=decoder_attribute_replacement,
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
@@ -211,10 +223,9 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
                     },
                 ),
                 policy=policy,
-                target_key=MistralModel,
+                target_key=Gemma2Model,
             )
 
-        # optimization configuration
         if self.shard_config.enable_fused_normalization:
             self.append_or_create_submodule_replacement(
                 description=[
@@ -226,54 +237,44 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
                         suffix="post_attention_layernorm",
                         target_module=FusedRMSNorm,
                     ),
+                    SubModuleReplacementDescription(
+                        suffix="pre_feedforward_layernorm",
+                        target_module=FusedRMSNorm,
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="post_feedforward_layernorm",
+                        target_module=FusedRMSNorm,
+                    ),
                 ],
                 policy=policy,
-                target_key=MistralDecoderLayer,
+                target_key=Gemma2DecoderLayer,
             )
-
             self.append_or_create_submodule_replacement(
-                description=SubModuleReplacementDescription(
-                    suffix="norm",
-                    target_module=FusedRMSNorm,
-                ),
+                description=[
+                    SubModuleReplacementDescription(
+                        suffix="norm",
+                        target_module=FusedRMSNorm,
+                    )
+                ],
                 policy=policy,
-                target_key=MistralModel,
+                target_key=Gemma2Model,
             )
 
-        if self.shard_config.enable_flash_attention:
-            ATTN_IMPLEMENTATION = {
-                "eager": MistralAttention,
-                "flash_attention_2": MistralFlashAttention2,
-                "sdpa": MistralSdpaAttention,
-            }
-            attn_cls = ATTN_IMPLEMENTATION[self.model.config._attn_implementation]
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": MistralForwards.mistral_flash_attention_forward,
-                },
-                policy=policy,
-                target_key=attn_cls,
+        if (
+            self.shard_config.enable_flash_attention
+            or self.model.config._attn_implementation != "eager"
+        ):
+            warnings.warn(
+                "It is strongly recommended to train Gemma2 models with the `eager` attention implementation "
+                f"instead of `{self.model.config._attn_implementation}`. Use `eager` with `AutoModelForCausalLM.from_pretrained('<path-to-checkpoint>', attn_implementation='eager')`."
             )
-            if self.pipeline_stage_manager is None:
-                # replace mistral model forward method
-                self.append_or_create_method_replacement(
-                    description={
-                        "forward": functools.partial(
-                            MistralForwards.mistral_model_forward_for_flash_attention,
-                            shard_config=self.shard_config,
-                        ),
-                    },
-                    policy=policy,
-                    target_key=MistralModel,
-                )
-
         return policy
 
 
-class MistralModelPolicy(MistralPolicy, ColossalMistralModelPolicy):
+class Gemma2ModelPolicy(Gemma2Policy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> list[str]:
-        return MistralPolicy.get_all_modules(config)
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        return Gemma2Policy.get_all_modules(config)
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
         super().pipeline_template_sanity_check(template)
@@ -283,8 +284,8 @@ class MistralModelPolicy(MistralPolicy, ColossalMistralModelPolicy):
 
         if self.pipeline_stage_manager:
             self.set_pipeline_forward(
-                model_cls=MistralModel,
-                new_forward=MistralPipelineForwards.mistral_model_forward,
+                model_cls=Gemma2Model,
+                new_forward=Gemma2PipelineForwards.gemma2_model_forward,
                 policy=policy,
             )
 
@@ -294,12 +295,10 @@ class MistralModelPolicy(MistralPolicy, ColossalMistralModelPolicy):
         return super().get_held_layers()
 
 
-class MistralForCausalLMPolicy(MistralPolicy, ColossalMistralForCausalLMPolicy):
+class Gemma2ForCausalLMPolicy(Gemma2Policy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> list[str]:
-        modules = [
-            f"model.{module}" for module in MistralPolicy.get_all_modules(config)
-        ]
+    def get_all_modules(config: PretrainedConfig) -> List[str]:
+        modules = [f"model.{module}" for module in Gemma2Policy.get_all_modules(config)]
         modules.append("lm_head")
         return modules
 
@@ -309,12 +308,9 @@ class MistralForCausalLMPolicy(MistralPolicy, ColossalMistralForCausalLMPolicy):
             raise ValueError("lm_head must be in the last stage.")
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
-        from transformers.models.mistral.modeling_mistral import MistralForCausalLM
-
         policy = super().module_policy()
 
         if self.shard_config.enable_tensor_parallelism:
-            # add a new item for causal lm
             target_module = VocabParallelLMHead1D
             kwargs = {
                 "gather_output": not self.shard_config.parallel_output,
@@ -322,7 +318,7 @@ class MistralForCausalLMPolicy(MistralPolicy, ColossalMistralForCausalLMPolicy):
             }
             methods_replacement = {
                 "forward": functools.partial(
-                    MistralForwards.mistral_for_causal_lm_forward_with_dist_cross_entropy,
+                    Gemma2Forwards.gemma2_for_causal_lm_forward_with_dist_cross_entropy,
                     shard_config=self.shard_config,
                 )
             }
@@ -335,7 +331,7 @@ class MistralForCausalLMPolicy(MistralPolicy, ColossalMistralForCausalLMPolicy):
 
         policy.update(
             {
-                MistralForCausalLM: ModulePolicyDescription(
+                Gemma2ForCausalLM: ModulePolicyDescription(
                     sub_module_replacement=[
                         SubModuleReplacementDescription(
                             suffix="lm_head",
@@ -349,10 +345,9 @@ class MistralForCausalLMPolicy(MistralPolicy, ColossalMistralForCausalLMPolicy):
         )
 
         if self.pipeline_stage_manager:
-            # set None as default
             self.set_pipeline_forward(
-                model_cls=MistralForCausalLM,
-                new_forward=MistralPipelineForwards.mistral_for_causal_lm_forward,
+                model_cls=Gemma2ForCausalLM,
+                new_forward=Gemma2PipelineForwards.gemma2_for_causal_lm_forward,
                 policy=policy,
             )
 
@@ -364,3 +359,18 @@ class MistralForCausalLMPolicy(MistralPolicy, ColossalMistralForCausalLMPolicy):
         if stage_manager.is_last_stage(ignore_chunk=True):
             held_layers.append(self.model.lm_head)
         return held_layers
+
+    def get_shared_params(self) -> List[Dict[int, Tensor]]:
+        gemma_model = self.model.model
+        if self.pipeline_stage_manager and self.pipeline_stage_manager.num_stages > 1:
+            if id(gemma_model.embed_tokens.weight) == id(self.model.lm_head.weight):
+                # tie weights
+                return [
+                    {
+                        0: gemma_model.embed_tokens.weight,
+                        self.pipeline_stage_manager.num_stages
+                        - 1: self.model.lm_head.weight,
+                    }
+                ]
+
+        return []

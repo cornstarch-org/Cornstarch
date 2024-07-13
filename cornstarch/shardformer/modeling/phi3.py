@@ -1,37 +1,30 @@
-import warnings
 from typing import List, Optional, Tuple, Union
 
 import torch
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer.layer import ColoAttention, cross_entropy_1d
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from torch.nn import CrossEntropyLoss
+from torch.nn.modules.loss import CrossEntropyLoss
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import (
-    MoeCausalLMOutputWithPast,
-    MoeModelOutputWithPast,
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
 )
-from transformers.models.mixtral.modeling_mixtral import (
-    MixtralAttention,
-    MixtralForCausalLM,
-    MixtralModel,
-    MixtralSdpaAttention,
+from transformers.models.phi3.modeling_phi3 import (
+    Phi3Attention,
+    Phi3ForCausalLM,
+    Phi3Model,
+    Phi3SdpaAttention,
     apply_rotary_pos_emb,
-    load_balancing_loss_func,
     logger,
     repeat_kv,
 )
 
 
-class MixtralPipelineForwards:
-    """
-    This class servers as a micro library for forward function substitution of Mixtral models
-    under pipeline setting.
-    """
-
+class Phi3PipelineForwards:
     @staticmethod
-    def mixtral_model_forward(
-        self: MixtralModel,
+    def phi3_model_forward(
+        self: Phi3Model,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -40,24 +33,17 @@ class MixtralPipelineForwards:
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
-        past_router_logits: Optional[torch.FloatTensor] = None,
-        stage_index: Optional[list[int]] = None,
+        stage_index: Optional[List[int]] = None,
         shard_config: Optional[ShardConfig] = None,
-    ) -> Union[Tuple, MoeModelOutputWithPast]:
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
             if output_attentions is not None
             else self.config.output_attentions
-        )
-        output_router_logits = (
-            output_router_logits
-            if output_router_logits is not None
-            else self.config.output_router_logits
         )
         output_hidden_states = (
             output_hidden_states
@@ -86,7 +72,6 @@ class MixtralPipelineForwards:
                 "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
             )
 
-        # retrieve input_ids and input_embeds
         if stage_manager.is_first_stage():
             if (input_ids is None) ^ (inputs_embeds is not None):
                 raise ValueError(
@@ -107,12 +92,10 @@ class MixtralPipelineForwards:
                 past_seen_tokens + hidden_states.shape[1],
                 device=hidden_states.device,
             )
-
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
         if shard_config.enable_flash_attention:
-            # in this case, attention_mask is a dict rather than a tensor
             batch_size, seq_length = hidden_states.shape[:2]
             mask_shape = (batch_size, 1, seq_length, seq_length)
             causal_mask = ColoAttention.prepare_attn_kwargs(
@@ -134,13 +117,10 @@ class MixtralPipelineForwards:
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-        all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
         start_idx, end_idx = stage_index[0], stage_index[1]
-        for idx, decoder_layer in enumerate(
-            self.layers[start_idx:end_idx], start=start_idx
-        ):
+        for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -152,7 +132,6 @@ class MixtralPipelineForwards:
                     position_ids,
                     past_key_values,
                     output_attentions,
-                    output_router_logits,
                     use_cache,
                     cache_position,
                 )
@@ -163,7 +142,6 @@ class MixtralPipelineForwards:
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
-                    output_router_logits=output_router_logits,
                     use_cache=use_cache,
                     cache_position=cache_position,
                 )
@@ -175,9 +153,6 @@ class MixtralPipelineForwards:
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
-
-            if output_router_logits:
-                all_router_logits += (layer_outputs[-1],)
 
         if stage_manager.is_last_stage():
             hidden_states = self.norm(hidden_states)
@@ -194,9 +169,6 @@ class MixtralPipelineForwards:
                 else next_decoder_cache
             )
 
-        if output_router_logits and past_router_logits is not None:
-            all_router_logits = past_router_logits + all_router_logits
-
         if stage_manager.is_last_stage():
             if not return_dict:
                 return tuple(
@@ -206,26 +178,21 @@ class MixtralPipelineForwards:
                         next_cache,
                         all_hidden_states,
                         all_self_attns,
-                        all_router_logits,
                     ]
                     if v is not None
                 )
-            return MoeModelOutputWithPast(
+            return BaseModelOutputWithPast(
                 last_hidden_state=hidden_states,
                 past_key_values=next_cache,
                 hidden_states=all_hidden_states,
                 attentions=all_self_attns,
-                router_logits=all_router_logits,
             )
+        else:
+            return {"hidden_states": hidden_states}
 
-        # always return dict for intermediate stage
-        out = {"hidden_states": hidden_states}
-        if output_router_logits:
-            out["past_router_logits"] = all_router_logits
-        return out
-
-    def mixtral_for_causal_lm_forward(
-        self: MixtralForCausalLM,
+    @staticmethod
+    def phi3_for_causal_lm_forward(
+        self: Phi3ForCausalLM,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -235,24 +202,17 @@ class MixtralPipelineForwards:
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
-        past_router_logits: Optional[torch.FloatTensor] = None,
-        stage_index: Optional[list[int]] = None,
+        stage_index: Optional[List[int]] = None,
         shard_config: Optional[ShardConfig] = None,
-    ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
             output_attentions
             if output_attentions is not None
             else self.config.output_attentions
-        )
-        output_router_logits = (
-            output_router_logits
-            if output_router_logits is not None
-            else self.config.output_router_logits
         )
         output_hidden_states = (
             output_hidden_states
@@ -263,25 +223,8 @@ class MixtralPipelineForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        if output_attentions:
-            logger.warning_once(
-                "output_attentions=True is not supported for pipeline models at the moment."
-            )
-            output_attentions = False
-
-        if output_hidden_states:
-            logger.warning_once(
-                "output_hidden_states=True is not supported for pipeline models at the moment."
-            )
-            output_hidden_states = False
-        if output_router_logits:
-            logger.warning_once(
-                "output_router_logits=True is not supported for pipeline models at the moment."
-            )
-            output_router_logits = False
-
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = MixtralPipelineForwards.mixtral_model_forward(
+        outputs = Phi3PipelineForwards.phi3_model_forward(
             self.model,
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -291,13 +234,11 @@ class MixtralPipelineForwards:
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits,
             return_dict=return_dict,
             cache_position=cache_position,
             stage_manager=stage_manager,
             hidden_states=hidden_states,
             stage_index=stage_index,
-            past_router_logits=past_router_logits,
             shard_config=shard_config,
         )
 
@@ -312,9 +253,7 @@ class MixtralPipelineForwards:
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels[..., 1:].contiguous()
                 # Flatten the tokens
-                loss_fct = CrossEntropyLoss()
                 shift_labels = shift_labels.view(-1)
-                # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
 
                 if (
@@ -328,52 +267,33 @@ class MixtralPipelineForwards:
                         shift_labels,
                         process_group=shard_config.tensor_parallel_process_group,
                         vocab_size=self.lm_head.out_features,
+                        dtype=self.model.dtype,
                     )
                 else:
+                    loss_fct = CrossEntropyLoss()
                     shift_logits = shift_logits.view(-1, self.config.vocab_size)
                     loss = loss_fct(shift_logits, shift_labels)
 
-            aux_loss = None
-            if output_router_logits:
-                aux_loss = load_balancing_loss_func(
-                    outputs.router_logits if return_dict else outputs[-1],
-                    self.num_experts,
-                    self.num_experts_per_tok,
-                    attention_mask,
-                )
-                if labels is not None:
-                    loss += self.router_aux_loss_coef * aux_loss.to(
-                        loss.device
-                    )  # make sure to reside in the same device
-
             if not return_dict:
                 output = (logits,) + outputs[1:]
-                if output_router_logits:
-                    output = (aux_loss,) + output
                 return (loss,) + output if loss is not None else output
 
-            return MoeCausalLMOutputWithPast(
+            return CausalLMOutputWithPast(
                 loss=loss,
-                aux_loss=aux_loss,
                 logits=logits,
                 past_key_values=outputs.past_key_values,
                 hidden_states=outputs.hidden_states,
                 attentions=outputs.attentions,
-                router_logits=outputs.router_logits,
             )
 
-        out = {}
         hidden_states = outputs.get("hidden_states")
-        out["hidden_states"] = hidden_states
-        if output_router_logits:
-            out["past_router_logits"] = outputs["past_router_logits"]
-        return out
+        return {"hidden_states": hidden_states}
 
 
-class MixtralForwards:
+class Phi3Forwards:
     @staticmethod
-    def mixtral_model_forward_for_flash_attention(
-        self: MixtralModel,
+    def phi3_model_forward_for_flash_attention(
+        self: Phi3Model,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -382,20 +302,14 @@ class MixtralForwards:
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         shard_config: Optional[ShardConfig] = None,
-    ) -> Union[Tuple, MoeModelOutputWithPast]:
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
             if output_attentions is not None
             else self.config.output_attentions
-        )
-        output_router_logits = (
-            output_router_logits
-            if output_router_logits is not None
-            else self.config.output_router_logits
         )
         output_hidden_states = (
             output_hidden_states
@@ -413,7 +327,7 @@ class MixtralForwards:
                 "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
             )
 
-        if self.gradient_checkpointing and self.training and use_cache:
+        if self.gradient_checkpointing and self.training:
             if use_cache:
                 logger.warning_once(
                     "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
@@ -445,10 +359,9 @@ class MixtralForwards:
             position_ids = cache_position.unsqueeze(0)
 
         if shard_config.enable_flash_attention:
-            # in this case, attention_mask is a dict rather than a tensor
-            batch_size, seq_length, _ = inputs_embeds.shape
+            batch_size, seq_length = inputs_embeds.shape[:2]
             mask_shape = (batch_size, 1, seq_length, seq_length)
-            attention_mask = ColoAttention.prepare_attn_kwargs(
+            causal_mask = ColoAttention.prepare_attn_kwargs(
                 mask_shape,
                 inputs_embeds.dtype,
                 inputs_embeds.device,
@@ -456,8 +369,12 @@ class MixtralForwards:
                 is_causal=True,
             )
         else:
-            attention_mask = self._update_causal_mask(
-                attention_mask, inputs_embeds, cache_position, past_key_values
+            causal_mask = self._update_causal_mask(
+                attention_mask,
+                inputs_embeds,
+                cache_position,
+                past_key_values,
+                output_attentions,
             )
 
         hidden_states = inputs_embeds
@@ -465,7 +382,6 @@ class MixtralForwards:
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-        all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
         for decoder_layer in self.layers:
@@ -476,22 +392,20 @@ class MixtralForwards:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    attention_mask,
+                    causal_mask,
                     position_ids,
                     past_key_values,
                     output_attentions,
-                    output_router_logits,
                     use_cache,
                     cache_position,
                 )
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=attention_mask,
+                    attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
-                    output_router_logits=output_router_logits,
                     use_cache=use_cache,
                     cache_position=cache_position,
                 )
@@ -503,9 +417,6 @@ class MixtralForwards:
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
-
-            if output_router_logits:
-                all_router_logits += (layer_outputs[-1],)
 
         hidden_states = self.norm(hidden_states)
 
@@ -520,30 +431,22 @@ class MixtralForwards:
                 if use_legacy_cache
                 else next_decoder_cache
             )
-
         if not return_dict:
             return tuple(
                 v
-                for v in [
-                    hidden_states,
-                    next_cache,
-                    all_hidden_states,
-                    all_self_attns,
-                    all_router_logits,
-                ]
+                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
                 if v is not None
             )
-        return MoeModelOutputWithPast(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
-            router_logits=all_router_logits,
         )
 
     @staticmethod
-    def mixtral_flash_attention_forward(
-        self: Union[MixtralAttention, MixtralSdpaAttention],
+    def phi3_flash_attention_forward(
+        self: Union[Phi3Attention, Phi3SdpaAttention],
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -551,18 +454,16 @@ class MixtralForwards:
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if "padding_mask" in kwargs:
-            warnings.warn(
-                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
-            )
-
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.num_heads * self.head_dim
+        query_states = qkv[..., :query_pos]
+        key_states = qkv[
+            ..., query_pos : query_pos + self.num_key_value_heads * self.head_dim
+        ]
+        value_states = qkv[..., query_pos + self.num_key_value_heads * self.head_dim :]
 
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
@@ -583,14 +484,18 @@ class MixtralForwards:
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids, seq_len=kv_seq_len)
+
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin, position_ids
         )
 
         if past_key_value is not None:
-            # Specific to RoPE models
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+            }  # Specific to RoPE models
             key_states, value_states = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
@@ -611,10 +516,14 @@ class MixtralForwards:
 
         attn_output = self.o_proj(attn_output)
 
-        return attn_output, None, past_key_value
+        if not output_attentions:
+            attn_weights = None
 
-    def mixtral_for_causal_lm_forward_with_dist_cross_entropy(
-        self: MixtralForCausalLM,
+        return attn_output, attn_weights, past_key_value
+
+    @staticmethod
+    def phi3_for_causal_lm_forward_with_dist_cross_entropy(
+        self: Phi3ForCausalLM,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -624,22 +533,15 @@ class MixtralForwards:
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         shard_config: Optional[ShardConfig] = None,
-    ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
             output_attentions
             if output_attentions is not None
             else self.config.output_attentions
         )
-        output_router_logits = (
-            output_router_logits
-            if output_router_logits is not None
-            else self.config.output_router_logits
-        )
-
         output_hidden_states = (
             output_hidden_states
             if output_hidden_states is not None
@@ -659,16 +561,13 @@ class MixtralForwards:
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits,
             return_dict=return_dict,
-            cache_position=cache_position,
         )
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 
-        loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
@@ -679,40 +578,22 @@ class MixtralForwards:
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
-            new_vocab_size = logits.shape[-1]
-            shift_logits = shift_logits.view(-1, new_vocab_size)
             loss = cross_entropy_1d(
                 shift_logits,
                 shift_labels,
                 process_group=shard_config.tensor_parallel_process_group,
                 vocab_size=self.lm_head.out_features,
+                dtype=self.model.dtype,
             )
-
-        aux_loss = None
-        if output_router_logits:
-            aux_loss = load_balancing_loss_func(
-                outputs.router_logits if return_dict else outputs[-1],
-                self.num_experts,
-                self.num_experts_per_tok,
-                attention_mask,
-            )
-            if labels is not None:
-                loss += self.router_aux_loss_coef * aux_loss.to(
-                    loss.device
-                )  # make sure to reside in the same device
 
         if not return_dict:
             output = (logits,) + outputs[1:]
-            if output_router_logits:
-                output = (aux_loss,) + output
             return (loss,) + output if loss is not None else output
 
-        return MoeCausalLMOutputWithPast(
+        return CausalLMOutputWithPast(
             loss=loss,
-            aux_loss=aux_loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            router_logits=outputs.router_logits,
         )

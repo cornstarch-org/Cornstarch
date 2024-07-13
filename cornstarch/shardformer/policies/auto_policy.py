@@ -125,6 +125,34 @@ _POLICY_LIST = {
     "transformers.models.dinov2.modeling_dinov2.Dinov2Backbone": PolicyLocation(
         file_name="dinov2", class_name="Dinov2BackbonePolicy"
     ),
+    # Gemma
+    "transformers.models.gemma.modeling_gemma.GemmaModel": PolicyLocation(
+        file_name="gemma", class_name="GemmaModelPolicy"
+    ),
+    "transformers.models.gemma.modeling_gemma.GemmaForCausalLM": PolicyLocation(
+        file_name="gemma", class_name="GemmaForCausalLMPolicy"
+    ),
+    # Gemma2
+    "transformers.models.gemma2.modeling_gemma2.Gemma2Model": PolicyLocation(
+        file_name="gemma2", class_name="Gemma2ModelPolicy"
+    ),
+    "transformers.models.gemma2.modeling_gemma2.Gemma2ForCausalLM": PolicyLocation(
+        file_name="gemma2", class_name="Gemma2ForCausalLMPolicy"
+    ),
+    # Phi3
+    "transformers.models.phi3.modeling_phi3.Phi3Model": PolicyLocation(
+        file_name="phi3", class_name="Phi3ModelPolicy"
+    ),
+    "transformers.models.phi3.modeling_phi3.Phi3ForCausalLM": PolicyLocation(
+        file_name="phi3", class_name="Phi3ForCausalLMPolicy"
+    ),
+    # Qwen2
+    "transformers.models.qwen2.modeling_qwen2.Qwen2Model": PolicyLocation(
+        file_name="qwen2", class_name="Qwen2ModelPolicy"
+    ),
+    "transformers.models.qwen2.modeling_qwen2.Qwen2ForCausalLM": PolicyLocation(
+        file_name="qwen2", class_name="Qwen2ForCausalLMPolicy"
+    ),
 }
 
 
