@@ -440,3 +440,36 @@ class MultimodalModel(nn.Module):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+    def generation(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        **kwargs
+    ):
+        # Need commment 
+        
+        if self.language_model is None:
+            # Does not support CLIP-like encoder only multimodal model yet
+            raise NotImplementedError
+        
+        inputs_embeds = None
+        
+        encoders_outputs = []
+        for modal_key in self.encoders.keys():
+            encoder_module = getattr(self, f"{modal_key}_encoder")
+            args = {
+                arg: kwargs[arg]
+                for arg in self.encoders_args[modal_key]
+                if arg in kwargs
+            }
+            encoders_outputs.append(encoder_module(**args))
+
+        encoders_outputs = torch.cat(encoders_outputs, dim=1)
+
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
+
+        return self.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            **kwargs
+        )
