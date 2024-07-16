@@ -11,6 +11,7 @@ from torch.nn import CrossEntropyLoss
 from transformers.activations import get_activation
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
+from transformers import LlavaForConditionalGeneration
 
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
@@ -270,6 +271,51 @@ class MultimodalModel(nn.Module):
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
+    def from_pretrained_multimodal_model(
+        cls,
+        model_id: str,
+        encoders: dict[str, ModalModule],
+        language_model: Optional[PreTrainedModel] = None,
+    ) -> MultimodalModel:
+        
+        # Need comment
+
+        if model_id == "llava-hf/llava-1.5-7b-hf":
+            llava_model = LlavaForConditionalGeneration.from_pretrained(model_id, revision="main", torch_dtype="auto", device_map="cuda")
+            
+            # convert language model
+            llava_state_dict = llava_model.language_model.state_dict()
+            llava_state_dict_keys = llava_model.language_model.state_dict().keys()
+            for key in llava_state_dict_keys:
+                if llava_state_dict[key].shape[0] == 32064:
+                    llava_state_dict[key] = llava_state_dict[key][:32000]
+                if ".weight" in key:
+                    llava_state_dict[key.replace(".weight", ".base_layer.weight")] = llava_state_dict[key]
+            
+            language_model.load_state_dict(llava_state_dict, strict=False)
+
+            # create projector
+            llava_proj = llava_model.multi_modal_projector
+            llava_proj_state_dict = llava_proj.state_dict()
+            for key in llava_proj.state_dict().keys():
+                llava_proj_state_dict[key.replace('linear_1', 'in_proj'). replace('linear_2', 'out_proj')] = llava_proj_state_dict.pop(key)
+
+            projector_config = MultimodalProjectorConfig(
+                encoder_config=encoders["vision"].config,
+                text_config=language_model.config,
+                projection_type="mlp",
+            )
+            vision_projector = MultimodalProjector(projector_config)
+            vision_projector.load_state_dict(llava_proj_state_dict)
+
+            return MultimodalModel(
+                encoders={"vision": ModalModule(model=encoders["vision"], projector=vision_projector)},
+                language_model=language_model,
+            )
+        
+        else:
+            raise NotImplementedError     
+    
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         for encoder in self.encoders.values():
             encoder.module.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
@@ -447,7 +493,7 @@ class MultimodalModel(nn.Module):
         **kwargs
     ):
         # Need commment 
-        
+
         if self.language_model is None:
             # Does not support CLIP-like encoder only multimodal model yet
             raise NotImplementedError
