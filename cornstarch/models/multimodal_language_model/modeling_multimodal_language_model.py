@@ -292,6 +292,7 @@ class MultimodalModel(nn.Module):
                 if ".weight" in key:
                     llava_state_dict[key.replace(".weight", ".base_layer.weight")] = llava_state_dict[key]
             
+            # ToDo: raise error if LLM type not matches
             language_model.load_state_dict(llava_state_dict, strict=False)
 
             # create projector
