@@ -125,13 +125,10 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
             return x
 
     def create_p2p(
-        self, model: SingleEncoderModel, tp_size: int
+        self, model: SingleEncoderModel
     ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
         encoder_template, llm_template = model.get_templates()
-        templates = {
-            encoder_template: tp_size,
-            llm_template: tp_size,
-        }
+        templates = {encoder_template: 1, llm_template: 1}
         execution_order = [(encoder_template, llm_template)]
 
         pg_mesh = MultiModalProcessGroupMesh(
@@ -143,14 +140,13 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
 
         return stage_manager, p2p
 
-    def test_schedule(self, tp_size=1):
-        num_microbatches = 4
-        microbatch_size = 1
-
+    @parametrize("num_microbatches", [4, 8, 12], name_fn=lambda x: f"mb={x}")
+    @parametrize("microbatch_size", [1, 2, 4], name_fn=lambda x: f"mbs={x}")
+    def test_schedule(self, num_microbatches: int, microbatch_size: int):
         model = self.SingleEncoderModel()
         pp_model = copy.deepcopy(model)
 
-        stage_manager, p2p = self.create_p2p(model=model, tp_size=tp_size)
+        stage_manager, p2p = self.create_p2p(model=model)
         schedule = MultimodalOneForwardOneBackwardSchedule(
             stage_manager, num_microbatches, microbatch_size
         )
@@ -171,8 +167,7 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
                     x = layer(x)
             else:
                 assert start_idx >= 3 and end_idx <= 9
-                start_idx, end_idx = start_idx - 3, end_idx - 3
-                for layer in self.llm[start_idx:end_idx]:
+                for layer in self.llm[start_idx - 3 : end_idx - 3]:
                     x = layer(x)
             return x
 
@@ -201,7 +196,8 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
         pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
 
-        criterion = lambda x, *args, **kwargs: (x * x).mean()
+        def criterion(x, *args, **kwargs):
+            return (x * x).mean()
 
         input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
         dist.all_reduce(input_list[0])
@@ -222,6 +218,56 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
 
         if stage_manager.is_last_stage():
             assert torch.allclose(loss, pp_ret["loss"])
+
+        # check gradients
+        if start_idx < 3:
+            for i in range(start_idx, end_idx):
+                assert torch.allclose(
+                    model.encoder[i].weight.grad,
+                    pp_model.encoder[i].weight.grad,
+                )
+                assert torch.allclose(
+                    model.encoder[i].bias.grad,
+                    pp_model.encoder[i].bias.grad,
+                )
+        else:
+            for i in range(start_idx - 3, end_idx - 3):
+                assert torch.allclose(
+                    model.llm[i].weight.grad,
+                    pp_model.llm[i].weight.grad,
+                )
+                assert torch.allclose(
+                    model.llm[i].bias.grad,
+                    pp_model.llm[i].bias.grad,
+                )
+
+        # step
+        model_optimizer.step()
+        pp_optimizer.step()
+        model_optimizer.zero_grad()
+        pp_optimizer.zero_grad()
+
+        # check updated param
+        if start_idx < 3:
+            for i in range(start_idx, end_idx):
+                assert torch.allclose(
+                    model.encoder[i].weight,
+                    pp_model.encoder[i].weight,
+                )
+                assert torch.allclose(
+                    model.encoder[i].bias,
+                    pp_model.encoder[i].bias,
+                )
+        else:
+            for i in range(start_idx - 3, end_idx - 3):
+                assert torch.allclose(
+                    model.llm[i].weight,
+                    pp_model.llm[i].weight,
+                )
+                assert torch.allclose(
+                    model.llm[i].bias,
+                    pp_model.llm[i].bias,
+                )
 
 
 instantiate_parametrized_tests(TestScheduleSingleEncoderClass)
