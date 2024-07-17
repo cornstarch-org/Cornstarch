@@ -347,11 +347,27 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         return self._communicate(
             object=output_object,
             send_ranks=self.stage_manager.get_next_ranks(),
-            recv_ranks=self.stage_manager.get_prev_ranks(),
+            recv_ranks=self.stage_manager.get_next_ranks(),
             send_first=send_first,
         )
 
     def send_backward_recv_forward(self, input_object: Any, send_first: bool) -> Any:
+        return self._communicate(
+            object=input_object,
+            send_ranks=self.stage_manager.get_prev_ranks(),
+            recv_ranks=self.stage_manager.get_prev_ranks(),
+            send_first=send_first,
+        )
+
+    def send_forward_recv_forward(self, output_object: Any, send_first: bool) -> Any:
+        return self._communicate(
+            object=output_object,
+            send_ranks=self.stage_manager.get_next_ranks(),
+            recv_ranks=self.stage_manager.get_prev_ranks(),
+            send_first=send_first,
+        )
+
+    def send_backward_recv_backward(self, input_object: Any, send_first: bool) -> Any:
         return self._communicate(
             object=input_object,
             send_ranks=self.stage_manager.get_prev_ranks(),
