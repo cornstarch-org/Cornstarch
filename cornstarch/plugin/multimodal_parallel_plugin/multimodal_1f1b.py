@@ -1,7 +1,8 @@
-from typing import Any, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import torch
 from colossalai.accelerator import get_accelerator
+from colossalai.interface import OptimizerWrapper
 from colossalai.pipeline.p2p import (
     P2PMetadata,
     PipelineP2PCommunication,
@@ -17,6 +18,7 @@ from colossalai.pipeline.schedule.one_f_one_b import (
 )
 from packaging.version import Version
 from torch import distributed as dist
+from torch import nn
 from torch.distributed import distributed_c10d as c10d
 from torch.utils._pytree import tree_unflatten
 
@@ -28,9 +30,7 @@ from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager impor
 class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
     stage_manager: MultiModalPipelineStageManager
 
-    def __init__(
-        self, stage_manager: MultiModalPipelineStageManager, enable_metadata_cache: bool
-    ):
+    def __init__(self, stage_manager: MultiModalPipelineStageManager):
         assert isinstance(stage_manager, MultiModalPipelineStageManager), (
             f"stage_manager must be an instance of MultiModalPipelineStageManager, "
             f"but got {type(stage_manager)}"
@@ -46,11 +46,11 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         send_object_size_tensor: torch.Tensor
         if Version(torch.__version__) >= Version("1.13.0"):
             send_object_tensor, send_object_size_tensor = c10d._object_to_tensor(
-                object_metadata, device=current_device
+                object_metadata, device=current_device, group=dist.GroupMember.WORLD
             )
         else:
             send_object_tensor, send_object_size_tensor = c10d._object_to_tensor(
-                object_metadata
+                object_metadata, group=dist.GroupMember.WORLD
             )
 
         send_object_tensor = send_object_tensor.to(device=current_device)
@@ -58,7 +58,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
 
         return send_object_tensor, send_object_size_tensor
 
-    def _send_recv_metadata(
+    def _send_recv_serialized_object(
         self,
         object_metadata: Optional[P2PMetadata],
         send_ranks: list[int],
@@ -66,7 +66,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         send_first: bool = True,
     ) -> list[P2PMetadata]:
         """
-        Send and receive metadata from send_ranks and recv_ranks respectively.
+        Send and receive metadata and potentially non-tensor objects from send_ranks and recv_ranks respectively.
 
         Optionally it can only send or receive metadata. To do it, set:
         - for send only:
@@ -114,14 +114,18 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                 _filling_ops_queue(
                     send_metadata_size_tensor, dist.isend, send_rank, ops, None
                 )
-            for recv_rank in recv_ranks:
+            for recv_rank, recv_metadata_size_tensor in zip(
+                recv_ranks, recv_metadata_size_tensors
+            ):
                 _filling_ops_queue(
-                    recv_metadata_size_tensors, dist.irecv, recv_rank, ops, None
+                    recv_metadata_size_tensor, dist.irecv, recv_rank, ops, None
                 )
         else:
-            for recv_rank in recv_ranks:
+            for recv_rank, recv_metadata_size_tensor in zip(
+                recv_ranks, recv_metadata_size_tensors
+            ):
                 _filling_ops_queue(
-                    recv_metadata_size_tensors, dist.irecv, recv_rank, ops, None
+                    recv_metadata_size_tensor, dist.irecv, recv_rank, ops, None
                 )
             for send_rank in send_ranks:
                 _filling_ops_queue(
@@ -276,7 +280,8 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
             send_metadata, send_tensor_objects = create_send_metadata(
                 object, strict=False, return_tensor=True
             )
-        recv_metadata = self._send_recv_metadata(
+
+        recv_metadata = self._send_recv_serialized_object(
             send_metadata, send_ranks, recv_ranks, send_first
         )
         recv_tensor_objects = self._send_recv_tensors(
@@ -297,9 +302,10 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
             if recv_tensor_objects is None:
                 recv_tensor_objects = []
 
-            local_received_objects = []
+            local_received_objects = recv_tensor_object
             for idx in non_tensor_object_indices:
                 local_received_objects.insert(idx, non_tensor_objects.pop(0))
+
             local_received_objects = tree_unflatten(recv_tensor_object, tree_spec)
             received_objects.append(local_received_objects)
 
@@ -427,3 +433,24 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
             input_tensors = self.comm.send_backward_recv_forward(input_tensor_grad)
 
         return input_tensors
+
+    def run_forward_backward(
+        self,
+        model: nn.Module,
+        data_iter: Iterable,
+        criterion: Callable[..., Any],
+        optimizer: OptimizerWrapper | None = None,
+        return_loss: bool = False,
+        return_outputs: bool = False,
+    ) -> torch.Dict:
+        raise NotImplementedError()
+
+    def run_forward_only(
+        self,
+        model: nn.Module,
+        data_iter: Iterable,
+        criterion: Callable[..., Any],
+        return_loss: bool = False,
+        return_outputs: bool = False,
+    ) -> torch.Dict:
+        raise NotImplementedError()
