@@ -4,7 +4,6 @@ import sys
 from unittest.mock import patch
 
 import numpy as np
-import pytest
 import torch
 import torch.distributed as dist
 from colossalai.accelerator import CudaAccelerator, get_accelerator
@@ -22,29 +21,16 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultiModalProcessGroupMesh,
 )
 
-encoder1_template = PipelineTemplate(
-    "encoder1", [["layer.0"], ["layer.1"], ["layer.2"], ["layer.3"]]
-)
+encoder1_template = PipelineTemplate("encoder1", [["layer.0", "layer.1", "layer.2"]])
 encoder2_template = PipelineTemplate(
-    "encoder2", [["layer.0", "layer.2"], ["layer.1", "layer.3"], ["layer.4", "layer.5"]]
+    "encoder2", [["layer.0"], ["layer.1"], ["layer.2"]]
 )
-encoder3_template = PipelineTemplate("encoder2", [["layer.0", "layer.1"]])
 llm_template = PipelineTemplate(
     "llm", [["layer.0", "layer.1"], ["layer.2", "layer.3"], ["layer.4", "layer.5"]]
 )
-llm_template = PipelineTemplate("llm", [["layer.0", "layer.1", "layer.2"]])
-
-# templates = {encoder1_template: 1, encoder2_template: 1, llm_template: 1}
-# dependency = [(encoder1_template, llm_template), (encoder2_template, llm_template)]
-
-templates = {encoder3_template: 1, llm_template: 1}
 
 
-class DistClassBase(MultiProcessTestCase):
-    @property
-    def world_size(self) -> int:
-        return 2
-
+class P2PCommunicationClassBase(MultiProcessTestCase):
     def setUp(self) -> None:
         super().setUp()
         with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
@@ -76,10 +62,6 @@ class DistClassBase(MultiProcessTestCase):
 
             raise
 
-        # if torch.cuda.is_available() and torch.cuda.device_count():
-        #     device_id = self.rank % torch.cuda.device_count()
-        #     torch.cuda.set_device(device_id)
-
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
         random.seed(0)
@@ -105,11 +87,22 @@ class DistClassBase(MultiProcessTestCase):
         dist.destroy_process_group()
 
 
-class TestOnetoOneCommunicationClass(DistClassBase):
-    def test_p2p_communication(self):
+class TestHomogeneousTensorParallelCommunicationClass(P2PCommunicationClassBase):
+    @property
+    def world_size(self):
+        return 16
+
+    @parametrize("tp_size", [1, 2, 4])
+    def test_p2p_communication(self, tp_size: int):
+        templates = {
+            encoder1_template: tp_size,
+            llm_template: tp_size,
+        }
+        execution_order = [(encoder1_template, llm_template)]
+
         pg_mesh = MultiModalProcessGroupMesh(
             modal_templates=templates,
-            execution_order=[(encoder3_template, llm_template)],
+            execution_order=execution_order,
         )
         stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
         p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
@@ -124,12 +117,20 @@ class TestOnetoOneCommunicationClass(DistClassBase):
             {"tensor": tensor},
         ]
 
-        if rank == 0:
+        if stage_manager.is_first_stage(check_only_in_modal=False):
             for obj in data:
                 p2p.send_forward(obj)
 
-        elif rank == 1:
+        elif stage_manager.is_last_stage(check_only_in_modal=False):
             for obj in data:
                 recv_objs = p2p.recv_forward()
                 assert len(recv_objs) == 1
                 assert recv_objs[0] == obj
+
+        else:
+            for obj in data:
+                recv_objs = p2p.recv_forward()
+                p2p.send_forward(obj)
+
+
+instantiate_parametrized_tests(TestHomogeneousTensorParallelCommunicationClass)
