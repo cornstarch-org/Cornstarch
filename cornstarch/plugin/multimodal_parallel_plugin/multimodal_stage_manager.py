@@ -247,7 +247,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
 
     def distribute_layers(
         self,
-        num_layers: int,
+        num_layers: Optional[int] = None,
         num_stages: Optional[int] = None,
         num_model_chunks: Optional[int] = None,
     ) -> list[int]:
