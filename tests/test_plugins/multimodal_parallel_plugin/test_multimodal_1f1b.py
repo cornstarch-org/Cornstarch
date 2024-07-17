@@ -23,9 +23,7 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
 )
 
 encoder1_template = PipelineTemplate("encoder1", [["layer.0", "layer.1", "layer.2"]])
-encoder2_template = PipelineTemplate(
-    "encoder2", [["layer.0"], ["layer.1"], ["layer.2"]]
-)
+encoder2_template = PipelineTemplate("encoder2", [["layer.0"], ["layer.1"]])
 llm_template = PipelineTemplate(
     "llm", [["layer.0", "layer.1"], ["layer.2", "layer.3"], ["layer.4", "layer.5"]]
 )
@@ -39,6 +37,15 @@ class P2PCommunicationClassBase(MultiProcessTestCase):
 
     def tearDown(self) -> None:
         return super().tearDown()
+
+    def create_data(self) -> list[Any]:
+        tensor = torch.ones(1, device=get_accelerator().get_current_device())
+        return [
+            "tensor",
+            tensor,
+            [tensor],
+            {"tensor": tensor},
+        ]
 
     @classmethod
     def _run(cls, rank: int, test_name: str, file_name: str, pipe) -> None:
@@ -88,7 +95,166 @@ class P2PCommunicationClassBase(MultiProcessTestCase):
         dist.destroy_process_group()
 
 
-class TestHomogeneousTensorParallelCommunicationClass(P2PCommunicationClassBase):
+class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
+    """
+    Tests in this class has two parallel encoders and one LLM.
+    Ranks at the border of
+    """
+
+    @property
+    def world_size(self):
+        return 24
+
+    def create_p2p(
+        self, tp_size: int
+    ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
+        templates = {
+            encoder1_template: tp_size,
+            encoder2_template: tp_size,
+            llm_template: tp_size,
+        }
+        execution_order = [
+            (encoder1_template, llm_template),
+            (encoder2_template, llm_template),
+        ]
+
+        pg_mesh = MultiModalProcessGroupMesh(
+            modal_templates=templates,
+            execution_order=execution_order,
+        )
+        stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
+        p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
+
+        return stage_manager, p2p
+
+    @parametrize("tp_size", [1, 2, 4])
+    def test_p2p_communication_forward_first(self, tp_size: int):
+        stage_manager, p2p = self.create_p2p(tp_size)
+        data = self.create_data()
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_backward(backward_obj)
+
+                assert len(recv_forward_objs) == 1
+                assert recv_forward_objs[0] == forward_obj
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                p2p.send_forward(forward_obj)
+                recv_backward_objs = p2p.recv_backward()
+
+                assert len(recv_backward_objs) == 1
+                assert recv_backward_objs[0] == backward_obj
+            else:
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_forward(forward_obj)
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_backward(backward_obj)
+
+                assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
+                assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
+                assert all(obj == backward_obj for obj in recv_backward_objs)
+                assert all(obj == forward_obj for obj in recv_forward_objs)
+
+    @parametrize("tp_size", [1, 2, 4])
+    def test_p2p_communication_backward_first(self, tp_size: int):
+        stage_manager, p2p = self.create_p2p(tp_size)
+        data = self.create_data()
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                p2p.send_backward(backward_obj)
+                recv_forward_objs = p2p.recv_forward()
+
+                assert len(recv_forward_objs) == 1
+                assert recv_forward_objs[0] == forward_obj
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_forward(forward_obj)
+
+                assert len(recv_backward_objs) == 1
+                assert recv_backward_objs[0] == backward_obj
+            else:
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_backward(backward_obj)
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_forward(forward_obj)
+
+                assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
+                assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
+                assert all(obj == backward_obj for obj in recv_backward_objs)
+                assert all(obj == forward_obj for obj in recv_forward_objs)
+
+    @parametrize("tp_size", [1, 2, 4])
+    @parametrize("send_first", [True, False])
+    def test_p2p_communication_coaleasced_forward_first(
+        self, tp_size: int, send_first: bool
+    ):
+        stage_manager, p2p = self.create_p2p(tp_size)
+        data = self.create_data()
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_backward(backward_obj)
+
+                assert len(recv_forward_objs) == 1
+                assert recv_forward_objs[0] == forward_obj
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                p2p.send_forward(forward_obj)
+                recv_backward_objs = p2p.recv_backward()
+
+                assert len(recv_backward_objs) == 1
+                assert recv_backward_objs[0] == backward_obj
+            else:
+                recv_forward_objs = p2p.send_forward_recv_forward(
+                    forward_obj, send_first=send_first
+                )
+                recv_backward_objs = p2p.send_backward_recv_backward(
+                    backward_obj, send_first=send_first
+                )
+
+                assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
+                assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
+                assert all(obj == backward_obj for obj in recv_backward_objs)
+                assert all(obj == forward_obj for obj in recv_forward_objs)
+
+    @parametrize("tp_size", [1, 2, 4])
+    @parametrize("send_first", [True, False])
+    def test_p2p_communication_coaleasced_backward_first(
+        self, tp_size: int, send_first: bool
+    ):
+        stage_manager, p2p = self.create_p2p(tp_size)
+        data = self.create_data()
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                p2p.send_backward(backward_obj)
+                recv_forward_objs = p2p.recv_forward()
+
+                assert len(recv_forward_objs) == 1
+                assert recv_forward_objs[0] == forward_obj
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_forward(forward_obj)
+
+                assert len(recv_backward_objs) == 1
+                assert recv_backward_objs[0] == backward_obj
+            else:
+                recv_backward_objs = p2p.send_backward_recv_backward(
+                    backward_obj, send_first=send_first
+                )
+                recv_forward_objs = p2p.send_forward_recv_forward(
+                    forward_obj, send_first=send_first
+                )
+
+                assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
+                assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
+                assert all(obj == backward_obj for obj in recv_backward_objs)
+                assert all(obj == forward_obj for obj in recv_forward_objs)
+
+
+class TestHomogeneousTensorParallelSingleEncoderClass(P2PCommunicationClassBase):
     @property
     def world_size(self):
         return 16
@@ -111,14 +277,31 @@ class TestHomogeneousTensorParallelCommunicationClass(P2PCommunicationClassBase)
 
         return stage_manager, p2p
 
-    def create_data(self) -> list[Any]:
-        tensor = torch.ones(1, device=get_accelerator().get_current_device())
-        return [
-            "tensor",
-            tensor,
-            [tensor],
-            {"tensor": tensor},
-        ]
+    @parametrize("tp_size", [1, 2, 4])
+    def test_p2p_communication_forward_first(self, tp_size: int):
+        stage_manager, p2p = self.create_p2p(tp_size)
+        data = self.create_data()
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_backward(backward_obj)
+                assert len(recv_forward_objs) == 1
+                assert recv_forward_objs[0] == forward_obj
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                p2p.send_forward(forward_obj)
+                recv_backward_objs = p2p.recv_backward()
+                assert len(recv_backward_objs) == 1
+                assert recv_backward_objs[0] == backward_obj
+            else:
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_forward(forward_obj)
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_backward(backward_obj)
+                assert len(recv_backward_objs) == 1
+                assert recv_backward_objs[0] == backward_obj
+                assert len(recv_forward_objs) == 1
+                assert recv_forward_objs[0] == forward_obj
 
     @parametrize("tp_size", [1, 2, 4])
     def test_p2p_communication_backward_first(self, tp_size: int):
@@ -141,32 +324,6 @@ class TestHomogeneousTensorParallelCommunicationClass(P2PCommunicationClassBase)
                 p2p.send_backward(backward_obj)
                 recv_forward_objs = p2p.recv_forward()
                 p2p.send_forward(forward_obj)
-                assert len(recv_backward_objs) == 1
-                assert recv_backward_objs[0] == backward_obj
-                assert len(recv_forward_objs) == 1
-                assert recv_forward_objs[0] == forward_obj
-
-    @parametrize("tp_size", [1, 2, 4])
-    def test_p2p_communication_forward_first(self, tp_size: int):
-        stage_manager, p2p = self.create_p2p(tp_size)
-        data = self.create_data()
-
-        for forward_obj, backward_obj in zip(data, reversed(data)):
-            if stage_manager.is_last_stage(check_only_in_modal=False):
-                recv_forward_objs = p2p.recv_forward()
-                p2p.send_backward(backward_obj)
-                assert len(recv_forward_objs) == 1
-                assert recv_forward_objs[0] == forward_obj
-            elif stage_manager.is_first_stage(check_only_in_modal=False):
-                p2p.send_forward(forward_obj)
-                recv_backward_objs = p2p.recv_backward()
-                assert len(recv_backward_objs) == 1
-                assert recv_backward_objs[0] == backward_obj
-            else:
-                recv_forward_objs = p2p.recv_forward()
-                p2p.send_forward(forward_obj)
-                recv_backward_objs = p2p.recv_backward()
-                p2p.send_backward(backward_obj)
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
                 assert len(recv_forward_objs) == 1
@@ -241,4 +398,5 @@ class TestHomogeneousTensorParallelCommunicationClass(P2PCommunicationClassBase)
                 assert recv_backward_objs[0] == backward_obj
 
 
-instantiate_parametrized_tests(TestHomogeneousTensorParallelCommunicationClass)
+instantiate_parametrized_tests(TestHomogeneousTensorParallelSingleEncoderClass)
+instantiate_parametrized_tests(TestHomogeneousTensorParallelMultiEncoderClass)
