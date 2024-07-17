@@ -1,8 +1,7 @@
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Optional
 
 import torch
 from colossalai.accelerator import get_accelerator
-from colossalai.interface import OptimizerWrapper
 from colossalai.pipeline.p2p import (
     P2PMetadata,
     PipelineP2PCommunication,
@@ -18,7 +17,6 @@ from colossalai.pipeline.schedule.one_f_one_b import (
 )
 from packaging.version import Version
 from torch import distributed as dist
-from torch import nn
 from torch.distributed import distributed_c10d as c10d
 from torch.utils._pytree import tree_unflatten
 
@@ -396,7 +394,6 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
         stage_manager: MultiModalPipelineStageManager,
         num_microbatches: int,
         microbatch_size: int,
-        enable_metadata_cache: bool = True,
     ):
         assert (
             num_microbatches is not None and microbatch_size is not None
@@ -404,7 +401,7 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
         PipelineSchedule.__init__(self, stage_manager)
 
         self.comm: MultimodalPipelineP2PCommunication = (
-            MultimodalPipelineP2PCommunication(stage_manager, enable_metadata_cache)
+            MultimodalPipelineP2PCommunication(stage_manager)
         )
 
         self.num_microbatches = num_microbatches
@@ -414,59 +411,66 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
         self.last_batch_size: Optional[int] = None
         self.microbatch_offset: Optional[int] = None
 
-    def recv_forward(self, prev_rank: int = None) -> Any:
-        input_tensors = None
-        if not self.stage_manager.is_first_stage(check_only_in_modal=False):
-            input_tensors = self.comm.recv_forward()
-
-        return input_tensors
-
-    def recv_backward(self, next_rank: int = None) -> Any:
-        output_tensor_grads = None
-        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
-            output_tensor_grads = self.comm.recv_backward()
-
-        return output_tensor_grads
-
-    def send_forward(self, output_tensor: Any, next_rank: int = None) -> None:
-        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
-            self.comm.send_forward(output_tensor)
-
-    def send_backward(self, input_tensor_grad: Any, prev_rank: int = None) -> None:
-        if not self.stage_manager.is_first_stage(check_only_in_modal=False):
-            self.comm.send_backward(input_tensor_grad)
-
-    def send_forward_recv_backward(self, output_tensor: Any) -> Any:
-        output_tensor_grads = None
-        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
-            output_tensor_grads = self.comm.send_forward_recv_backward(output_tensor)
-
-        return output_tensor_grads
-
-    def send_backward_recv_forward(self, input_tensor_grad: Any) -> Any:
+    def recv_forward(self) -> Any:
         input_tensors = None
         if not self.stage_manager.is_first_stage():
-            input_tensors = self.comm.send_backward_recv_forward(input_tensor_grad)
+            input_tensors = self.comm.recv_forward()
+            assert isinstance(input_tensors, list)
+            if len(input_tensors) == 1:
+                input_tensors = input_tensors[0]
+            else:
+                raise NotImplementedError()
 
         return input_tensors
 
-    def run_forward_backward(
-        self,
-        model: nn.Module,
-        data_iter: Iterable,
-        criterion: Callable[..., Any],
-        optimizer: OptimizerWrapper | None = None,
-        return_loss: bool = False,
-        return_outputs: bool = False,
-    ) -> torch.Dict:
-        raise NotImplementedError()
+    def recv_backward(self) -> Any:
+        output_tensor_grads = None
+        if not self.stage_manager.is_last_stage():
+            output_tensor_grads = self.comm.recv_backward()
+            assert isinstance(output_tensor_grads, list)
+            if len(output_tensor_grads) == 1:
+                output_tensor_grads = output_tensor_grads[0]
+            else:
+                raise NotImplementedError()
 
-    def run_forward_only(
-        self,
-        model: nn.Module,
-        data_iter: Iterable,
-        criterion: Callable[..., Any],
-        return_loss: bool = False,
-        return_outputs: bool = False,
-    ) -> torch.Dict:
-        raise NotImplementedError()
+        return output_tensor_grads
+
+    def send_forward(self, output_tensor: Any) -> None:
+        if not self.stage_manager.is_last_stage():
+            self.comm.send_forward(output_tensor)
+
+    def send_backward(self, input_tensor_grad: Any) -> None:
+        if not self.stage_manager.is_first_stage():
+            self.comm.send_backward(input_tensor_grad)
+
+    def send_forward_recv_backward(
+        self, output_tensor: Any, send_first: Optional[bool] = None
+    ) -> Any:
+        output_tensor_grads = None
+        if not self.stage_manager.is_last_stage():
+            output_tensor_grads = self.comm.send_forward_recv_backward(
+                output_tensor, send_first=send_first
+            )
+            assert isinstance(output_tensor_grads, list)
+            if len(output_tensor_grads) == 1:
+                output_tensor_grads = output_tensor_grads[0]
+            else:
+                raise NotImplementedError()
+
+        return output_tensor_grads
+
+    def send_backward_recv_forward(
+        self, input_tensor_grad: Any, send_first: Optional[bool] = None
+    ) -> Any:
+        input_tensors = None
+        if not self.stage_manager.is_first_stage():
+            input_tensors = self.comm.send_backward_recv_forward(
+                input_tensor_grad, send_first=send_first
+            )
+            assert isinstance(input_tensors, list)
+            if len(input_tensors) == 1:
+                input_tensors = input_tensors[0]
+            else:
+                raise NotImplementedError()
+
+        return input_tensors

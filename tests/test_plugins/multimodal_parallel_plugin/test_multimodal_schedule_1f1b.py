@@ -1,0 +1,227 @@
+import copy
+import functools
+import os
+import random
+import sys
+from types import MethodType
+from typing import Any
+from unittest.mock import patch
+
+import numpy as np
+import torch
+import torch.distributed as dist
+from colossalai.accelerator import CudaAccelerator, get_accelerator
+from colossalai.interface import OptimizerWrapper
+from torch import nn
+from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
+from torch.testing._internal.common_utils import (
+    FILE_SCHEMA,
+    instantiate_parametrized_tests,
+    parametrize,
+)
+
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.multimodal_parallel_plugin import (
+    MultimodalOneForwardOneBackwardSchedule,
+    MultimodalPipelineP2PCommunication,
+    MultiModalPipelineStageManager,
+    MultiModalProcessGroupMesh,
+)
+
+# TODO (insujang): add tests for the cases without modal parallelism (modalities are colocated)
+
+
+class ScheduleTestClassBase(MultiProcessTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
+            self._spawn_processes()
+
+    def tearDown(self) -> None:
+        return super().tearDown()
+
+    def create_data(self) -> list[Any]:
+        tensor = torch.ones(1, device=get_accelerator().get_current_device())
+        return [
+            "tensor",
+            tensor,
+            [tensor],
+            {"tensor": tensor},
+        ]
+
+    @classmethod
+    def _run(cls, rank: int, test_name: str, file_name: str, pipe) -> None:
+        # Copy from: torch/testing/_internal/common_fsdp.py FSDPTest._run
+        self = cls(test_name)
+        self.rank = rank
+        self.file_name = file_name
+
+        print(f"dist init r={self.rank}, world={self.world_size}")
+        backend = "gloo"
+
+        try:
+            dist.init_process_group(
+                init_method=f"{FILE_SCHEMA}{self.file_name}",
+                backend=backend,
+                world_size=self.world_size,
+                rank=self.rank,
+            )
+        except RuntimeError as e:
+            if "recompile" in e.args[0]:
+                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
+
+            raise
+
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        random.seed(0)
+        np.random.seed(0)
+
+        # Execute barrier prior to running test to ensure that every process
+        # has finished initialization and that the following test
+        # immediately exiting due to a skip doesn't cause flakiness.
+        dist.barrier()
+
+        with (
+            torch.backends.cudnn.flags(
+                enabled=True, deterministic=True, benchmark=True
+            ),
+            patch.object(
+                CudaAccelerator, "get_current_device", return_value=torch.device("cpu")
+            ),
+        ):
+            self.run_test(test_name, pipe)
+
+        dist.barrier()
+
+        dist.destroy_process_group()
+
+
+class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
+    @property
+    def world_size(self):
+        return 4
+
+    class SingleEncoderModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = nn.ModuleList([nn.Linear(8, 8) for _ in range(3)])
+            self.llm = nn.ModuleList([nn.Linear(8, 8) for _ in range(6)])
+
+        def get_templates(self) -> list[PipelineTemplate]:
+            return [
+                PipelineTemplate("encoder", [["encoder.0", "encoder.1", "encoder.2"]]),
+                PipelineTemplate(
+                    "llm", [["llm.0", "llm.1"], ["llm.2", "llm.3"], ["llm.4", "llm.5"]]
+                ),
+            ]
+
+        def forward(self, x):
+            for layer in self.encoder:
+                x = layer(x)
+            for layer in self.llm:
+                x = layer(x)
+
+            return x
+
+    def create_p2p(
+        self, model: SingleEncoderModel, tp_size: int
+    ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
+        encoder_template, llm_template = model.get_templates()
+        templates = {
+            encoder_template: tp_size,
+            llm_template: tp_size,
+        }
+        execution_order = [(encoder_template, llm_template)]
+
+        pg_mesh = MultiModalProcessGroupMesh(
+            modal_templates=templates,
+            execution_order=execution_order,
+        )
+        stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
+        p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
+
+        return stage_manager, p2p
+
+    def test_schedule(self, tp_size=1):
+        num_microbatches = 4
+        microbatch_size = 1
+
+        model = self.SingleEncoderModel()
+        pp_model = copy.deepcopy(model)
+
+        stage_manager, p2p = self.create_p2p(model=model, tp_size=tp_size)
+        schedule = MultimodalOneForwardOneBackwardSchedule(
+            stage_manager, num_microbatches, microbatch_size
+        )
+
+        start_idx, end_idx = stage_manager.get_stage_index(
+            stage_manager.distribute_layers()
+        )
+
+        def pp_forward(
+            self: TestScheduleSingleEncoderClass.SingleEncoderModel,
+            x,
+            start_idx: int,
+            end_idx: int,
+        ):
+            if start_idx < 3:
+                assert start_idx >= 0 and end_idx <= 3
+                for layer in self.encoder[start_idx:end_idx]:
+                    x = layer(x)
+            else:
+                assert start_idx >= 3 and end_idx <= 9
+                start_idx, end_idx = start_idx - 3, end_idx - 3
+                for layer in self.llm[start_idx:end_idx]:
+                    x = layer(x)
+            return x
+
+        def pp_linear_fwd(
+            forward,
+            data: torch.Tensor = None,
+            input_obj: torch.Tensor = None,
+            stage_manager: MultiModalPipelineStageManager = None,
+        ):
+            if stage_manager.is_first_stage():
+                return {"input_obj": forward(data)}
+            elif stage_manager.is_last_stage():
+                return forward(input_obj)
+            else:
+                return {"input_obj": forward(input_obj)}
+
+        pp_model._forward = MethodType(
+            functools.partial(pp_forward, start_idx=start_idx, end_idx=end_idx),
+            pp_model,
+        )
+        pp_model.forward = MethodType(
+            functools.partial(pp_linear_fwd, stage_manager=stage_manager),
+            pp_model._forward,
+        )
+
+        model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
+        pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
+
+        criterion = lambda x, *args, **kwargs: (x * x).mean()
+
+        input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
+        dist.all_reduce(input_list[0])
+
+        # forward and backward
+        output = model(input_list[0])
+        loss = criterion(output)
+        loss.backward()
+
+        pp_ret = schedule.forward_backward_step(
+            pp_model,
+            iter(input_list),
+            criterion,
+            pp_optimizer,
+            return_loss=True,
+            return_outputs=True,
+        )
+
+        if stage_manager.is_last_stage():
+            assert torch.allclose(loss, pp_ret["loss"])
+
+
+instantiate_parametrized_tests(TestScheduleSingleEncoderClass)
