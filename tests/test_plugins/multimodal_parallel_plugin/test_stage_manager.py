@@ -211,8 +211,8 @@ def test_first_last_stage(
             if rank in ranks
         )
         assert expected_first_last_stage == (
-            stage_manager.is_first_stage(check_only_in_modal=False),
-            stage_manager.is_last_stage(check_only_in_modal=False),
+            stage_manager.is_first_stage(),
+            stage_manager.is_last_stage(),
         ), (
             f"rank {rank} expected to have {expected_first_last_stage} as first and last stage, "
             f"but got ({stage_manager.is_first_stage(), stage_manager.is_last_stage()})."

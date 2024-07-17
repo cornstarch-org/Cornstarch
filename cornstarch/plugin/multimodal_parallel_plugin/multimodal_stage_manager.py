@@ -123,7 +123,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         )
 
     def is_first_stage(
-        self, ignore_chunk: bool = False, check_only_in_modal: bool = True
+        self, ignore_chunk: bool = False, check_only_in_modal: bool = False
     ) -> bool:
         """Is the current stage the first stage.
 
@@ -162,7 +162,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                 return False
 
     def is_last_stage(
-        self, ignore_chunk: bool = False, check_only_in_modal: bool = True
+        self, ignore_chunk: bool = False, check_only_in_modal: bool = False
     ) -> bool:
         """Is the current stage the last stage.
 
