@@ -61,7 +61,7 @@ class DistClassBase(MultiProcessTestCase):
         self.file_name = file_name
 
         print(f"dist init r={self.rank}, world={self.world_size}")
-        backend = "nccl"
+        backend = "gloo"
 
         try:
             dist.init_process_group(
@@ -76,9 +76,9 @@ class DistClassBase(MultiProcessTestCase):
 
             raise
 
-        if torch.cuda.is_available() and torch.cuda.device_count():
-            device_id = self.rank % torch.cuda.device_count()
-            torch.cuda.set_device(device_id)
+        # if torch.cuda.is_available() and torch.cuda.device_count():
+        #     device_id = self.rank % torch.cuda.device_count()
+        #     torch.cuda.set_device(device_id)
 
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
@@ -93,6 +93,9 @@ class DistClassBase(MultiProcessTestCase):
         with (
             torch.backends.cudnn.flags(
                 enabled=True, deterministic=True, benchmark=True
+            ),
+            patch.object(
+                CudaAccelerator, "get_current_device", return_value=torch.device("cpu")
             ),
         ):
             self.run_test(test_name, pipe)
