@@ -411,15 +411,40 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
         self.last_batch_size: Optional[int] = None
         self.microbatch_offset: Optional[int] = None
 
+    def _merge_tensors(self, tensors: list) -> Any:
+        assert isinstance(tensors, list)
+
+        if len(tensors) == 0:
+            return []
+
+        if len(tensors) == 1:
+            tensors = tensors[0]
+        else:
+            if isinstance(tensors[0], torch.Tensor):
+                assert all(isinstance(item, torch.Tensor) for item in tensors)
+                tensors = torch.cat(tensors, dim=1)
+            elif isinstance(tensors[0], list):
+                assert all(isinstance(item, list) for item in tensors)
+                # Call torch.cat for every items at the same index and create one list.
+                tensors = [
+                    torch.cat([item[i] for item in tensors], dim=1)
+                    for i in range(len(tensors[0]))
+                ]
+            elif isinstance(tensors[0], dict):
+                assert all(isinstance(item, dict) for item in tensors)
+                tensors = {
+                    key: torch.cat([item[key] for item in tensors], dim=1)
+                    for key in tensors[0].keys()
+                }
+            else:
+                raise ValueError(f"Unsupported type of tensors: {type(tensors)}")
+        return tensors
+
     def recv_forward(self) -> Any:
         input_tensors = None
         if not self.stage_manager.is_first_stage():
             input_tensors = self.comm.recv_forward()
-            assert isinstance(input_tensors, list)
-            if len(input_tensors) == 1:
-                input_tensors = input_tensors[0]
-            else:
-                raise NotImplementedError()
+            input_tensors = self._merge_tensors(input_tensors)
 
         return input_tensors
 
@@ -427,11 +452,7 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
         output_tensor_grads = None
         if not self.stage_manager.is_last_stage():
             output_tensor_grads = self.comm.recv_backward()
-            assert isinstance(output_tensor_grads, list)
-            if len(output_tensor_grads) == 1:
-                output_tensor_grads = output_tensor_grads[0]
-            else:
-                raise NotImplementedError()
+            output_tensor_grads = self._merge_tensors(output_tensor_grads)
 
         return output_tensor_grads
 
@@ -451,11 +472,7 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
             output_tensor_grads = self.comm.send_forward_recv_backward(
                 output_tensor, send_first=send_first
             )
-            assert isinstance(output_tensor_grads, list)
-            if len(output_tensor_grads) == 1:
-                output_tensor_grads = output_tensor_grads[0]
-            else:
-                raise NotImplementedError()
+            output_tensor_grads = self._merge_tensors(output_tensor_grads)
 
         return output_tensor_grads
 
@@ -467,10 +484,6 @@ class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
             input_tensors = self.comm.send_backward_recv_forward(
                 input_tensor_grad, send_first=send_first
             )
-            assert isinstance(input_tensors, list)
-            if len(input_tensors) == 1:
-                input_tensors = input_tensors[0]
-            else:
-                raise NotImplementedError()
+            input_tensors = self._merge_tensors(input_tensors)
 
         return input_tensors
