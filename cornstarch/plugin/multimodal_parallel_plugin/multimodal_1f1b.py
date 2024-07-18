@@ -1,7 +1,8 @@
-from typing import Any, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import torch
 from colossalai.accelerator import get_accelerator
+from colossalai.interface import OptimizerWrapper
 from colossalai.pipeline.p2p import (
     P2PMetadata,
     PipelineP2PCommunication,
@@ -17,6 +18,7 @@ from colossalai.pipeline.schedule.one_f_one_b import (
 )
 from packaging.version import Version
 from torch import distributed as dist
+from torch import nn
 from torch.distributed import distributed_c10d as c10d
 from torch.utils._pytree import tree_unflatten
 
@@ -489,3 +491,14 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             input_tensors = self._merge_tensors(input_tensors)
 
         return input_tensors
+
+    def run_forward_backward(
+        self,
+        model: nn.Module,
+        data_iter: Iterable,
+        criterion: Callable[..., Any],
+        optimizer: OptimizerWrapper | None = None,
+        return_loss: bool = False,
+        return_outputs: bool = False,
+    ) -> dict:
+        raise NotImplementedError
