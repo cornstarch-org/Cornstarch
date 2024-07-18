@@ -245,6 +245,15 @@ class MultiModalPipelineStageManager(PipelineStageManager):
     def stage(self) -> int:
         return self.pg_mesh.coords[0][self.pipeline_axis]
 
+    @property
+    def stage_in_modal(self) -> int:
+        first_stage_index = next(
+            index
+            for index, modal in enumerate(self.stage_index_to_modal)
+            if modal == self.stage_index_to_modal[self.stage]
+        )
+        return self.stage - first_stage_index
+
     def distribute_layers(
         self,
         num_layers: Optional[int] = None,

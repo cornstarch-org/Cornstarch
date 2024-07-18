@@ -416,3 +416,80 @@ def test_process_group_by_stages(
             assert calls == recorded_new_group_calls[0]
 
         group_by_stages.clear()
+
+
+@pytest.mark.parametrize(
+    "world_size, modal_templates, execution_order, expected_stage_index",
+    [
+        (
+            24,
+            {encoder1_template: 2, llm_template_2stages: 4},
+            [(encoder1_template, llm_template_2stages)],
+            {
+                (0, 1, 2, 3): (0, 0),
+                (4, 5, 6, 7): (1, 1),
+                (8, 9, 10, 11, 12, 13, 14, 15): (2, 0),
+                (16, 17, 18, 19, 20, 21, 22, 23): (3, 1),
+            },
+        ),
+        (
+            18,
+            {
+                encoder1_template: 2,
+                encoder2_template: 2,
+                llm_template_2stages: 4,
+            },
+            [
+                (encoder1_template, llm_template_2stages),
+                (encoder2_template, llm_template_2stages),
+            ],
+            {
+                (0, 1): (0, 0),
+                (2, 3): (1, 1),
+                (4, 5): (2, 0),
+                (6, 7): (3, 1),
+                (8, 9): (4, 2),
+                (10, 11, 12, 13): (5, 0),
+                (14, 15, 16, 17): (6, 1),
+            },
+        ),
+        (
+            84,
+            {encoder2_template: 4, llm_template_4stages: 4},
+            [(encoder2_template, llm_template_4stages)],
+            {
+                tuple(range(0, 12)): (0, 0),
+                tuple(range(12, 24)): (1, 1),
+                tuple(range(24, 36)): (2, 2),
+                tuple(range(36, 48)): (3, 0),
+                tuple(range(48, 60)): (4, 1),
+                tuple(range(60, 72)): (5, 2),
+                tuple(range(72, 84)): (6, 3),
+            },
+        ),
+    ],
+)
+def test_stage_index(
+    world_size: int,
+    modal_templates: dict[PipelineTemplate, int],
+    execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
+    expected_stage_index: dict[tuple[int, ...], tuple[int, int]],
+):
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        mesh = MultiModalProcessGroupMesh(modal_templates, execution_order)
+        stage_manager = MultiModalPipelineStageManager(mesh, mesh.pp_axis)
+        expected_stage_index_for_rank = next(
+            value for ranks, value in expected_stage_index.items() if rank in ranks
+        )
+        assert (
+            stage_manager.stage,
+            stage_manager.stage_in_modal,
+        ) == expected_stage_index_for_rank, (
+            f"rank {rank} expected: {expected_stage_index_for_rank}, "
+            f"got: {stage_manager.stage, stage_manager.stage_in_modal}."
+        )
+
+        dist.destroy_process_group()
