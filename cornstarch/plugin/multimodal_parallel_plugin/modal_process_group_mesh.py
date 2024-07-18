@@ -1,60 +1,14 @@
 from __future__ import annotations
 
-import copy
 import itertools
-from collections import defaultdict, deque
-from dataclasses import dataclass
+from collections import defaultdict
+from typing import Optional
 
 import numpy as np
 import torch.distributed as dist
 from colossalai.cluster.process_group_mesh import ProcessGroupMesh
 
 from cornstarch.pipeline_template import PipelineTemplate
-
-
-@dataclass
-class ModalDependencies:
-    modal: PipelineTemplate
-    in_degree: int
-    out_degree: int
-    previous: list[PipelineTemplate]
-    next: list[PipelineTemplate]
-
-    @classmethod
-    def create_from_execution_order(
-        cls: ModalDependencies,
-        execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
-    ) -> list[ModalDependencies]:
-        modal_graph = defaultdict(lambda: {"previous": [], "next": []})
-        in_degree, out_degree = defaultdict(int), defaultdict(int)
-        for from_modal, to_modal in execution_order:
-            modal_graph[from_modal]["next"].append(to_modal)
-            modal_graph[to_modal]["previous"].append(from_modal)
-            if from_modal not in in_degree:
-                in_degree[from_modal] = 0
-            if to_modal not in out_degree:
-                out_degree[to_modal] = 0
-            in_degree[to_modal] += 1
-            out_degree[from_modal] += 1
-
-        # Connect the last modals and the first modals
-        zero_in_degree = [modal for modal, degree in in_degree.items() if degree == 0]
-        zero_out_degree = [modal for modal, degree in out_degree.items() if degree == 0]
-        for first_modal in zero_in_degree:
-            for last_modal in zero_out_degree:
-                modal_graph[first_modal]["previous"].append(last_modal)
-                modal_graph[last_modal]["next"].append(first_modal)
-
-        return [
-            ModalDependencies(
-                modal=modal,
-                in_degree=in_degree[modal],
-                out_degree=out_degree[modal],
-                previous=dependencies["previous"],
-                next=dependencies["next"],
-            )
-            for modal, dependencies in modal_graph.items()
-        ]
 
 
 class MultiModalProcessGroupMesh(ProcessGroupMesh):
@@ -82,58 +36,84 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
 
     def __init__(
         self,
-        modal_templates: dict[PipelineTemplate, int],
-        execution_order: list[tuple[PipelineTemplate, PipelineTemplate]],
+        encoder_templates: Optional[dict[PipelineTemplate, int]] = None,
+        llm_template: Optional[tuple[PipelineTemplate, int]] = None,
+        decoder_templates: Optional[dict[PipelineTemplate, int]] = None,
     ) -> None:
         assert dist.is_initialized(), "Please initialize torch.distributed first."
-        assert len(modal_templates) > 0, "At least one modal is required."
-        for from_modal, to_modal in execution_order:
+
+        if encoder_templates is None:
+            encoder_templates = {}
+
+        if decoder_templates is None:
+            decoder_templates = {}
+        if len(decoder_templates) > 0:
             assert (
-                from_modal in modal_templates
-            ), f"{from_modal} not in modal_templates."
-            assert to_modal in modal_templates, f"{to_modal} not in modal_templates."
+                llm_template is not None
+            ), "LLM template is required if decoders are given."
 
-        self.modal_dependencies: list[ModalDependencies] = (
-            ModalDependencies.create_from_execution_order(execution_order)
-        )
-        self.topological_sorted_modals = self.topological_sort(execution_order)
-        assert len(modal_templates) == len(self.topological_sorted_modals)
+        self.encoder_templates = encoder_templates
+        self.llm_template = llm_template
+        self.decoder_templates = decoder_templates
+        self.topological_sorted_modals: list[PipelineTemplate] = [
+            *self.encoder_templates.keys(),
+            *([] if llm_template is None else [llm_template[0]]),
+            *self.decoder_templates.keys(),
+        ]
 
-        assert (
-            dist.get_world_size()
-            % sum(
+        num_ranks_in_model = (
+            sum(
                 template.num_stages * tp_size
-                for template, tp_size in modal_templates.items()
+                for template, tp_size in encoder_templates.items()
             )
-            == 0
-        ), "The world size must be divisible by tp_size * pp_size."
-        dp_size = dist.get_world_size() // sum(
-            template.num_stages * tp_size
-            for template, tp_size in modal_templates.items()
+            + (
+                0
+                if llm_template is None
+                else llm_template[0].num_stages * llm_template[1]
+            )
+            + sum(
+                template.num_stages * tp_size
+                for template, tp_size in decoder_templates.items()
+            )
         )
+        assert (
+            dist.get_world_size() % num_ranks_in_model == 0
+        ), "The world size must be divisible by tp_size * pp_size."
 
-        max_tp_size = max(modal_templates.values())
+        dp_size = dist.get_world_size() // num_ranks_in_model
+
+        max_tp_size = max(
+            [
+                *encoder_templates.values(),
+                0 if llm_template is None else llm_template[1],
+                *decoder_templates.values(),
+            ]
+        )
         meshes: list[list[list[int]]] = []
         rank_index = 0
         modal_to_ranks: dict[PipelineTemplate, list[int]] = defaultdict(list)
 
-        for modal in self.topological_sorted_modals:
-            tp_size = modal_templates[modal]
-            for _ in range(modal.num_stages):
-                stage_mesh = []
-                for _ in range(dp_size):
-                    # create a list of ranks with length `max_tp_size`, where each rank is repeated `max_tp_size // tp_size` times.
-                    # Example: [0, 0, 1, 1] for tp_size=2 and max_tp_size=4
-                    ranks = [
-                        i
-                        for i in range(rank_index, rank_index + tp_size)
-                        for _ in range(max_tp_size // tp_size)
-                    ]
-                    rank_index += tp_size
+        for iterable in [
+            encoder_templates.items(),
+            [llm_template],
+            decoder_templates.items(),
+        ]:
+            for modal, tp_size in iterable:
+                for _ in range(modal.num_stages):
+                    stage_mesh = []
+                    for _ in range(dp_size):
+                        # create a list of ranks with length `max_tp_size`, where each rank is repeated `max_tp_size // tp_size` times.
+                        # Example: [0, 0, 1, 1] for tp_size=2 and max_tp_size=4
+                        ranks = [
+                            i
+                            for i in range(rank_index, rank_index + tp_size)
+                            for _ in range(max_tp_size // tp_size)
+                        ]
+                        rank_index += tp_size
 
-                    stage_mesh.append(ranks)
-                    modal_to_ranks[modal].extend(ranks)
-                meshes.append(stage_mesh)
+                        stage_mesh.append(ranks)
+                        modal_to_ranks[modal].extend(ranks)
+                    meshes.append(stage_mesh)
 
         self._rank = dist.get_rank()
         self._mesh = np.array(meshes)
@@ -182,48 +162,6 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         """
         indices = np.where(mesh == rank)
         return list(zip(*indices))
-
-    def topological_sort(
-        self, execution_order: list[tuple[PipelineTemplate, PipelineTemplate]]
-    ) -> list[PipelineTemplate]:
-        """
-        Topological sort the modal templates based on the execution order.
-        """
-        graph: dict[PipelineTemplate, list[PipelineTemplate]] = defaultdict(list)
-        in_degree: dict[PipelineTemplate, int] = defaultdict(int)
-        out_degree: dict[PipelineTemplate, int] = defaultdict(int)
-
-        for from_modal, to_modal in execution_order:
-            graph[from_modal].append(to_modal)
-            in_degree[to_modal] += 1
-            out_degree[from_modal] += 1
-            if from_modal not in in_degree:
-                in_degree[from_modal] = 0
-            if to_modal not in in_degree:
-                in_degree[to_modal] = 0
-
-        self.in_degree = copy.deepcopy(in_degree)
-        self.out_degree = copy.deepcopy(out_degree)
-
-        # Find all modals with no incoming edges
-        zero_in_degree = deque([modal for modal in in_degree if in_degree[modal] == 0])
-        topological_order: list[PipelineTemplate] = []
-
-        while zero_in_degree:
-            node = zero_in_degree.popleft()
-            topological_order.append(node)
-
-            # Reduce the in-degre of each neigher by 1
-            for neighbor in graph[node]:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    zero_in_degree.append(neighbor)
-
-        # Check if topological sort is possible
-        if len(topological_order) == len(in_degree):
-            return topological_order
-        else:
-            raise ValueError("Topological sort is not possible.")
 
     def create_group_along_axis(
         self,
