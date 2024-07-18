@@ -22,13 +22,27 @@ from torch.testing._internal.common_utils import (
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin import (
-    MultimodalOneForwardOneBackwardSchedule,
+    MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
     MultimodalPipelineP2PCommunication,
     MultiModalPipelineStageManager,
     MultiModalProcessGroupMesh,
 )
 
 # TODO (insujang): add tests for the cases without modal parallelism (modalities are colocated)
+
+
+def pp_linear_fwd(
+    forward,
+    data: torch.Tensor = None,
+    input_obj: torch.Tensor = None,
+    stage_manager: MultiModalPipelineStageManager = None,
+):
+    if stage_manager.is_first_stage(check_only_in_modal=True):
+        return {"input_obj": forward(data)}
+    elif stage_manager.is_last_stage():
+        return forward(input_obj)
+    else:
+        return {"input_obj": forward(input_obj)}
 
 
 class ScheduleTestClassBase(MultiProcessTestCase):
@@ -147,7 +161,7 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         pp_model = copy.deepcopy(model)
 
         stage_manager, p2p = self.create_p2p(model=model)
-        schedule = MultimodalOneForwardOneBackwardSchedule(
+        schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             stage_manager, num_microbatches, microbatch_size
         )
 
@@ -170,19 +184,6 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
                 for layer in self.llm[start_idx - 3 : end_idx - 3]:
                     x = layer(x)
             return x
-
-        def pp_linear_fwd(
-            forward,
-            data: torch.Tensor = None,
-            input_obj: torch.Tensor = None,
-            stage_manager: MultiModalPipelineStageManager = None,
-        ):
-            if stage_manager.is_first_stage():
-                return {"input_obj": forward(data)}
-            elif stage_manager.is_last_stage():
-                return forward(input_obj)
-            else:
-                return {"input_obj": forward(input_obj)}
 
         pp_model._forward = MethodType(
             functools.partial(pp_forward, start_idx=start_idx, end_idx=end_idx),
@@ -270,4 +271,130 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
                 )
 
 
+class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
+    @property
+    def world_size(self):
+        return 6
+
+    class DoubleEncoderModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder1 = nn.ModuleList([nn.Linear(8, 8) for _ in range(3)])
+            self.encoder2 = nn.ModuleList([nn.Linear(8, 8) for _ in range(2)])
+            self.llm = nn.ModuleList([nn.Linear(8, 8) for _ in range(6)])
+
+        def get_templates(self) -> list[PipelineTemplate]:
+            return [
+                PipelineTemplate(
+                    "encoder1", [["encoder1.0", "encoder1.1", "encoder1.2"]]
+                ),
+                PipelineTemplate("encoder2", [["encoder2.0"], ["encoder2.1"]]),
+                PipelineTemplate(
+                    "llm", [["llm.0", "llm.1"], ["llm.2", "llm.3"], ["llm.4", "llm.5"]]
+                ),
+            ]
+
+        def forward(self, x):
+            x1 = copy.deepcopy(x)
+            x2 = copy.deepcopy(x)
+            for layer in self.encoder1:
+                x1 = layer(x1)
+            for layer in self.encoder2:
+                x2 = layer(x2)
+            x = torch.cat([x1, x2], dim=1)
+            for layer in self.llm:
+                x = layer(x)
+
+            return x
+
+    def create_p2p(
+        self, model: DoubleEncoderModel
+    ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
+        encoder1_template, encoder2_template, llm_template = model.get_templates()
+        templates = {encoder1_template: 1, encoder2_template: 1, llm_template: 1}
+        execution_order = [
+            (encoder1_template, llm_template),
+            (encoder2_template, llm_template),
+        ]
+
+        pg_mesh = MultiModalProcessGroupMesh(
+            modal_templates=templates,
+            execution_order=execution_order,
+        )
+        stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
+        p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
+
+        return stage_manager, p2p
+
+    def test_schedule(self, num_microbatches: int = 6, microbatch_size: int = 1):
+        model = self.DoubleEncoderModel()
+        pp_model = copy.deepcopy(model)
+
+        stage_manager, p2p = self.create_p2p(model=model)
+        schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
+            stage_manager, num_microbatches, microbatch_size
+        )
+
+        start_idx, end_idx = stage_manager.get_stage_index(
+            stage_manager.distribute_layers()
+        )
+
+        def pp_forward(
+            self: TestScheduleMultipleEncoderClass.DoubleEncoderModel,
+            x,
+            start_idx: int,
+            end_idx: int,
+        ):
+            if start_idx < 3:
+                assert start_idx >= 0 and end_idx <= 3
+                for layer in self.encoder1[start_idx:end_idx]:
+                    x = layer(x)
+            elif start_idx < 5:
+                assert start_idx >= 3 and end_idx <= 5
+                for layer in self.encoder2[start_idx - 3 : end_idx - 3]:
+                    x = layer(x)
+            else:
+                assert start_idx >= 5 and end_idx <= 11
+                for layer in self.llm[start_idx - 5 : end_idx - 5]:
+                    x = layer(x)
+
+            return x
+
+        pp_model._forward = MethodType(
+            functools.partial(pp_forward, start_idx=start_idx, end_idx=end_idx),
+            pp_model,
+        )
+        pp_model.forward = MethodType(
+            functools.partial(pp_linear_fwd, stage_manager=stage_manager),
+            pp_model._forward,
+        )
+
+        model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
+        pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
+
+        def criterion(x, *args, **kwargs):
+            return (x * x).mean()
+
+        input_list = [torch.rand(num_microbatches * microbatch_size, 4, 8)]
+        dist.all_reduce(input_list[0])
+
+        # forward and backward
+        output = model(input_list[0])
+        loss = criterion(output)
+        loss.backward()
+
+        pp_ret = schedule.forward_backward_step(
+            pp_model,
+            iter(input_list),
+            criterion,
+            pp_optimizer,
+            return_loss=True,
+            return_outputs=True,
+        )
+
+        if stage_manager.is_last_stage():
+            assert torch.allclose(loss, pp_ret["loss"])
+
+
 instantiate_parametrized_tests(TestScheduleSingleEncoderClass)
+instantiate_parametrized_tests(TestScheduleMultipleEncoderClass)

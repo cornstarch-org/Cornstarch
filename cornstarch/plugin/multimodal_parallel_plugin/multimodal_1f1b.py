@@ -374,7 +374,9 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         )
 
 
-class MultimodalOneForwardOneBackwardSchedule(OneForwardOneBackwardSchedule):
+class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
+    OneForwardOneBackwardSchedule
+):
     """
     1F1B pipeline schedule, with multi-modality in mind.
 
