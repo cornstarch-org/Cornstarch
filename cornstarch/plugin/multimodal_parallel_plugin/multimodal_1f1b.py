@@ -65,6 +65,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         send_ranks: list[int],
         recv_ranks: list[int],
         send_first: bool = True,
+        is_broadcast: Optional[bool] = None,
     ) -> list[P2PMetadata]:
         """
         Send and receive metadata and potentially non-tensor objects from send_ranks and recv_ranks respectively.
@@ -92,21 +93,19 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
 
         send_metadata_tensor: torch.Tensor | list[torch.Tensor] = []
         send_metadata_size_tensor: torch.Tensor | list[torch.Tensor] = []
-        is_broadcast = False
+
         if object_metadata is not None:
+            assert is_broadcast is not None
             assert (
-                send_ranks != []
+                len(send_ranks) > 0
             ), "send_ranks must be provided when object is not None"
 
-            if isinstance(object_metadata, P2PMetadata):
+            if is_broadcast:
                 send_metadata_tensor, send_metadata_size_tensor = (
                     self._serialize_object(object_metadata, current_device)
                 )
-                is_broadcast = True
-            elif isinstance(object_metadata, list):
-                assert all(
-                    isinstance(metadata, P2PMetadata) for metadata in object_metadata
-                )
+            else:
+                assert isinstance(object_metadata, list)
                 assert len(object_metadata) == len(send_ranks)
                 for metadata in object_metadata:
                     metadata_tensor, metadata_size_tensor = self._serialize_object(
@@ -114,12 +113,9 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                     )
                     send_metadata_tensor.append(metadata_tensor)
                     send_metadata_size_tensor.append(metadata_size_tensor)
-            else:
-                raise ValueError(
-                    f"Unsupported type of object_metadata: {type(object_metadata)}"
-                )
 
         else:
+            assert is_broadcast is None
             # remove send_ranks as there is no data to send
             send_ranks = []
 
@@ -135,7 +131,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                     _filling_ops_queue(
                         send_metadata_size_tensor, dist.isend, send_rank, ops, None
                     )
-            else:
+            elif is_broadcast is False:
                 for send_rank, metadata_size_tenor in zip(
                     send_ranks, send_metadata_size_tensor
                 ):
@@ -162,7 +158,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                     _filling_ops_queue(
                         send_metadata_size_tensor, dist.isend, send_rank, ops, None
                     )
-            else:
+            elif is_broadcast is False:
                 for send_rank, metadata_size_tenor in zip(
                     send_ranks, send_metadata_size_tensor
                 ):
@@ -193,7 +189,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                     _filling_ops_queue(
                         send_metadata_tensor, dist.isend, send_rank, ops, None
                     )
-            else:
+            elif is_broadcast is False:
                 for send_rank, metadata_tensor in zip(send_ranks, send_metadata_tensor):
                     _filling_ops_queue(
                         metadata_tensor, dist.isend, send_rank, ops, None
@@ -218,7 +214,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                     _filling_ops_queue(
                         send_metadata_tensor, dist.isend, send_rank, ops, None
                     )
-            else:
+            elif is_broadcast is False:
                 for send_rank, metadata_tensor in zip(send_ranks, send_metadata_tensor):
                     _filling_ops_queue(
                         metadata_tensor, dist.isend, send_rank, ops, None
@@ -254,6 +250,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         send_ranks: list[int],
         recv_ranks: list[int],
         send_first: bool = True,
+        is_broadcast: Optional[bool] = None,
     ) -> list[list[torch.Tensor]]:
         """
         Send and receive tensors from send_ranks and recv_ranks respectively.
@@ -280,20 +277,15 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         """
         current_device = get_accelerator().get_current_device()
 
-        is_broadcast = False
         if send_tensor_objects is not None:
-            assert isinstance(send_tensor_objects, list)
-            if isinstance(send_tensor_objects[0], list):
-                # Non-broadcast
+            assert is_broadcast is not None
+            if not is_broadcast:
+                assert isinstance(send_tensor_objects, list)
                 assert len(send_tensor_objects) == len(send_ranks)
-            else:
-                # Broadcast
-                is_broadcast = True
-                assert len(send_tensor_objects) == 1
         else:
+            assert is_broadcast is None
             # remove send_ranks as there is no data to send
             send_ranks = []
-            send_tensor_objects = []
 
         recv_buffers: list[list[torch.Tensor]]
         if not recv_tensor_metadata:
@@ -314,7 +306,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                     _filling_ops_queue(
                         send_tensor_objects, dist.isend, send_rank, ops, None
                     )
-            else:
+            elif is_broadcast is False:
                 for send_rank, tensor_objects in zip(send_ranks, send_tensor_objects):
                     _filling_ops_queue(tensor_objects, dist.isend, send_rank, ops, None)
 
@@ -329,7 +321,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                     _filling_ops_queue(
                         send_tensor_objects, dist.isend, send_rank, ops, None
                     )
-            else:
+            elif is_broadcast is False:
                 for send_rank, tensor_objects in zip(send_ranks, send_tensor_objects):
                     _filling_ops_queue(tensor_objects, dist.isend, send_rank, ops, None)
 
@@ -346,13 +338,18 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         send_ranks: list[int],
         recv_ranks: list[int],
         send_first: bool = True,
+        is_broadcast: bool = None,
     ) -> Any:
         send_metadata: P2PMetadata | list[P2PMetadata] = None
         send_tensor_objects: list[torch.Tensor] | list[list[torch.Tensor]] = None
 
         if object is not None:
-            if isinstance(object, list):
-                # Non-broadcast. Each object in a list will be sent to each rank.
+            assert is_broadcast is not None
+            if is_broadcast:
+                send_metadata, send_tensor_objects = create_send_metadata(
+                    object, strict=False, return_tensor=True
+                )
+            else:
                 send_metadata = []
                 send_tensor_objects = []
                 for obj in object:
@@ -361,14 +358,11 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                     )
                     send_metadata.append(metadata)
                     send_tensor_objects.append(tensor_objects)
-            else:
-                # Broadcast. There should be only one object which will be sent to all ranks.
-                send_metadata, send_tensor_objects = create_send_metadata(
-                    object, strict=False, return_tensor=True
-                )
+        else:
+            assert is_broadcast is None
 
         recv_metadata = self._send_recv_serialized_object(
-            send_metadata, send_ranks, recv_ranks, send_first
+            send_metadata, send_ranks, recv_ranks, send_first, is_broadcast
         )
         recv_tensor_objects = self._send_recv_tensors(
             send_tensor_objects,
@@ -376,6 +370,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
             send_ranks,
             recv_ranks,
             send_first,
+            is_broadcast,
         )
 
         received_objects: list[Any] = []
@@ -415,50 +410,64 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
 
         return output_tensor_grads
 
-    def send_forward(self, output_object: Any) -> None:
+    def send_forward(self, output_object: Any, is_broadcast: bool) -> None:
         self._communicate(
             object=output_object,
             send_ranks=self.stage_manager.get_next_ranks(),
             recv_ranks=[],
+            is_broadcast=is_broadcast,
         )
 
-    def send_backward(self, input_object: Any) -> None:
+    def send_backward(self, input_object: Any, is_broadcast: bool) -> None:
         self._communicate(
             object=input_object,
             send_ranks=self.stage_manager.get_prev_ranks(),
             recv_ranks=[],
+            is_broadcast=is_broadcast,
         )
 
-    def send_forward_recv_backward(self, output_object: Any, send_first: bool) -> Any:
+    def send_forward_recv_backward(
+        self, output_object: Any, send_first: bool, is_broadcast: bool
+    ) -> Any:
         return self._communicate(
             object=output_object,
             send_ranks=self.stage_manager.get_next_ranks(),
             recv_ranks=self.stage_manager.get_next_ranks(),
             send_first=send_first,
+            is_broadcast=is_broadcast,
         )
 
-    def send_backward_recv_forward(self, input_object: Any, send_first: bool) -> Any:
+    def send_backward_recv_forward(
+        self, input_object: Any, send_first: bool, is_broadcast: bool
+    ) -> Any:
         return self._communicate(
             object=input_object,
             send_ranks=self.stage_manager.get_prev_ranks(),
             recv_ranks=self.stage_manager.get_prev_ranks(),
             send_first=send_first,
+            is_broadcast=is_broadcast,
         )
 
-    def send_forward_recv_forward(self, output_object: Any, send_first: bool) -> Any:
+    def send_forward_recv_forward(
+        self, output_object: Any, send_first: bool, is_broadcast: bool
+    ) -> Any:
         return self._communicate(
             object=output_object,
             send_ranks=self.stage_manager.get_next_ranks(),
             recv_ranks=self.stage_manager.get_prev_ranks(),
             send_first=send_first,
+            is_broadcast=is_broadcast,
         )
 
-    def send_backward_recv_backward(self, input_object: Any, send_first: bool) -> Any:
+    def send_backward_recv_backward(
+        self, input_object: Any, send_first: bool, is_broadcast: bool
+    ) -> Any:
         return self._communicate(
             object=input_object,
             send_ranks=self.stage_manager.get_prev_ranks(),
             recv_ranks=self.stage_manager.get_next_ranks(),
             send_first=send_first,
+            is_broadcast=is_broadcast,
         )
 
 
@@ -565,7 +574,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
 
     def recv_forward(self) -> Any:
         input_tensors = None
-        if not self.stage_manager.is_first_stage():
+        if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             input_tensors = self.comm.recv_forward()
             input_tensors = self._merge_tensors(input_tensors)
 
@@ -573,32 +582,32 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
 
     def recv_backward(self) -> Any:
         output_tensor_grads = None
-        if not self.stage_manager.is_last_stage():
+        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
             output_tensor_grads = self.comm.recv_backward()
             output_tensor_grads = self._merge_tensors(output_tensor_grads)
 
         return output_tensor_grads
 
     def send_forward(self, output_tensor: Any) -> None:
-        if not self.stage_manager.is_last_stage():
-            self.comm.send_forward(output_tensor)
+        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
+            self.comm.send_forward(output_tensor, is_broadcast=True)
 
     def send_backward(self, input_tensor_grad: Any) -> None:
-        if not self.stage_manager.is_first_stage():
+        if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
             if num_ranks_to_send > 1:
                 input_tensor_grad = self._split_tensor(
                     input_tensor_grad, num_ranks_to_send
                 )
-            self.comm.send_backward(input_tensor_grad)
+            self.comm.send_backward(input_tensor_grad, is_broadcast=False)
 
     def send_forward_recv_backward(
         self, output_tensor: Any, send_first: Optional[bool] = None
     ) -> Any:
         output_tensor_grads = None
-        if not self.stage_manager.is_last_stage():
+        if not self.stage_manager.is_last_stage(check_only_in_modal=False):
             output_tensor_grads = self.comm.send_forward_recv_backward(
-                output_tensor, send_first=send_first
+                output_tensor, send_first=send_first, is_broadcast=True
             )
             output_tensor_grads = self._merge_tensors(output_tensor_grads)
 
@@ -608,14 +617,14 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         self, input_tensor_grad: Any, send_first: Optional[bool] = None
     ) -> Any:
         input_tensors = None
-        if not self.stage_manager.is_first_stage():
+        if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
             if num_ranks_to_send > 1:
                 input_tensor_grad = self._split_tensor(
                     input_tensor_grad, num_ranks_to_send
                 )
             input_tensors = self.comm.send_backward_recv_forward(
-                input_tensor_grad, send_first=send_first
+                input_tensor_grad, send_first=send_first, is_broadcast=False
             )
             input_tensors = self._merge_tensors(input_tensors)
 
@@ -663,11 +672,16 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         input_objs, output_objs = [], []
 
         accum_loss = None
-        if return_loss and self.stage_manager.is_last_stage():
+        if return_loss and self.stage_manager.is_last_stage(check_only_in_modal=False):
             accum_loss = torch.scalar_tensor(
                 0, device=get_accelerator().get_current_device()
             )
-        outputs = [] if return_outputs and self.stage_manager.is_last_stage() else None
+        outputs = (
+            []
+            if return_outputs
+            and self.stage_manager.is_last_stage(check_only_in_modal=False)
+            else None
+        )
 
         # Run warmup forward passes.
         for i in range(num_warmup_microbatches):

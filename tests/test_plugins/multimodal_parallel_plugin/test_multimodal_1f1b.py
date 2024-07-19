@@ -129,21 +129,21 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
 
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
             elif stage_manager.is_first_stage(check_only_in_modal=False):
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
                 recv_backward_objs = p2p.recv_backward()
 
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
 
                 assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
                 assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
@@ -157,22 +157,22 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
 
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
                 recv_forward_objs = p2p.recv_forward()
 
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
             elif stage_manager.is_first_stage(check_only_in_modal=False):
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
 
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
 
                 assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
                 assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
@@ -190,22 +190,22 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
 
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
             elif stage_manager.is_first_stage(check_only_in_modal=False):
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
                 recv_backward_objs = p2p.recv_backward()
 
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_forward_objs = p2p.send_forward_recv_forward(
-                    forward_obj, send_first=send_first
+                    forward_obj, send_first=send_first, is_broadcast=True
                 )
                 recv_backward_objs = p2p.send_backward_recv_backward(
-                    backward_obj, send_first=send_first
+                    backward_obj, send_first=send_first, is_broadcast=True
                 )
 
                 assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
@@ -223,23 +223,23 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
 
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
                 recv_forward_objs = p2p.recv_forward()
 
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
             elif stage_manager.is_first_stage(check_only_in_modal=False):
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
 
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_backward_objs = p2p.send_backward_recv_backward(
-                    backward_obj, send_first=send_first
+                    backward_obj, send_first=send_first, is_broadcast=True
                 )
                 recv_forward_objs = p2p.send_forward_recv_forward(
-                    forward_obj, send_first=send_first
+                    forward_obj, send_first=send_first, is_broadcast=True
                 )
 
                 assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
@@ -275,19 +275,19 @@ class TestHomogeneousTensorParallelSingleEncoderClass(P2PCommunicationClassBase)
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
             elif stage_manager.is_first_stage(check_only_in_modal=False):
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
                 recv_backward_objs = p2p.recv_backward()
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
                 assert len(recv_forward_objs) == 1
@@ -300,20 +300,20 @@ class TestHomogeneousTensorParallelSingleEncoderClass(P2PCommunicationClassBase)
 
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
                 recv_forward_objs = p2p.recv_forward()
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
             elif stage_manager.is_first_stage(check_only_in_modal=False):
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
                 assert len(recv_forward_objs) == 1
@@ -330,22 +330,22 @@ class TestHomogeneousTensorParallelSingleEncoderClass(P2PCommunicationClassBase)
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
 
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
             elif stage_manager.is_first_stage(check_only_in_modal=False):
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
                 recv_backward_objs = p2p.recv_backward()
 
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_forward_objs = p2p.send_forward_recv_forward(
-                    forward_obj, send_first=send_first
+                    forward_obj, send_first=send_first, is_broadcast=True
                 )
                 recv_backward_objs = p2p.send_backward_recv_backward(
-                    backward_obj, send_first=send_first
+                    backward_obj, send_first=send_first, is_broadcast=True
                 )
 
                 assert len(recv_forward_objs) == 1
@@ -363,23 +363,23 @@ class TestHomogeneousTensorParallelSingleEncoderClass(P2PCommunicationClassBase)
 
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
-                p2p.send_backward(backward_obj)
+                p2p.send_backward(backward_obj, is_broadcast=True)
                 recv_forward_objs = p2p.recv_forward()
 
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
             elif stage_manager.is_first_stage(check_only_in_modal=False):
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_forward(forward_obj)
+                p2p.send_forward(forward_obj, is_broadcast=True)
 
                 assert len(recv_backward_objs) == 1
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_backward_objs = p2p.send_backward_recv_backward(
-                    backward_obj, send_first=send_first
+                    backward_obj, send_first=send_first, is_broadcast=True
                 )
                 recv_forward_objs = p2p.send_forward_recv_forward(
-                    forward_obj, send_first=send_first
+                    forward_obj, send_first=send_first, is_broadcast=True
                 )
 
                 assert len(recv_forward_objs) == 1
