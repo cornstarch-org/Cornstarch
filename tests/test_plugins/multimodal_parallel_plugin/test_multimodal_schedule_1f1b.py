@@ -310,7 +310,9 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
         )
         return MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
 
-    def test_schedule(self, num_microbatches: int = 6, microbatch_size: int = 1):
+    @parametrize("num_microbatches", [6, 12, 24], name_fn=lambda x: f"mb={x}")
+    @parametrize("microbatch_size", [1, 2, 4], name_fn=lambda x: f"mbs={x}")
+    def test_schedule(self, num_microbatches: int, microbatch_size: int):
         model = self.DoubleEncoderModel()
         pp_model = copy.deepcopy(model)
 
@@ -378,6 +380,76 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
 
         if stage_manager.is_last_stage():
             assert torch.allclose(loss, pp_ret["loss"])
+
+        # check gradients
+        if start_idx < 3:
+            for i in range(start_idx, end_idx):
+                assert torch.allclose(
+                    model.encoder1[i].weight.grad,
+                    pp_model.encoder1[i].weight.grad,
+                )
+                assert torch.allclose(
+                    model.encoder1[i].bias.grad,
+                    pp_model.encoder1[i].bias.grad,
+                )
+        elif start_idx < 5:
+            for i in range(start_idx - 3, end_idx - 3):
+                assert torch.allclose(
+                    model.encoder2[i].weight.grad,
+                    pp_model.encoder2[i].weight.grad,
+                )
+                assert torch.allclose(
+                    model.encoder2[i].bias.grad,
+                    pp_model.encoder2[i].bias.grad,
+                )
+        else:
+            for i in range(start_idx - 5, end_idx - 5):
+                assert torch.allclose(
+                    model.llm[i].weight.grad,
+                    pp_model.llm[i].weight.grad,
+                )
+                assert torch.allclose(
+                    model.llm[i].bias.grad,
+                    pp_model.llm[i].bias.grad,
+                )
+
+        # step
+        model_optimizer.step()
+        pp_optimizer.step()
+        model_optimizer.zero_grad()
+        pp_optimizer.zero_grad()
+
+        # check updated param
+        if start_idx < 3:
+            for i in range(start_idx, end_idx):
+                assert torch.allclose(
+                    model.encoder1[i].weight,
+                    pp_model.encoder1[i].weight,
+                )
+                assert torch.allclose(
+                    model.encoder1[i].bias,
+                    pp_model.encoder1[i].bias,
+                )
+        elif start_idx < 5:
+            for i in range(start_idx - 3, end_idx - 3):
+                assert torch.allclose(
+                    model.encoder2[i].weight,
+                    pp_model.encoder2[i].weight,
+                )
+                assert torch.allclose(
+                    model.encoder2[i].bias,
+                    pp_model.encoder2[i].bias,
+                )
+        else:
+            for i in range(start_idx - 5, end_idx - 5):
+                assert torch.allclose(
+                    model.llm[i].weight,
+                    pp_model.llm[i].weight,
+                )
+                assert torch.allclose(
+                    model.llm[i].bias,
+                    pp_model.llm[i].bias,
+                )
 
 
 instantiate_parametrized_tests(TestScheduleSingleEncoderClass)
