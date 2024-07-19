@@ -61,7 +61,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
 
     def _send_recv_serialized_object(
         self,
-        object_metadata: Optional[P2PMetadata],
+        object_metadata: Optional[P2PMetadata | list[P2PMetadata]],
         send_ranks: list[int],
         recv_ranks: list[int],
         send_first: bool = True,
@@ -90,16 +90,35 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         current_device = get_accelerator().get_current_device()
         ops: list[dist.Work] = []
 
-        send_metadata_tensor: torch.Tensor = None
-        send_metadata_size_tensor: torch.Tensor = None
+        send_metadata_tensor: torch.Tensor | list[torch.Tensor] = []
+        send_metadata_size_tensor: torch.Tensor | list[torch.Tensor] = []
+        is_broadcast = False
         if object_metadata is not None:
             assert (
                 send_ranks != []
             ), "send_ranks must be provided when object is not None"
-            # NOTE: if object contains non-tensor objects, we have to send metadata
-            send_metadata_tensor, send_metadata_size_tensor = self._serialize_object(
-                object_metadata, current_device
-            )
+
+            if isinstance(object_metadata, P2PMetadata):
+                send_metadata_tensor, send_metadata_size_tensor = (
+                    self._serialize_object(object_metadata, current_device)
+                )
+                is_broadcast = True
+            elif isinstance(object_metadata, list):
+                assert all(
+                    isinstance(metadata, P2PMetadata) for metadata in object_metadata
+                )
+                assert len(object_metadata) == len(send_ranks)
+                for metadata in object_metadata:
+                    metadata_tensor, metadata_size_tensor = self._serialize_object(
+                        metadata, current_device
+                    )
+                    send_metadata_tensor.append(metadata_tensor)
+                    send_metadata_size_tensor.append(metadata_size_tensor)
+            else:
+                raise ValueError(
+                    f"Unsupported type of object_metadata: {type(object_metadata)}"
+                )
+
         else:
             # remove send_ranks as there is no data to send
             send_ranks = []
@@ -111,10 +130,19 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
 
         # send and receive size first
         if send_first:
-            for send_rank in send_ranks:
-                _filling_ops_queue(
-                    send_metadata_size_tensor, dist.isend, send_rank, ops, None
-                )
+            if is_broadcast:
+                for send_rank in send_ranks:
+                    _filling_ops_queue(
+                        send_metadata_size_tensor, dist.isend, send_rank, ops, None
+                    )
+            else:
+                for send_rank, metadata_size_tenor in zip(
+                    send_ranks, send_metadata_size_tensor
+                ):
+                    _filling_ops_queue(
+                        metadata_size_tenor, dist.isend, send_rank, ops, None
+                    )
+
             for recv_rank, recv_metadata_size_tensor in zip(
                 recv_ranks, recv_metadata_size_tensors
             ):
@@ -128,10 +156,19 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                 _filling_ops_queue(
                     recv_metadata_size_tensor, dist.irecv, recv_rank, ops, None
                 )
-            for send_rank in send_ranks:
-                _filling_ops_queue(
-                    send_metadata_size_tensor, dist.isend, send_rank, ops, None
-                )
+
+            if is_broadcast:
+                for send_rank in send_ranks:
+                    _filling_ops_queue(
+                        send_metadata_size_tensor, dist.isend, send_rank, ops, None
+                    )
+            else:
+                for send_rank, metadata_size_tenor in zip(
+                    send_ranks, send_metadata_size_tensor
+                ):
+                    _filling_ops_queue(
+                        metadata_size_tenor, dist.isend, send_rank, ops, None
+                    )
 
         if len(ops) > 0:
             reqs = dist.batch_isend_irecv(ops)
@@ -151,10 +188,17 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         ops.clear()
         # send and receive data
         if send_first:
-            for send_rank in send_ranks:
-                _filling_ops_queue(
-                    send_metadata_tensor, dist.isend, send_rank, ops, None
-                )
+            if is_broadcast:
+                for send_rank in send_ranks:
+                    _filling_ops_queue(
+                        send_metadata_tensor, dist.isend, send_rank, ops, None
+                    )
+            else:
+                for send_rank, metadata_tensor in zip(send_ranks, send_metadata_tensor):
+                    _filling_ops_queue(
+                        metadata_tensor, dist.isend, send_rank, ops, None
+                    )
+
             for recv_rank, recv_metadata_tensor in zip(
                 recv_ranks, recv_metadata_tensors
             ):
@@ -168,10 +212,17 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
                 _filling_ops_queue(
                     recv_metadata_tensor, dist.irecv, recv_rank, ops, None
                 )
-            for send_rank in send_ranks:
-                _filling_ops_queue(
-                    send_metadata_tensor, dist.isend, send_rank, ops, None
-                )
+
+            if is_broadcast:
+                for send_rank in send_ranks:
+                    _filling_ops_queue(
+                        send_metadata_tensor, dist.isend, send_rank, ops, None
+                    )
+            else:
+                for send_rank, metadata_tensor in zip(send_ranks, send_metadata_tensor):
+                    _filling_ops_queue(
+                        metadata_tensor, dist.isend, send_rank, ops, None
+                    )
 
         if len(ops) > 0:
             reqs = dist.batch_isend_irecv(ops)
@@ -198,7 +249,7 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
 
     def _send_recv_tensors(
         self,
-        send_tensor_objects: Optional[list[torch.Tensor]],
+        send_tensor_objects: Optional[list[torch.Tensor] | list[list[torch.Tensor]]],
         recv_tensor_metadata: list[TensorMetadata],
         send_ranks: list[int],
         recv_ranks: list[int],
@@ -229,9 +280,20 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
         """
         current_device = get_accelerator().get_current_device()
 
-        if send_tensor_objects is None:
+        is_broadcast = False
+        if send_tensor_objects is not None:
+            assert isinstance(send_tensor_objects, list)
+            if isinstance(send_tensor_objects[0], list):
+                # Non-broadcast
+                assert len(send_tensor_objects) == len(send_ranks)
+            else:
+                # Broadcast
+                is_broadcast = True
+                assert len(send_tensor_objects) == 1
+        else:
             # remove send_ranks as there is no data to send
             send_ranks = []
+            send_tensor_objects = []
 
         recv_buffers: list[list[torch.Tensor]]
         if not recv_tensor_metadata:
@@ -247,19 +309,29 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
 
         ops: list[dist.Work] = []
         if send_first:
-            for send_rank in send_ranks:
-                _filling_ops_queue(
-                    send_tensor_objects, dist.isend, send_rank, ops, None
-                )
+            if is_broadcast:
+                for send_rank in send_ranks:
+                    _filling_ops_queue(
+                        send_tensor_objects, dist.isend, send_rank, ops, None
+                    )
+            else:
+                for send_rank, tensor_objects in zip(send_ranks, send_tensor_objects):
+                    _filling_ops_queue(tensor_objects, dist.isend, send_rank, ops, None)
+
             for recv_rank, recv_buffer in zip(recv_ranks, recv_buffers):
                 _filling_ops_queue(recv_buffer, dist.irecv, recv_rank, ops, None)
         else:
             for recv_rank, recv_buffer in zip(recv_ranks, recv_buffers):
                 _filling_ops_queue(recv_buffer, dist.irecv, recv_rank, ops, None)
-            for send_rank in send_ranks:
-                _filling_ops_queue(
-                    send_tensor_objects, dist.isend, send_rank, ops, None
-                )
+
+            if is_broadcast:
+                for send_rank in send_ranks:
+                    _filling_ops_queue(
+                        send_tensor_objects, dist.isend, send_rank, ops, None
+                    )
+            else:
+                for send_rank, tensor_objects in zip(send_ranks, send_tensor_objects):
+                    _filling_ops_queue(tensor_objects, dist.isend, send_rank, ops, None)
 
         if len(ops) > 0:
             reqs = dist.batch_isend_irecv(ops)
@@ -270,17 +342,30 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
 
     def _communicate(
         self,
-        object: Any,
+        object: Optional[Any | list[Any]],
         send_ranks: list[int],
         recv_ranks: list[int],
         send_first: bool = True,
     ) -> Any:
-        send_metadata: P2PMetadata = None
-        send_tensor_objects: list[torch.Tensor] = None
+        send_metadata: P2PMetadata | list[P2PMetadata] = None
+        send_tensor_objects: list[torch.Tensor] | list[list[torch.Tensor]] = None
+
         if object is not None:
-            send_metadata, send_tensor_objects = create_send_metadata(
-                object, strict=False, return_tensor=True
-            )
+            if isinstance(object, list):
+                # Non-broadcast. Each object in a list will be sent to each rank.
+                send_metadata = []
+                send_tensor_objects = []
+                for obj in object:
+                    metadata, tensor_objects = create_send_metadata(
+                        obj, strict=False, return_tensor=True
+                    )
+                    send_metadata.append(metadata)
+                    send_tensor_objects.append(tensor_objects)
+            else:
+                # Broadcast. There should be only one object which will be sent to all ranks.
+                send_metadata, send_tensor_objects = create_send_metadata(
+                    object, strict=False, return_tensor=True
+                )
 
         recv_metadata = self._send_recv_serialized_object(
             send_metadata, send_ranks, recv_ranks, send_first
@@ -450,14 +535,33 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 raise ValueError(f"Unsupported type of tensors: {type(tensors)}")
         return tensors
 
-    def _split_tensor(
-        self, tensors: torch.Tensor, num_splits: int
-    ) -> list[torch.Tensor]:
-        assert isinstance(tensors, torch.Tensor)
+    def _split_tensor(self, object: Any, num_splits: int) -> list[Any]:
         assert num_splits > 0
 
-        split_tensors = torch.split(tensors, tensors.size(1) // num_splits, dim=1)
-        return split_tensors
+        if isinstance(object, torch.Tensor):
+            objects = torch.split(object, object.size(1) // num_splits, dim=1)
+        elif isinstance(object, list):
+            assert all(isinstance(obj, torch.Tensor) for obj in object)
+            object: list[torch.Tensor] = object
+            objects = [
+                torch.split(obj, obj.size(1) // num_splits, dim=1) for obj in object
+            ]
+            objects = [objects[:, i] for i in range(num_splits)]
+        elif isinstance(object, dict):
+            assert all(isinstance(obj, torch.Tensor) for obj in object.values())
+            object: dict[str, torch.Tensor] = object
+            objects = {
+                key: torch.split(value, value.size(1) // num_splits, dim=1)
+                for key, value in object.items()
+            }
+            objects = [
+                {key: value[i] for key, value in objects.items()}
+                for i in range(num_splits)
+            ]
+        else:
+            raise ValueError(f"Unsupported type of object: {type(object)}")
+
+        return objects
 
     def recv_forward(self) -> Any:
         input_tensors = None
@@ -481,6 +585,11 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
 
     def send_backward(self, input_tensor_grad: Any) -> None:
         if not self.stage_manager.is_first_stage():
+            num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
+            if num_ranks_to_send > 1:
+                input_tensor_grad = self._split_tensor(
+                    input_tensor_grad, num_ranks_to_send
+                )
             self.comm.send_backward(input_tensor_grad)
 
     def send_forward_recv_backward(
@@ -500,6 +609,11 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
     ) -> Any:
         input_tensors = None
         if not self.stage_manager.is_first_stage():
+            num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
+            if num_ranks_to_send > 1:
+                input_tensor_grad = self._split_tensor(
+                    input_tensor_grad, num_ranks_to_send
+                )
             input_tensors = self.comm.send_backward_recv_forward(
                 input_tensor_grad, send_first=send_first
             )
