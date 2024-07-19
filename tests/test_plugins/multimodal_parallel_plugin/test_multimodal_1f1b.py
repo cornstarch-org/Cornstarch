@@ -108,19 +108,13 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
     def create_p2p(
         self, tp_size: int
     ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
-        templates = {
+        encoder_templates = {
             encoder1_template: tp_size,
             encoder2_template: tp_size,
-            llm_template: tp_size,
         }
-        execution_order = [
-            (encoder1_template, llm_template),
-            (encoder2_template, llm_template),
-        ]
-
         pg_mesh = MultiModalProcessGroupMesh(
-            modal_templates=templates,
-            execution_order=execution_order,
+            encoder_templates=encoder_templates,
+            llm_template=(llm_template, tp_size),
         )
         stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
         p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
@@ -262,15 +256,11 @@ class TestHomogeneousTensorParallelSingleEncoderClass(P2PCommunicationClassBase)
     def create_p2p(
         self, tp_size: int
     ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
-        templates = {
-            encoder1_template: tp_size,
-            llm_template: tp_size,
-        }
-        execution_order = [(encoder1_template, llm_template)]
+        encoder_templates = {encoder1_template: tp_size}
 
         pg_mesh = MultiModalProcessGroupMesh(
-            modal_templates=templates,
-            execution_order=execution_order,
+            encoder_templates=encoder_templates,
+            llm_template=(llm_template, tp_size),
         )
         stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
         p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
