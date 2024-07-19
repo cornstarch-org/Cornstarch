@@ -121,15 +121,32 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
 
         return stage_manager, p2p
 
+    def make_backward_object(
+        self,
+        backward_obj: Any,
+        is_broadcast: bool,
+        stage_manager: MultiModalPipelineStageManager,
+    ):
+        if is_broadcast:
+            return backward_obj
+        else:
+            return [backward_obj for _ in range(len(stage_manager.get_prev_ranks()))]
+
     @parametrize("tp_size", [1, 2, 4])
-    def test_p2p_communication_forward_first(self, tp_size: int):
+    @parametrize("is_broadcast", [True, False])
+    def test_p2p_communication_forward_first(self, tp_size: int, is_broadcast: bool):
         stage_manager, p2p = self.create_p2p(tp_size)
         data = self.create_data()
 
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
                 recv_forward_objs = p2p.recv_forward()
-                p2p.send_backward(backward_obj, is_broadcast=True)
+                p2p.send_backward(
+                    self.make_backward_object(
+                        backward_obj, is_broadcast, stage_manager
+                    ),
+                    is_broadcast=is_broadcast,
+                )
 
                 assert len(recv_forward_objs) == 1
                 assert recv_forward_objs[0] == forward_obj
@@ -143,7 +160,12 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
                 recv_forward_objs = p2p.recv_forward()
                 p2p.send_forward(forward_obj, is_broadcast=True)
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_backward(backward_obj, is_broadcast=True)
+                p2p.send_backward(
+                    self.make_backward_object(
+                        backward_obj, is_broadcast, stage_manager
+                    ),
+                    is_broadcast=is_broadcast,
+                )
 
                 assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
                 assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
@@ -151,13 +173,19 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
                 assert all(obj == forward_obj for obj in recv_forward_objs)
 
     @parametrize("tp_size", [1, 2, 4])
-    def test_p2p_communication_backward_first(self, tp_size: int):
+    @parametrize("is_broadcast", [True, False])
+    def test_p2p_communication_backward_first(self, tp_size: int, is_broadcast: bool):
         stage_manager, p2p = self.create_p2p(tp_size)
         data = self.create_data()
 
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
-                p2p.send_backward(backward_obj, is_broadcast=True)
+                p2p.send_backward(
+                    self.make_backward_object(
+                        backward_obj, is_broadcast, stage_manager
+                    ),
+                    is_broadcast=is_broadcast,
+                )
                 recv_forward_objs = p2p.recv_forward()
 
                 assert len(recv_forward_objs) == 1
@@ -170,7 +198,12 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_backward_objs = p2p.recv_backward()
-                p2p.send_backward(backward_obj, is_broadcast=True)
+                p2p.send_backward(
+                    self.make_backward_object(
+                        backward_obj, is_broadcast, stage_manager
+                    ),
+                    is_broadcast=is_broadcast,
+                )
                 recv_forward_objs = p2p.recv_forward()
                 p2p.send_forward(forward_obj, is_broadcast=True)
 
@@ -181,8 +214,9 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
 
     @parametrize("tp_size", [1, 2, 4])
     @parametrize("send_first", [True, False])
+    @parametrize("is_broadcast", [True, False])
     def test_p2p_communication_coaleasced_forward_first(
-        self, tp_size: int, send_first: bool
+        self, tp_size: int, send_first: bool, is_broadcast: bool
     ):
         stage_manager, p2p = self.create_p2p(tp_size)
         data = self.create_data()
@@ -215,15 +249,21 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
 
     @parametrize("tp_size", [1, 2, 4])
     @parametrize("send_first", [True, False])
+    @parametrize("is_broadcast", [True, False])
     def test_p2p_communication_coaleasced_backward_first(
-        self, tp_size: int, send_first: bool
+        self, tp_size: int, send_first: bool, is_broadcast: bool
     ):
         stage_manager, p2p = self.create_p2p(tp_size)
         data = self.create_data()
 
         for forward_obj, backward_obj in zip(data, reversed(data)):
             if stage_manager.is_last_stage(check_only_in_modal=False):
-                p2p.send_backward(backward_obj, is_broadcast=True)
+                p2p.send_backward(
+                    self.make_backward_object(
+                        backward_obj, is_broadcast, stage_manager
+                    ),
+                    is_broadcast=is_broadcast,
+                )
                 recv_forward_objs = p2p.recv_forward()
 
                 assert len(recv_forward_objs) == 1
@@ -236,7 +276,11 @@ class TestHomogeneousTensorParallelMultiEncoderClass(P2PCommunicationClassBase):
                 assert recv_backward_objs[0] == backward_obj
             else:
                 recv_backward_objs = p2p.send_backward_recv_backward(
-                    backward_obj, send_first=send_first, is_broadcast=True
+                    self.make_backward_object(
+                        backward_obj, is_broadcast, stage_manager
+                    ),
+                    send_first=send_first,
+                    is_broadcast=is_broadcast,
                 )
                 recv_forward_objs = p2p.send_forward_recv_forward(
                     forward_obj, send_first=send_first, is_broadcast=True
