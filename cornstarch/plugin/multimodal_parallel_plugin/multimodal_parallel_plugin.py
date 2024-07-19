@@ -5,7 +5,6 @@ import torch.distributed as dist
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelPlugin
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
-from colossalai.pipeline.schedule import OneForwardOneBackwardSchedule, PipelineSchedule
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
@@ -18,6 +17,9 @@ from cornstarch.plugin.multimodal_parallel_plugin.modal_parallel_plugin import (
 )
 from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh import (
     MultiModalProcessGroupMesh,
+)
+from cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b import (
+    MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
 )
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
@@ -141,8 +143,20 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         )
 
         # TODO: add decoders when we support multimodal generation
+        # Note that current schedule is encoder-llm only.
+        # Decoder-llm needs another schedule, and encoder-decoder cannot be trained together.
+        # TODO: implement interleaved parallelism to train encoder and decoder at the same time.
 
-        self.pg_mesh = MultiModalProcessGroupMesh(modal_templates, execution_order)
+        self.pg_mesh = MultiModalProcessGroupMesh(
+            encoder_templates={
+                plugin.pipeline_template: plugin.tp_size
+                for plugin in self.encoder_plugins.values()
+            },
+            llm_template=(
+                self.language_model_plugin.pipeline_template,
+                self.language_model_plugin.tp_size,
+            ),
+        )
         self.stage_manager = MultiModalPipelineStageManager(
             self.pg_mesh, self.pg_mesh.pp_axis
         )
@@ -154,7 +168,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
         # TODO: implement a new one if needed!
-        self.schedule = OneForwardOneBackwardSchedule(
+        self.schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             self.stage_manager, self.num_microbatches, self.microbatch_size
         )
 
@@ -175,18 +189,6 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
     ) -> Tuple[Module, OptimizerWrapper, Callable[..., Any], DataLoader, LRScheduler]:
         assert dist.is_initialized(), "torch.distributed is not initialized."
         self.init_distributed()
-
-        # def get_ranks_along_pp_axis(
-        #     target_modal: PipelineTemplate,
-        #     stage_manager: MultiModalPipelineStageManager,
-        # ) -> list:
-        #     pg_mesh = stage_manager.pg_mesh
-        #     stage_indices = [
-        #         index
-        #         for index, modal in enumerate(stage_manager.stage_index_to_modal)
-        #         if modal == target_modal
-        #     ]
-        #     return np.take(pg_mesh.mesh, stage_indices, axis=pg_mesh.pp_axis)
 
         if not isinstance(model, ModelWrapper):
             for modal_name, encoder in self.encoder_plugins.items():

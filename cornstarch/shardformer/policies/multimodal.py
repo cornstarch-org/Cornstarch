@@ -97,7 +97,7 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
         elif config.projection_type == "qformer":
             raise NotImplementedError("QFormer is not supported yet.")
 
-        if stage_manager.is_last_stage(ignore_chunk=True):
+        if stage_manager.is_last_stage(check_only_in_modal=True):
             return held_layers
 
         return []
@@ -172,7 +172,7 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
         policy.set_shard_config(self.shard_config)
         held_layers.extend(policy.get_held_layers())
 
-        if stage_manager.is_last_stage(ignore_chunk=True):
+        if stage_manager.is_last_stage(check_only_in_modal=True):
             policy = MultimodalProjectorPolicy()
             policy.set_model(model.projector)
             policy.set_shard_config(self.shard_config)

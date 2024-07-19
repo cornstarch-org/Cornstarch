@@ -352,12 +352,12 @@ class MultiModalPipelineStageManager(PipelineStageManager):
 
         # Find the first stage index of this modal and subtract it from stage
         # to make it zero-based index
-        # first_stage_index = next(
-        #     index
-        #     for index, modal in enumerate(self.stage_index_to_modal)
-        #     if modal == self.stage_index_to_modal[stage]
-        # )
-        # stage -= first_stage_index
+        first_stage_index = next(
+            index
+            for index, modal in enumerate(self.stage_index_to_modal)
+            if modal == self.stage_index_to_modal[stage]
+        )
+        stage -= first_stage_index
 
         num_layers_per_stage_accumulated = np.insert(np.cumsum(layers_per_stage), 0, 0)
         return (

@@ -148,7 +148,7 @@ class TestPluginInitializationWithFakeBackend:
         model = MultimodalModel(
             encoders={"vision": vision_module},
             language_model=language_module,
-        ).to(dtype=torch.float16)
+        ).to(dtype=torch.bfloat16)
 
         return vision_module, language_module, model
 
