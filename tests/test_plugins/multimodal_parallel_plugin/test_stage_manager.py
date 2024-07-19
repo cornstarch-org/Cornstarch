@@ -143,7 +143,7 @@ def test_multimodal_pipeline_stage_manager(
 
 
 @pytest.mark.parametrize(
-    "world_size, encoder_templates, llm_template, expected_first_last_stages",
+    "world_size, encoder_templates, llm_template, expected_first_last_stages, expected_first_last_stages_in_modal",
     [
         (
             24,
@@ -154,6 +154,12 @@ def test_multimodal_pipeline_stage_manager(
                 tuple(range(4, 16)): (False, False),
                 tuple(range(16, 24)): (False, True),
             },
+            {
+                (0, 1, 2, 3): (True, False),
+                (4, 5, 6, 7): (False, True),
+                tuple(range(8, 16)): (True, False),
+                tuple(range(16, 24)): (False, True),
+            },
         ),
         (
             18,
@@ -161,7 +167,14 @@ def test_multimodal_pipeline_stage_manager(
             (llm_template_2stages, 4),
             {
                 (0, 1, 4, 5): (True, False),
-                (2, 3) + tuple(range(6, 14)): (False, False),
+                (2, 3, 6, 7) + tuple(range(8, 14)): (False, False),
+                (14, 15, 16, 17): (False, True),
+            },
+            {
+                (0, 1, 4, 5): (True, False),
+                (6, 7): (False, False),
+                (2, 3, 8, 9): (False, True),
+                (10, 11, 12, 13): (True, False),
                 (14, 15, 16, 17): (False, True),
             },
         ),
@@ -174,6 +187,14 @@ def test_multimodal_pipeline_stage_manager(
                 tuple(range(12, 72)): (False, False),
                 tuple(range(72, 84)): (False, True),
             },
+            {
+                tuple(range(0, 12)): (True, False),
+                tuple(range(12, 24)): (False, False),
+                tuple(range(24, 36)): (False, True),
+                tuple(range(36, 48)): (True, False),
+                tuple(range(48, 72)): (False, False),
+                tuple(range(72, 84)): (False, True),
+            },
         ),
     ],
 )
@@ -183,6 +204,7 @@ def test_first_last_stage(
     encoder_templates: dict[PipelineTemplate, int],
     llm_template: tuple[PipelineTemplate, int],
     expected_first_last_stages: dict[tuple[int], tuple[bool, bool]],
+    expected_first_last_stages_in_modal: dict[tuple[int], tuple[bool, bool]],
 ):
     for rank in range(world_size):
         dist.init_process_group(
@@ -197,11 +219,24 @@ def test_first_last_stage(
             if rank in ranks
         )
         assert expected_first_last_stage == (
-            stage_manager.is_first_stage(),
-            stage_manager.is_last_stage(),
+            stage_manager.is_first_stage(check_only_in_modal=False),
+            stage_manager.is_last_stage(check_only_in_modal=False),
         ), (
             f"rank {rank} expected to have {expected_first_last_stage} as first and last stage, "
-            f"but got ({stage_manager.is_first_stage(), stage_manager.is_last_stage()})."
+            f"but got ({stage_manager.is_first_stage(check_only_in_modal=False), stage_manager.is_last_stage(check_only_in_modal=False)})."
+        )
+
+        expected_first_last_stage_in_modal = next(
+            value
+            for ranks, value in expected_first_last_stages_in_modal.items()
+            if rank in ranks
+        )
+        assert expected_first_last_stage_in_modal == (
+            stage_manager.is_first_stage(check_only_in_modal=True),
+            stage_manager.is_last_stage(check_only_in_modal=True),
+        ), (
+            f"rank {rank} expected to have {expected_first_last_stage_in_modal} as first and last stage in modal, "
+            f"but got ({stage_manager.is_first_stage(check_only_in_modal=True), stage_manager.is_last_stage(check_only_in_modal=True)})."
         )
 
         dist.destroy_process_group()
