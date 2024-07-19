@@ -2,7 +2,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import torch
 from colossalai.accelerator import get_accelerator
-from colossalai.interface import OptimizerWrapper
+from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.p2p import (
     P2PMetadata,
     PipelineP2PCommunication,
@@ -12,6 +12,7 @@ from colossalai.pipeline.p2p import (
     _filling_ops_queue,
     create_send_metadata,
 )
+from colossalai.pipeline.schedule._utils import merge_batch
 from colossalai.pipeline.schedule.one_f_one_b import (
     OneForwardOneBackwardSchedule,
     PipelineSchedule,
@@ -404,6 +405,11 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         ), "Both num_microbatches and microbatch_size must be provided."
         PipelineSchedule.__init__(self, stage_manager)
 
+        assert len(stage_manager.pg_mesh.decoder_templates) == 0, (
+            "MultimodalEncoderTrainingOneForwardOneBackwardSchedule does not support "
+            "decoders in the model."
+        )
+
         self.comm: MultimodalPipelineP2PCommunication = (
             MultimodalPipelineP2PCommunication(stage_manager)
         )
@@ -419,7 +425,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         assert isinstance(tensors, list)
 
         if len(tensors) == 0:
-            return []
+            return None
 
         if len(tensors) == 1:
             tensors = tensors[0]
@@ -443,6 +449,15 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             else:
                 raise ValueError(f"Unsupported type of tensors: {type(tensors)}")
         return tensors
+
+    def _split_tensor(
+        self, tensors: torch.Tensor, num_splits: int
+    ) -> list[torch.Tensor]:
+        assert isinstance(tensors, torch.Tensor)
+        assert num_splits > 0
+
+        split_tensors = torch.split(tensors, tensors.size(1) // num_splits, dim=1)
+        return split_tensors
 
     def recv_forward(self) -> Any:
         input_tensors = None
@@ -501,4 +516,108 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         return_loss: bool = False,
         return_outputs: bool = False,
     ) -> dict:
-        raise NotImplementedError
+        assert not self.forward_only
+
+        self.load_batch(data_iter)
+
+        my_modal = self.stage_manager.stage_index_to_modal[
+            self.stage_manager.pg_mesh.coords[0][self.stage_manager.pipeline_axis]
+        ]
+        if self.stage_manager.pg_mesh.llm_template is not None:
+            llm_modal = self.stage_manager.pg_mesh.llm_template[0]
+
+            if my_modal == llm_modal:
+                num_warmup_microbatches = (
+                    my_modal.num_stages - self.stage_manager.stage_in_modal - 1
+                )
+            else:
+                num_warmup_microbatches = (
+                    my_modal.num_stages
+                    + llm_modal.num_stages
+                    - self.stage_manager.stage_in_modal
+                    - 1
+                )
+
+        else:
+            num_warmup_microbatches = (
+                my_modal.num_stages - self.stage_manager.stage_in_modal - 1
+            )
+        num_warmup_microbatches = min(num_warmup_microbatches, self.num_microbatches)
+        num_microbatches_remaining = self.num_microbatches - num_warmup_microbatches
+
+        # Input, output tensors only need to be saved when doing backward passes
+        input_objs, output_objs = [], []
+
+        accum_loss = None
+        if return_loss and self.stage_manager.is_last_stage():
+            accum_loss = torch.scalar_tensor(
+                0, device=get_accelerator().get_current_device()
+            )
+        outputs = [] if return_outputs and self.stage_manager.is_last_stage() else None
+
+        # Run warmup forward passes.
+        for i in range(num_warmup_microbatches):
+            input_obj = self.recv_forward()
+            output_obj = self.forward_step(
+                model, input_obj, criterion, accum_loss, outputs
+            )
+            self.send_forward(output_obj)
+            input_objs.append(input_obj)
+            output_objs.append(output_obj)
+
+        # Before running 1F1B, need to receive first forward tensor.
+        # If all microbatches are run in warmup / cooldown phase, then no need to
+        # receive this tensor here.
+        if num_microbatches_remaining > 0:
+            input_obj = self.recv_forward()
+
+        # Run 1F1B in steady state.
+        for i in range(num_microbatches_remaining):
+            last_iteration = i == (num_microbatches_remaining - 1)
+
+            output_obj = self.forward_step(
+                model, input_obj, criterion, accum_loss, outputs
+            )
+            output_obj_grad = self.send_forward_recv_backward(
+                output_obj, send_first=self.stage_manager.stage % 2 == 0
+            )
+            # Add input_obj and output_obj to end of list.
+            input_objs.append(input_obj)
+            output_objs.append(output_obj)
+
+            # Pop output_obj and output_obj from the start of the list for
+            # the backward pass.
+            input_obj = input_objs.pop(0)
+            output_obj = output_objs.pop(0)
+            input_obj_grad = self.backward_step(
+                optimizer, input_obj, output_obj, output_obj_grad
+            )
+
+            if last_iteration:
+                self.send_backward(input_obj_grad)
+            else:
+                input_obj = self.send_backward_recv_forward(
+                    input_obj_grad, send_first=self.stage_manager.stage % 2 == 0
+                )
+
+        # Run cooldown backward passes.
+        for i in range(num_warmup_microbatches):
+            input_obj = input_objs.pop(0)
+            output_obj = output_objs.pop(0)
+
+            output_obj_grad = self.recv_backward()
+            input_obj_grad = self.backward_step(
+                optimizer, input_obj, output_obj, output_obj_grad
+            )
+            self.send_backward(input_obj_grad)
+
+        assert all(len(v) == 0 for v in input_objs) and all(
+            len(v) == 0 for v in output_objs
+        )
+
+        if outputs is not None:
+            if isinstance(model, ModelWrapper):
+                model = model.unwrap()
+            batch_size_dim = getattr(model, "batch_size_dim", 0)
+            outputs = merge_batch(outputs, batch_size_dim)
+        return {"loss": accum_loss, "outputs": outputs}

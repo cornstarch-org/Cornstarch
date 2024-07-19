@@ -23,7 +23,6 @@ from torch.testing._internal.common_utils import (
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin import (
     MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
-    MultimodalPipelineP2PCommunication,
     MultiModalPipelineStageManager,
     MultiModalProcessGroupMesh,
 )
@@ -37,7 +36,7 @@ def pp_linear_fwd(
     input_obj: torch.Tensor = None,
     stage_manager: MultiModalPipelineStageManager = None,
 ):
-    if stage_manager.is_first_stage(check_only_in_modal=True):
+    if stage_manager.is_first_stage():
         return {"input_obj": forward(data)}
     elif stage_manager.is_last_stage():
         return forward(input_obj)
@@ -138,19 +137,15 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
 
             return x
 
-    def create_p2p(
+    def create_stage_manager(
         self, model: SingleEncoderModel
-    ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
+    ) -> MultiModalPipelineStageManager:
         encoder_template, llm_template = model.get_templates()
-        encoder_templates = {encoder_template: 1}
         pg_mesh = MultiModalProcessGroupMesh(
-            encoder_templates=encoder_templates,
+            encoder_templates={encoder_template: 1},
             llm_template=(llm_template, 1),
         )
-        stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
-        p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
-
-        return stage_manager, p2p
+        return MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
 
     @parametrize("num_microbatches", [4, 8, 12], name_fn=lambda x: f"mb={x}")
     @parametrize("microbatch_size", [1, 2, 4], name_fn=lambda x: f"mbs={x}")
@@ -158,7 +153,7 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         model = self.SingleEncoderModel()
         pp_model = copy.deepcopy(model)
 
-        stage_manager, p2p = self.create_p2p(model=model)
+        stage_manager = self.create_stage_manager(model=model)
         schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             stage_manager, num_microbatches, microbatch_size
         )
@@ -198,7 +193,7 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         def criterion(x, *args, **kwargs):
             return (x * x).mean()
 
-        input_list = [torch.rand(num_microbatches * microbatch_size, 4, 8)]
+        input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
         dist.all_reduce(input_list[0])
 
         # forward and backward
@@ -305,25 +300,21 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
 
             return x
 
-    def create_p2p(
+    def create_stage_manager(
         self, model: DoubleEncoderModel
-    ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
+    ) -> MultiModalPipelineStageManager:
         encoder1_template, encoder2_template, llm_template = model.get_templates()
-        encoder_templates = {encoder1_template: 1, encoder2_template: 1}
         pg_mesh = MultiModalProcessGroupMesh(
-            encoder_templates=encoder_templates,
+            encoder_templates={encoder1_template: 1, encoder2_template: 1},
             llm_template=(llm_template, 1),
         )
-        stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
-        p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
-
-        return stage_manager, p2p
+        return MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
 
     def test_schedule(self, num_microbatches: int = 6, microbatch_size: int = 1):
         model = self.DoubleEncoderModel()
         pp_model = copy.deepcopy(model)
 
-        stage_manager, p2p = self.create_p2p(model=model)
+        stage_manager = self.create_stage_manager(model=model)
         schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             stage_manager, num_microbatches, microbatch_size
         )
