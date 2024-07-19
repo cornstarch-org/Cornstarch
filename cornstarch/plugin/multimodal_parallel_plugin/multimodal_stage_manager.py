@@ -195,7 +195,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                 return False
 
     def is_last_stage(
-        self, ignore_chunk: bool = False, check_only_in_modal: bool = False
+        self, ignore_chunk: bool = False, check_only_in_modal: bool = True
     ) -> bool:
         """Is the current stage the last stage.
 

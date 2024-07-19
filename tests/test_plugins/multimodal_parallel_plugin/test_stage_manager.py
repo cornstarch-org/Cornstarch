@@ -213,6 +213,7 @@ def test_first_last_stage(
         mesh = MultiModalProcessGroupMesh(encoder_templates, llm_template)
         stage_manager = MultiModalPipelineStageManager(mesh, mesh.pp_axis)
 
+        # check modal-local stage
         expected_first_last_stage = next(
             value
             for ranks, value in expected_first_last_stages.items()
@@ -226,6 +227,7 @@ def test_first_last_stage(
             f"but got ({stage_manager.is_first_stage(check_only_in_modal=False), stage_manager.is_last_stage(check_only_in_modal=False)})."
         )
 
+        # check global stage
         expected_first_last_stage_in_modal = next(
             value
             for ranks, value in expected_first_last_stages_in_modal.items()
@@ -237,6 +239,15 @@ def test_first_last_stage(
         ), (
             f"rank {rank} expected to have {expected_first_last_stage_in_modal} as first and last stage in modal, "
             f"but got ({stage_manager.is_first_stage(check_only_in_modal=True), stage_manager.is_last_stage(check_only_in_modal=True)})."
+        )
+
+        # check automatic behavior, which should be the same with check_only_in_modal=True
+        assert expected_first_last_stage_in_modal == (
+            stage_manager.is_first_stage(),
+            stage_manager.is_last_stage(),
+        ), (
+            f"rank {rank} expected to have {expected_first_last_stage_in_modal} as first and last stage in modal, "
+            f"but got ({stage_manager.is_first_stage(), stage_manager.is_last_stage()})."
         )
 
         dist.destroy_process_group()
