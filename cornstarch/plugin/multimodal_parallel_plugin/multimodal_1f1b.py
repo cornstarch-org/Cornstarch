@@ -596,10 +596,12 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
             if num_ranks_to_send > 1:
-                input_tensor_grad = self._split_tensor(
-                    input_tensor_grad, num_ranks_to_send
+                self.comm.send_backward(
+                    self._split_tensor(input_tensor_grad, num_ranks_to_send),
+                    is_broadcast=False,
                 )
-            self.comm.send_backward(input_tensor_grad, is_broadcast=False)
+            else:
+                self.comm.send_backward(input_tensor_grad, is_broadcast=True)
 
     def send_forward_recv_backward(
         self, output_tensor: Any, send_first: Optional[bool] = None
@@ -620,12 +622,17 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
             if num_ranks_to_send > 1:
-                input_tensor_grad = self._split_tensor(
-                    input_tensor_grad, num_ranks_to_send
+                input_tensors = self.comm.send_backward_recv_forward(
+                    self._split_tensor(input_tensor_grad, num_ranks_to_send),
+                    send_first=send_first,
+                    is_broadcast=False,
                 )
-            input_tensors = self.comm.send_backward_recv_forward(
-                input_tensor_grad, send_first=send_first, is_broadcast=False
-            )
+            else:
+                input_tensors = self.comm.send_backward_recv_forward(
+                    input_tensor_grad,
+                    send_first=send_first,
+                    is_broadcast=True,
+                )
             input_tensors = self._merge_tensors(input_tensors)
 
         return input_tensors

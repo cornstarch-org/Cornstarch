@@ -36,9 +36,9 @@ def pp_linear_fwd(
     input_obj: torch.Tensor = None,
     stage_manager: MultiModalPipelineStageManager = None,
 ):
-    if stage_manager.is_first_stage():
+    if stage_manager.is_first_stage(check_only_in_modal=False):
         return {"input_obj": forward(data)}
-    elif stage_manager.is_last_stage():
+    elif stage_manager.is_last_stage(check_only_in_modal=False):
         return forward(input_obj)
     else:
         return {"input_obj": forward(input_obj)}
