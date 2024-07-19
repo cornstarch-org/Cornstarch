@@ -118,7 +118,7 @@ class ModalParallelPlugin(PipelinePluginBase):
 
     def configure(
         self,
-        model: ModalModule,
+        model: ModalModule | PreTrainedModel,
         shard_config: ShardConfig,
         stage_manager: MultiModalPipelineStageManager,
     ) -> nn.Module:

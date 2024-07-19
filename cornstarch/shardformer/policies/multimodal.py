@@ -85,7 +85,7 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
     def get_held_layers(self) -> list[nn.Module]:
         assert self.pipeline_stage_manager is not None
 
-        stage_manager = self.pipeline_stage_manager
+        stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
         config = cast(MultimodalProjectorConfig, self.model.config)
         model = cast(MultimodalProjector, self.model)
         held_layers = []
@@ -160,7 +160,7 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
         assert self.pipeline_stage_manager is not None
 
         model = cast(ModalModule, self.model)
-        stage_manager = self.pipeline_stage_manager
+        stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
         shard_config: ShardConfig = self.shard_config
 
         if not self.should_hold_module(shard_config.pipeline_template):
