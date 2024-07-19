@@ -142,12 +142,10 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         self, model: SingleEncoderModel
     ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
         encoder_template, llm_template = model.get_templates()
-        templates = {encoder_template: 1, llm_template: 1}
-        execution_order = [(encoder_template, llm_template)]
-
+        encoder_templates = {encoder_template: 1}
         pg_mesh = MultiModalProcessGroupMesh(
-            modal_templates=templates,
-            execution_order=execution_order,
+            encoder_templates=encoder_templates,
+            llm_template=(llm_template, 1),
         )
         stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
         p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
@@ -200,7 +198,7 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         def criterion(x, *args, **kwargs):
             return (x * x).mean()
 
-        input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
+        input_list = [torch.rand(num_microbatches * microbatch_size, 4, 8)]
         dist.all_reduce(input_list[0])
 
         # forward and backward
@@ -311,15 +309,10 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
         self, model: DoubleEncoderModel
     ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
         encoder1_template, encoder2_template, llm_template = model.get_templates()
-        templates = {encoder1_template: 1, encoder2_template: 1, llm_template: 1}
-        execution_order = [
-            (encoder1_template, llm_template),
-            (encoder2_template, llm_template),
-        ]
-
+        encoder_templates = {encoder1_template: 1, encoder2_template: 1}
         pg_mesh = MultiModalProcessGroupMesh(
-            modal_templates=templates,
-            execution_order=execution_order,
+            encoder_templates=encoder_templates,
+            llm_template=(llm_template, 1),
         )
         stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
         p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
