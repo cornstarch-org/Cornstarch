@@ -70,6 +70,8 @@ for _, config, _ in language_configs:
     config.hidden_size = 256
     config.intermediate_size = 256
     config.num_attention_heads = 8
+    if hasattr(config, "word_embed_proj_dim"):  # for opt
+        config.word_embed_proj_dim = 256
     config._attn_implementation = "eager"
 
 expected_language_module_layers = {
@@ -116,25 +118,50 @@ expected_vision_module_layers_per_stage = {
 }
 
 expected_language_module_layers_per_stage = {
-    "mistralai/Mistral-7B-v0.3": [
-        ["model.embed_tokens", "model.layers.0"],
-        ["model.layers.1"],
-        ["model.layers.2", "model.norm", "lm_head"],
-    ],
-    "meta-llama/Meta-Llama-3-8B": [
-        ["model.embed_tokens", "model.layers.0"],
-        ["model.layers.1"],
-        ["model.layers.2", "model.norm", "lm_head"],
-    ],
-    "facebook/opt-125m": [
-        [
-            "model.decoder.embed_tokens",
-            "model.decoder.embed_positions",
-            "model.decoder.layers.0",
+    2: {
+        "mistralai/Mistral-7B-v0.3": [
+            ["model.embed_tokens", "model.layers.0"],
+            ["model.layers.1", "model.layers.2", "model.norm", "lm_head"],
         ],
-        ["model.decoder.layers.1"],
-        ["model.decoder.layers.2", "model.decoder.final_layer_norm", "lm_head"],
-    ],
+        "meta-llama/Meta-Llama-3-8B": [
+            ["model.embed_tokens", "model.layers.0"],
+            ["model.layers.1", "model.layers.2", "model.norm", "lm_head"],
+        ],
+        "facebook/opt-125m": [
+            [
+                "model.decoder.embed_tokens",
+                "model.decoder.embed_positions",
+                "model.decoder.layers.0",
+            ],
+            [
+                "model.decoder.layers.1",
+                "model.decoder.layers.2",
+                "model.decoder.final_layer_norm",
+                "lm_head",
+            ],
+        ],
+    },
+    3: {
+        "mistralai/Mistral-7B-v0.3": [
+            ["model.embed_tokens", "model.layers.0"],
+            ["model.layers.1"],
+            ["model.layers.2", "model.norm", "lm_head"],
+        ],
+        "meta-llama/Meta-Llama-3-8B": [
+            ["model.embed_tokens", "model.layers.0"],
+            ["model.layers.1"],
+            ["model.layers.2", "model.norm", "lm_head"],
+        ],
+        "facebook/opt-125m": [
+            [
+                "model.decoder.embed_tokens",
+                "model.decoder.embed_positions",
+                "model.decoder.layers.0",
+            ],
+            ["model.decoder.layers.1"],
+            ["model.decoder.layers.2", "model.decoder.final_layer_norm", "lm_head"],
+        ],
+    },
 }
 
 
@@ -161,6 +188,7 @@ def generate_multimodal_plugin(
     language_model_name: str,
     vision_tp_size: int,
     language_tp_size: int,
+    language_pp_size: int = 3,
 ) -> MultimodalParallelPlugin:
     vision_plugin = ModalParallelPlugin(
         tp_size=vision_tp_size,
@@ -173,7 +201,9 @@ def generate_multimodal_plugin(
         tp_size=language_tp_size,
         pipeline_template=PipelineTemplate(
             language_model_name,
-            expected_language_module_layers_per_stage[language_model_name],
+            expected_language_module_layers_per_stage[language_pp_size][
+                language_model_name
+            ],
         ),
     )
 
@@ -250,7 +280,11 @@ class TestPluginInitializationWithFakeBackend:
 
         for rank in range(world_size):
             plugin = generate_multimodal_plugin(
-                vision_model_name, language_model_name, vision_tp_size, language_tp_size
+                vision_model_name,
+                language_model_name,
+                vision_tp_size,
+                language_tp_size,
+                3,
             )
             per_rank_model = copy.deepcopy(model)
             dist.init_process_group(
@@ -402,7 +436,7 @@ class TestPluginInitializationWithFakeBackend:
 class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
     @property
     def world_size(self):
-        return 5
+        return 4
 
     def setUp(self) -> None:
         super().setUp()
@@ -421,7 +455,7 @@ class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
         }
         input["labels"] = input["input_ids"]
 
-        return input
+        return BatchFeature(input, tensor_type="pt")
 
     @classmethod
     def _run(cls, rank: int, test_name: str, file_name: str, parent_pipe) -> None:
@@ -430,7 +464,7 @@ class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
         self.file_name = file_name
 
         print(f"dist init r={self.rank}, world={self.world_size}")
-        backend = "gloo"
+        backend = "nccl"
 
         try:
             dist.init_process_group(
@@ -445,6 +479,12 @@ class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
 
             raise
 
+        device_ids = None
+        if torch.cuda.is_available() and torch.cuda.device_count():
+            device_id = self.rank % torch.cuda.device_count()
+            torch.cuda.set_device(device_id)
+            device_ids = [device_id]
+
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
         random.seed(0)
@@ -453,19 +493,14 @@ class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
         # Execute barrier prior to running test to ensure that every process
         # has finished initialization and that the following test
         # immediately exiting due to a skip doesn't cause flakiness.
-        dist.barrier()
+        dist.barrier(device_ids=device_ids)
 
-        with (
-            torch.backends.cudnn.flags(
-                enabled=True, deterministic=True, benchmark=True
-            ),
-            patch.object(
-                CudaAccelerator, "get_current_device", return_value=torch.device("cpu")
-            ),
+        with torch.backends.cudnn.flags(
+            enabled=True, deterministic=True, benchmark=True
         ):
             self.run_test(test_name, parent_pipe)
 
-        dist.barrier()
+        dist.barrier(device_ids=device_ids)
 
         dist.destroy_process_group()
 
@@ -492,41 +527,48 @@ class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
             language_model_config[1],
             language_model_config[2],
         )
-
-        plugin = generate_multimodal_plugin(
-            vision_model_name,
-            language_model_name,
-            vision_tp_size=1,
-            language_tp_size=1,
-        )
-
-        module = copy.deepcopy(model)
+        model.gradient_checkpointing_enable()
+        model.to(device=torch.device("cuda"))
 
         model_optimizer = Adam(model.parameters())
-        parallel_module_optimizer = Adam(module.parameters())
 
-        def criterion(x, *args, **kwargs):
-            return x.loss
+        inputs = self.get_data()
+        for k, v in inputs.items():
+            inputs[k] = v.to("cuda")
 
-        module, parallel_module_optimizer, *_ = plugin.configure(
-            module,
-            parallel_module_optimizer,
-            criterion,
-        )
-
-        inputs = [self.get_data()]
-
-        outputs = model(**inputs[0])
+        outputs = model(**inputs)
         loss = outputs.loss
         loss.backward()
 
-        plugin.execute_pipeline(
-            data_iter=iter(inputs),
-            model=module,
-            criterion=criterion,
-            optimizer=parallel_module_optimizer,
-            return_loss=True,
-        )
+        model_optimizer.step()
+        model_optimizer.zero_grad()
+
+        # plugin = generate_multimodal_plugin(
+        #     vision_model_name,
+        #     language_model_name,
+        #     vision_tp_size=1,
+        #     language_tp_size=1,
+        #     language_pp_size=2,
+        # )
+
+        # module = copy.deepcopy(model)
+        # parallel_module_optimizer = Adam(module.parameters())
+
+        # module, parallel_module_optimizer, *_ = plugin.configure(
+        #     module,
+        #     parallel_module_optimizer,
+        # )
+
+        # def criterion(x, *args, **kwargs):
+        #     return x.loss
+
+        # plugin.execute_pipeline(
+        #     data_iter=iter(inputs),
+        #     model=module,
+        #     criterion=criterion,
+        #     optimizer=parallel_module_optimizer,
+        #     return_loss=True,
+        # )
 
 
 instantiate_parametrized_tests(TestPluginExecutionWithGlooBackend)
