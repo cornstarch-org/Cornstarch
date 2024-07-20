@@ -118,50 +118,25 @@ expected_vision_module_layers_per_stage = {
 }
 
 expected_language_module_layers_per_stage = {
-    2: {
-        "mistralai/Mistral-7B-v0.3": [
-            ["model.embed_tokens", "model.layers.0"],
-            ["model.layers.1", "model.layers.2", "model.norm", "lm_head"],
+    "mistralai/Mistral-7B-v0.3": [
+        ["model.embed_tokens", "model.layers.0"],
+        ["model.layers.1"],
+        ["model.layers.2", "model.norm", "lm_head"],
+    ],
+    "meta-llama/Meta-Llama-3-8B": [
+        ["model.embed_tokens", "model.layers.0"],
+        ["model.layers.1"],
+        ["model.layers.2", "model.norm", "lm_head"],
+    ],
+    "facebook/opt-125m": [
+        [
+            "model.decoder.embed_tokens",
+            "model.decoder.embed_positions",
+            "model.decoder.layers.0",
         ],
-        "meta-llama/Meta-Llama-3-8B": [
-            ["model.embed_tokens", "model.layers.0"],
-            ["model.layers.1", "model.layers.2", "model.norm", "lm_head"],
-        ],
-        "facebook/opt-125m": [
-            [
-                "model.decoder.embed_tokens",
-                "model.decoder.embed_positions",
-                "model.decoder.layers.0",
-            ],
-            [
-                "model.decoder.layers.1",
-                "model.decoder.layers.2",
-                "model.decoder.final_layer_norm",
-                "lm_head",
-            ],
-        ],
-    },
-    3: {
-        "mistralai/Mistral-7B-v0.3": [
-            ["model.embed_tokens", "model.layers.0"],
-            ["model.layers.1"],
-            ["model.layers.2", "model.norm", "lm_head"],
-        ],
-        "meta-llama/Meta-Llama-3-8B": [
-            ["model.embed_tokens", "model.layers.0"],
-            ["model.layers.1"],
-            ["model.layers.2", "model.norm", "lm_head"],
-        ],
-        "facebook/opt-125m": [
-            [
-                "model.decoder.embed_tokens",
-                "model.decoder.embed_positions",
-                "model.decoder.layers.0",
-            ],
-            ["model.decoder.layers.1"],
-            ["model.decoder.layers.2", "model.decoder.final_layer_norm", "lm_head"],
-        ],
-    },
+        ["model.decoder.layers.1"],
+        ["model.decoder.layers.2", "model.decoder.final_layer_norm", "lm_head"],
+    ],
 }
 
 
@@ -183,38 +158,6 @@ def generate_multimodal_model(
     return vision_module, language_module, model
 
 
-def generate_multimodal_plugin(
-    vision_model_name: str,
-    language_model_name: str,
-    vision_tp_size: int,
-    language_tp_size: int,
-    language_pp_size: int = 3,
-) -> MultimodalParallelPlugin:
-    vision_plugin = ModalParallelPlugin(
-        tp_size=vision_tp_size,
-        pipeline_template=PipelineTemplate(
-            vision_model_name,
-            expected_vision_module_layers_per_stage[vision_model_name],
-        ),
-    )
-    language_plugin = ModalParallelPlugin(
-        tp_size=language_tp_size,
-        pipeline_template=PipelineTemplate(
-            language_model_name,
-            expected_language_module_layers_per_stage[language_pp_size][
-                language_model_name
-            ],
-        ),
-    )
-
-    return MultimodalParallelPlugin(
-        encoder_plugins={"vision": vision_plugin},
-        language_model_plugin=language_plugin,
-        num_microbatches=12,
-        microbatch_size=1,
-    )
-
-
 class TestPluginInitializationWithFakeBackend:
     @pytest.fixture(autouse=True)
     def fake_backend(self, mocker: MockerFixture):
@@ -227,6 +170,35 @@ class TestPluginInitializationWithFakeBackend:
 
         if dist.is_initialized():
             dist.destroy_process_group()
+
+    def generate_multimodal_plugin(
+        self,
+        vision_model_name: str,
+        language_model_name: str,
+        vision_tp_size: int,
+        language_tp_size: int,
+    ) -> MultimodalParallelPlugin:
+        vision_plugin = ModalParallelPlugin(
+            tp_size=vision_tp_size,
+            pipeline_template=PipelineTemplate(
+                vision_model_name,
+                expected_vision_module_layers_per_stage[vision_model_name],
+            ),
+        )
+        language_plugin = ModalParallelPlugin(
+            tp_size=language_tp_size,
+            pipeline_template=PipelineTemplate(
+                language_model_name,
+                expected_language_module_layers_per_stage[language_model_name],
+            ),
+        )
+
+        return MultimodalParallelPlugin(
+            encoder_plugins={"vision": vision_plugin},
+            language_model_plugin=language_plugin,
+            num_microbatches=12,
+            microbatch_size=1,
+        )
 
     @pytest.mark.parametrize("vision_config", vision_configs, ids=["clip"])
     @pytest.mark.parametrize(
@@ -279,12 +251,11 @@ class TestPluginInitializationWithFakeBackend:
         )
 
         for rank in range(world_size):
-            plugin = generate_multimodal_plugin(
+            plugin = self.generate_multimodal_plugin(
                 vision_model_name,
                 language_model_name,
                 vision_tp_size,
                 language_tp_size,
-                3,
             )
             per_rank_model = copy.deepcopy(model)
             dist.init_process_group(
@@ -386,7 +357,7 @@ class TestPluginInitializationWithFakeBackend:
         )
 
         for rank in range(world_size):
-            plugin = generate_multimodal_plugin(
+            plugin = self.generate_multimodal_plugin(
                 vision_model_name,
                 language_model_name,
                 vision_tp_size=vision_tp_size,
@@ -433,7 +404,60 @@ class TestPluginInitializationWithFakeBackend:
             dist.destroy_process_group()
 
 
-class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
+class TestParallelPluginExecution(MultiProcessTestCase):
+    language_module_layers_per_stage = {
+        "mistralai/Mistral-7B-v0.3": [
+            ["model.embed_tokens", "model.layers.0"],
+            ["model.layers.1", "model.layers.2", "model.norm", "lm_head"],
+        ],
+        "meta-llama/Meta-Llama-3-8B": [
+            ["model.embed_tokens", "model.layers.0"],
+            ["model.layers.1", "model.layers.2", "model.norm", "lm_head"],
+        ],
+        "facebook/opt-125m": [
+            [
+                "model.decoder.embed_tokens",
+                "model.decoder.embed_positions",
+                "model.decoder.layers.0",
+            ],
+            [
+                "model.decoder.layers.1",
+                "model.decoder.layers.2",
+                "model.decoder.final_layer_norm",
+                "lm_head",
+            ],
+        ],
+    }
+
+    def generate_multimodal_plugin(
+        self,
+        vision_model_name: str,
+        language_model_name: str,
+        vision_tp_size: int,
+        language_tp_size: int,
+    ) -> MultimodalParallelPlugin:
+        vision_plugin = ModalParallelPlugin(
+            tp_size=vision_tp_size,
+            pipeline_template=PipelineTemplate(
+                vision_model_name,
+                expected_vision_module_layers_per_stage[vision_model_name],
+            ),
+        )
+        language_plugin = ModalParallelPlugin(
+            tp_size=language_tp_size,
+            pipeline_template=PipelineTemplate(
+                language_model_name,
+                self.language_module_layers_per_stage[language_model_name],
+            ),
+        )
+
+        return MultimodalParallelPlugin(
+            encoder_plugins={"vision": vision_plugin},
+            language_model_plugin=language_plugin,
+            num_microbatches=4,
+            microbatch_size=1,
+        )
+
     @property
     def world_size(self):
         return 4
@@ -543,32 +567,31 @@ class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
         model_optimizer.step()
         model_optimizer.zero_grad()
 
-        # plugin = generate_multimodal_plugin(
-        #     vision_model_name,
-        #     language_model_name,
-        #     vision_tp_size=1,
-        #     language_tp_size=1,
-        #     language_pp_size=2,
-        # )
+        plugin = self.generate_multimodal_plugin(
+            vision_model_name,
+            language_model_name,
+            vision_tp_size=1,
+            language_tp_size=1,
+        )
 
-        # module = copy.deepcopy(model)
-        # parallel_module_optimizer = Adam(module.parameters())
+        module = copy.deepcopy(model)
+        parallel_module_optimizer = Adam(module.parameters())
 
-        # module, parallel_module_optimizer, *_ = plugin.configure(
-        #     module,
-        #     parallel_module_optimizer,
-        # )
+        module, parallel_module_optimizer, *_ = plugin.configure(
+            module,
+            parallel_module_optimizer,
+        )
 
-        # def criterion(x, *args, **kwargs):
-        #     return x.loss
+        def criterion(x, *args, **kwargs):
+            return x.loss
 
-        # plugin.execute_pipeline(
-        #     data_iter=iter(inputs),
-        #     model=module,
-        #     criterion=criterion,
-        #     optimizer=parallel_module_optimizer,
-        #     return_loss=True,
-        # )
+        plugin.execute_pipeline(
+            data_iter=iter(inputs),
+            model=module,
+            criterion=criterion,
+            optimizer=parallel_module_optimizer,
+            return_loss=True,
+        )
 
 
-instantiate_parametrized_tests(TestPluginExecutionWithGlooBackend)
+instantiate_parametrized_tests(TestParallelPluginExecution)
