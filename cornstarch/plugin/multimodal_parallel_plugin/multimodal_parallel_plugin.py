@@ -1,11 +1,20 @@
+from contextlib import contextmanager
 from dataclasses import replace
+from types import MethodType
 from typing import Any, Callable, Tuple
 
+import torch
 import torch.distributed as dist
-from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelPlugin
+from colossalai.accelerator import get_accelerator
+from colossalai.booster.plugin.hybrid_parallel_plugin import (
+    HybridParallelAMPOptimizer,
+    HybridParallelNaiveOptimizer,
+    HybridParallelPlugin,
+    get_param_info,
+)
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
-from torch.nn import Module
+from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader
@@ -28,7 +37,93 @@ from cornstarch.shardformer.shard.shard_config import ShardConfig
 
 
 class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
-    pass
+    def __init__(
+        self,
+        module: MultimodalModel,
+        precision: str,
+        shard_config: ShardConfig,
+        dp_group: dist.ProcessGroup,
+        tp_group: dist.ProcessGroup,
+        sp_group: dist.ProcessGroup,
+    ):
+        self.stage_manager = shard_config.pipeline_stage_manager
+        self.shard_config = shard_config
+        self.dp_group = dp_group
+        self.tp_group = tp_group
+        self.sp_group = sp_group
+        self.use_dpp = False
+        self.require_grad_sync = True
+        self.shared_params = []  # TODO: add shared params
+        self.shared_param_process_groups = []
+
+        # setting mixed_precision
+        self.mixed_precision = None
+        if precision == "fp16":
+            self.mixed_precision = torch.float16
+        elif precision == "bf16":
+            self.mixed_precision = torch.bfloat16
+        if self.mixed_precision is not None:
+            module = module.to(self.mixed_precision)
+
+        module = module.to(get_accelerator().get_current_device())
+
+        super().__init__(module)
+
+    def sync_shared_params(self):
+        for shared_param, group in zip(
+            self.shared_params, self.shared_param_process_groups
+        ):
+            if self.stage_manager.stage in shared_param:
+                param = shared_param[self.stage_manager.stage]
+                dist.all_reduce(param.grad, group=group)
+            dist.barrier()
+
+    @contextmanager
+    def no_sync(self):
+        r"""
+        A context manager to disable automatic gradient synchronization (all-reduce) and allow manual synchronization
+        when 'no_sync' is active. Alternatively, synchronization will occur in the first forward-backward pass
+        when exiting the context.
+        """
+
+        # Store the current value of 'require_grad_sync' to restore it later.
+        old_require_grad_sync = self.require_grad_sync
+        # Disable automatic gradient synchronization.
+        self.require_grad_sync = False
+        try:
+            if self.use_dpp:
+                # If using data parallel processing (use_dpp), disable synchronization too.
+                with self.module.no_sync():
+                    yield
+            else:
+                yield
+        finally:
+            # Restore the original value of 'require_grad_sync'.
+            self.require_grad_sync = old_require_grad_sync
+
+    def sync_dp_grads(self):
+        r"""
+        Synchronize gradients across data parallelism (DP) if the DP group size is greater than 1.
+        This function performs an all-reduce operation to combine gradients from different devices in the DP group.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+
+        # Check if the DP group size is 1, meaning no synchronization is needed.
+        if self.dp_group.size() == 1:
+            return
+
+        # Iterate through the model's parameters and perform gradient synchronization.
+        for p in self.module.parameters():
+            if p.grad is not None:
+                # Perform all-reduce to combine gradients from different devices.
+                dist.all_reduce(p.grad, group=self.dp_group)
+                # Normalize the gradient by dividing it by the DP group size.
+                p.grad.div_(self.dp_group.size())
 
 
 class MultimodalParallelPlugin(HybridParallelPlugin):
@@ -186,7 +281,9 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         criterion: Callable[..., Any] | None = None,
         dataloader: DataLoader | None = None,
         lr_scheduler: LRScheduler | None = None,
-    ) -> Tuple[Module, OptimizerWrapper, Callable[..., Any], DataLoader, LRScheduler]:
+    ) -> Tuple[
+        nn.Module, OptimizerWrapper, Callable[..., Any], DataLoader, LRScheduler
+    ]:
         assert dist.is_initialized(), "torch.distributed is not initialized."
         self.init_distributed()
 
@@ -210,6 +307,43 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             )
             model.add_module("language_model", module)
 
-            model = MultimodalParallelModule(model)
+            model = MultimodalParallelModule(
+                model,
+                precision=self.precision,
+                shard_config=self.shard_config,
+                dp_group=self.dp_group,
+                tp_group=self.tp_group,
+                sp_group=None,
+            )
+
+        if optimizer is not None:
+            if not isinstance(optimizer, OptimizerWrapper):
+                param_info = get_param_info(optimizer)
+                if self.precision in ["fp16", "bf16"]:
+                    optimizer = HybridParallelAMPOptimizer(
+                        optimizer,
+                        model,
+                        use_pipeline=self.enable_pipeline_parallelism,
+                        param_info=param_info,
+                        precision=self.precision,
+                        max_norm=self.max_norm,
+                        pp_process_group=self.pp_groups[0],
+                        tp_process_group=self.tp_group,
+                        **self.amp_config,
+                    )
+                else:
+                    optimizer = HybridParallelNaiveOptimizer(
+                        optimizer,
+                        model,
+                        use_pipeline=self.enable_pipeline_parallelism,
+                        param_info=param_info,
+                        max_norm=self.max_norm,
+                        pp_process_group=self.pp_groups[0],
+                        tp_process_group=self.tp_group,
+                    )
+                # inject update_master_params
+                model.update_master_params = MethodType(
+                    optimizer.update_master_params, model
+                )
 
         return model, optimizer, criterion, dataloader, lr_scheduler

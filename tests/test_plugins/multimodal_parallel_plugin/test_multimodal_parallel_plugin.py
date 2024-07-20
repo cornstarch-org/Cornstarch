@@ -1,13 +1,27 @@
 import copy
+import os
+import random
+import sys
 from typing import Type
+from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+from colossalai.accelerator import CudaAccelerator
 from colossalai.device import device_mesh
 from pytest_mock import MockerFixture
+from torch.optim import Adam
+from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
+from torch.testing._internal.common_utils import (
+    FILE_SCHEMA,
+    instantiate_parametrized_tests,
+    parametrize,
+)
 from torch.testing._internal.distributed.fake_pg import FakeStore
 from transformers import PretrainedConfig, PreTrainedModel
+from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 from transformers.models.mistral import MistralConfig, MistralForCausalLM
@@ -53,6 +67,9 @@ language_configs = [
 ]
 for _, config, _ in language_configs:
     config.num_hidden_layers = 3
+    config.hidden_size = 256
+    config.intermediate_size = 256
+    config.num_attention_heads = 8
     config._attn_implementation = "eager"
 
 expected_language_module_layers = {
@@ -121,6 +138,53 @@ expected_language_module_layers_per_stage = {
 }
 
 
+def generate_multimodal_model(
+    vision_config: PretrainedConfig,
+    vision_model_cls: Type[PreTrainedModel],
+    language_model_config: PretrainedConfig,
+    language_model_cls: Type[PreTrainedModel],
+) -> tuple[ModalModule, PreTrainedModel, MultimodalModel]:
+    vision_encoder = vision_model_cls(vision_config)
+    vision_module = ModalModule(vision_encoder)
+    language_module = language_model_cls(language_model_config)
+
+    model = MultimodalModel(
+        encoders={"vision": vision_module},
+        language_model=language_module,
+    ).to(dtype=torch.bfloat16)
+
+    return vision_module, language_module, model
+
+
+def generate_multimodal_plugin(
+    vision_model_name: str,
+    language_model_name: str,
+    vision_tp_size: int,
+    language_tp_size: int,
+) -> MultimodalParallelPlugin:
+    vision_plugin = ModalParallelPlugin(
+        tp_size=vision_tp_size,
+        pipeline_template=PipelineTemplate(
+            vision_model_name,
+            expected_vision_module_layers_per_stage[vision_model_name],
+        ),
+    )
+    language_plugin = ModalParallelPlugin(
+        tp_size=language_tp_size,
+        pipeline_template=PipelineTemplate(
+            language_model_name,
+            expected_language_module_layers_per_stage[language_model_name],
+        ),
+    )
+
+    return MultimodalParallelPlugin(
+        encoder_plugins={"vision": vision_plugin},
+        language_model_plugin=language_plugin,
+        num_microbatches=12,
+        microbatch_size=1,
+    )
+
+
 class TestPluginInitializationWithFakeBackend:
     @pytest.fixture(autouse=True)
     def fake_backend(self, mocker: MockerFixture):
@@ -133,53 +197,6 @@ class TestPluginInitializationWithFakeBackend:
 
         if dist.is_initialized():
             dist.destroy_process_group()
-
-    def generate_multimodal_model(
-        self,
-        vision_config: PretrainedConfig,
-        vision_model_cls: Type[PreTrainedModel],
-        language_model_config: PretrainedConfig,
-        language_model_cls: Type[PreTrainedModel],
-    ) -> tuple[ModalModule, PreTrainedModel, MultimodalModel]:
-        vision_encoder = vision_model_cls(vision_config)
-        vision_module = ModalModule(vision_encoder)
-        language_module = language_model_cls(language_model_config)
-
-        model = MultimodalModel(
-            encoders={"vision": vision_module},
-            language_model=language_module,
-        ).to(dtype=torch.bfloat16)
-
-        return vision_module, language_module, model
-
-    def generate_multimodal_plugin(
-        self,
-        vision_model_name: str,
-        language_model_name: str,
-        vision_tp_size: int,
-        language_tp_size: int,
-    ) -> MultimodalParallelPlugin:
-        vision_plugin = ModalParallelPlugin(
-            tp_size=vision_tp_size,
-            pipeline_template=PipelineTemplate(
-                vision_model_name,
-                expected_vision_module_layers_per_stage[vision_model_name],
-            ),
-        )
-        language_plugin = ModalParallelPlugin(
-            tp_size=language_tp_size,
-            pipeline_template=PipelineTemplate(
-                language_model_name,
-                expected_language_module_layers_per_stage[language_model_name],
-            ),
-        )
-
-        return MultimodalParallelPlugin(
-            encoder_plugins={"vision": vision_plugin},
-            language_model_plugin=language_plugin,
-            num_microbatches=12,
-            microbatch_size=1,
-        )
 
     @pytest.mark.parametrize("vision_config", vision_configs, ids=["clip"])
     @pytest.mark.parametrize(
@@ -214,7 +231,7 @@ class TestPluginInitializationWithFakeBackend:
     ):
         vision_model_name = vision_config[0]
         language_model_name = language_model_config[0]
-        vision_module, language_module, model = self.generate_multimodal_model(
+        vision_module, language_module, model = generate_multimodal_model(
             vision_config[1],
             vision_config[2],
             language_model_config[1],
@@ -232,7 +249,7 @@ class TestPluginInitializationWithFakeBackend:
         )
 
         for rank in range(world_size):
-            plugin = self.generate_multimodal_plugin(
+            plugin = generate_multimodal_plugin(
                 vision_model_name, language_model_name, vision_tp_size, language_tp_size
             )
             per_rank_model = copy.deepcopy(model)
@@ -327,7 +344,7 @@ class TestPluginInitializationWithFakeBackend:
     ):
         vision_model_name = vision_config[0]
         language_model_name = language_model_config[0]
-        *_, model = self.generate_multimodal_model(
+        *_, model = generate_multimodal_model(
             vision_config[1],
             vision_config[2],
             language_model_config[1],
@@ -335,7 +352,7 @@ class TestPluginInitializationWithFakeBackend:
         )
 
         for rank in range(world_size):
-            plugin = self.generate_multimodal_plugin(
+            plugin = generate_multimodal_plugin(
                 vision_model_name,
                 language_model_name,
                 vision_tp_size=vision_tp_size,
@@ -380,3 +397,136 @@ class TestPluginInitializationWithFakeBackend:
                 )
 
             dist.destroy_process_group()
+
+
+class TestPluginExecutionWithGlooBackend(MultiProcessTestCase):
+    @property
+    def world_size(self):
+        return 5
+
+    def setUp(self) -> None:
+        super().setUp()
+        with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
+            self._spawn_processes()
+
+    def tearDown(self) -> None:
+        return super().tearDown()
+
+    def get_data(self) -> dict[str, torch.Tensor]:
+        input = {
+            "pixel_values": torch.from_numpy(
+                np.random.rand(12, 3, 224, 224).astype(np.float32)
+            ),
+            "input_ids": torch.from_numpy(np.random.randint(0, 2048, (12, 64))),
+        }
+        input["labels"] = input["input_ids"]
+
+        return input
+
+    @classmethod
+    def _run(cls, rank: int, test_name: str, file_name: str, parent_pipe) -> None:
+        self = cls(test_name)
+        self.rank = rank
+        self.file_name = file_name
+
+        print(f"dist init r={self.rank}, world={self.world_size}")
+        backend = "gloo"
+
+        try:
+            dist.init_process_group(
+                init_method=f"{FILE_SCHEMA}{self.file_name}",
+                backend=backend,
+                world_size=self.world_size,
+                rank=self.rank,
+            )
+        except RuntimeError as e:
+            if "recompile" in e.args[0]:
+                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
+
+            raise
+
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        random.seed(0)
+        np.random.seed(0)
+
+        # Execute barrier prior to running test to ensure that every process
+        # has finished initialization and that the following test
+        # immediately exiting due to a skip doesn't cause flakiness.
+        dist.barrier()
+
+        with (
+            torch.backends.cudnn.flags(
+                enabled=True, deterministic=True, benchmark=True
+            ),
+            patch.object(
+                CudaAccelerator, "get_current_device", return_value=torch.device("cpu")
+            ),
+        ):
+            self.run_test(test_name, parent_pipe)
+
+        dist.barrier()
+
+        dist.destroy_process_group()
+
+    @parametrize(
+        "vision_config",
+        vision_configs,
+        name_fn=lambda x: ["clip"][vision_configs.index(x)],
+    )
+    @parametrize(
+        "language_model_config",
+        language_configs,
+        name_fn=lambda x: ["mistral", "llama", "opt"][language_configs.index(x)],
+    )
+    def test_model_run(
+        self,
+        vision_config: tuple[str, PretrainedConfig, Type[PreTrainedModel]],
+        language_model_config: tuple[str, PretrainedConfig, Type[PreTrainedModel]],
+    ):
+        vision_model_name = vision_config[0]
+        language_model_name = language_model_config[0]
+        *_, model = generate_multimodal_model(
+            vision_config[1],
+            vision_config[2],
+            language_model_config[1],
+            language_model_config[2],
+        )
+
+        plugin = generate_multimodal_plugin(
+            vision_model_name,
+            language_model_name,
+            vision_tp_size=1,
+            language_tp_size=1,
+        )
+
+        module = copy.deepcopy(model)
+
+        model_optimizer = Adam(model.parameters())
+        parallel_module_optimizer = Adam(module.parameters())
+
+        def criterion(x, *args, **kwargs):
+            return x.loss
+
+        module, parallel_module_optimizer, *_ = plugin.configure(
+            module,
+            parallel_module_optimizer,
+            criterion,
+        )
+
+        inputs = [self.get_data()]
+
+        outputs = model(**inputs[0])
+        loss = outputs.loss
+        loss.backward()
+
+        plugin.execute_pipeline(
+            data_iter=iter(inputs),
+            model=module,
+            criterion=criterion,
+            optimizer=parallel_module_optimizer,
+            return_loss=True,
+        )
+
+
+instantiate_parametrized_tests(TestPluginExecutionWithGlooBackend)
