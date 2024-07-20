@@ -376,6 +376,13 @@ class MultimodalModel(nn.Module):
                 for arg in self.encoders_args[modal_key]
                 if arg in kwargs
             }
+            if "output_attentions" in self.encoders_args[modal_key]:
+                args["output_attentions"] = output_attentions
+            if "output_hidden_states" in self.encoders_args[modal_key]:
+                args["output_hidden_states"] = output_hidden_states
+            if "return_dict" in self.encoders_args[modal_key]:
+                args["return_dict"] = return_dict
+
             encoders_outputs.append(encoder_module(**args))
 
         encoders_outputs = torch.cat(encoders_outputs, dim=1)
