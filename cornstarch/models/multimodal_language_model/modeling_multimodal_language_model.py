@@ -395,7 +395,7 @@ class MultimodalModel(nn.Module):
             )
         attention_mask = torch.cat([encoders_attention_mask, attention_mask], dim=1)
 
-        outputs = self.language_model(
+        language_model_inputs = dict(
             input_ids=None,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -406,6 +406,16 @@ class MultimodalModel(nn.Module):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+
+        # remove inputs that the language model doesn't accept
+        language_model_arguments = list(
+            inspect.signature(self.language_model.forward).parameters.keys()
+        )
+        for key in list(language_model_inputs.keys()):
+            if key not in language_model_arguments:
+                language_model_inputs.pop(key)
+
+        outputs = self.language_model(**language_model_inputs)
 
         logits = outputs.logits if return_dict else outputs[0]
         loss = None
