@@ -21,7 +21,6 @@ from torch.testing._internal.common_utils import (
 )
 from torch.testing._internal.distributed.fake_pg import FakeStore
 from transformers import PretrainedConfig, PreTrainedModel
-from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 from transformers.models.mistral import MistralConfig, MistralForCausalLM
@@ -429,6 +428,9 @@ class TestParallelPluginExecution(MultiProcessTestCase):
         ],
     }
 
+    num_microbatches = 4
+    microbatch_size = 1
+
     def generate_multimodal_plugin(
         self,
         vision_model_name: str,
@@ -454,8 +456,8 @@ class TestParallelPluginExecution(MultiProcessTestCase):
         return MultimodalParallelPlugin(
             encoder_plugins={"vision": vision_plugin},
             language_model_plugin=language_plugin,
-            num_microbatches=4,
-            microbatch_size=1,
+            num_microbatches=self.num_microbatches,
+            microbatch_size=self.microbatch_size,
         )
 
     @property
@@ -471,15 +473,16 @@ class TestParallelPluginExecution(MultiProcessTestCase):
         return super().tearDown()
 
     def get_data(self) -> dict[str, torch.Tensor]:
+        num_batch = self.microbatch_size * self.num_microbatches
         input = {
             "pixel_values": torch.from_numpy(
-                np.random.rand(12, 3, 224, 224).astype(np.float32)
+                np.random.rand(num_batch, 3, 224, 224).astype(np.float32)
             ),
-            "input_ids": torch.from_numpy(np.random.randint(0, 2048, (12, 64))),
+            "input_ids": torch.from_numpy(np.random.randint(0, 2048, (num_batch, 64))),
         }
         input["labels"] = input["input_ids"]
 
-        return BatchFeature(input, tensor_type="pt")
+        return input
 
     @classmethod
     def _run(cls, rank: int, test_name: str, file_name: str, parent_pipe) -> None:
@@ -554,18 +557,17 @@ class TestParallelPluginExecution(MultiProcessTestCase):
         model.gradient_checkpointing_enable()
         model.to(device=torch.device("cuda"))
 
-        model_optimizer = Adam(model.parameters())
-
         inputs = self.get_data()
         for k, v in inputs.items():
             inputs[k] = v.to("cuda")
 
-        outputs = model(**inputs)
-        loss = outputs.loss
-        loss.backward()
+        # outputs = model(**inputs)
+        # loss = outputs.loss
+        # loss.backward()
 
-        model_optimizer.step()
-        model_optimizer.zero_grad()
+        # model_optimizer = Adam(model.parameters())
+        # model_optimizer.step()
+        # model_optimizer.zero_grad()
 
         plugin = self.generate_multimodal_plugin(
             vision_model_name,
@@ -585,8 +587,9 @@ class TestParallelPluginExecution(MultiProcessTestCase):
         def criterion(x, *args, **kwargs):
             return x.loss
 
+        data_iter = iter([inputs])
         plugin.execute_pipeline(
-            data_iter=iter(inputs),
+            data_iter=data_iter,
             model=module,
             criterion=criterion,
             optimizer=parallel_module_optimizer,
