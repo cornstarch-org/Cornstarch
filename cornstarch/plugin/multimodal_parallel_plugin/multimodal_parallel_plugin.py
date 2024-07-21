@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import MethodType
 from typing import Any, Callable, Optional, Tuple
 
+from colossalai.checkpoint_io import CheckpointIO
 import torch
 import torch.distributed as dist
 from colossalai.accelerator import get_accelerator
@@ -573,3 +574,6 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 )
 
         return model, optimizer, criterion, dataloader, lr_scheduler
+
+    def get_checkpoint_io(self) -> CheckpointIO:
+        return None
