@@ -132,15 +132,19 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                         target_module=DropoutForReplicatedInput,
                     ),
                     SubModuleReplacementDescription(
-                        suffix="mlp.weights_in"
-                        if self.model.config.use_swiglu_ffn
-                        else "mlp.fc1",
+                        suffix=(
+                            "mlp.weights_in"
+                            if self.model.config.use_swiglu_ffn
+                            else "mlp.fc1"
+                        ),
                         target_module=Linear1D_Col,
                     ),
                     SubModuleReplacementDescription(
-                        suffix="mlp.weights_out"
-                        if self.model.config.use_swiglu_ffn
-                        else "mlp.fc2",
+                        suffix=(
+                            "mlp.weights_out"
+                            if self.model.config.use_swiglu_ffn
+                            else "mlp.fc2"
+                        ),
                         target_module=Linear1D_Row,
                     ),
                 ],
@@ -331,9 +335,11 @@ class Dinov2BackbonePolicy(Dinov2Policy):
         self.append_or_create_submodule_replacement(
             description=SubModuleReplacementDescription(
                 suffix="layernorm",
-                target_module=FusedLayerNorm
-                if self.shard_config.enable_fused_normalization
-                else LayerNorm,
+                target_module=(
+                    FusedLayerNorm
+                    if self.shard_config.enable_fused_normalization
+                    else LayerNorm
+                ),
             ),
             policy=policy,
             target_key=Dinov2Backbone,

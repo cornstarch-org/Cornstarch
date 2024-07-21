@@ -53,7 +53,9 @@ class MultimodalProjector(PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def forward(self, inputs_embeds: torch.Tensor, return_dict: bool = True) -> Union[ModelOutput, tuple]:
+    def forward(
+        self, inputs_embeds: torch.Tensor, return_dict: bool = True
+    ) -> Union[ModelOutput, tuple]:
         if self.gradient_checkpointing and self.training:
             if self.config.projection_type == "linear":
                 outputs = self._gradient_checkpointing_func(
@@ -80,7 +82,9 @@ class MultimodalProjector(PreTrainedModel):
                 raise NotImplementedError
 
         if not return_dict:
-            return tuple(outputs,)
+            return tuple(
+                outputs,
+            )
 
         return ModelOutput(hidden_states=outputs)
 
@@ -123,15 +127,27 @@ class ModalModule(nn.Module):
                     f"should be equal to hidden size of model ({model.config.hidden_size})."
                 )
 
-    def forward(self, return_dict: Optional[bool] = None, *args, **kwargs) -> ModelOutput | tuple:
-        return_dict = return_dict if return_dict is not None else self.module.config.use_return_dict
+    def forward(
+        self, return_dict: Optional[bool] = None, *args, **kwargs
+    ) -> ModelOutput | tuple:
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.module.config.use_return_dict
+        )
         if self.projector is None:
             return self.module(return_dict=return_dict, *args, **kwargs)
 
         if self.modal_type == ModalModuleType.Encoder:
-            return self.projector(self.module(return_dict=return_dict, *args, **kwargs)[0], return_dict=return_dict)
+            return self.projector(
+                self.module(return_dict=return_dict, *args, **kwargs)[0],
+                return_dict=return_dict,
+            )
         else:
-            return self.module(self.projector(return_dict=return_dict, *args, **kwargs)[0], return_dict=return_dict)
+            return self.module(
+                self.projector(return_dict=return_dict, *args, **kwargs)[0],
+                return_dict=return_dict,
+            )
 
     def train(self, mode: bool = True) -> ModalModule:
         self.module.train(mode)

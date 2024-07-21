@@ -443,17 +443,19 @@ class ImageProcessorWrapper(BaseImageProcessor):
         # Pad features
         max_patch = max(len(x) for x in new_images)
         pixel_values = [
-            np.concatenate(
-                [
-                    x,
-                    np.zeros(
-                        [max_patch - x.shape[0]] + list(x.shape[1:]), dtype=x.dtype
-                    ),
-                ],
-                axis=0,
+            (
+                np.concatenate(
+                    [
+                        x,
+                        np.zeros(
+                            [max_patch - x.shape[0]] + list(x.shape[1:]), dtype=x.dtype
+                        ),
+                    ],
+                    axis=0,
+                )
+                if x.shape[0] < max_patch
+                else x
             )
-            if x.shape[0] < max_patch
-            else x
             for x in new_images
         ]
 

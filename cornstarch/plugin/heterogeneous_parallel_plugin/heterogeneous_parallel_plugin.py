@@ -198,9 +198,8 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
             my_pipeline = self.pipelines[self._pipeline_index]
             module_names = my_pipeline.modules_per_stage[self.stage_manager.stage]
 
-            assert (
-                isinstance(self.dp_groups, list)
-                and len(self.dp_groups) == len(module_names)
+            assert isinstance(self.dp_groups, list) and len(self.dp_groups) == len(
+                module_names
             ), f"Number of dp groups ({len(self.dp_groups)}) does not match the number of modules in the stage ({len(module_names)})."
 
             module = model.module if isinstance(model, ModelWrapper) else model
@@ -211,12 +210,14 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
 
             model = HeterogeneousParallelModule(
                 module=module,
-                dp_groups={
-                    module_name: dp_group
-                    for module_name, dp_group in zip(module_names, self.dp_groups)
-                }
-                if self.dp_groups
-                else None,
+                dp_groups=(
+                    {
+                        module_name: dp_group
+                        for module_name, dp_group in zip(module_names, self.dp_groups)
+                    }
+                    if self.dp_groups
+                    else None
+                ),
                 tp_group=self.tp_group,
                 precision=self.precision,
                 shard_config=self.shard_config,
@@ -280,9 +281,9 @@ class HeterogeneousParallelPlugin(HybridParallelPlugin):
         data_iter: Iterator,
         model: HeterogeneousParallelModule,
         criterion: Callable[[Any, Any], torch.Tensor],
-        optimizer: HybridParallelNaiveOptimizer
-        | HybridParallelAMPOptimizer
-        | None = None,
+        optimizer: (
+            HybridParallelNaiveOptimizer | HybridParallelAMPOptimizer | None
+        ) = None,
         return_loss: bool = True,
         return_outputs: bool = False,
     ) -> dict:

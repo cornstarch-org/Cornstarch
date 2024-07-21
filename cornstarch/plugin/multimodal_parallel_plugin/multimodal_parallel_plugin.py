@@ -281,7 +281,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 assert not stage_manager.is_first_stage(check_only_in_modal=True)
                 args.pop(encoder_module.module.main_input_name)
                 args["hidden_states"] = hidden_states
-                
+
             outputs = encoder_module(**args)
             return outputs
         elif "decoder" in self.my_modal_name:
@@ -345,6 +345,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
     def sync_sp_grads(self):
         pass
+
 
 class MultimodalParallelPlugin(HybridParallelPlugin):
     """Plugin for multimodal language model.

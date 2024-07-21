@@ -212,9 +212,11 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
 
         self.append_or_create_method_replacement(
             description={
-                "forward": EvaCLIPForwards.evaclip_flash_attention_forward
-                if self.shard_config.enable_flash_attention
-                else EvaCLIPForwards.evaclip_eager_forward
+                "forward": (
+                    EvaCLIPForwards.evaclip_flash_attention_forward
+                    if self.shard_config.enable_flash_attention
+                    else EvaCLIPForwards.evaclip_eager_forward
+                )
             },
             policy=policy,
             target_key=EvaCLIPAttention,

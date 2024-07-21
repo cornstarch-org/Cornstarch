@@ -78,10 +78,12 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         for i in range(len(coords)):
             if (
                 # if this stage is the first first stage
-                coords[i][self.pipeline_axis] == 0
+                coords[i][self.pipeline_axis]
+                == 0
             ) or (
                 # if previous stage is in the different modal
-                self.stage_index_to_modal[coords[i][self.pipeline_axis] - 1] != my_modal
+                self.stage_index_to_modal[coords[i][self.pipeline_axis] - 1]
+                != my_modal
             ):
                 last_stage_indices_of_previous_modals = []
                 for previous_modal in previous_modals:
@@ -117,7 +119,8 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                 == self.pg_mesh.shape[self.pipeline_axis] - 1
             ) or (
                 # if next stage is in the different modal
-                self.stage_index_to_modal[coords[i][self.pipeline_axis] + 1] != my_modal
+                self.stage_index_to_modal[coords[i][self.pipeline_axis] + 1]
+                != my_modal
             ):
                 first_stage_indices_of_next_modals = []
                 for next_modal in next_modals:
