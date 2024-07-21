@@ -360,10 +360,11 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             for index, modal in enumerate(self.stage_index_to_modal)
             if modal == self.stage_index_to_modal[stage]
         )
-        stage -= first_stage_index
 
         num_layers_per_stage_accumulated = np.insert(np.cumsum(layers_per_stage), 0, 0)
         return (
-            num_layers_per_stage_accumulated[stage],
-            num_layers_per_stage_accumulated[stage + 1],
+            num_layers_per_stage_accumulated[stage]
+            - num_layers_per_stage_accumulated[first_stage_index],
+            num_layers_per_stage_accumulated[stage + 1]
+            - num_layers_per_stage_accumulated[first_stage_index],
         )

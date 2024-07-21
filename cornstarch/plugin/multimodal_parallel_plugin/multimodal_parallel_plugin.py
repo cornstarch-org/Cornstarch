@@ -187,7 +187,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 # step 2. merge encoded multimodal features into text embeddings
                 inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
                 inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
-                hidden_states = inputs_embeds
+                hidden_states = None
 
                 if attention_mask is None:
                     attention_mask = torch.ones_like(input_ids).to(
@@ -196,6 +196,8 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 attention_mask = torch.cat(
                     [encoders_attention_mask, attention_mask], dim=1
                 )
+            else:
+                assert inputs_embeds is None
 
             language_model_inputs = dict(
                 input_ids=None,
