@@ -152,7 +152,7 @@ def generate_multimodal_model(
     model = MultimodalModel(
         encoders={"vision": vision_module},
         language_model=language_module,
-    ).to(dtype=torch.bfloat16)
+    ).to(dtype=torch.float32)
 
     return vision_module, language_module, model
 
@@ -561,13 +561,13 @@ class TestParallelPluginExecution(MultiProcessTestCase):
         for k, v in inputs.items():
             inputs[k] = v.to("cuda")
 
-        # outputs = model(**inputs)
-        # loss = outputs.loss
-        # loss.backward()
+        org_outputs = model(**inputs)
+        org_loss = org_outputs.loss
+        org_loss.backward()
 
-        # model_optimizer = Adam(model.parameters())
-        # model_optimizer.step()
-        # model_optimizer.zero_grad()
+        model_optimizer = Adam(model.parameters())
+        model_optimizer.step()
+        model_optimizer.zero_grad()
 
         plugin = self.generate_multimodal_plugin(
             vision_model_name,
@@ -588,13 +588,17 @@ class TestParallelPluginExecution(MultiProcessTestCase):
             return x.loss
 
         data_iter = iter([inputs])
-        plugin.execute_pipeline(
+        sharded_outputs = plugin.execute_pipeline(
             data_iter=data_iter,
             model=module,
             criterion=criterion,
             optimizer=parallel_module_optimizer,
             return_loss=True,
         )
+        sharded_loss = sharded_outputs["loss"]
+
+        if plugin.stage_manager.is_last_stage(check_only_in_modal=False):
+            assert torch.allclose(org_loss.float(), sharded_loss.float())
 
 
 instantiate_parametrized_tests(TestParallelPluginExecution)

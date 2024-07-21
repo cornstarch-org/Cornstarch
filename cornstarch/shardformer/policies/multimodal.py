@@ -1,3 +1,4 @@
+import functools
 from typing import Any, Dict, cast
 
 import torch.distributed as dist
@@ -153,7 +154,10 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
         if self.pipeline_stage_manager is not None:
             policies[ModalModule] = ModulePolicyDescription(
                 method_replacement={
-                    "forward": ModalModulePipelineForwards.modal_module_forward
+                    "forward": functools.partial(
+                        ModalModulePipelineForwards.modal_module_forward,
+                        stage_manager=self.pipeline_stage_manager,
+                    )
                 }
             )
 
