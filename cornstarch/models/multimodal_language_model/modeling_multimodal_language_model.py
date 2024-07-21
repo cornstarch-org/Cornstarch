@@ -272,10 +272,9 @@ class MultimodalModel(nn.Module):
         self.add_module("language_model", language_model)
 
     def from_pretrained_multimodal_model(
-        cls,
         model_id: str,
-        encoders: dict[str, ModalModule],
-        language_model: Optional[PreTrainedModel] = None,
+        # encoders: dict[str, ModalModule],
+        # language_model: Optional[PreTrainedModel] = None,
     ) -> MultimodalModel:
         
         # Need comment
@@ -283,17 +282,8 @@ class MultimodalModel(nn.Module):
         if model_id == "llava-hf/llava-1.5-7b-hf":
             llava_model = LlavaForConditionalGeneration.from_pretrained(model_id, revision="main", torch_dtype="auto", device_map="cuda")
             
-            # convert language model
-            llava_state_dict = llava_model.language_model.state_dict()
-            llava_state_dict_keys = llava_model.language_model.state_dict().keys()
-            for key in llava_state_dict_keys:
-                if llava_state_dict[key].shape[0] == 32064:
-                    llava_state_dict[key] = llava_state_dict[key][:32000]
-                if ".weight" in key:
-                    llava_state_dict[key.replace(".weight", ".base_layer.weight")] = llava_state_dict[key]
-            
-            # ToDo: raise error if LLM type not matches
-            language_model.load_state_dict(llava_state_dict, strict=False)
+            vision_encoder = llava_model.vision_tower
+            language_model = llava_model.language_model
 
             # create projector
             llava_proj = llava_model.multi_modal_projector
@@ -302,15 +292,15 @@ class MultimodalModel(nn.Module):
                 llava_proj_state_dict[key.replace('linear_1', 'in_proj'). replace('linear_2', 'out_proj')] = llava_proj_state_dict.pop(key)
 
             projector_config = MultimodalProjectorConfig(
-                encoder_config=encoders["vision"].config,
+                encoder_config=vision_encoder.config,
                 text_config=language_model.config,
                 projection_type="mlp",
             )
             vision_projector = MultimodalProjector(projector_config)
-            vision_projector.load_state_dict(llava_proj_state_dict)
-
+            vision_projector.load_state_dict(llava_proj_state_dict, assign=True)
+            
             return MultimodalModel(
-                encoders={"vision": ModalModule(model=encoders["vision"], projector=vision_projector)},
+                encoders={"vision": ModalModule(model=vision_encoder, projector=vision_projector)},
                 language_model=language_model,
             )
         
@@ -488,7 +478,7 @@ class MultimodalModel(nn.Module):
             attentions=outputs.attentions,
         )
 
-    def generation(
+    def generate(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         **kwargs
