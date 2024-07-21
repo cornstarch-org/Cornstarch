@@ -3,13 +3,13 @@ from __future__ import annotations
 import inspect
 import warnings
 from enum import Enum, auto
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from transformers.activations import get_activation
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast, ModelOutput
 from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
@@ -53,7 +53,7 @@ class MultimodalProjector(PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs_embeds: torch.Tensor, return_dict: bool = True) -> Union[ModelOutput, tuple]:
         if self.gradient_checkpointing and self.training:
             if self.config.projection_type == "linear":
                 outputs = self._gradient_checkpointing_func(
@@ -79,7 +79,10 @@ class MultimodalProjector(PreTrainedModel):
             else:
                 raise NotImplementedError
 
-        return outputs
+        if not return_dict:
+            return tuple(outputs,)
+
+        return ModelOutput(hidden_states=outputs)
 
 
 class ModalModuleType(Enum):
@@ -120,14 +123,15 @@ class ModalModule(nn.Module):
                     f"should be equal to hidden size of model ({model.config.hidden_size})."
                 )
 
-    def forward(self, *args, **kwargs) -> torch.Tensor:
+    def forward(self, return_dict: Optional[bool] = None, *args, **kwargs) -> ModelOutput | tuple:
+        return_dict = return_dict if return_dict is not None else self.module.config.use_return_dict
         if self.projector is None:
-            return self.module(*args, **kwargs)
+            return self.module(return_dict=return_dict, *args, **kwargs)
 
         if self.modal_type == ModalModuleType.Encoder:
-            return self.projector(self.module(*args, **kwargs)[0])
+            return self.projector(self.module(return_dict=return_dict, *args, **kwargs)[0], return_dict=return_dict)
         else:
-            return self.module(self.projector(*args, **kwargs))[0]
+            return self.module(self.projector(return_dict=return_dict, *args, **kwargs)[0], return_dict=return_dict)
 
     def train(self, mode: bool = True) -> ModalModule:
         self.module.train(mode)
@@ -383,7 +387,7 @@ class MultimodalModel(nn.Module):
             if "return_dict" in self.encoders_args[modal_key]:
                 args["return_dict"] = return_dict
 
-            encoders_outputs.append(encoder_module(**args))
+            encoders_outputs.append(encoder_module(**args)[0])
 
         encoders_outputs = torch.cat(encoders_outputs, dim=1)
         encoders_attention_mask = torch.ones(

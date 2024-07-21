@@ -1,4 +1,4 @@
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Union
 
 import torch
 from colossalai.accelerator import get_accelerator
@@ -11,6 +11,17 @@ from colossalai.pipeline.p2p import (
     _cuda_safe_tensor_to_object,
     _filling_ops_queue,
     create_send_metadata,
+)
+
+from colossalai.pipeline.schedule._utils import (
+    detach,
+    get_batch_size,
+    get_micro_batch,
+    merge_batch,
+    model_forward,
+    retain_grad,
+    to_device,
+    tree_map_hf,
 )
 from colossalai.pipeline.schedule._utils import merge_batch
 from colossalai.pipeline.schedule.one_f_one_b import (
@@ -636,6 +647,40 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             input_tensors = self._merge_tensors(input_tensors)
 
         return input_tensors
+
+    def forward_step(
+        self,
+        model: nn.Module,
+        input_obj: Optional[dict],
+        criterion: Callable,
+        accum_loss: Optional[torch.Tensor] = None,
+        outputs: Optional[list[Any]] = None,
+    ) -> Union[torch.Tensor, dict]:
+        """Forward one step of the pipeline
+
+        Args:
+            model (Module): Model to be run
+            input_obj (Optional[dict]): The output from the previous stage. If it is the first stage, the `input_obj` is None.
+            criterion (Callable): Criterion to calculate loss.
+            accum_loss (Optional[torch.Tensor], optional): Accumulated loss. Defaults to None.
+            outputs (Optional[List[Any]], optional): List to store the output of the last stage (final output). Defaults to None.
+
+        Returns:
+            Union[torch.Tensor, dict]: The intermediate output (dict) of the current stage. If it is the last stage, the output is the loss (Tensor).
+        """
+        micro_batch = self.load_micro_batch()
+        # for the first stage, input_obj is None
+        # for the non-first stage, input_obj is the output of the previous stage and it's must be a dict
+        output_obj = model_forward(model, micro_batch, input_obj)
+        if self.stage_manager.is_last_stage(check_only_in_modal=False):
+            loss = criterion(output_obj, micro_batch) / self.num_microbatches
+            if accum_loss is not None:
+                accum_loss.add_(loss.detach())
+            if outputs is not None:
+                outputs.append(tree_map_hf(detach, output_obj))
+            return loss
+        else:
+            return output_obj
 
     def run_forward_backward(
         self,

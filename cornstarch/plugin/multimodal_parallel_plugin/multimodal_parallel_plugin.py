@@ -187,6 +187,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 # step 2. merge encoded multimodal features into text embeddings
                 inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
                 inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
+                hidden_states = inputs_embeds
 
                 if attention_mask is None:
                     attention_mask = torch.ones_like(input_ids).to(
@@ -219,7 +220,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
             outputs = module.language_model(**language_model_inputs)
 
-            if stage_manager.is_last_stage(cheeck_only_in_modal=True):
+            if stage_manager.is_last_stage(check_only_in_modal=True):
                 # TODO: add padding to labels and use LM's loss calculation
                 #       Search "pad the labels" from Shiqi in the chat for context
                 # TODO: support tensor parallelism as well
@@ -236,7 +237,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     # Flatten the tokens
                     loss_fct = CrossEntropyLoss()
                     loss = loss_fct(
-                        shift_logits.view(-1, self.language_model.config.vocab_size),
+                        shift_logits.view(-1, module.language_model.config.vocab_size),
                         shift_labels.view(-1),
                     )
 
@@ -276,7 +277,13 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 args["return_dict"] = return_dict
 
             encoder_module = getattr(module, self.my_modal_name)
-            return encoder_module(**args)
+            if hidden_states is not None:
+                assert not stage_manager.is_first_stage(check_only_in_modal=True)
+                args.pop(encoder_module.module.main_input_name)
+                args["hidden_states"] = hidden_states
+                
+            outputs = encoder_module(**args)
+            return outputs
         elif "decoder" in self.my_modal_name:
             raise NotImplementedError()
 
@@ -336,6 +343,8 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 # Normalize the gradient by dividing it by the DP group size.
                 p.grad.div_(self.dp_group.size())
 
+    def sync_sp_grads(self):
+        pass
 
 class MultimodalParallelPlugin(HybridParallelPlugin):
     """Plugin for multimodal language model.
