@@ -152,7 +152,7 @@ def generate_multimodal_model(
     model = MultimodalModel(
         encoders={"vision": vision_module},
         language_model=language_module,
-    ).to(dtype=torch.float32)
+    )
 
     return vision_module, language_module, model
 
@@ -458,6 +458,7 @@ class TestParallelPluginExecution(MultiProcessTestCase):
             language_model_plugin=language_plugin,
             num_microbatches=self.num_microbatches,
             microbatch_size=self.microbatch_size,
+            precision=None,
         )
 
     @property
@@ -555,7 +556,9 @@ class TestParallelPluginExecution(MultiProcessTestCase):
             language_model_config[2],
         )
         model.gradient_checkpointing_enable()
-        model.to(device=torch.device("cuda"))
+        model.to(dtype=torch.float32, device=torch.device("cuda"))
+
+        module = copy.deepcopy(model)
 
         inputs = self.get_data()
         for k, v in inputs.items():
@@ -576,7 +579,6 @@ class TestParallelPluginExecution(MultiProcessTestCase):
             language_tp_size=1,
         )
 
-        module = copy.deepcopy(model)
         parallel_module_optimizer = Adam(module.parameters())
 
         module, parallel_module_optimizer, *_ = plugin.configure(
