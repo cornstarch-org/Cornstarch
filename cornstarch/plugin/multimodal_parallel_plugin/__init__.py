@@ -5,5 +5,8 @@ from .multimodal_1f1b import (
     MultimodalPipelineP2PCommunication,
 )
 from .multimodal_parallel_checkpoint_io import MultimodalParallelCheckpointIO
-from .multimodal_parallel_plugin import MultimodalParallelPlugin
+from .multimodal_parallel_plugin import (
+    MultimodalParallelPlugin,
+    MultimodalParallelModule,
+)
 from .multimodal_stage_manager import MultiModalPipelineStageManager
