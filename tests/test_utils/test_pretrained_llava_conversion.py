@@ -60,5 +60,25 @@ def test_multimodal_model_generation(
     )
 
     # ToDo: compare weights
+    prompt = "<image>USER: What are these? ASSISTANT:"
+    image_file = "http://images.cocodataset.org/val2017/000000039769.jpg"
 
-    pass
+    llava_processor = AutoProcessor.from_pretrained(pretrained_model_name_or_path)
+
+    raw_image = Image.open(requests.get(image_file, stream=True).raw)
+    llava_inputs = llava_processor(prompt, raw_image, return_tensors="pt").to(
+        0, llava_model.dtype
+    )
+
+    llava_output = llava_model.generate(
+        **llava_inputs, max_new_tokens=20, do_sample=False, vision_feature_layer=-1
+    )
+
+    cornstarch_output = cornstarch_llava.generate(
+        **llava_inputs,
+        max_new_tokens=20,
+        do_sample=False,
+        pad_token_id=llava_processor.tokenizer.eos_token_id,
+    )
+
+    print(llava_processor.decode(cornstarch_output[0][2:], skip_special_tokens=True))

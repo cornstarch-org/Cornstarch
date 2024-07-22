@@ -503,10 +503,25 @@ class MultimodalModel(nn.Module):
 
         encoders_outputs = torch.cat(encoders_outputs, dim=1)
 
+        encoders_attention_mask = torch.ones(
+            encoders_outputs.size()[:-1],
+            dtype=torch.long,
+            device=encoders_outputs.device,
+        )
+
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
         inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
+        
+        attention_mask = torch.ones_like(input_ids).to(
+            encoders_attention_mask.device
+        )
+        attention_mask = torch.cat([encoders_attention_mask, attention_mask], dim=1)
+
+
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ["pixel_values", "attention_mask"]}
 
         return self.language_model.generate(
             inputs_embeds=inputs_embeds,
-            **kwargs
+            use_cache=True,
+            **filtered_kwargs
         )
