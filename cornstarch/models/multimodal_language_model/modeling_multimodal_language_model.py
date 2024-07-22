@@ -273,15 +273,14 @@ class MultimodalModel(nn.Module):
 
     def from_pretrained_multimodal_model(
         model_id: str,
-        # encoders: dict[str, ModalModule],
-        # language_model: Optional[PreTrainedModel] = None,
     ) -> MultimodalModel:
-        
         # Need comment
 
         if model_id == "llava-hf/llava-1.5-7b-hf":
-            llava_model = LlavaForConditionalGeneration.from_pretrained(model_id, revision="main", torch_dtype="auto", device_map="cuda")
-            
+            llava_model = LlavaForConditionalGeneration.from_pretrained(
+                model_id, revision="main", torch_dtype="auto", device_map="cuda"
+            )
+
             vision_encoder = llava_model.vision_tower
             language_model = llava_model.language_model
 
@@ -289,7 +288,9 @@ class MultimodalModel(nn.Module):
             llava_proj = llava_model.multi_modal_projector
             llava_proj_state_dict = llava_proj.state_dict()
             for key in llava_proj.state_dict().keys():
-                llava_proj_state_dict[key.replace('linear_1', 'in_proj'). replace('linear_2', 'out_proj')] = llava_proj_state_dict.pop(key)
+                llava_proj_state_dict[
+                    key.replace("linear_1", "in_proj").replace("linear_2", "out_proj")
+                ] = llava_proj_state_dict.pop(key)
 
             projector_config = MultimodalProjectorConfig(
                 encoder_config=vision_encoder.config,
@@ -298,15 +299,19 @@ class MultimodalModel(nn.Module):
             )
             vision_projector = MultimodalProjector(projector_config)
             vision_projector.load_state_dict(llava_proj_state_dict, assign=True)
-            
+
             return MultimodalModel(
-                encoders={"vision": ModalModule(model=vision_encoder, projector=vision_projector)},
+                encoders={
+                    "vision": ModalModule(
+                        model=vision_encoder, projector=vision_projector
+                    )
+                },
                 language_model=language_model,
             )
-        
+
         else:
-            raise NotImplementedError     
-    
+            raise NotImplementedError
+
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         for encoder in self.encoders.values():
             encoder.module.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
@@ -478,19 +483,15 @@ class MultimodalModel(nn.Module):
             attentions=outputs.attentions,
         )
 
-    def generate(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        **kwargs
-    ):
-        # Need commment 
+    def generate(self, input_ids: Optional[torch.LongTensor] = None, **kwargs):
+        # Need commment
 
         if self.language_model is None:
             # Does not support CLIP-like encoder only multimodal model yet
             raise NotImplementedError
-        
+
         inputs_embeds = None
-        
+
         encoders_outputs = []
         for modal_key in self.encoders.keys():
             encoder_module = getattr(self, f"{modal_key}_encoder")
@@ -502,7 +503,7 @@ class MultimodalModel(nn.Module):
             encoders_outputs.append(encoder_module(**args))
 
         encoders_outputs = torch.cat(encoders_outputs, dim=1)
-        
+
         encoders_attention_mask = torch.ones(
             encoders_outputs.size()[:-1],
             dtype=torch.long,
@@ -511,16 +512,16 @@ class MultimodalModel(nn.Module):
 
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
         inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
-        
-        attention_mask = torch.ones_like(input_ids).to(
-            encoders_attention_mask.device
-        )
+
+        attention_mask = torch.ones_like(input_ids).to(encoders_attention_mask.device)
         attention_mask = torch.cat([encoders_attention_mask, attention_mask], dim=1)
 
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ["pixel_values", "attention_mask"]}
+        filtered_kwargs = {
+            k: v
+            for k, v in kwargs.items()
+            if k not in ["pixel_values", "attention_mask"]
+        }
 
         return self.language_model.generate(
-            inputs_embeds=inputs_embeds,
-            use_cache=True,
-            **filtered_kwargs
+            inputs_embeds=inputs_embeds, use_cache=True, **filtered_kwargs
         )
