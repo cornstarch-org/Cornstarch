@@ -81,7 +81,7 @@ def test_multimodal_model_generation(
         vision_feature_layer=-1,
         pad_token_id=llava_processor.tokenizer.eos_token_id,
     )
-    print(llava_processor.decode(llava_output[0][2:], skip_special_tokens=True))
+    llava_text_output = llava_processor.decode(llava_output[0][2:], skip_special_tokens=True).split("ASSISTANT:")[-1].strip()
 
     prompt = "USER: What are these? ASSISTANT:"
     cornstarch_inputs = llava_processor(prompt, raw_image, return_tensors="pt").to(
@@ -93,9 +93,7 @@ def test_multimodal_model_generation(
         do_sample=False,
         pad_token_id=llava_processor.tokenizer.eos_token_id,
     )
-    print(llava_processor.decode(cornstarch_output[0], skip_special_tokens=True))
+    cornstarch_text_output = llava_processor.decode(cornstarch_output[0], skip_special_tokens=True)
 
-    # print("***", llava_model.config.vision_feature_layer, llava_model.config.vision_feature_select_strategy)
-    # print("!!!", cornstarch_output)
-
+    assert llava_text_output == cornstarch_text_output
     
