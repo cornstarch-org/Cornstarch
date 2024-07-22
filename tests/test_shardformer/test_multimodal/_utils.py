@@ -91,102 +91,94 @@ model_class_dict: dict[str, Type[PreTrainedModel]] = {
 }
 
 llama_gemma_mistral_qwen_modules = [
-    [
-        "module.embed_tokens",
-        "module.layers.0",
-        "module.layers.1",
-        "module.layers.2",
-        "module.layers.3",
-        "module.norm",
-        "lm_head",
-    ]
+    "module.embed_tokens",
+    "module.layers.0",
+    "module.layers.1",
+    "module.layers.2",
+    "module.layers.3",
+    "module.norm",
+    "lm_head",
 ]
 phi3_modules = [
-    [
-        "module.embed_tokens",
-        "module.embed_dropout",
-        "module.layers.0",
-        "module.layers.1",
-        "module.layers.2",
-        "module.layers.3",
-        "module.norm",
-        "lm_head",
-    ]
+    "module.embed_tokens",
+    "module.embed_dropout",
+    "module.layers.0",
+    "module.layers.1",
+    "module.layers.2",
+    "module.layers.3",
+    "module.norm",
+    "lm_head",
 ]
 clip_vision_model_modules = [
-    [
-        "vision_model.embeddings",
-        "vision_model.pre_layrnorm",
-        "vision_model.encoder.layers.0",
-        "vision_model.encoder.layers.1",
-        "vision_model.encoder.layers.2",
-        "vision_model.post_layernorm",
-    ]
+    "vision_model.embeddings",
+    "vision_model.pre_layrnorm",
+    "vision_model.encoder.layers.0",
+    "vision_model.encoder.layers.1",
+    "vision_model.encoder.layers.2",
+    "vision_model.post_layernorm",
 ]
 siglip_vision_model_modules = [
-    [
-        "vision_model.embeddings",
-        "vision_model.encoder.layers.0",
-        "vision_model.encoder.layers.1",
-        "vision_model.encoder.layers.2",
-        "vision_model.post_layernorm",
-        "vision_model.head",
-    ]
+    "vision_model.embeddings",
+    "vision_model.encoder.layers.0",
+    "vision_model.encoder.layers.1",
+    "vision_model.encoder.layers.2",
+    "vision_model.post_layernorm",
+    "vision_model.head",
 ]
 dinov2_modules = [
-    [
-        "dinov2.embeddings",
-        "dinov2.encoder.layers.0",
-        "dinov2.encoder.layers.1",
-        "dinov2.encoder.layers.2",
-        "dinov2.layernorm",
-    ]
+    "dinov2.embeddings",
+    "dinov2.encoder.layers.0",
+    "dinov2.encoder.layers.1",
+    "dinov2.encoder.layers.2",
+    "dinov2.layernorm",
 ]
 
 pipeline_template_dict: dict[tuple[str, int], PipelineTemplate] = {
-    ("llama", 1): PipelineTemplate("llama", llama_gemma_mistral_qwen_modules),
+    ("llama", 1): PipelineTemplate("llama", [llama_gemma_mistral_qwen_modules]),
     ("llama", 2): PipelineTemplate(
         "llama",
         [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
     ),
-    ("gemma", 1): PipelineTemplate("gemma", llama_gemma_mistral_qwen_modules),
+    ("gemma", 1): PipelineTemplate("gemma", [llama_gemma_mistral_qwen_modules]),
     ("gemma", 2): PipelineTemplate(
         "gemma",
         [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
     ),
-    ("gemma2", 1): PipelineTemplate("gemma2", llama_gemma_mistral_qwen_modules),
+    ("gemma2", 1): PipelineTemplate("gemma2", [llama_gemma_mistral_qwen_modules]),
     ("gemma2", 2): PipelineTemplate(
         "gemma2",
         [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
     ),
-    ("mistral", 1): PipelineTemplate("mistral", llama_gemma_mistral_qwen_modules),
+    ("mistral", 1): PipelineTemplate("mistral", [llama_gemma_mistral_qwen_modules]),
     ("mistral", 2): PipelineTemplate(
         "mistral",
         [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
     ),
-    ("qwen2", 1): PipelineTemplate("qwen2", llama_gemma_mistral_qwen_modules),
+    ("qwen2", 1): PipelineTemplate("qwen2", [llama_gemma_mistral_qwen_modules]),
     ("qwen2", 2): PipelineTemplate(
         "qwen2",
         [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
     ),
-    ("qwen2", 1): PipelineTemplate("qwen2", llama_gemma_mistral_qwen_modules),
+    ("qwen2", 1): PipelineTemplate("qwen2", [llama_gemma_mistral_qwen_modules]),
     ("qwen2", 2): PipelineTemplate(
         "qwen2",
         [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
     ),
     ("phi3", 1): PipelineTemplate("phi3", phi3_modules),
     ("phi3", 2): PipelineTemplate("phi3", [phi3_modules[:3], phi3_modules[2:]]),
-    ("clip_vision_model", 1): PipelineTemplate("clip", clip_vision_model_modules),
+    ("clip_vision_model", 1): PipelineTemplate("clip", [clip_vision_model_modules]),
     ("clip_vision_model", 2): PipelineTemplate(
         "clip",
         [clip_vision_model_modules[:3], clip_vision_model_modules[3:]],
     ),
-    ("siglip_vision_model", 1): PipelineTemplate("siglip", siglip_vision_model_modules),
+    ("siglip_vision_model", 1): PipelineTemplate(
+        "siglip", [siglip_vision_model_modules]
+    ),
     ("siglip_vision_model", 2): PipelineTemplate(
         "siglip",
         [siglip_vision_model_modules[:2], siglip_vision_model_modules[2:]],
     ),
-    ("dinov2", 1): PipelineTemplate("dinov2", dinov2_modules),
+    ("dinov2", 1): PipelineTemplate("dinov2", [dinov2_modules]),
     ("dinov2", 2): PipelineTemplate("dinov2", [dinov2_modules[:2], dinov2_modules[2:]]),
 }
 

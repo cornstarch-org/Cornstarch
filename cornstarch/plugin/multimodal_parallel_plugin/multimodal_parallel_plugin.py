@@ -197,25 +197,29 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 attention_mask = torch.cat(
                     [encoders_attention_mask, attention_mask], dim=1
                 )
-            else:
-                assert inputs_embeds is None
 
-            if hidden_states is not None:
-                language_model_inputs = dict(
-                    input_ids=None,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                    hidden_states=hidden_states,
-                )
-            else:
                 language_model_inputs = dict(
                     input_ids=None,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds,
+                    hidden_states=None,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            else:
+                assert inputs_embeds is None
+
+                language_model_inputs = dict(
+                    input_ids=None,
+                    attention_mask=None,
+                    position_ids=None,
+                    past_key_values=None,
+                    inputs_embeds=None,
+                    hidden_states=hidden_states,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
@@ -271,6 +275,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 )
 
             # LM already returns a dict {"hidden_states": tensor}
+            assert isinstance(outputs, dict) and "hidden_states" in outputs.keys()
             return outputs
         elif "encoder" in self.my_modal_name:
             # TODO: support colocated modal forward.
