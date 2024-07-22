@@ -502,7 +502,7 @@ class MultimodalModel(nn.Module):
             encoders_outputs.append(encoder_module(**args))
 
         encoders_outputs = torch.cat(encoders_outputs, dim=1)
-
+        
         encoders_attention_mask = torch.ones(
             encoders_outputs.size()[:-1],
             dtype=torch.long,
@@ -516,7 +516,6 @@ class MultimodalModel(nn.Module):
             encoders_attention_mask.device
         )
         attention_mask = torch.cat([encoders_attention_mask, attention_mask], dim=1)
-
 
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ["pixel_values", "attention_mask"]}
 
