@@ -200,18 +200,27 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             else:
                 assert inputs_embeds is None
 
-            language_model_inputs = dict(
-                input_ids=None,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                hidden_states=hidden_states,
-            )
+            if hidden_states is not None:
+                language_model_inputs = dict(
+                    input_ids=None,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                    hidden_states=hidden_states,
+                )
+            else:
+                language_model_inputs = dict(
+                    input_ids=None,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
 
             # remove inputs that the language model doesn't accept
             language_model_arguments = list(
