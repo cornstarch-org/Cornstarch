@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 
 from ._utils import VisionLanguagePolicyTestClassBase, config_class_dict
@@ -107,7 +106,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
                 atol=atol,
                 rtol=rtol,
                 dim=0,
-                verbose=True,
+                verbose=False,
             )
             col_layer_grads = get_grad_tensors_for_check(
                 org_vision_model,
@@ -117,7 +116,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
                 atol=atol,
                 rtol=rtol,
                 dim=1,
-                verbose=True,
+                verbose=False,
             )
             grads_to_check.update(row_layer_grads)
             grads_to_check.update(col_layer_grads)
@@ -131,7 +130,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
                 atol=atol,
                 rtol=rtol,
                 dim=0,
-                verbose=True,
+                verbose=False,
             )
             col_layer_grads = get_grad_tensors_for_check(
                 org_language_model,
@@ -141,7 +140,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
                 atol=atol,
                 rtol=rtol,
                 dim=1,
-                verbose=True,
+                verbose=False,
             )
             grads_to_check.update(row_layer_grads)
             grads_to_check.update(col_layer_grads)
