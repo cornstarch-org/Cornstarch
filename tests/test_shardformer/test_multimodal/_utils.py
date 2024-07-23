@@ -195,12 +195,10 @@ def build_model_from_muiltimodal_plugin(
     Callable,
     Booster,
 ]:
-    precision = test_config.pop("precision")
-    precision = torch.float32 if precision == "fp32" else torch.float16
-    org_model = model_fn().to(dtype=precision, device=torch.device("cuda"))
+    org_model = model_fn()
     sharded_model = copy.deepcopy(org_model)
 
-    org_model = org_model.to("cuda")
+    org_model = org_model.to(device=torch.device("cuda"))
     org_optimizer = Adam(org_model.parameters(), lr=1e-3)
     sharded_optimizer = Adam(sharded_model.parameters(), lr=1e-3)
     criterion = loss_fn
@@ -222,7 +220,6 @@ def build_model_from_muiltimodal_plugin(
     plugin = MultimodalParallelPlugin(
         encoder_plugins={"vision": vision_plugin},
         language_model_plugin=language_plugin,
-        precision=None,
         **test_config,
     )
     booster = Booster(plugin=plugin)
