@@ -257,26 +257,28 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             # TODO: support colocated modal forward.
             # assume currently they are parallelized.
             modal_key = self.my_modal_name.replace("_encoder", "")
-            args = {
-                arg: kwargs[arg]
-                for arg in module.encoders_args[modal_key]
-                if arg in kwargs
-            }
-            if "output_attentions" in module.encoders_args[modal_key]:
-                args["output_attentions"] = output_attentions
-            if "output_hidden_states" in module.encoders_args[modal_key]:
-                args["output_hidden_states"] = output_hidden_states
-            if "return_dict" in module.encoders_args[modal_key]:
-                args["return_dict"] = return_dict
-
             encoder_module = getattr(module, self.my_modal_name)
-            if hidden_states is not None:
-                assert not stage_manager.is_first_stage(check_only_in_modal=True)
-                args.pop(encoder_module.module.main_input_name)
-                args["hidden_states"] = hidden_states
 
-            outputs = encoder_module(**args)
-            return outputs
+            if stage_manager.is_first_stage(check_only_in_modal=True):
+                assert hidden_states is None
+                encoder_model_inputs = {
+                    arg: kwargs[arg]
+                    for arg in module.encoders_args[modal_key]
+                    if arg in kwargs
+                }
+            else:
+                assert hidden_states is not None
+                encoder_model_inputs = dict(hidden_states=hidden_states)
+
+            encoder_model_inputs.update(
+                {
+                    "output_attentions": output_attentions,
+                    "output_hidden_states": output_hidden_states,
+                    "return_dict": return_dict,
+                }
+            )
+
+            return encoder_module(**encoder_model_inputs)
         elif "decoder" in self.my_modal_name:
             raise NotImplementedError()
 
