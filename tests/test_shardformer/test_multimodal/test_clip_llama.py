@@ -16,12 +16,10 @@ from torch.testing._internal.common_utils import (
 from colossalai.booster import Booster
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from cornstarch.plugin.multimodal_parallel_plugin import (
-    MultimodalParallelPlugin,
-    ModalParallelPlugin,
     MultimodalParallelModule,
     MultiModalPipelineStageManager,
 )
-from cornstarch.models.multimodal_language_model import MultimodalModel, ModalModule
+from cornstarch.models.multimodal_language_model import MultimodalModel
 from torch.optim import Optimizer
 from colossalai.interface import OptimizerWrapper
 
@@ -41,11 +39,9 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
         num_microbatches = 4
         num_batch = microbatch_size * num_microbatches
         input = {
-            "pixel_values": torch.from_numpy(
-                np.random.rand(num_batch, 3, 224, 224).astype(np.float32)
-            ),
-            "input_ids": torch.from_numpy(np.random.randint(0, 2048, (num_batch, 64))),
-            "attention_mask": torch.from_numpy(np.ones((num_batch, 64))),
+            "pixel_values": torch.rand(num_batch, 3, 224, 224),
+            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
+            "attention_mask": torch.ones(num_batch, 64),
         }
         input["labels"] = input["input_ids"]
 
@@ -69,7 +65,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
     ):
         stage_manager: MultiModalPipelineStageManager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
-        precision = next(org_model.parameters()).dtype
+        precision = booster.plugin.precision
 
         # unwrap_model
         org_vision_model = org_model.encoders["vision"].module.vision_model
@@ -91,7 +87,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
         language_col_layer_for_check = ["layers[0].self_attn.o_proj"]
 
         grads_to_check = {}
-        atol, rtol = (1e-4, 1e-4) if precision == torch.float32 else (5e-3, 5e-3)
+        atol, rtol = (1e-4, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
 
         is_vision_first_stage = (
             sharded_model.my_modal_name == "vision_encoder"
@@ -111,7 +107,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
                 atol=atol,
                 rtol=rtol,
                 dim=0,
-                verbose=False,
+                verbose=True,
             )
             col_layer_grads = get_grad_tensors_for_check(
                 org_vision_model,
@@ -121,7 +117,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
                 atol=atol,
                 rtol=rtol,
                 dim=1,
-                verbose=False,
+                verbose=True,
             )
             grads_to_check.update(row_layer_grads)
             grads_to_check.update(col_layer_grads)
@@ -135,7 +131,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
                 atol=atol,
                 rtol=rtol,
                 dim=0,
-                verbose=False,
+                verbose=True,
             )
             col_layer_grads = get_grad_tensors_for_check(
                 org_language_model,
@@ -145,7 +141,7 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
                 atol=atol,
                 rtol=rtol,
                 dim=1,
-                verbose=False,
+                verbose=True,
             )
             grads_to_check.update(row_layer_grads)
             grads_to_check.update(col_layer_grads)
@@ -155,11 +151,11 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
         sharded_optim.step()
 
         if stage_manager.is_last_stage(check_only_in_modal=False):
-            atol, rtol = (1e-5, 1e-3) if precision == torch.float32 else (5e-3, 5e-3)
+            atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
-        atol, rtol = (1e-4, 1e-3) if precision == torch.float32 else (5e-3, 5e-3)
+        atol, rtol = (1e-4, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
         if is_vision_first_stage:
             check_weight(
                 org_vision_model,
@@ -196,8 +192,8 @@ class ClipLlamaForcausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):
         ],
         name_fn=lambda vtp, vpp, ltp, lpp: f"v=({vtp},{vpp}),l=({ltp},{lpp})",
     )
-    @parametrize("precision", ["bf16", "fp32"])
-    @parametrize("fa", [False])
+    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("fa", [False, True])
     def test_clip_llama_causallm(
         self,
         vision_tp_size: int,
