@@ -198,6 +198,14 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     [encoders_attention_mask, attention_mask], dim=1
                 )
 
+                if labels is not None and labels.shape[1] != inputs_embeds.shape[1]:
+                    batch_size, seq_length = inputs_embeds.shape[:2]
+                    new_labels = torch.full((batch_size, seq_length), -100).to(
+                        labels.device
+                    )
+                    new_labels[:, -labels.shape[1] :] = labels
+                    labels = new_labels
+
                 language_model_inputs = dict(
                     input_ids=None,
                     attention_mask=attention_mask,
@@ -205,6 +213,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds,
                     hidden_states=None,
+                    labels=labels,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
@@ -213,6 +222,14 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             else:
                 assert inputs_embeds is None
 
+                if labels is not None and labels.shape[1] != hidden_states.shape[1]:
+                    batch_size, seq_length = hidden_states.shape[:2]
+                    new_labels = torch.full((batch_size, seq_length), -100).to(
+                        labels.device
+                    )
+                    new_labels[:, -labels.shape[1] :] = labels
+                    labels = new_labels
+
                 language_model_inputs = dict(
                     input_ids=None,
                     attention_mask=None,
@@ -220,6 +237,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     past_key_values=None,
                     inputs_embeds=None,
                     hidden_states=hidden_states,
+                    labels=labels,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
@@ -234,49 +252,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 if key not in language_model_arguments:
                     language_model_inputs.pop(key)
 
-            outputs = module.language_model(**language_model_inputs)
-
-            if stage_manager.is_last_stage(check_only_in_modal=True):
-                # TODO: add padding to labels and use LM's loss calculation
-                #       Search "pad the labels" from Shiqi in the chat for context
-                # TODO: support tensor parallelism as well
-                logits = outputs.logits if return_dict else outputs[0]
-                loss = None
-                # we compute the loss here since we need to take into account the sequence length of the query embeds
-                if labels is not None:
-                    labels = labels.to(logits.device)
-                    logits = logits[:, -labels.size(1) :, :]
-                    # Shift so that tokens < n predict n
-                    shift_logits = logits[..., :-1, :].contiguous()
-                    shift_labels = labels[..., 1:].contiguous().to(logits.device)
-
-                    # Flatten the tokens
-                    loss_fct = CrossEntropyLoss()
-                    loss = loss_fct(
-                        shift_logits.view(-1, module.language_model.config.vocab_size),
-                        shift_labels.view(-1),
-                    )
-
-                if not return_dict:
-                    output = (
-                        logits,
-                        past_key_values,
-                        outputs.hidden_states,
-                        outputs.attentions,
-                    )
-                    return ((loss,) + output) if loss is not None else output
-
-                return CausalLMOutputWithPast(
-                    loss=loss,
-                    logits=logits,
-                    past_key_values=outputs.past_key_values,
-                    hidden_states=outputs.hidden_states,
-                    attentions=outputs.attentions,
-                )
-
-            # LM already returns a dict {"hidden_states": tensor}
-            assert isinstance(outputs, dict) and "hidden_states" in outputs.keys()
-            return outputs
+            return module.language_model(**language_model_inputs)
         elif "encoder" in self.my_modal_name:
             # TODO: support colocated modal forward.
             # assume currently they are parallelized.
