@@ -18,10 +18,6 @@ from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager impor
     MultiModalPipelineStageManager,
 )
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
-from cornstarch.shardformer.policies.multimodal import (
-    LanguageModelPolicyWrapper,
-    ModalModulePolicy,
-)
 from cornstarch.shardformer.shard.shardformer import ShardFormer
 
 
@@ -125,11 +121,19 @@ class ModalParallelPlugin(PipelinePluginBase):
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
         if isinstance(model, ModalModule):
+            from cornstarch.shardformer.policies.multimodal import (
+                ModalModulePolicy,
+            )
+
             policy = ModalModulePolicy()
             policy.set_model(model)
             policy.set_shard_config(shard_config)
         else:
             assert isinstance(model, PreTrainedModel)
+            from cornstarch.shardformer.policies.multimodal import (
+                LanguageModelPolicyWrapper,
+            )
+
             policy = LanguageModelPolicyWrapper(get_autopolicy(_fullname(model)))
             policy.set_model(model)
             policy.set_shard_config(shard_config)
