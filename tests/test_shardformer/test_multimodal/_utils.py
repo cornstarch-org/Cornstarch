@@ -164,7 +164,7 @@ pipeline_template_dict: dict[tuple[str, int], PipelineTemplate] = {
         "qwen2",
         [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
     ),
-    ("phi3", 1): PipelineTemplate("phi3", phi3_modules),
+    ("phi3", 1): PipelineTemplate("phi3", [phi3_modules]),
     ("phi3", 2): PipelineTemplate("phi3", [phi3_modules[:3], phi3_modules[2:]]),
     ("clip_vision_model", 1): PipelineTemplate("clip", [clip_vision_model_modules]),
     ("clip_vision_model", 2): PipelineTemplate(
