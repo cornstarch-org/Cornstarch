@@ -422,6 +422,9 @@ class MultimodalModel(nn.Module):
             )
         attention_mask = torch.cat([encoders_attention_mask, attention_mask], dim=1)
 
+        # Pad the labels to match the shape with LM input
+        # Lables are padded by -100 (a default ignore_index in loss calculation)
+        # so that they are ignored when calculating a loss.
         if labels is not None and labels.shape[1] != inputs_embeds.shape[1]:
             batch_size, seq_length = inputs_embeds.shape[:2]
             new_labels = torch.full((batch_size, seq_length), -100).to(labels.device)
