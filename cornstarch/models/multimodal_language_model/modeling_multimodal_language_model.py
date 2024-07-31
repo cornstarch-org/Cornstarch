@@ -530,7 +530,7 @@ class MultimodalModel(nn.Module):
         filtered_kwargs = {
             k: v
             for k, v in kwargs.items()
-            if k not in ["pixel_values", "attention_mask"]
+            if k not in ["pixel_values", "attention_mask", "image_sizes"]
         }
 
         return self.language_model.generate(
