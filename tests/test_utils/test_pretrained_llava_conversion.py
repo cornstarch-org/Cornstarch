@@ -18,11 +18,11 @@ from cornstarch.models.multimodal_language_model import (
     MultimodalModel,
 )
 
-
 pretrained_model_name_or_path_list = [
     "llava-hf/llava-1.5-7b-hf",
     # "llava-hf/llava-v1.6-vicuna-7b-hf"
 ]
+
 
 @pytest.mark.parametrize(
     "pretrained_model_name_or_path", pretrained_model_name_or_path_list
@@ -30,6 +30,8 @@ pretrained_model_name_or_path_list = [
 def test_multimodal_model_generation(
     pretrained_model_name_or_path: str,
 ):
+    # todo: currently does not support llava-v1.6
+
     # create cornstarch llava model
     cornstarch_llava = MultimodalModel.from_pretrained_multimodal_model(
         pretrained_model_id=pretrained_model_name_or_path,
@@ -38,11 +40,17 @@ def test_multimodal_model_generation(
     # create llava model
     if "llava-1.5" in pretrained_model_name_or_path:
         llava_model = LlavaForConditionalGeneration.from_pretrained(
-            pretrained_model_name_or_path, revision="main", torch_dtype="auto", device_map="cuda"
+            pretrained_model_name_or_path,
+            revision="main",
+            torch_dtype="auto",
+            device_map="cuda",
         )
     elif "llava-v1.6" in pretrained_model_name_or_path:
         llava_model = LlavaNextForConditionalGeneration.from_pretrained(
-            pretrained_model_name_or_path, revision="main", torch_dtype="auto", device_map="cuda"
+            pretrained_model_name_or_path,
+            revision="main",
+            torch_dtype="auto",
+            device_map="cuda",
         )
 
     # config vision feature layer to match cornstarch settings

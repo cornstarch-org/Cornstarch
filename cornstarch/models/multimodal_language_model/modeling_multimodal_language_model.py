@@ -8,10 +8,13 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
+from transformers import (
+    LlavaForConditionalGeneration,
+    LlavaNextForConditionalGeneration,
+)
 from transformers.activations import get_activation
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers import LlavaForConditionalGeneration, LlavaNextForConditionalGeneration
 
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
@@ -280,7 +283,7 @@ class MultimodalModel(nn.Module):
         Args:
             pretrained_model_id (`str`):
                 A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
-        
+
         Currently supporting:
             llava-hf/llava-v1.5
             llava-hf/llava-v1.6
@@ -288,11 +291,17 @@ class MultimodalModel(nn.Module):
 
         if "llava-1.5" in pretrained_model_id:
             pretrained_model = LlavaForConditionalGeneration.from_pretrained(
-                pretrained_model_id, revision="main", torch_dtype="auto", device_map="cuda"
+                pretrained_model_id,
+                revision="main",
+                torch_dtype="auto",
+                device_map="cuda",
             )
         elif "llava-v1.6" in pretrained_model_id:
             pretrained_model = LlavaNextForConditionalGeneration.from_pretrained(
-                pretrained_model_id, revision="main", torch_dtype="auto", device_map="cuda"
+                pretrained_model_id,
+                revision="main",
+                torch_dtype="auto",
+                device_map="cuda",
             )
         else:
             raise NotImplementedError
@@ -318,9 +327,7 @@ class MultimodalModel(nn.Module):
 
         return MultimodalModel(
             encoders={
-                "vision": ModalModule(
-                    model=vision_encoder, projector=vision_projector
-                )
+                "vision": ModalModule(model=vision_encoder, projector=vision_projector)
             },
             language_model=language_model,
         )
