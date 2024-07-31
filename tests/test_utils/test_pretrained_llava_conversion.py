@@ -8,6 +8,7 @@ from PIL import Image
 from transformers import (
     AutoProcessor,
     LlavaForConditionalGeneration,
+    LlavaNextForConditionalGeneration,
     PretrainedConfig,
     PreTrainedModel,
 )
@@ -19,7 +20,8 @@ from cornstarch.models.multimodal_language_model import (
 
 
 pretrained_model_name_or_path_list = [
-    "llava-hf/llava-1.5-7b-hf"
+    "llava-hf/llava-1.5-7b-hf",
+    # "llava-hf/llava-v1.6-vicuna-7b-hf"
 ]
 
 @pytest.mark.parametrize(
@@ -34,12 +36,14 @@ def test_multimodal_model_generation(
     ).to(dtype=torch.float16, device="cuda")
 
     # create llava model
-    llava_model = LlavaForConditionalGeneration.from_pretrained(
-        pretrained_model_name_or_path,
-        revision="main",
-        torch_dtype="auto",
-        device_map="cuda",
-    )
+    if "llava-1.5" in pretrained_model_name_or_path:
+        llava_model = LlavaForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path, revision="main", torch_dtype="auto", device_map="cuda"
+        )
+    elif "llava-v1.6" in pretrained_model_name_or_path:
+        llava_model = LlavaNextForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path, revision="main", torch_dtype="auto", device_map="cuda"
+        )
 
     # config vision feature layer to match cornstarch settings
     llava_model.config.vision_feature_layer = -1
