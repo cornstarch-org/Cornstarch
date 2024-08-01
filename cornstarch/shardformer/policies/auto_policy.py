@@ -153,6 +153,10 @@ _POLICY_LIST = {
     "transformers.models.qwen2.modeling_qwen2.Qwen2ForCausalLM": PolicyLocation(
         file_name="qwen2", class_name="Qwen2ForCausalLMPolicy"
     ),
+    # Whisper
+    "transformers.models.whisper.modeling_whisper.WhisperEncoder": PolicyLocation(
+        file_name="whisper", class_name="WhisperEncoderPolicy"
+    ),
 }
 
 
