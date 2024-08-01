@@ -8,6 +8,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
+from transformers import (
+    LlavaForConditionalGeneration,
+    LlavaNextForConditionalGeneration,
+)
 from transformers.activations import get_activation
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -270,6 +274,64 @@ class MultimodalModel(nn.Module):
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
+    def from_pretrained_multimodal_model(
+        pretrained_model_id: str,
+    ) -> MultimodalModel:
+        """
+        Instantiate a cornstarch model from a pretrained multimodal model.
+
+        Args:
+            pretrained_model_id (`str`):
+                A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
+
+        Currently supporting:
+            llava-hf/llava-v1.5
+            llava-hf/llava-v1.6
+        """
+
+        if "llava-1.5" in pretrained_model_id:
+            pretrained_model = LlavaForConditionalGeneration.from_pretrained(
+                pretrained_model_id,
+                revision="main",
+                torch_dtype="auto",
+                device_map="cuda",
+            )
+        elif "llava-v1.6" in pretrained_model_id:
+            pretrained_model = LlavaNextForConditionalGeneration.from_pretrained(
+                pretrained_model_id,
+                revision="main",
+                torch_dtype="auto",
+                device_map="cuda",
+            )
+        else:
+            raise NotImplementedError
+
+        vision_encoder = pretrained_model.vision_tower
+        language_model = pretrained_model.language_model
+
+        # Create projector
+        pretrained_proj = pretrained_model.multi_modal_projector
+        pretrained_proj_state_dict = pretrained_proj.state_dict()
+        for key in pretrained_proj.state_dict().keys():
+            pretrained_proj_state_dict[
+                key.replace("linear_1", "in_proj").replace("linear_2", "out_proj")
+            ] = pretrained_proj_state_dict.pop(key)
+
+        projector_config = MultimodalProjectorConfig(
+            encoder_config=vision_encoder.config,
+            text_config=language_model.config,
+            projection_type="mlp",
+        )
+        vision_projector = MultimodalProjector(projector_config)
+        vision_projector.load_state_dict(pretrained_proj_state_dict, assign=True)
+
+        return MultimodalModel(
+            encoders={
+                "vision": ModalModule(model=vision_encoder, projector=vision_projector)
+            },
+            language_model=language_model,
+        )
+
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         for encoder in self.encoders.values():
             encoder.module.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
@@ -439,4 +501,45 @@ class MultimodalModel(nn.Module):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+        )
+
+    def generate(self, input_ids: Optional[torch.LongTensor] = None, **kwargs):
+        """
+        Generates sequences of token ids for models with a language modeling head.
+
+        Args:
+            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you provide it.
+        """
+
+        if self.language_model is None:
+            # Does not support CLIP-like encoder only multimodal model yet
+            raise NotImplementedError
+
+        inputs_embeds = None
+
+        encoders_outputs = []
+        for modal_key in self.encoders.keys():
+            encoder_module = getattr(self, f"{modal_key}_encoder")
+            args = {
+                arg: kwargs[arg]
+                for arg in self.encoders_args[modal_key]
+                if arg in kwargs
+            }
+            encoders_outputs.append(encoder_module(**args))
+
+        encoders_outputs = torch.cat(encoders_outputs, dim=1)
+
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
+
+        filtered_kwargs = {
+            k: v
+            for k, v in kwargs.items()
+            if k not in ["pixel_values", "attention_mask", "image_sizes"]
+        }
+
+        return self.language_model.generate(
+            inputs_embeds=inputs_embeds, use_cache=True, **filtered_kwargs
         )
