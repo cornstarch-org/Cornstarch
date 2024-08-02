@@ -1,5 +1,4 @@
 import copy
-from collections import namedtuple
 from typing import Type
 
 import pytest
@@ -22,26 +21,21 @@ model_name_classes = [
     ("llava-hf/llava-v1.6-vicuna-7b-hf", LlavaNextForConditionalGeneration),
 ]
 
-Input = namedtuple("Input", ["image", "prompt"])
-batches = [
-    Input(
-        image=Image.open(
-            requests.get(
-                "http://images.cocodataset.org/val2017/000000039769.jpg",
-                stream=True,
-            ).raw
-        ),
-        prompt="USER: <image> What are these? ASSISTANT:",
-    ),
-    Input(
-        image=Image.open(
-            requests.get(
-                "https://github.com/haotian-liu/LLaVA/blob/1a91fc274d7c35a9b50b3cb29c4247ae5837ce39/images/llava_v1_5_radar.jpg?raw=true",
-                stream=True,
-            ).raw
-        ),
-        prompt="USER: <image> What are these? ASSISTANT:",
-    ),
+url = "https://www.ilankelman.org/stopsigns/australia.jpg"
+image_stop = Image.open(requests.get(url, stream=True).raw)
+
+url = "http://images.cocodataset.org/val2017/000000039769.jpg"
+image_cats = Image.open(requests.get(url, stream=True).raw)
+
+url = "https://huggingface.co/microsoft/kosmos-2-patch14-224/resolve/main/snowman.jpg"
+image_snowman = Image.open(requests.get(url, stream=True).raw)
+
+images = [image_stop, image_cats, image_snowman]
+
+prompts = [
+    "USER: <image>\nWhat is shown in this image? ASSISTANT:",
+    "USER: <image>\nWhat about this image? How many cats do you see ASSISTANT:",
+    "USER: <image>\nWhat is shown in this image? ASSISTANT:",
 ]
 
 
@@ -72,29 +66,22 @@ def test_multimodal_model_generation(
     hf_model.train(mode=False)
 
     processor = AutoProcessor.from_pretrained(model_name)
-
-    # loading sample image file
-    prompts = []
-    images = []
-    for i in range(batch_size):
-        prompts.append(batches[i].prompt)
-        images.append(batches[i].image)
+    processor.tokenizer.padding_side = "left"
 
     # llava text generation
-    hf_inputs = processor(prompts, images, return_tensors="pt").to(
-        dtype=torch.float16, device="cuda"
-    )
+    hf_inputs = processor(
+        prompts[:batch_size], images[:batch_size], padding=True, return_tensors="pt"
+    ).to(dtype=torch.float16, device="cuda")
 
     hf_output = hf_model.generate(
         **hf_inputs,
         max_new_tokens=20,
         do_sample=False,
     )
-    hf_text_output = (
-        processor.decode(hf_output[0][2:], skip_special_tokens=True)
-        .split("ASSISTANT:")[-1]
-        .strip()
-    )
+    hf_text_output = [
+        output.split("ASSISTANT:")[-1].strip()
+        for output in processor.batch_decode(hf_output, skip_special_tokens=True)
+    ]
 
     # cornstarch text generation
     cornstarch_inputs = copy.deepcopy(hf_inputs)
@@ -103,8 +90,8 @@ def test_multimodal_model_generation(
         max_new_tokens=20,
         do_sample=False,
     )
-    cornstarch_text_output = processor.decode(
-        cornstarch_output[0], skip_special_tokens=True
+    cornstarch_text_output = processor.batch_decode(
+        cornstarch_output, skip_special_tokens=True
     )
 
     assert hf_text_output == cornstarch_text_output
