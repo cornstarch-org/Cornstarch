@@ -490,8 +490,9 @@ class MultimodalModel(nn.Module):
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
+    @classmethod
     def from_pretrained_multimodal_model(
-        pretrained_model_id: str,
+        cls: MultimodalModel, pretrained_model_id: str
     ) -> MultimodalModel:
         """
         Instantiate a cornstarch model from a pretrained multimodal model.
@@ -552,7 +553,7 @@ class MultimodalModel(nn.Module):
             postprocess_projector_callback=llava_callbacks.postprocess_projector_callback,
         )
 
-        return MultimodalModel(
+        return cls(
             encoders={"vision": vision_tower},
             language_model=language_model,
         )
