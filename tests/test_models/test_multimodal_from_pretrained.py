@@ -1,4 +1,5 @@
 import copy
+from collections import namedtuple
 from typing import Type
 
 import pytest
@@ -14,21 +15,42 @@ from transformers.models.llava_next.modeling_llava_next import (
     LlavaNextForConditionalGeneration,
 )
 
-from cornstarch.models.multimodal_language_model import (
-    MultimodalModel,
-)
+from cornstarch.models.multimodal_language_model import MultimodalModel
 
 model_name_classes = [
     ("llava-hf/llava-1.5-7b-hf", LlavaForConditionalGeneration),
     ("llava-hf/llava-v1.6-vicuna-7b-hf", LlavaNextForConditionalGeneration),
 ]
 
+Input = namedtuple("Input", ["image", "prompt"])
+batches = [
+    Input(
+        image=Image.open(
+            requests.get(
+                "http://images.cocodataset.org/val2017/000000039769.jpg",
+                stream=True,
+            ).raw
+        ),
+        prompt="USER: <image> What are these? ASSISTANT:",
+    ),
+    Input(
+        image=Image.open(
+            requests.get(
+                "https://github.com/haotian-liu/LLaVA/blob/1a91fc274d7c35a9b50b3cb29c4247ae5837ce39/images/llava_v1_5_radar.jpg?raw=true",
+                stream=True,
+            ).raw
+        ),
+        prompt="USER: <image> What are these? ASSISTANT:",
+    ),
+]
+
 
 @pytest.mark.parametrize(
     "model_name_class", model_name_classes, ids=lambda x: x[0].split("/")[1]
 )
+@pytest.mark.parametrize("batch_size", [1, 2], ids=lambda x: f"bs{x}")
 def test_multimodal_model_generation(
-    model_name_class: tuple[str, Type[PreTrainedModel]],
+    model_name_class: tuple[str, Type[PreTrainedModel]], batch_size: int
 ):
     model_name, model_cls = model_name_class
 
@@ -52,12 +74,14 @@ def test_multimodal_model_generation(
     processor = AutoProcessor.from_pretrained(model_name)
 
     # loading sample image file
-    image_file = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    raw_image = Image.open(requests.get(image_file, stream=True).raw)
+    prompts = []
+    images = []
+    for i in range(batch_size):
+        prompts.append(batches[i].prompt)
+        images.append(batches[i].image)
 
     # llava text generation
-    prompt = "<image>USER: What are these? ASSISTANT:"
-    hf_inputs = processor(prompt, raw_image, return_tensors="pt").to(
+    hf_inputs = processor(prompts, images, return_tensors="pt").to(
         dtype=torch.float16, device="cuda"
     )
 
