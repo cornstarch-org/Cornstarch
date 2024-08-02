@@ -492,7 +492,7 @@ class MultimodalModel(nn.Module):
 
     @classmethod
     def from_pretrained_multimodal_model(
-        cls: MultimodalModel, pretrained_model_id: str
+        cls: MultimodalModel, pretrained_model_id: str, *args, **kwargs
     ) -> MultimodalModel:
         """
         Instantiate a cornstarch model from a pretrained multimodal model.
@@ -500,6 +500,7 @@ class MultimodalModel(nn.Module):
         Args:
             pretrained_model_id (`str`):
                 A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
+            args and kwargs are passed to from_pretrained().
 
         Currently supporting:
             llava-hf/llava-v1.5
@@ -508,18 +509,12 @@ class MultimodalModel(nn.Module):
 
         if "llava-1.5" in pretrained_model_id:
             pretrained_model = LlavaForConditionalGeneration.from_pretrained(
-                pretrained_model_id,
-                revision="main",
-                torch_dtype="auto",
-                device_map="cuda",
+                pretrained_model_id, *args, **kwargs
             )
             pretrained_model.vision_tower.config.output_hidden_states = True
         elif "llava-v1.6" in pretrained_model_id:
             pretrained_model = LlavaNextForConditionalGeneration.from_pretrained(
-                pretrained_model_id,
-                revision="main",
-                torch_dtype="auto",
-                device_map="cuda",
+                pretrained_model_id, *args, **kwargs
             )
             pretrained_model.vision_tower.config.output_hidden_states = True
         else:
