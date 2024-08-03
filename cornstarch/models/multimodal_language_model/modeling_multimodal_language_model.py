@@ -590,3 +590,46 @@ class MultimodalModel(nn.Module):
                 language_model_inputs.pop(key)
 
         return self.language_model(**language_model_inputs)
+
+    def generate(self, input_ids: Optional[torch.LongTensor] = None, **kwargs):
+        """
+        Generates sequences of token ids for models with a language modeling head.
+
+        Args:
+            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you provide it.
+        """
+
+        if self.language_model is None:
+            # Does not support CLIP-like encoder only multimodal model yet
+            raise NotImplementedError
+
+        attention_mask = kwargs.pop("attention_mask", None)
+
+        encoders_outputs = {}
+        for modal_key in self.encoders.keys():
+            encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
+            args = {
+                arg: kwargs[arg]
+                for arg in self.encoders_args[modal_key]
+                if arg in kwargs
+            }
+            for arg in args:
+                kwargs.pop(arg, None)
+            encoders_outputs[modal_key] = encoder_module(**args)[0]
+
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+
+        for modal_key in reversed(self.encoders.keys()):
+            encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
+            inputs_embeds = encoder_module.postprocess_projector_callback(
+                encoders_outputs[modal_key], inputs_embeds
+            )
+
+        return self.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            use_cache=True,
+            **kwargs,
+        )
