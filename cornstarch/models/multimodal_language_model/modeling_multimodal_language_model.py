@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from enum import Enum, auto
 from typing import Optional, Union
 
 import torch
