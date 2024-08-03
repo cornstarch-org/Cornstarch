@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import inspect
 import warnings
 from collections import namedtuple
@@ -234,10 +233,11 @@ class ModalEncoderModule(ModalModuleBase):
         projector: Optional[MultimodalProjector] = None,
         preprocess_callback: Callable[[Any], Any] = lambda x: x,
         postprocess_module_callback: Callable[
-            [BaseModelOutput | tuple], BaseModelOutput | tuple
+            [dict, BaseModelOutput | tuple], BaseModelOutput | tuple
         ] = lambda x: x,
         postprocess_projector_callback: Callable[
             [
+                dict,
                 BaseModelOutput | tuple,
                 torch.Tensor,
                 torch.Tensor,
@@ -260,10 +260,13 @@ class ModalEncoderModule(ModalModuleBase):
             preprocess_callback (`Callable[[Any], Any]`, *optional*):
                 A function to preprocess inputs.
                 Called before the encoder module is called to manipulate the inputs. Default is an identity function.
-            postprocess_module_callback (`Callable[[BaseModelOutput], BaseModelOutput]`, *optional*):
+            postprocess_module_callback (`Callable[[dict, BaseModelOutput | tuple], BaseModelOutput]`, *optional*):
                 A function to postprocess the output of the encoder module.
                 Called after the encoder module is called and before the projector is called. Default is an identity function.
-            postprocess_projector_callback (`Callable[[BaseModelOutput | tuple, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]`, *optional*):
+                Inputs to the callback:
+                    dict: Inputs to the encoder module.
+                    BaseModelOutput | tuple: Output of the encoder module.
+            postprocess_projector_callback (`Callable[[dict, BaseModelOutput | tuple, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]`, *optional*):
                 A function to postprocess the output of the `ModalEncoderModule`.
                 Called after the encoder module and the projector are called.
                 Second argument of the function is the original `inputs_embeds` from the language model backbone.
@@ -271,6 +274,7 @@ class ModalEncoderModule(ModalModuleBase):
                 This function is called by `MultimodalModel` after the encoder is called.
                 When there are multiple encoders, the order of the function call is the reverse order of the encoder modules.
                 Inputs to the callback:
+                    dict: Inputs to the encoder module.
                     BaseModelOutput | tuple: Output of the encoder module.
                     torch.Tensor: `input_ids` from the language model backbone.
                     torch.Tensor: `inputs_embeds` from the language model backbone.
@@ -328,12 +332,12 @@ class ModalEncoderModule(ModalModuleBase):
             output_hidden_states=output_hidden_states,
             **kwargs,
         )
-        outputs = self.postprocess_module_callback(outputs)
+        outputs = self.postprocess_module_callback(kwargs, outputs)
 
         if self.projector is None:
             return outputs
 
-        # `postprocess_projector_callback`` cannot be called here, since we do not have `inputs_embeds`.
+        # `postprocess_projector_callback`` cannot be called here, since we do not have language model data.
         # It will be called from `MultimodalModel`.
         return self.projector(outputs[0], return_dict=return_dict)
 
@@ -746,6 +750,7 @@ class MultimodalModel(nn.Module):
             # Does not support CLIP-like encoder only multimodal model yet
             raise NotImplementedError
 
+        encoders_inputs = {}
         encoders_outputs = {}
         for modal_key in self.encoders.keys():
             encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
@@ -756,6 +761,7 @@ class MultimodalModel(nn.Module):
             }
             for arg in args:
                 kwargs.pop(arg, None)
+            encoders_inputs[modal_key] = args
 
             output_attentions = (
                 output_attentions
@@ -784,6 +790,7 @@ class MultimodalModel(nn.Module):
             encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
             inputs_embeds, attention_mask, _, _ = (
                 encoder_module.postprocess_projector_callback(
+                    encoders_inputs[modal_key],
                     encoders_outputs[modal_key],
                     input_ids,
                     inputs_embeds,
