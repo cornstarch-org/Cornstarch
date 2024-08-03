@@ -88,43 +88,50 @@ class MultimodalProjector(PreTrainedModel):
         return ModelOutput(hidden_states=outputs)
 
 
-class ModalModuleType(Enum):
-    Encoder = auto()
-    Decoder = auto()
-
-
-class ModalModule(nn.Module):
-    """
-    This is a wrapper of each modality model with a projector layer.
-
-    Depending on the modal type, the execution order is different:
-    - Encoder: input -> model -> projector -> output
-    - Decoder: input -> projector -> model -> output
-    """
-
+class ModalModuleBase(nn.Module):
     def __init__(
-        self,
-        model: PreTrainedModel,
-        projector: Optional[MultimodalProjector] = None,
-        modal_type: ModalModuleType = ModalModuleType.Encoder,
+        self, model: PreTrainedModel, projector: Optional[MultimodalProjector] = None
     ):
         super().__init__()
         self.module = model
-        self.modal_type = modal_type
         self.projector = projector
         self.config = (model.config, projector.config if projector else None)
 
         if projector is not None:
-            if modal_type == ModalModuleType.Encoder:
+            if isinstance(self, ModalEncoderModule):
                 assert projector.config.in_features == model.config.hidden_size, (
                     f"Input features of projector ({projector.config.in_features}) "
                     f"should be equal to hidden size of model ({model.config.hidden_size})."
                 )
-            else:
+            elif isinstance(self, ModalDecoderModule):
                 assert projector.config.out_features == model.config.hidden_size, (
                     f"Output features of projector ({projector.config.out_features}) "
                     f"should be equal to hidden size of model ({model.config.hidden_size})."
                 )
+            else:
+                raise ValueError(
+                    "ModalModule should be either ModalEncoderModule or ModalDecoderModule."
+                )
+
+    def train(self, mode: bool = True) -> ModalModuleBase:
+        self.module.train(mode)
+        self.projector.train(mode)
+        return self
+
+    def get_modules(self) -> list[nn.Module]:
+        modules = [self.module]
+        if self.projector is not None:
+            modules.append(self.projector)
+        return modules
+
+
+class ModalEncoderModule(ModalModuleBase):
+    def __init__(
+        self,
+        model: PreTrainedModel,
+        projector: Optional[MultimodalProjector] = None,
+    ):
+        super().__init__(model, projector)
 
     def forward(
         self, return_dict: Optional[bool] = None, *args, **kwargs
@@ -137,33 +144,37 @@ class ModalModule(nn.Module):
         if self.projector is None:
             return self.module(return_dict=return_dict, *args, **kwargs)
 
-        if self.modal_type == ModalModuleType.Encoder:
-            return self.projector(
-                self.module(return_dict=return_dict, *args, **kwargs)[0],
-                return_dict=return_dict,
-            )
-        else:
-            return self.module(
-                self.projector(return_dict=return_dict, *args, **kwargs)[0],
-                return_dict=return_dict,
-            )
+        return self.projector(
+            self.module(return_dict=return_dict, *args, **kwargs)[0],
+            return_dict=return_dict,
+        )
 
-    def train(self, mode: bool = True) -> ModalModule:
-        self.module.train(mode)
-        self.projector.train(mode)
-        return self
 
-    def get_modules(self) -> list[nn.Module]:
-        modules = [self.module]
-        if self.projector is not None:
-            modules.append(self.projector)
-        return modules
+class ModalDecoderModule(ModalModuleBase):
+    def __init__(self, model: PreTrainedModel, projector: MultimodalProjector):
+        super().__init__(model, projector)
+
+    def forward(
+        self, return_dict: Optional[bool] = None, *args, **kwargs
+    ) -> ModelOutput | tuple:
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.module.config.use_return_dict
+        )
+        if self.projector is None:
+            return self.module(return_dict=return_dict, *args, **kwargs)
+
+        return self.module(
+            self.projector(return_dict=return_dict, *args, **kwargs)[0],
+            return_dict=return_dict,
+        )
 
 
 class MultimodalModel(nn.Module):
     def __init__(
         self,
-        encoders: dict[str, ModalModule],
+        encoders: dict[str, ModalEncoderModule],
         language_model: Optional[PreTrainedModel] = None,
         init_projector_type: str = "linear",
         init_activation: str = "gelu",
@@ -173,9 +184,9 @@ class MultimodalModel(nn.Module):
         different types of encoders, and an optional large language model.
 
         Args:
-            encoders (`dict[str, ModalModule]`):
+            encoders (`dict[str, ModalEncoderModule]`):
                 A dictionary of modal key and modal module.
-                The modal module should be an instance of `ModalModule`.
+                The modal module should be an instance of `ModalEncoderModule`.
             language_model (`PreTrainedModel`, *optional*):
                 A language model to be used as a decoder.
                 If not given, the model will be trained as an encoder-only model.
@@ -192,10 +203,10 @@ class MultimodalModel(nn.Module):
             ```
             from transformers.models.clip.modeling_clip import CLIPVisionModel
             from transformers.models.llama.modeling_llama import LlamaForCausalLM
-            from cornstarch.models.multimodal_language_model import MultimodalModel, ModalModule
+            from cornstarch.models.multimodal_language_model import MultimodalModel, ModalEncoderModule
 
             vision_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch16")
-            vision_module = ModalModule(vision_encoder)
+            vision_module = ModalEncoderModule(vision_encoder)
 
             language_model = LlamaForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
 
@@ -207,7 +218,7 @@ class MultimodalModel(nn.Module):
 
         - An example of using peft to fine-tune the pretrained models
             ```
-            from cornstarch.models.multimodal_language_model import MultimodalModel, ModalModule
+            from cornstarch.models.multimodal_language_model import MultimodalModel, ModalEncoderModule
 
             from transformers.models.clip.modeling_clip import CLIPVisionModel
             from transformers.models.llama.modeling_llama import LlamaForCausalLM
@@ -218,7 +229,7 @@ class MultimodalModel(nn.Module):
                 vision_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch16")
                 peft_config = LoraConfig(task_type=None, inference_mode=False, target_modules="all-linear")
                 vision_encoder = get_peft_model(vision_encoder, peft_config)
-                vision_module = ModalModule(vision_encoder)
+                vision_module = ModalEncoderModule(vision_encoder)
 
                 language_model = LlamaForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
                 peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM, inference_mode=False)
@@ -233,9 +244,9 @@ class MultimodalModel(nn.Module):
         self.encoders_args: dict[str, list[str]] = {}
 
         for modal_key, modal_module in encoders.items():
-            if not isinstance(modal_module, ModalModule):
+            if not isinstance(modal_module, ModalEncoderModule):
                 raise ValueError(
-                    f"Value of {modal_key} encoder should be an instance of ModalModule."
+                    f"Value of {modal_key} encoder should be an instance of ModalEncoderModule."
                 )
 
             if language_model is not None:
@@ -245,7 +256,7 @@ class MultimodalModel(nn.Module):
                         "while it is required in multimodal with a language model. "
                         f"Creating a {init_projector_type} projector layer for the encoder. "
                         "If you want to load a pretrained projector, "
-                        "please explicitly specify a projector in `ModalModule`."
+                        "please explicitly specify a projector in `ModalEncoderModule`."
                     )
                     projector_config = MultimodalProjectorConfig(
                         encoder_config=modal_module.module.config,

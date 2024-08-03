@@ -19,7 +19,7 @@ class PipelineTemplate:
     def get_modules(model: nn.Module) -> list[str]:
         """Get all modules from the model."""
         # Avoid circular import
-        from cornstarch.models.multimodal_language_model import ModalModule
+        from cornstarch.models.multimodal_language_model import ModalModuleBase
         from cornstarch.shardformer.policies.auto_policy import (
             get_policy_type,
         )
@@ -28,7 +28,7 @@ class PipelineTemplate:
             PipelineTemplatePolicyBase,
         )
 
-        if isinstance(model, ModalModule):
+        if isinstance(model, ModalModuleBase):
             modules = []
 
             policy = get_policy_type(PipelineTemplate.get_model_name(model.module))

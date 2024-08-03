@@ -12,7 +12,7 @@ from torch import Tensor, nn
 from torch.utils.data import Dataset
 from transformers.modeling_utils import PreTrainedModel
 
-from cornstarch.models.multimodal_language_model import ModalModule
+from cornstarch.models.multimodal_language_model import ModalModuleBase
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
@@ -114,13 +114,13 @@ class ModalParallelPlugin(PipelinePluginBase):
 
     def configure(
         self,
-        model: ModalModule | PreTrainedModel,
+        model: ModalModuleBase | PreTrainedModel,
         shard_config: ShardConfig,
         stage_manager: MultiModalPipelineStageManager,
     ) -> nn.Module:
         assert dist.is_initialized(), "torch.distributed is not initialized."
 
-        if isinstance(model, ModalModule):
+        if isinstance(model, ModalModuleBase):
             from cornstarch.shardformer.policies.multimodal import (
                 ModalModulePolicy,
             )

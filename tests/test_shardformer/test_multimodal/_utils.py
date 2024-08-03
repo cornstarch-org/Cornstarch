@@ -1,35 +1,37 @@
-from abc import ABC, abstractmethod
 import copy
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Type
 
 import torch
-
-from .._utils import PolicyTestBase
-
 from colossalai.booster import Booster
-from torch.optim import Adam, Optimizer
 from colossalai.interface import OptimizerWrapper
+from torch import nn
+from torch.optim import Adam, Optimizer
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
-from torch import nn
-from cornstarch.plugin.multimodal_parallel_plugin import (
-    MultimodalParallelPlugin,
-    ModalParallelPlugin,
-    MultimodalParallelModule,
-)
-from cornstarch.models.multimodal_language_model import MultimodalModel, ModalModule
-from cornstarch.pipeline_template import PipelineTemplate
-
-from transformers.models.llama import LlamaConfig, LlamaForCausalLM
+from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
+from transformers.models.dinov2 import Dinov2Config, Dinov2Model
 from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
 from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.models.gemma2.modeling_gemma2 import Gemma2ForCausalLM
+from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 from transformers.models.mistral import MistralConfig, MistralForCausalLM
 from transformers.models.phi3 import Phi3Config, Phi3ForCausalLM
 from transformers.models.qwen2 import Qwen2Config, Qwen2ForCausalLM
-from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.siglip import SiglipVisionConfig, SiglipVisionModel
-from transformers.models.dinov2 import Dinov2Config, Dinov2Model
+
+from cornstarch.models.multimodal_language_model import (
+    ModalEncoderModule,
+    MultimodalModel,
+)
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.multimodal_parallel_plugin import (
+    ModalParallelPlugin,
+    MultimodalParallelModule,
+    MultimodalParallelPlugin,
+)
+
+from .._utils import PolicyTestBase
 
 llama_config = LlamaConfig()
 gemma_config = GemmaConfig()
@@ -327,7 +329,7 @@ class VisionLanguagePolicyTestClassBase(PolicyTestBase, ABC):
         language_module = self.language_model_class(language_config)
 
         return MultimodalModel(
-            encoders={"vision": ModalModule(vision_module)},
+            encoders={"vision": ModalEncoderModule(vision_module)},
             language_model=language_module,
         )
 

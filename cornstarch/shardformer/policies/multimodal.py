@@ -12,8 +12,9 @@ from colossalai.shardformer.policies.base_policy import (
 from torch import nn
 
 from cornstarch.models.multimodal_language_model import (
-    ModalModule,
-    ModalModuleType,
+    ModalDecoderModule,
+    ModalEncoderModule,
+    ModalModuleBase,
     MultimodalProjector,
     MultimodalProjectorConfig,
 )
@@ -126,9 +127,9 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from cornstarch.shardformer.policies.auto_policy import get_autopolicy
 
-        model = cast(ModalModule, self.model)
+        model = cast(ModalModuleBase, self.model)
         policies = {}
-        if model.modal_type == ModalModuleType.Encoder:
+        if isinstance(model, ModalEncoderModule):
             # Module first
             policy = get_autopolicy(_fullname(model.module))
             policy.set_model(model.module)
@@ -139,7 +140,17 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
             policy.set_model(model.projector)
             policy.set_shard_config(self.shard_config)
             policies.update(policy.module_policy())
-        else:
+
+            if self.pipeline_stage_manager is not None:
+                policies[ModalEncoderModule] = ModulePolicyDescription(
+                    method_replacement={
+                        "forward": functools.partial(
+                            ModalModulePipelineForwards.modal_encoder_module_forward,
+                            stage_manager=self.pipeline_stage_manager,
+                        )
+                    }
+                )
+        elif isinstance(model, ModalDecoderModule):
             # Projector first
             policy = MultimodalProjectorPolicy()
             policy.set_model(model.projector)
@@ -151,14 +162,18 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
             policy.set_shard_config(self.shard_config)
             policies.update(policy.module_policy())
 
-        if self.pipeline_stage_manager is not None:
-            policies[ModalModule] = ModulePolicyDescription(
-                method_replacement={
-                    "forward": functools.partial(
-                        ModalModulePipelineForwards.modal_module_forward,
-                        stage_manager=self.pipeline_stage_manager,
-                    )
-                }
+            if self.pipeline_stage_manager is not None:
+                policies[ModalDecoderModule] = ModulePolicyDescription(
+                    method_replacement={
+                        "forward": functools.partial(
+                            ModalModulePipelineForwards.modal_decoder_module_forward,
+                            stage_manager=self.pipeline_stage_manager,
+                        )
+                    }
+                )
+        else:
+            raise ValueError(
+                f"Unsupported modal type: {type(model)}. Only ModalEncoderModule and ModalDecoderModule are supported."
             )
 
         return policies
@@ -171,7 +186,7 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
 
         assert self.pipeline_stage_manager is not None
 
-        model = cast(ModalModule, self.model)
+        model = cast(ModalModuleBase, self.model)
         stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
         shard_config: ShardConfig = self.shard_config
 
@@ -179,12 +194,19 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
             return []
 
         held_layers = []
+
+        if isinstance(model, ModalDecoderModule) and stage_manager.is_first_stage():
+            policy = MultimodalProjectorPolicy()
+            policy.set_model(model.projector)
+            policy.set_shard_config(self.shard_config)
+            held_layers.extend(policy.get_held_layers())
+
         policy = get_autopolicy(_fullname(model.module))
         policy.set_model(model.module)
         policy.set_shard_config(self.shard_config)
         held_layers.extend(policy.get_held_layers())
 
-        if stage_manager.is_last_stage(check_only_in_modal=True):
+        if isinstance(model, ModalEncoderModule) and stage_manager.is_last_stage():
             policy = MultimodalProjectorPolicy()
             policy.set_model(model.projector)
             policy.set_shard_config(self.shard_config)

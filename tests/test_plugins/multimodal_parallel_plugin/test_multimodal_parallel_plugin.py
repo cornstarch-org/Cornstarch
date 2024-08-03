@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
-from colossalai.accelerator import CudaAccelerator
 from colossalai.device import device_mesh
 from pytest_mock import MockerFixture
 from torch.optim import Adam
@@ -27,7 +26,7 @@ from transformers.models.mistral import MistralConfig, MistralForCausalLM
 from transformers.models.opt import OPTConfig, OPTForCausalLM
 
 from cornstarch.models.multimodal_language_model import (
-    ModalModule,
+    ModalEncoderModule,
     MultimodalModel,
     MultimodalProjector,
 )
@@ -144,9 +143,9 @@ def generate_multimodal_model(
     vision_model_cls: Type[PreTrainedModel],
     language_model_config: PretrainedConfig,
     language_model_cls: Type[PreTrainedModel],
-) -> tuple[ModalModule, PreTrainedModel, MultimodalModel]:
+) -> tuple[ModalEncoderModule, PreTrainedModel, MultimodalModel]:
     vision_encoder = vision_model_cls(vision_config)
-    vision_module = ModalModule(vision_encoder)
+    vision_module = ModalEncoderModule(vision_encoder)
     language_module = language_model_cls(language_model_config)
 
     model = MultimodalModel(
