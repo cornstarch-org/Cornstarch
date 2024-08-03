@@ -7,7 +7,6 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from torch.nn import CrossEntropyLoss
 from transformers.activations import get_activation
 from transformers.modeling_outputs import CausalLMOutputWithPast, ModelOutput
 from transformers.modeling_utils import PreTrainedModel
