@@ -29,6 +29,38 @@ from transformers.models.llava_next.modeling_llava_next import (
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 
+def prepend_modal_output_to_inputs_embeds(
+    inputs: dict,
+    output: BaseModelOutput | tuple,
+    input_ids: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    attention_mask: torch.Tensor,
+    labels: torch.Tensor,
+    pad_token_id: int = -1,
+    ignore_ignore_index: int = -100,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Simple postprocess_projector_callback that prepends the output of the `ModalEncoderModule` to the `inputs_embeds`."""
+    # output[0] == output.last_hidden_state
+    batch_size, num_tokens, _ = output[0].shape
+
+    new_attention_mask = (
+        torch.cat([torch.zeros((batch_size, num_tokens)), attention_mask], dim=1),
+    )
+
+    return (
+        torch.cat(
+            [torch.full((batch_size, num_tokens), pad_token_id), input_ids], dim=1
+        ),
+        torch.cat([output[0], inputs_embeds], dim=1),
+        new_attention_mask,
+        torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1,
+        torch.cat(
+            [torch.full((batch_size, num_tokens), ignore_ignore_index), labels],
+            dim=1,
+        ),
+    )
+
+
 class LlavaCallbacks:
     """A set of callbacks for Llava pretrained models.
     This is only for Llava <= 1.5, not compatible with Llava 1.6 (Llava-Next)"""
@@ -339,37 +371,6 @@ class ModalModuleBase(nn.Module):
 
 
 class ModalEncoderModule(ModalModuleBase):
-    @staticmethod
-    def prepend_modal_output_to_inputs_embeds(
-        inputs: dict,
-        output: BaseModelOutput | tuple,
-        input_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels: torch.Tensor,
-        pad_token_id: int = -1,
-        ignore_ignore_index: int = -100,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Simple postprocess_projector_callback that prepends the output of the `ModalEncoderModule` to the `inputs_embeds`."""
-        # output[0] == output.last_hidden_state
-        batch_size, num_tokens, _ = output[0].shape
-
-        new_attention_mask = (
-            torch.cat([torch.zeros((batch_size, num_tokens)), attention_mask], dim=1),
-        )
-
-        return (
-            torch.cat(
-                [torch.full((batch_size, num_tokens), pad_token_id), input_ids], dim=1
-            ),
-            torch.cat([output[0], inputs_embeds], dim=1),
-            new_attention_mask,
-            torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1,
-            torch.cat(
-                [torch.full((batch_size, num_tokens), ignore_ignore_index), labels],
-                dim=1,
-            ),
-        )
 
     def __init__(
         self,
@@ -951,7 +952,6 @@ class MultimodalModel(nn.Module):
 
             for arg in args:
                 kwargs.pop(arg, None)
-
 
             encoders_inputs[modal_key] = args
 
