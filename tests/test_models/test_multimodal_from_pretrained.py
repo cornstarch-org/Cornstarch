@@ -1,3 +1,4 @@
+import copy
 from typing import Type
 
 import pytest
@@ -48,10 +49,6 @@ def test_multimodal_model_generation(
     )
     hf_model.train(mode=False)
 
-    # config vision feature layer to match cornstarch settings
-    hf_model.config.vision_feature_layer = -1
-    hf_model.config.vision_feature_select_strategy = "full"
-
     processor = AutoProcessor.from_pretrained(model_name)
 
     # loading sample image file
@@ -64,23 +61,10 @@ def test_multimodal_model_generation(
         dtype=torch.float16, device="cuda"
     )
 
-    # currently hf llava replaces <image> with actual image embeddings,
-    # thus bos_token is located before image embedings, while cornstarch
-    # simply prepends image embeddings to the input sequence,
-    # thus the location of bos_token is different.
-    # to match the result, we swap bos_token and <image>
-    # FIXME: it does not guarantee correctness. Fix it.
-    hf_inputs["input_ids"][0][0], hf_inputs["input_ids"][0][1] = (
-        hf_inputs["input_ids"][0][1].clone(),
-        hf_inputs["input_ids"][0][0].clone(),
-    )
-
     hf_output = hf_model.generate(
         **hf_inputs,
         max_new_tokens=20,
         do_sample=False,
-        vision_feature_layer=-1,
-        pad_token_id=processor.tokenizer.eos_token_id,
     )
     hf_text_output = (
         processor.decode(hf_output[0][2:], skip_special_tokens=True)
@@ -89,15 +73,11 @@ def test_multimodal_model_generation(
     )
 
     # cornstarch text generation
-    prompt = "USER: What are these? ASSISTANT:"
-    cornstarch_inputs = processor(prompt, raw_image, return_tensors="pt").to(
-        dtype=torch.float16, device="cuda"
-    )
+    cornstarch_inputs = copy.deepcopy(hf_inputs)
     cornstarch_output = cornstarch_model.generate(
         **cornstarch_inputs,
         max_new_tokens=20,
         do_sample=False,
-        pad_token_id=processor.tokenizer.eos_token_id,
     )
     cornstarch_text_output = processor.decode(
         cornstarch_output[0], skip_special_tokens=True
