@@ -1,7 +1,9 @@
+import inspect
 import math
 from typing import Optional, Union
 
 import numpy as np
+from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_processing_utils import BaseImageProcessor, get_size_dict
 from transformers.image_transforms import (
@@ -481,16 +483,19 @@ class MultimodalModelProcessor(ProcessorMixin):
     """
 
     attributes = ["image_processor", "tokenizer"]
+    feature_extractor_class = "AutoFeatureExtractor"
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
     def __init__(
         self,
+        feature_extractor: SequenceFeatureExtractor = None,
         image_processor: BaseImageProcessor = None,
         tokenizer: PreTrainedTokenizerBase = None,
         **kwargs,
     ):
-        super().__init__(image_processor, tokenizer)
+        super().__init__(feature_extractor, image_processor, tokenizer)
+        self.feature_extractor = feature_extractor
         self.image_processor = image_processor
         self.tokenizer = tokenizer
 
@@ -505,28 +510,56 @@ class MultimodalModelProcessor(ProcessorMixin):
                 f"Setting `pad_token_id` to `eos_token_id`: {self.tokenizer.eos_token_id}."
             )
 
+        self.tokenizer_args = (
+            list(inspect.signature(self.tokenizer.__call__).parameters.keys())
+            if self.tokenizer is not None
+            else []
+        )
+        self.image_processor_args = (
+            list(inspect.signature(self.image_processor.__call__).parameters.keys())
+            if self.image_processor is not None
+            else []
+        )
+        self.feature_extractor_args = (
+            list(inspect.signature(self.feature_extractor.__call__).parameters.keys())
+            if self.feature_extractor is not None
+            else []
+        )
+
     def __call__(
         self,
         text: Union[
             TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]
         ],
         images: ImageInput = None,
+        raw_speech: Union[
+            np.ndarray, list[float], list[np.ndarray], list[list[float]]
+        ] = None,
         return_tensors: str | TensorType = TensorType.PYTORCH,
         **kwargs,
     ) -> BatchFeature:
-        if text is None and images is None:
-            raise ValueError("You have to specify either text or images.")
+        assert text is not None
 
-        padding = kwargs.pop("padding", True)
-        inputs = self.tokenizer(
-            text, return_tensors=return_tensors, padding=padding, **kwargs
-        )
+        tokenizer_kwargs = {k: v for k, v in kwargs.items() if k in self.tokenizer_args}
+        inputs = self.tokenizer(text, return_tensors=return_tensors, **tokenizer_kwargs)
 
         if images is not None:
+            image_processor_kwargs = {
+                k: v for k, v in kwargs.items() if k in self.image_processor_args
+            }
             image_inputs = self.image_processor(
-                images, return_tensors=return_tensors, **kwargs
+                images, return_tensors=return_tensors, **image_processor_kwargs
             )
             inputs.update(image_inputs.data)
+
+        if raw_speech is not None:
+            feature_extractor_kwargs = {
+                k: v for k, v in kwargs.items() if k in self.feature_extractor_args
+            }
+            feature = self.feature_extractor(
+                raw_speech, return_tensors=return_tensors, **feature_extractor_kwargs
+            )
+            inputs.update(feature)
 
         return BatchFeature(data=inputs, tensor_type=return_tensors)
 
@@ -538,6 +571,23 @@ class MultimodalModelProcessor(ProcessorMixin):
 
     @property
     def model_input_names(self):
-        tokenizer_input_names = self.tokenizer.model_input_names
-        image_processor_input_names = self.image_processor.model_input_names
-        return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
+        tokenizer_input_names = (
+            self.tokenizer.model_input_names if self.tokenizer is not None else []
+        )
+        image_processor_input_names = (
+            self.image_processor.model_input_names
+            if self.image_processor is not None
+            else []
+        )
+        feature_extractor_input_names = (
+            self.feature_extractor.model_input_names
+            if self.feature_extractor is not None
+            else []
+        )
+        return list(
+            dict.fromkeys(
+                tokenizer_input_names
+                + image_processor_input_names
+                + feature_extractor_input_names
+            )
+        )
