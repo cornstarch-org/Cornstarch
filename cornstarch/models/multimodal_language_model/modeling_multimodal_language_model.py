@@ -34,30 +34,37 @@ def prepend_modal_output_to_inputs_embeds(
     output: BaseModelOutput | tuple,
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
-    attention_mask: torch.Tensor,
-    labels: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    labels: Optional[torch.Tensor] = None,
     pad_token_id: int = -1,
-    ignore_ignore_index: int = -100,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ignore_index: int = -100,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Simple postprocess_projector_callback that prepends the output of the `ModalEncoderModule` to the `inputs_embeds`."""
     # output[0] == output.last_hidden_state
     batch_size, num_tokens, _ = output[0].shape
 
-    new_attention_mask = (
-        torch.cat([torch.zeros((batch_size, num_tokens)), attention_mask], dim=1),
+    new_inputs_embeds = torch.cat([output[0], inputs_embeds], dim=1)
+
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids).to(input_ids.device)
+
+    new_attention_mask = torch.cat(
+        [
+            torch.ones((batch_size, num_tokens), device=attention_mask.device),
+            attention_mask,
+        ],
+        dim=1,
     )
+    new_position_ids = torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1
+
+    new_labels = torch.full(new_inputs_embeds.shape[:2], ignore_index, device=labels.device)
+    new_labels[:, -labels.shape[1] :] = labels
 
     return (
-        torch.cat(
-            [torch.full((batch_size, num_tokens), pad_token_id), input_ids], dim=1
-        ),
-        torch.cat([output[0], inputs_embeds], dim=1),
+        new_inputs_embeds,
         new_attention_mask,
-        torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1,
-        torch.cat(
-            [torch.full((batch_size, num_tokens), ignore_ignore_index), labels],
-            dim=1,
-        ),
+        new_position_ids,
+        new_labels,
     )
 
 
@@ -377,10 +384,12 @@ class ModalEncoderModule(ModalModuleBase):
         model: PreTrainedModel,
         projector: Optional[MultimodalProjector] = None,
         additional_args: list[str] = [],
-        preprocess_callback: Callable[[dict[str, Any]], dict[str, Any]] = lambda x: x,
+        preprocess_callback: Callable[
+            [dict[str, Any]], dict[str, Any]
+        ] = lambda inputs: inputs,
         postprocess_module_callback: Callable[
             [dict, BaseModelOutput | tuple], BaseModelOutput | tuple
-        ] = lambda x: x,
+        ] = lambda inputs, outputs: outputs,
         postprocess_projector_callback: Callable[
             [
                 dict,
@@ -842,53 +851,48 @@ class MultimodalModel(nn.Module):
 
         # step 1. forward the modal inputs to the encoders,
         # to get encoder embeddings of shape (batch_size, seq_len, hidden_size)
+        encoders_inputs = {}
         encoders_outputs = {}
         for modal_key in self.encoders.keys():
-            encoder_module = getattr(self, f"{modal_key}_encoder")
+            encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
             args = {
                 arg: kwargs[arg]
                 for arg in self.encoders_args[modal_key]
                 if arg in kwargs
             }
-            if "output_attentions" in self.encoders_args[modal_key]:
-                args["output_attentions"] = output_attentions
-            if "output_hidden_states" in self.encoders_args[modal_key]:
-                args["output_hidden_states"] = output_hidden_states
-            if "return_dict" in self.encoders_args[modal_key]:
-                args["return_dict"] = return_dict
 
-            encoders_outputs[modal_key] = encoder_module(**args)
+            for additional_arg in encoder_module.additional_args:
+                if additional_arg in kwargs:
+                    args[additional_arg] = kwargs[additional_arg]
 
-        encoders_outputs = torch.cat(encoders_outputs, dim=1)
-        encoders_attention_mask = torch.ones(
-            encoders_outputs.size()[:-1],
-            dtype=torch.long,
-            device=encoders_outputs.device,
-        )
+            for arg in args:
+                kwargs.pop(arg, None)
+
+            encoders_inputs[modal_key] = args
+
+            encoders_outputs[modal_key] = encoder_module(
+                **args,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
 
         # step 2. merge encoded multimodal features into text embeddings
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         for modal_key in reversed(self.encoders.keys()):
             encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
-            inputs_embeds = encoder_module.postprocess_projector_callback(
-                encoders_outputs[modal_key], inputs_embeds
+            inputs_embeds, attention_mask, position_ids, labels = (
+                encoder_module.postprocess_projector_callback(
+                    encoders_inputs[modal_key],
+                    encoders_outputs[modal_key],
+                    input_ids,
+                    inputs_embeds,
+                    attention_mask,
+                    labels,
+                    pad_token_id=self.language_model.config.pad_token_id,
+                )
             )
-
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids).to(
-                encoders_attention_mask.device
-            )
-        attention_mask = torch.cat([encoders_attention_mask, attention_mask], dim=1)
-
-        # Pad the labels to match the shape with LM input
-        # Lables are padded by -100 (a default ignore_index in loss calculation)
-        # so that they are ignored when calculating a loss.
-        if labels is not None and labels.shape[1] != inputs_embeds.shape[1]:
-            batch_size, seq_length = inputs_embeds.shape[:2]
-            new_labels = torch.full((batch_size, seq_length), -100).to(labels.device)
-            new_labels[:, -labels.shape[1] :] = labels
-            labels = new_labels
 
         language_model_inputs = dict(
             input_ids=None,
