@@ -1,6 +1,3 @@
-from typing import Optional
-
-import torch
 from transformers.modeling_outputs import ModelOutput
 
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (

@@ -57,28 +57,29 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
 
         policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
-        # if self.shard_config.enable_tensor_parallelism:
-        #     # TODO: check if input is in parallel
-        #     policy[MultimodalProjector] = ModulePolicyDescription(
-        #         sub_module_replacement=[
-        #             SubModuleReplacementDescription(
-        #                 "projection",
-        #                 target_module=Linear1D_Row,
-        #                 ignore_if_not_exist=True,
-        #             ),
-        #             SubModuleReplacementDescription(
-        #                 "in_proj",
-        #                 target_module=Linear1D_Col,
-        #                 ignore_if_not_exist=True,
-        #             ),
-        #             SubModuleReplacementDescription(
-        #                 "out_proj",
-        #                 target_module=Linear1D_Row,
-        #                 ignore_if_not_exist=True,
-        #             ),
-        #             # add qformer layers
-        #         ]
-        #     )
+        if self.shard_config.enable_tensor_parallelism:
+            # TODO: check if input is in parallel
+            policy[MultimodalProjector] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        "projection",
+                        target_module=Linear1D_Row,
+                        ignore_if_not_exist=True,
+                        kwargs=dict(parallel_input=False),
+                    ),
+                    SubModuleReplacementDescription(
+                        "in_proj",
+                        target_module=Linear1D_Col,
+                        ignore_if_not_exist=True,
+                    ),
+                    SubModuleReplacementDescription(
+                        "out_proj",
+                        target_module=Linear1D_Row,
+                        ignore_if_not_exist=True,
+                    ),
+                    # TODO: add qformer layers
+                ]
+            )
 
         return policy
 
