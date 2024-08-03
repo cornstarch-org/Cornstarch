@@ -4,7 +4,6 @@ from dataclasses import replace
 from types import MethodType
 from typing import Any, Callable, Optional, Tuple
 
-from colossalai.checkpoint_io import CheckpointIO
 import torch
 import torch.distributed as dist
 from colossalai.accelerator import get_accelerator
@@ -15,9 +14,9 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
     get_param_info,
 )
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
+from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
 from torch import nn
-from torch.nn.modules.loss import CrossEntropyLoss
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader
@@ -63,6 +62,14 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         # stage manager, but only different pipeline templates.
         # TODO: if llm_shard_config is None, use another shard_config
         assert llm_shard_config is not None
+        if (
+            module.language_model.config.tie_word_embeddings
+            and llm_shard_config.pipeline_template.num_stages > 1
+        ):
+            raise NotImplementedError(
+                "Tied embeddings in pipeline parallelism cannot be synchronized as of now."
+            )
+
         self.stage_manager = llm_shard_config.pipeline_stage_manager
         self.dp_group = dp_group
         self.tp_group = tp_group
