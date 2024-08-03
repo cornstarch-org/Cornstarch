@@ -779,11 +779,14 @@ class MultimodalModel(nn.Module):
                 return_dict=return_dict,
             )
 
+            output_attentions = None
+            output_hidden_states = None
+
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         for modal_key in reversed(self.encoders.keys()):
             encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
-            inputs_embeds, attention_mask, position_ids, _ = (
+            inputs_embeds, attention_mask, _, _ = (
                 encoder_module.postprocess_projector_callback(
                     encoders_outputs[modal_key],
                     input_ids,
@@ -808,7 +811,6 @@ class MultimodalModel(nn.Module):
         return self.language_model.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            position_ids=position_ids,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
