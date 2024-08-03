@@ -14,7 +14,7 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
     ModelOutput,
 )
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 from transformers.models.auto.configuration_auto import AutoConfig
 from transformers.models.llava.modeling_llava import (
     LlavaConfig,
@@ -665,7 +665,7 @@ class MultimodalModel(nn.Module):
             llava-hf/llava-v1.6
         """
 
-        config = AutoConfig.from_pretrained(pretrained_model_id)
+        config: PretrainedConfig = AutoConfig.from_pretrained(pretrained_model_id)
 
         if config.model_type == "llava":
             pretrained_model = LlavaForConditionalGeneration.from_pretrained(
@@ -674,7 +674,11 @@ class MultimodalModel(nn.Module):
             pretrained_model.vision_tower.config.output_hidden_states = True
             vision_encoder = pretrained_model.vision_tower
             language_model = pretrained_model.language_model
-            language_model.config.pad_token_id = pretrained_model.config.pad_token_id
+            language_model.config.pad_token_id = (
+                pretrained_model.config.pad_token_id
+                if pretrained_model.config.pad_token_id is not None
+                else -1
+            )
         elif config.model_type == "llava_next":
             pretrained_model = LlavaNextForConditionalGeneration.from_pretrained(
                 pretrained_model_id, *args, **kwargs
@@ -682,7 +686,11 @@ class MultimodalModel(nn.Module):
             pretrained_model.vision_tower.config.output_hidden_states = True
             vision_encoder = pretrained_model.vision_tower
             language_model = pretrained_model.language_model
-            language_model.config.pad_token_id = pretrained_model.config.pad_token_id
+            language_model.config.pad_token_id = (
+                pretrained_model.config.pad_token_id
+                if pretrained_model.config.pad_token_id is not None
+                else -1
+            )
         else:
             raise NotImplementedError
 
@@ -715,6 +723,7 @@ class MultimodalModel(nn.Module):
             vision_tower = ModalEncoderModule(
                 model=vision_encoder,
                 projector=vision_projector,
+                additional_args=["image_sizes"],
                 preprocess_callback=llava_next_callbacks.preprocess_vision_callback,
                 postprocess_module_callback=llava_next_callbacks.postprocess_vision_callback,
                 postprocess_projector_callback=functools.partial(
@@ -724,10 +733,15 @@ class MultimodalModel(nn.Module):
                 ),
             )
 
-        return cls(
+        model = cls(
             encoders={"vision": vision_tower},
             language_model=language_model,
         )
+
+        if config.model_type == "llava_next":
+            model.image_newline = pretrained_model.image_newline
+
+        return model
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         for encoder in self.encoders.values():
@@ -930,12 +944,14 @@ class MultimodalModel(nn.Module):
                 for arg in self.encoders_args[modal_key]
                 if arg in kwargs
             }
-            for arg in args:
-                kwargs.pop(arg, None)
 
             for additional_arg in encoder_module.additional_args:
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
+
+            for arg in args:
+                kwargs.pop(arg, None)
+
 
             encoders_inputs[modal_key] = args
 
