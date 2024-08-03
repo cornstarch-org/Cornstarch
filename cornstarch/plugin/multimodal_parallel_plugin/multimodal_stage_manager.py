@@ -40,19 +40,53 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         prev_coords = []
         next_coords = []
         my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
-        modal_dependency = next(
-            md for md in self.pg_mesh.modal_dependencies if md.modal == my_modal
-        )
+
+        previous_modals = []
+        next_modals = []
+
+        if my_modal in pg_mesh.encoder_templates.keys():
+            if pg_mesh.llm_template is not None:
+                next_modals.append(pg_mesh.llm_template[0])
+                previous_modals.append(pg_mesh.llm_template[0])
+            else:
+                assert (
+                    len(pg_mesh.decoder_templates) == 0
+                ), "Encoder-decoder model without llm is not supported."
+
+        elif pg_mesh.llm_template is not None and my_modal == pg_mesh.llm_template[0]:
+            if (
+                len(pg_mesh.encoder_templates) > 0
+                and len(pg_mesh.decoder_templates) > 0
+            ):
+                previous_modals.extend(list(pg_mesh.encoder_templates.keys()))
+                next_modals.extend(list(pg_mesh.decoder_templates.keys()))
+            elif len(pg_mesh.encoder_templates) > 0:
+                assert len(pg_mesh.decoder_templates) == 0
+                previous_modals.extend(list(pg_mesh.encoder_templates.keys()))
+                next_modals.extend(list(pg_mesh.encoder_templates.keys()))
+            elif len(pg_mesh.decoder_templates) > 0:
+                assert len(pg_mesh.encoder_templates) == 0
+                previous_modals.extend(list(pg_mesh.decoder_templates.keys()))
+                next_modals.extend(list(pg_mesh.decoder_templates.keys()))
+        elif my_modal in pg_mesh.decoder_templates.keys():
+            assert (
+                pg_mesh.llm_template is not None
+            ), "Decoder model without llm is not supported."
+            previous_modals.append(pg_mesh.llm_template[0])
+            next_modals.append(pg_mesh.llm_template[0])
+
         for i in range(len(coords)):
             if (
                 # if this stage is the first first stage
-                coords[i][self.pipeline_axis] == 0
+                coords[i][self.pipeline_axis]
+                == 0
             ) or (
                 # if previous stage is in the different modal
-                self.stage_index_to_modal[coords[i][self.pipeline_axis] - 1] != my_modal
+                self.stage_index_to_modal[coords[i][self.pipeline_axis] - 1]
+                != my_modal
             ):
                 last_stage_indices_of_previous_modals = []
-                for previous_modal in modal_dependency.previous:
+                for previous_modal in previous_modals:
                     last_stage_indices_of_previous_modals.append(
                         [
                             index
@@ -85,10 +119,11 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                 == self.pg_mesh.shape[self.pipeline_axis] - 1
             ) or (
                 # if next stage is in the different modal
-                self.stage_index_to_modal[coords[i][self.pipeline_axis] + 1] != my_modal
+                self.stage_index_to_modal[coords[i][self.pipeline_axis] + 1]
+                != my_modal
             ):
                 first_stage_indices_of_next_modals = []
-                for next_modal in modal_dependency.next:
+                for next_modal in next_modals:
                     first_stage_indices_of_next_modals.append(
                         [
                             index
@@ -136,9 +171,6 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         """
         coords = self.pg_mesh.coords
         my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
-        modal_dependency = next(
-            md for md in self.pg_mesh.modal_dependencies if md.modal == my_modal
-        )
         stage_indices_of_modal = [
             index
             for index, modal in enumerate(self.stage_index_to_modal)
@@ -152,11 +184,15 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             else:
                 return False
         else:
-            # This is the first stage only if in_degree is 0 and this stage is the first one of the modal
+            # This is the first stage only if it is the first stage of encoders
+            # or llm if there is no encoders.
             if (
-                modal_dependency.in_degree == 0
-                and coords[0][self.pipeline_axis] == stage_indices_of_modal[0]
-            ):
+                (my_modal in self.pg_mesh.encoder_templates.keys())
+                or (
+                    len(self.pg_mesh.encoder_templates) == 0
+                    and my_modal == self.pg_mesh.llm_template[0]
+                )
+            ) and coords[0][self.pipeline_axis] == stage_indices_of_modal[0]:
                 return True
             else:
                 return False
@@ -175,9 +211,6 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         """
         coords = self.pg_mesh.coords
         my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
-        modal_dependency = next(
-            md for md in self.pg_mesh.modal_dependencies if md.modal == my_modal
-        )
         stage_indices_of_modal = [
             index
             for index, modal in enumerate(self.stage_index_to_modal)
@@ -191,11 +224,15 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             else:
                 return False
         else:
-            # This is the last stage only if out_degree is 0 and this stage is the last one of the modal
+            # This is the last stage only if it is the last stage of decoders or
+            # llm if there is no decoders
             if (
-                modal_dependency.out_degree == 0
-                and coords[0][self.pipeline_axis] == stage_indices_of_modal[-1]
-            ):
+                (my_modal in self.pg_mesh.decoder_templates.keys())
+                or (
+                    len(self.pg_mesh.decoder_templates) == 0
+                    and my_modal == self.pg_mesh.llm_template[0]
+                )
+            ) and coords[0][self.pipeline_axis] == stage_indices_of_modal[-1]:
                 return True
             else:
                 return False
@@ -245,9 +282,18 @@ class MultiModalPipelineStageManager(PipelineStageManager):
     def stage(self) -> int:
         return self.pg_mesh.coords[0][self.pipeline_axis]
 
+    @property
+    def stage_in_modal(self) -> int:
+        first_stage_index = next(
+            index
+            for index, modal in enumerate(self.stage_index_to_modal)
+            if modal == self.stage_index_to_modal[self.stage]
+        )
+        return self.stage - first_stage_index
+
     def distribute_layers(
         self,
-        num_layers: int,
+        num_layers: Optional[int] = None,
         num_stages: Optional[int] = None,
         num_model_chunks: Optional[int] = None,
     ) -> list[int]:
@@ -314,10 +360,11 @@ class MultiModalPipelineStageManager(PipelineStageManager):
             for index, modal in enumerate(self.stage_index_to_modal)
             if modal == self.stage_index_to_modal[stage]
         )
-        stage -= first_stage_index
 
         num_layers_per_stage_accumulated = np.insert(np.cumsum(layers_per_stage), 0, 0)
         return (
-            num_layers_per_stage_accumulated[stage],
-            num_layers_per_stage_accumulated[stage + 1],
+            num_layers_per_stage_accumulated[stage]
+            - num_layers_per_stage_accumulated[first_stage_index],
+            num_layers_per_stage_accumulated[stage + 1]
+            - num_layers_per_stage_accumulated[first_stage_index],
         )

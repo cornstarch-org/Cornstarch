@@ -13,7 +13,7 @@ from transformers import (
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 
 from cornstarch.models.multimodal_language_model import (
-    ModalModule,
+    ModalEncoderModule,
     MultimodalModel,
     MultimodalProjector,
 )
@@ -57,7 +57,7 @@ def test_load_and_save_projection(
 
     # Initializing a projector module is done here.
     mm = MultimodalModel(
-        encoders={"vision": ModalModule(vision_model)},
+        encoders={"vision": ModalEncoderModule(vision_model)},
         language_model=language_model,
     )
 

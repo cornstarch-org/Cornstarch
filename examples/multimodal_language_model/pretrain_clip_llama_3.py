@@ -14,7 +14,7 @@ from transformers.models.clip import CLIPImageProcessor, CLIPVisionModel
 from transformers.models.llama import LlamaForCausalLM, LlamaTokenizerFast
 
 from cornstarch.models.multimodal_language_model import (
-    ModalModule,
+    ModalEncoderModule,
     MultimodalModel,
     MultimodalModelProcessor,
 )
@@ -65,7 +65,7 @@ def pretrain(
     vision_encoder = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
     language_model = LlamaForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8b")
     model = MultimodalModel(
-        encoders={"vision": ModalModule(vision_encoder)},
+        encoders={"vision": ModalEncoderModule(vision_encoder)},
         language_model=language_model,
     ).to(dtype=torch.bfloat16, device="cuda")
     model.gradient_checkpointing_enable()

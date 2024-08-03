@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, cast
+import functools
+from typing import Any, Dict, cast
 
 import torch.distributed as dist
 from colossalai.shardformer.layer import Linear1D_Col, Linear1D_Row
@@ -11,8 +12,9 @@ from colossalai.shardformer.policies.base_policy import (
 from torch import nn
 
 from cornstarch.models.multimodal_language_model import (
-    ModalModule,
-    ModalModuleType,
+    ModalDecoderModule,
+    ModalEncoderModule,
+    ModalModuleBase,
     MultimodalProjector,
     MultimodalProjectorConfig,
 )
@@ -20,6 +22,7 @@ from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
+from cornstarch.shardformer.modeling.multimodal import ModalModulePipelineForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -54,28 +57,29 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
 
         policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
-        # if self.shard_config.enable_tensor_parallelism:
-        #     # TODO: check if input is in parallel
-        #     policy[MultimodalProjector] = ModulePolicyDescription(
-        #         sub_module_replacement=[
-        #             SubModuleReplacementDescription(
-        #                 "projection",
-        #                 target_module=Linear1D_Row,
-        #                 ignore_if_not_exist=True,
-        #             ),
-        #             SubModuleReplacementDescription(
-        #                 "in_proj",
-        #                 target_module=Linear1D_Col,
-        #                 ignore_if_not_exist=True,
-        #             ),
-        #             SubModuleReplacementDescription(
-        #                 "out_proj",
-        #                 target_module=Linear1D_Row,
-        #                 ignore_if_not_exist=True,
-        #             ),
-        #             # add qformer layers
-        #         ]
-        #     )
+        if self.shard_config.enable_tensor_parallelism:
+            # TODO: check if input is in parallel
+            policy[MultimodalProjector] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        "projection",
+                        target_module=Linear1D_Row,
+                        ignore_if_not_exist=True,
+                        kwargs=dict(parallel_input=False),
+                    ),
+                    SubModuleReplacementDescription(
+                        "in_proj",
+                        target_module=Linear1D_Col,
+                        ignore_if_not_exist=True,
+                    ),
+                    SubModuleReplacementDescription(
+                        "out_proj",
+                        target_module=Linear1D_Row,
+                        ignore_if_not_exist=True,
+                    ),
+                    # TODO: add qformer layers
+                ]
+            )
 
         return policy
 
@@ -85,7 +89,7 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
     def get_held_layers(self) -> list[nn.Module]:
         assert self.pipeline_stage_manager is not None
 
-        stage_manager = self.pipeline_stage_manager
+        stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
         config = cast(MultimodalProjectorConfig, self.model.config)
         model = cast(MultimodalProjector, self.model)
         held_layers = []
@@ -97,7 +101,7 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
         elif config.projection_type == "qformer":
             raise NotImplementedError("QFormer is not supported yet.")
 
-        if stage_manager.is_last_stage(ignore_chunk=True):
+        if stage_manager.is_last_stage(check_only_in_modal=True):
             return held_layers
 
         return []
@@ -124,9 +128,9 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from cornstarch.shardformer.policies.auto_policy import get_autopolicy
 
-        model = cast(ModalModule, self.model)
+        model = cast(ModalModuleBase, self.model)
         policies = {}
-        if model.modal_type == ModalModuleType.Encoder:
+        if isinstance(model, ModalEncoderModule):
             # Module first
             policy = get_autopolicy(_fullname(model.module))
             policy.set_model(model.module)
@@ -137,7 +141,17 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
             policy.set_model(model.projector)
             policy.set_shard_config(self.shard_config)
             policies.update(policy.module_policy())
-        else:
+
+            if self.pipeline_stage_manager is not None:
+                policies[ModalEncoderModule] = ModulePolicyDescription(
+                    method_replacement={
+                        "forward": functools.partial(
+                            ModalModulePipelineForwards.modal_encoder_module_forward,
+                            stage_manager=self.pipeline_stage_manager,
+                        )
+                    }
+                )
+        elif isinstance(model, ModalDecoderModule):
             # Projector first
             policy = MultimodalProjectorPolicy()
             policy.set_model(model.projector)
@@ -149,6 +163,20 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
             policy.set_shard_config(self.shard_config)
             policies.update(policy.module_policy())
 
+            if self.pipeline_stage_manager is not None:
+                policies[ModalDecoderModule] = ModulePolicyDescription(
+                    method_replacement={
+                        "forward": functools.partial(
+                            ModalModulePipelineForwards.modal_decoder_module_forward,
+                            stage_manager=self.pipeline_stage_manager,
+                        )
+                    }
+                )
+        else:
+            raise ValueError(
+                f"Unsupported modal type: {type(model)}. Only ModalEncoderModule and ModalDecoderModule are supported."
+            )
+
         return policies
 
     def postprocess(self) -> nn.Module:
@@ -159,20 +187,27 @@ class ModalModulePolicy(Policy, ModalModulePolicyMixin):
 
         assert self.pipeline_stage_manager is not None
 
-        model = cast(ModalModule, self.model)
-        stage_manager = self.pipeline_stage_manager
+        model = cast(ModalModuleBase, self.model)
+        stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
         shard_config: ShardConfig = self.shard_config
 
         if not self.should_hold_module(shard_config.pipeline_template):
             return []
 
         held_layers = []
+
+        if isinstance(model, ModalDecoderModule) and stage_manager.is_first_stage():
+            policy = MultimodalProjectorPolicy()
+            policy.set_model(model.projector)
+            policy.set_shard_config(self.shard_config)
+            held_layers.extend(policy.get_held_layers())
+
         policy = get_autopolicy(_fullname(model.module))
         policy.set_model(model.module)
         policy.set_shard_config(self.shard_config)
         held_layers.extend(policy.get_held_layers())
 
-        if stage_manager.is_last_stage(ignore_chunk=True):
+        if isinstance(model, ModalEncoderModule) and stage_manager.is_last_stage():
             policy = MultimodalProjectorPolicy()
             policy.set_model(model.projector)
             policy.set_shard_config(self.shard_config)

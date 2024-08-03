@@ -116,9 +116,7 @@ class HeterogeneousParallelPluginClassBase(MultiProcessTestCase):
         assert np.array_equal(plugin.stage_manager.pg_mesh.mesh, expected_mesh)
         assert expected_num_stages[self.rank] == plugin.stage_manager.num_stages
 
-    def configure(
-        self, pipelines: list[PipelineTemplate]
-    ) -> tuple[
+    def configure(self, pipelines: list[PipelineTemplate]) -> tuple[
         HeterogeneousParallelPlugin,
         ModelWrapper,
         OptimizerWrapper,
@@ -293,9 +291,9 @@ class TestHeterogeneous3DParallelPluginConfigurationClass(
                 ],
             ],
         ],
-        name_fn=lambda pipelines, *_: "homogeneous"
-        if len(set(pipelines)) == 1
-        else "heterogeneous",
+        name_fn=lambda pipelines, *_: (
+            "homogeneous" if len(set(pipelines)) == 1 else "heterogeneous"
+        ),
     )
     def test_plugin_initialte(
         self,
@@ -322,9 +320,9 @@ class TestHeterogeneous3DParallelPluginConfigurationClass(
                 [0] * 6 + [1] * 4 + [2] * 4 + [3] * 4,
             ],
         ],
-        name_fn=lambda pipelines, _: "homogeneous"
-        if len(set(pipelines)) == 1
-        else "heterogeneous",
+        name_fn=lambda pipelines, _: (
+            "homogeneous" if len(set(pipelines)) == 1 else "heterogeneous"
+        ),
     )
     def test_plugin_configure(
         self, pipelines: list[PipelineTemplate], expected_pipeline_index: list[int]

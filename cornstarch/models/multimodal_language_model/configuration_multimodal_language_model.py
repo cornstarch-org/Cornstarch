@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-from typing import Union
-
 from transformers.activations import ACT2CLS
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.clip.configuration_clip import CLIPVisionConfig

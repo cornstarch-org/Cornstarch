@@ -16,7 +16,7 @@ from transformers.models.clip import CLIPImageProcessor, CLIPVisionModel
 from transformers.models.gemma import GemmaForCausalLM, GemmaTokenizerFast
 
 from cornstarch.models.multimodal_language_model import (
-    ModalModule,
+    ModalEncoderModule,
     MultimodalModel,
     MultimodalModelProcessor,
 )
@@ -68,7 +68,7 @@ def pretrain(
     language_model = GemmaForCausalLM.from_pretrained("google/gemma-1.1-2b-it")
 
     model = MultimodalModel(
-        encoders={"vision": ModalModule(vision_encoder)},
+        encoders={"vision": ModalEncoderModule(vision_encoder)},
         language_model=language_model,
     ).to(dtype=torch.bfloat16, device="cuda")
     model.gradient_checkpointing_enable()

@@ -15,7 +15,7 @@ from transformers.models.opt import OPTConfig, OPTForCausalLM
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
 from cornstarch.models.multimodal_language_model import (
-    ModalModule,
+    ModalEncoderModule,
     MultimodalModel,
     MultimodalProjector,
 )
@@ -71,7 +71,13 @@ language_configs = [
 ]
 for _, config, _ in language_configs:
     config.num_hidden_layers = 3
+    config.hidden_size = 256
+    config.intermediate_size = 256
+    config.num_attention_heads = 8
+    if hasattr(config, "word_embed_proj_dim"):  # for opt
+        config.word_embed_proj_dim = 256
     config._attn_implementation = "eager"
+    config.tie_word_embeddings = False # opt uses it
 
 expected_language_module_layers = {
     "mistralai/Mistral-7B-v0.3": [
@@ -194,9 +200,9 @@ class TestSingleEncoderModelInitializationClass(
         encoder_model_cls: Type[PreTrainedModel],
         language_model_config: PretrainedConfig,
         language_model_cls: Type[PreTrainedModel],
-    ) -> tuple[ModalModule, PreTrainedModel, MultimodalModel]:
+    ) -> tuple[ModalEncoderModule, PreTrainedModel, MultimodalModel]:
         encoder_module = encoder_model_cls(encoder_config)
-        encoder_module = ModalModule(encoder_module)
+        encoder_module = ModalEncoderModule(encoder_module)
         language_module = language_model_cls(language_model_config)
 
         model = MultimodalModel(
@@ -454,14 +460,14 @@ class TestMultiEncodersModelInitializationClass(
         encoder_model_clss: list[Type[PreTrainedModel]],
         language_model_config: PretrainedConfig,
         language_model_cls: Type[PreTrainedModel],
-    ) -> tuple[dict[str, ModalModule], PreTrainedModel, MultimodalModel]:
+    ) -> tuple[dict[str, ModalEncoderModule], PreTrainedModel, MultimodalModel]:
         assert len(encoder_configs) == len(encoder_model_clss)
         encoder_modules = {}
         for index, (encoder_config, encoder_model_cls) in enumerate(
             zip(encoder_configs, encoder_model_clss)
         ):
             encoder_module = encoder_model_cls(encoder_config)
-            encoder_module = ModalModule(encoder_module)
+            encoder_module = ModalEncoderModule(encoder_module)
             encoder_modules[f"encoder{index}"] = encoder_module
 
         language_module = language_model_cls(language_model_config)

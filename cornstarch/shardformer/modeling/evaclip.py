@@ -175,9 +175,9 @@ class EvaCLIPForwards:
             query_states,
             key_states,
             value_states,
-            attention_mask=attn_mask
-            if causal_attention_mask is not None
-            else attention_mask,
+            attention_mask=(
+                attn_mask if causal_attention_mask is not None else attention_mask
+            ),
             dropout_p=self.dropout if self.training else 0.0,
             scale=self.scale,
         )

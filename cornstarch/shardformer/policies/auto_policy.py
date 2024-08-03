@@ -14,7 +14,10 @@ _POLICY_LIST = {
     "cornstarch.models.multimodal_language_model.modeling_multimodal_language_model.MultimodalProjector": PolicyLocation(
         file_name="multimodal", class_name="MultimodalProjectorPolicy"
     ),
-    "cornstarch.models.multimodal_language_model.modeling_multimodal_language_model.ModalModule": PolicyLocation(
+    "cornstarch.models.multimodal_language_model.modeling_multimodal_language_model.ModalEncoderModule": PolicyLocation(
+        file_name="multimodal", class_name="ModalModulePolicy"
+    ),
+    "cornstarch.models.multimodal_language_model.modeling_multimodal_language_model.ModalDecoderModule": PolicyLocation(
         file_name="multimodal", class_name="ModalModulePolicy"
     ),
     # BERT

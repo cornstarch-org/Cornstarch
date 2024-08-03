@@ -172,9 +172,11 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
 
         self.append_or_create_method_replacement(
             description={
-                "forward": CLIPForwards.clip_flash_attention_forward
-                if self.shard_config.enable_flash_attention
-                else CLIPForwards.clip_eager_forward,
+                "forward": (
+                    CLIPForwards.clip_flash_attention_forward
+                    if self.shard_config.enable_flash_attention
+                    else CLIPForwards.clip_eager_forward
+                ),
             },
             policy=policy,
             target_key=CLIPAttention,

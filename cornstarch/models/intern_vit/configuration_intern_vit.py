@@ -120,7 +120,7 @@ class InternVisionConfig(PretrainedConfig):
         ):
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
-                f'{cls.model_type}. This is not supported for all configurations of models and can yield errors.'
+                f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
             )
 
         return cls.from_dict(config_dict, **kwargs)

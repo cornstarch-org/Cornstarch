@@ -86,7 +86,7 @@ class GemmaPipelineForwards:
             if input_ids is not None:
                 batch_size, seq_length = input_ids.shape[:2]
             elif inputs_embeds is not None:
-                batch_size, seq_length, _ = inputs_embeds.shape[:2]
+                batch_size, seq_length = inputs_embeds.shape[:2]
 
             if inputs_embeds is None:
                 inputs_embeds = self.embed_tokens(input_ids)

@@ -14,7 +14,10 @@ from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
-from cornstarch.models.multimodal_language_model import ModalModule, MultimodalModel
+from cornstarch.models.multimodal_language_model import (
+    ModalEncoderModule,
+    MultimodalModel,
+)
 
 vision_model = [
     ("openai/clip-vit-base-patch16", CLIPVisionConfig, CLIPVisionModel),
@@ -82,6 +85,6 @@ def test_build_vlm(
         )
 
         MultimodalModel(
-            encoders={"vision": ModalModule(vision_model)},
+            encoders={"vision": ModalEncoderModule(vision_model)},
             language_model=language_model,
         )
