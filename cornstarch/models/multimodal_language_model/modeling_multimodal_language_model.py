@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,11 @@ from transformers import (
     LlavaNextForConditionalGeneration,
 )
 from transformers.activations import get_activation
-from transformers.modeling_outputs import CausalLMOutputWithPast, ModelOutput
+from transformers.modeling_outputs import (
+    BaseModelOutput,
+    CausalLMOutputWithPast,
+    ModelOutput,
+)
 from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
@@ -129,12 +133,53 @@ class ModalModuleBase(nn.Module):
 
 
 class ModalEncoderModule(ModalModuleBase):
+    @staticmethod
+    def prepend_modal_output_to_inputs_embeds(
+        output: BaseModelOutput | tuple, inputs_embeds: torch.Tensor
+    ) -> torch.Tensor:
+        """Simple postprocess_projector_callback that prepends the output of the `ModalEncoderModule` to the `inputs_embeds`."""
+        # output[0] == output.last_hidden_state
+        return torch.cat([output[0], inputs_embeds], dim=1)
+
     def __init__(
         self,
         model: PreTrainedModel,
         projector: Optional[MultimodalProjector] = None,
+        preprocess_callback: Callable[[Any], Any] = lambda x: x,
+        postprocess_module_callback: Callable[
+            [BaseModelOutput | tuple], BaseModelOutput | tuple
+        ] = lambda x: x,
+        postprocess_projector_callback: Callable[
+            [BaseModelOutput | tuple, torch.Tensor], torch.Tensor
+        ] = prepend_modal_output_to_inputs_embeds,
     ):
+        """
+        A wrapper module for encoder model with a projector layer.
+
+        Args:
+            model (`PreTrainedModel`):
+                An encoder model.
+            projector (`MultimodalProjector`, *optional*):
+                A projector layer.
+                If not given, this `ModalEncoderModule` cannot be attached to `MutlimodalModel`.
+            preprocess_callback (`Callable[[Any], Any]`, *optional*):
+                A function to preprocess inputs.
+                Called before the encoder module is called to manipulate the inputs. Default is an identity function.
+            postprocess_module_callback (`Callable[[BaseModelOutput], BaseModelOutput]`, *optional*):
+                A function to postprocess the output of the encoder module.
+                Called after the encoder module is called and before the projector is called. Default is an identity function.
+            postprocess_projector_callback (`Callable[[BaseModelOutput, torch.Tensor], torch.Tensor]`, *optional*):
+                A function to postprocess the output of the `ModalEncoderModule`.
+                Called after the encoder module and the projector are called.
+                Second argument of the function is the original `inputs_embeds` from the language model backbone.
+                After manipulating the `inputs_embeds`, returned `torch.Tensor` will replace the original `inputs_embeds`.
+                This function is called by `MultimodalModel` after the encoder is called.
+                When there are multiple encoders, the order of the function call is the reverse order of the encoder modules.
+        """
         super().__init__(model, projector)
+        self.preprocess_callback = preprocess_callback
+        self.postprocess_module_callback = postprocess_module_callback
+        self.postprocess_projector_callback = postprocess_projector_callback
 
     def forward(
         self, return_dict: Optional[bool] = None, *args, **kwargs
@@ -144,16 +189,29 @@ class ModalEncoderModule(ModalModuleBase):
             if return_dict is not None
             else self.module.config.use_return_dict
         )
-        if self.projector is None:
-            return self.module(return_dict=return_dict, *args, **kwargs)
 
-        return self.projector(
-            self.module(return_dict=return_dict, *args, **kwargs)[0],
-            return_dict=return_dict,
-        )
+        # Merge args to kwargs
+        module_params = list(inspect.signature(self.module.forward).parameters.keys())
+        args_dict = {param_name: arg for param_name, arg in zip(module_params, args)}
+        kwargs.update(args_dict)
+
+        # Extract main input and call preprocess callback
+        main_input_name = self.module.main_input_name
+        kwargs[main_input_name] = self.preprocess_callback(kwargs[main_input_name])
+
+        outputs: BaseModelOutput = self.module(return_dict=return_dict, **kwargs)
+        outputs = self.postprocess_module_callback(outputs)
+
+        if self.projector is None:
+            return outputs
+
+        # `postprocess_projector_callback`` cannot be called here, since we do not have `inputs_embeds`.
+        # It will be called from `MultimodalModel`.
+        return self.projector(outputs[0], return_dict=return_dict)
 
 
 class ModalDecoderModule(ModalModuleBase):
+    # TODO: support callbacks like `ModalEncoderModule`
     def __init__(self, model: PreTrainedModel, projector: MultimodalProjector):
         super().__init__(model, projector)
 
@@ -165,6 +223,7 @@ class ModalDecoderModule(ModalModuleBase):
             if return_dict is not None
             else self.module.config.use_return_dict
         )
+
         if self.projector is None:
             return self.module(return_dict=return_dict, *args, **kwargs)
 
@@ -461,7 +520,7 @@ class MultimodalModel(nn.Module):
 
         # step 1. forward the modal inputs to the encoders,
         # to get encoder embeddings of shape (batch_size, seq_len, hidden_size)
-        encoders_outputs = []
+        encoders_outputs = {}
         for modal_key in self.encoders.keys():
             encoder_module = getattr(self, f"{modal_key}_encoder")
             args = {
@@ -476,7 +535,7 @@ class MultimodalModel(nn.Module):
             if "return_dict" in self.encoders_args[modal_key]:
                 args["return_dict"] = return_dict
 
-            encoders_outputs.append(encoder_module(**args)[0])
+            encoders_outputs[modal_key] = encoder_module(**args)
 
         encoders_outputs = torch.cat(encoders_outputs, dim=1)
         encoders_attention_mask = torch.ones(
@@ -487,7 +546,12 @@ class MultimodalModel(nn.Module):
 
         # step 2. merge encoded multimodal features into text embeddings
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-        inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
+
+        for modal_key in reversed(self.encoders.keys()):
+            encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
+            inputs_embeds = encoder_module.postprocess_projector_callback(
+                encoders_outputs[modal_key], inputs_embeds
+            )
 
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids).to(
