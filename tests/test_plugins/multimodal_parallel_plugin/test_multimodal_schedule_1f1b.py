@@ -165,21 +165,34 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         def pp_forward(
             self: TestScheduleSingleEncoderClass.SingleEncoderModel,
             x,
+            modal_name: str,
             start_idx: int,
             end_idx: int,
         ):
-            if start_idx < 3:
+            if modal_name == "encoder":
                 assert start_idx >= 0 and end_idx <= 3
                 for layer in self.encoder[start_idx:end_idx]:
                     x = layer(x)
-            else:
-                assert start_idx >= 3 and end_idx <= 9
-                for layer in self.llm[start_idx - 3 : end_idx - 3]:
+            elif modal_name == "llm":
+                assert start_idx >= 0 and end_idx <= 6
+                for layer in self.llm[start_idx:end_idx]:
                     x = layer(x)
             return x
 
+        my_modal = next(
+            template
+            for template, ranks in stage_manager.pg_mesh.modal_to_ranks.items()
+            if dist.get_rank() in ranks
+        )
+
+        assert my_modal.model_name in ["encoder", "llm"]
         pp_model._forward = MethodType(
-            functools.partial(pp_forward, start_idx=start_idx, end_idx=end_idx),
+            functools.partial(
+                pp_forward,
+                modal_name=my_modal.model_name,
+                start_idx=start_idx,
+                end_idx=end_idx,
+            ),
             pp_model,
         )
         pp_model.forward = MethodType(
@@ -210,11 +223,11 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
             return_outputs=True,
         )
 
-        if stage_manager.is_last_stage():
+        if stage_manager.is_last_stage(check_only_in_modal=False):
             assert torch.allclose(loss, pp_ret["loss"])
 
         # check gradients
-        if start_idx < 3:
+        if my_modal.model_name == "encoder":
             for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.encoder[i].weight.grad,
@@ -224,8 +237,8 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
                     model.encoder[i].bias.grad,
                     pp_model.encoder[i].bias.grad,
                 )
-        else:
-            for i in range(start_idx - 3, end_idx - 3):
+        elif my_modal.model_name == "llm":
+            for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.llm[i].weight.grad,
                     pp_model.llm[i].weight.grad,
@@ -242,7 +255,7 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         pp_optimizer.zero_grad()
 
         # check updated param
-        if start_idx < 3:
+        if my_modal.model_name == "encoder":
             for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.encoder[i].weight,
@@ -252,8 +265,8 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
                     model.encoder[i].bias,
                     pp_model.encoder[i].bias,
                 )
-        else:
-            for i in range(start_idx - 3, end_idx - 3):
+        elif my_modal.model_name == "llm":
+            for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.llm[i].weight,
                     pp_model.llm[i].weight,
@@ -328,26 +341,39 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
         def pp_forward(
             self: TestScheduleMultipleEncoderClass.DoubleEncoderModel,
             x,
+            modal_name: str,
             start_idx: int,
             end_idx: int,
         ):
-            if start_idx < 3:
+            if modal_name == "encoder1":
                 assert start_idx >= 0 and end_idx <= 3
                 for layer in self.encoder1[start_idx:end_idx]:
                     x = layer(x)
-            elif start_idx < 5:
-                assert start_idx >= 3 and end_idx <= 5
-                for layer in self.encoder2[start_idx - 3 : end_idx - 3]:
+            elif modal_name == "encoder2":
+                assert start_idx >= 0 and end_idx <= 2
+                for layer in self.encoder2[start_idx:end_idx]:
                     x = layer(x)
-            else:
-                assert start_idx >= 5 and end_idx <= 11
-                for layer in self.llm[start_idx - 5 : end_idx - 5]:
+            elif modal_name == "llm":
+                assert start_idx >= 0 and end_idx <= 6
+                for layer in self.llm[start_idx:end_idx]:
                     x = layer(x)
 
             return x
 
+        my_modal = next(
+            template
+            for template, ranks in stage_manager.pg_mesh.modal_to_ranks.items()
+            if dist.get_rank() in ranks
+        )
+
+        assert my_modal.model_name in ["encoder1", "encoder2", "llm"]
         pp_model._forward = MethodType(
-            functools.partial(pp_forward, start_idx=start_idx, end_idx=end_idx),
+            functools.partial(
+                pp_forward,
+                modal_name=my_modal.model_name,
+                start_idx=start_idx,
+                end_idx=end_idx,
+            ),
             pp_model,
         )
         pp_model.forward = MethodType(
@@ -378,11 +404,11 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
             return_outputs=True,
         )
 
-        if stage_manager.is_last_stage():
+        if stage_manager.is_last_stage(check_only_in_modal=False):
             assert torch.allclose(loss, pp_ret["loss"])
 
         # check gradients
-        if start_idx < 3:
+        if my_modal.model_name == "encoder1":
             for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.encoder1[i].weight.grad,
@@ -392,8 +418,8 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
                     model.encoder1[i].bias.grad,
                     pp_model.encoder1[i].bias.grad,
                 )
-        elif start_idx < 5:
-            for i in range(start_idx - 3, end_idx - 3):
+        elif my_modal.model_name == "encoder2":
+            for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.encoder2[i].weight.grad,
                     pp_model.encoder2[i].weight.grad,
@@ -402,8 +428,8 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
                     model.encoder2[i].bias.grad,
                     pp_model.encoder2[i].bias.grad,
                 )
-        else:
-            for i in range(start_idx - 5, end_idx - 5):
+        elif my_modal.model_name == "llm":
+            for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.llm[i].weight.grad,
                     pp_model.llm[i].weight.grad,
@@ -420,7 +446,7 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
         pp_optimizer.zero_grad()
 
         # check updated param
-        if start_idx < 3:
+        if my_modal.model_name == "encoder1":
             for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.encoder1[i].weight,
@@ -430,8 +456,8 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
                     model.encoder1[i].bias,
                     pp_model.encoder1[i].bias,
                 )
-        elif start_idx < 5:
-            for i in range(start_idx - 3, end_idx - 3):
+        elif my_modal.model_name == "encoder2":
+            for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.encoder2[i].weight,
                     pp_model.encoder2[i].weight,
@@ -440,8 +466,8 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
                     model.encoder2[i].bias,
                     pp_model.encoder2[i].bias,
                 )
-        else:
-            for i in range(start_idx - 5, end_idx - 5):
+        elif my_modal.model_name == "llm":
+            for i in range(start_idx, end_idx):
                 assert torch.allclose(
                     model.llm[i].weight,
                     pp_model.llm[i].weight,
