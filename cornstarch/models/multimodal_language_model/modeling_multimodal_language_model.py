@@ -1,20 +1,88 @@
 from __future__ import annotations
 
+import functools
 import inspect
 import warnings
-from typing import Optional, Union
+from collections import namedtuple
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
-from transformers import (
-    LlavaForConditionalGeneration,
+from transformers.activations import get_activation
+from transformers.modeling_outputs import (
+    BaseModelOutput,
+    CausalLMOutputWithPast,
+    ModelOutput,
+)
+from transformers.modeling_utils import PreTrainedModel
+from transformers.models.llava import LlavaConfig, LlavaForConditionalGeneration
+from transformers.models.llava_next import (
+    LlavaNextConfig,
     LlavaNextForConditionalGeneration,
 )
-from transformers.activations import get_activation
-from transformers.modeling_outputs import CausalLMOutputWithPast, ModelOutput
-from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
+
+
+class LlavaCallbacks:
+    """A set of callbacks for Llava pretrained models.
+    This is only for Llava <= 1.5, not compatible with Llava 1.6 (Llava-Next)"""
+
+    def __init__(self, config: LlavaConfig):
+        self.config = config
+
+    def postprocess_vision_callback(
+        self, output: BaseModelOutput | tuple
+    ) -> BaseModelOutput | tuple:
+        vision_feature_layer = self.config.vision_feature_layer
+        vision_feature_select_strategy = self.config.vision_feature_select_strategy
+
+        if isinstance(output, ModelOutput):
+            if output.hidden_states is None:
+                # vision_tower is executed without output_hidden_states=True.
+                # Use the last_hidden_state.
+                selected_image_feature = output.last_hidden_state
+            else:
+                selected_image_feature = output.hidden_states[vision_feature_layer]
+        else:
+            if len(output) == 1 or output[1] is None:
+                selected_image_feature = output[0]
+            else:
+                selected_image_feature = output[1][vision_feature_layer]
+
+        if vision_feature_select_strategy == "default":
+            selected_image_feature = selected_image_feature[:, 1:]
+        elif vision_feature_select_strategy == "full":
+            selected_image_feature = selected_image_feature
+        else:
+            raise ValueError(
+                f"Unexpected select feature strategy: {vision_feature_select_strategy}"
+            )
+
+        output.last_hidden_state = selected_image_feature
+        return output
+
+    def postprocess_projector_callback(
+        self,
+        output: BaseModelOutput | tuple,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor,
+        pad_token_id: int = -1,
+        ignore_index: int = -100,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        FakeLlavaClass = namedtuple(
+            "LlavaForConditionalGeneration", ["pad_token_id", "config"]
+        )
+        fake_llava = FakeLlavaClass(pad_token_id, self.config)
+        inputs_embeds, attention_mask, labels, position_ids = (
+            LlavaForConditionalGeneration._merge_input_ids_with_image_features(
+                fake_llava, output[0], inputs_embeds, input_ids, attention_mask, labels
+            )
+        )
+
+        return inputs_embeds, attention_mask, position_ids, labels
 
 
 class MultimodalProjector(PreTrainedModel):
@@ -129,31 +197,149 @@ class ModalModuleBase(nn.Module):
 
 
 class ModalEncoderModule(ModalModuleBase):
+    @staticmethod
+    def prepend_modal_output_to_inputs_embeds(
+        output: BaseModelOutput | tuple,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor,
+        pad_token_id: int = -1,
+        ignore_ignore_index: int = -100,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Simple postprocess_projector_callback that prepends the output of the `ModalEncoderModule` to the `inputs_embeds`."""
+        # output[0] == output.last_hidden_state
+        batch_size, num_tokens, _ = output[0].shape
+
+        new_attention_mask = (
+            torch.cat([torch.zeros((batch_size, num_tokens)), attention_mask], dim=1),
+        )
+
+        return (
+            torch.cat(
+                [torch.full((batch_size, num_tokens), pad_token_id), input_ids], dim=1
+            ),
+            torch.cat([output[0], inputs_embeds], dim=1),
+            new_attention_mask,
+            torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1,
+            torch.cat(
+                [torch.full((batch_size, num_tokens), ignore_ignore_index), labels],
+                dim=1,
+            ),
+        )
+
     def __init__(
         self,
         model: PreTrainedModel,
         projector: Optional[MultimodalProjector] = None,
+        preprocess_callback: Callable[[Any], Any] = lambda x: x,
+        postprocess_module_callback: Callable[
+            [BaseModelOutput | tuple], BaseModelOutput | tuple
+        ] = lambda x: x,
+        postprocess_projector_callback: Callable[
+            [
+                BaseModelOutput | tuple,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                int,
+                int,
+            ],
+            torch.Tensor,
+        ] = prepend_modal_output_to_inputs_embeds,
     ):
+        """
+        A wrapper module for encoder model with a projector layer.
+
+        Args:
+            model (`PreTrainedModel`):
+                An encoder model.
+            projector (`MultimodalProjector`, *optional*):
+                A projector layer.
+                If not given, this `ModalEncoderModule` cannot be attached to `MutlimodalModel`.
+            preprocess_callback (`Callable[[Any], Any]`, *optional*):
+                A function to preprocess inputs.
+                Called before the encoder module is called to manipulate the inputs. Default is an identity function.
+            postprocess_module_callback (`Callable[[BaseModelOutput], BaseModelOutput]`, *optional*):
+                A function to postprocess the output of the encoder module.
+                Called after the encoder module is called and before the projector is called. Default is an identity function.
+            postprocess_projector_callback (`Callable[[BaseModelOutput | tuple, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]`, *optional*):
+                A function to postprocess the output of the `ModalEncoderModule`.
+                Called after the encoder module and the projector are called.
+                Second argument of the function is the original `inputs_embeds` from the language model backbone.
+                After manipulating the `inputs_embeds`, returned `torch.Tensor` will replace the original `inputs_embeds`.
+                This function is called by `MultimodalModel` after the encoder is called.
+                When there are multiple encoders, the order of the function call is the reverse order of the encoder modules.
+                Inputs to the callback:
+                    BaseModelOutput | tuple: Output of the encoder module.
+                    torch.Tensor: `input_ids` from the language model backbone.
+                    torch.Tensor: `inputs_embeds` from the language model backbone.
+                    torch.Tensor: `attention_mask` from the language model backbone.
+                    torch.Tensor: `labels` from the language model backbone.
+                    int: `pad_token_id` from the language model backbone.
+                    int: `ignore_index` from the language model backbone.
+                Outputs from the callback:
+                    torch.Tensor: new `inputs_embeds` to be used in the language model backbone.
+                    torch.Tensor: new `attention_mask` to be used in the language model backbone.
+                    torch.Tensor: new `position_ids` to be used in the language model backbone.
+                    torch.Tensor: new `labels` to be used in the language model backbone.
+        """
         super().__init__(model, projector)
+        self.preprocess_callback = preprocess_callback
+        self.postprocess_module_callback = postprocess_module_callback
+        self.postprocess_projector_callback = postprocess_projector_callback
 
     def forward(
-        self, return_dict: Optional[bool] = None, *args, **kwargs
+        self,
+        return_dict: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        *args,
+        **kwargs,
     ) -> ModelOutput | tuple:
         return_dict = (
             return_dict
             if return_dict is not None
             else self.module.config.use_return_dict
         )
-        if self.projector is None:
-            return self.module(return_dict=return_dict, *args, **kwargs)
-
-        return self.projector(
-            self.module(return_dict=return_dict, *args, **kwargs)[0],
-            return_dict=return_dict,
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.module.config.output_attentions
         )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.module.config.output_hidden_states
+        )
+
+        # Merge args to kwargs
+        module_params = list(inspect.signature(self.module.forward).parameters.keys())
+        args_dict = {param_name: arg for param_name, arg in zip(module_params, args)}
+        kwargs.update(args_dict)
+
+        # Extract main input and call preprocess callback
+        main_input_name = self.module.main_input_name
+        kwargs[main_input_name] = self.preprocess_callback(kwargs[main_input_name])
+
+        outputs: BaseModelOutput = self.module(
+            return_dict=return_dict,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            **kwargs,
+        )
+        outputs = self.postprocess_module_callback(outputs)
+
+        if self.projector is None:
+            return outputs
+
+        # `postprocess_projector_callback`` cannot be called here, since we do not have `inputs_embeds`.
+        # It will be called from `MultimodalModel`.
+        return self.projector(outputs[0], return_dict=return_dict)
 
 
 class ModalDecoderModule(ModalModuleBase):
+    # TODO: support callbacks like `ModalEncoderModule`
     def __init__(self, model: PreTrainedModel, projector: MultimodalProjector):
         super().__init__(model, projector)
 
@@ -165,6 +351,7 @@ class ModalDecoderModule(ModalModuleBase):
             if return_dict is not None
             else self.module.config.use_return_dict
         )
+
         if self.projector is None:
             return self.module(return_dict=return_dict, *args, **kwargs)
 
@@ -303,8 +490,9 @@ class MultimodalModel(nn.Module):
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
+    @classmethod
     def from_pretrained_multimodal_model(
-        pretrained_model_id: str,
+        cls: MultimodalModel, pretrained_model_id: str, *args, **kwargs
     ) -> MultimodalModel:
         """
         Instantiate a cornstarch model from a pretrained multimodal model.
@@ -312,6 +500,7 @@ class MultimodalModel(nn.Module):
         Args:
             pretrained_model_id (`str`):
                 A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
+            args and kwargs are passed to from_pretrained().
 
         Currently supporting:
             llava-hf/llava-v1.5
@@ -320,23 +509,20 @@ class MultimodalModel(nn.Module):
 
         if "llava-1.5" in pretrained_model_id:
             pretrained_model = LlavaForConditionalGeneration.from_pretrained(
-                pretrained_model_id,
-                revision="main",
-                torch_dtype="auto",
-                device_map="cuda",
+                pretrained_model_id, *args, **kwargs
             )
+            pretrained_model.vision_tower.config.output_hidden_states = True
         elif "llava-v1.6" in pretrained_model_id:
             pretrained_model = LlavaNextForConditionalGeneration.from_pretrained(
-                pretrained_model_id,
-                revision="main",
-                torch_dtype="auto",
-                device_map="cuda",
+                pretrained_model_id, *args, **kwargs
             )
+            pretrained_model.vision_tower.config.output_hidden_states = True
         else:
             raise NotImplementedError
 
         vision_encoder = pretrained_model.vision_tower
         language_model = pretrained_model.language_model
+        language_model.config.pad_token_id = pretrained_model.config.pad_token_id
 
         # Create projector
         pretrained_proj = pretrained_model.multi_modal_projector
@@ -354,12 +540,16 @@ class MultimodalModel(nn.Module):
         vision_projector = MultimodalProjector(projector_config)
         vision_projector.load_state_dict(pretrained_proj_state_dict, assign=True)
 
-        return MultimodalModel(
-            encoders={
-                "vision": ModalEncoderModule(
-                    model=vision_encoder, projector=vision_projector
-                )
-            },
+        llava_callbacks = LlavaCallbacks(pretrained_model.config)
+        vision_tower = ModalEncoderModule(
+            model=vision_encoder,
+            projector=vision_projector,
+            postprocess_module_callback=llava_callbacks.postprocess_vision_callback,
+            postprocess_projector_callback=llava_callbacks.postprocess_projector_callback,
+        )
+
+        return cls(
+            encoders={"vision": vision_tower},
             language_model=language_model,
         )
 
@@ -461,7 +651,7 @@ class MultimodalModel(nn.Module):
 
         # step 1. forward the modal inputs to the encoders,
         # to get encoder embeddings of shape (batch_size, seq_len, hidden_size)
-        encoders_outputs = []
+        encoders_outputs = {}
         for modal_key in self.encoders.keys():
             encoder_module = getattr(self, f"{modal_key}_encoder")
             args = {
@@ -476,7 +666,7 @@ class MultimodalModel(nn.Module):
             if "return_dict" in self.encoders_args[modal_key]:
                 args["return_dict"] = return_dict
 
-            encoders_outputs.append(encoder_module(**args)[0])
+            encoders_outputs[modal_key] = encoder_module(**args)
 
         encoders_outputs = torch.cat(encoders_outputs, dim=1)
         encoders_attention_mask = torch.ones(
@@ -487,7 +677,12 @@ class MultimodalModel(nn.Module):
 
         # step 2. merge encoded multimodal features into text embeddings
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-        inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
+
+        for modal_key in reversed(self.encoders.keys()):
+            encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
+            inputs_embeds = encoder_module.postprocess_projector_callback(
+                encoders_outputs[modal_key], inputs_embeds
+            )
 
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids).to(
@@ -526,3 +721,95 @@ class MultimodalModel(nn.Module):
                 language_model_inputs.pop(key)
 
         return self.language_model(**language_model_inputs)
+
+    def generate(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = True,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ):
+        """
+        Generates sequences of token ids for models with a language modeling head.
+
+        Args:
+            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you provide it.
+        """
+
+        if self.language_model is None:
+            # Does not support CLIP-like encoder only multimodal model yet
+            raise NotImplementedError
+
+        encoders_outputs = {}
+        for modal_key in self.encoders.keys():
+            encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
+            args = {
+                arg: kwargs[arg]
+                for arg in self.encoders_args[modal_key]
+                if arg in kwargs
+            }
+            for arg in args:
+                kwargs.pop(arg, None)
+
+            output_attentions = (
+                output_attentions
+                if output_attentions is not None
+                else encoder_module.config[0].output_attentions
+            )
+            output_hidden_states = (
+                output_hidden_states
+                if output_hidden_states is not None
+                else encoder_module.config[0].output_hidden_states
+            )
+
+            encoders_outputs[modal_key] = encoder_module(
+                **args,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+            output_attentions = None
+            output_hidden_states = None
+
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+
+        for modal_key in reversed(self.encoders.keys()):
+            encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
+            inputs_embeds, attention_mask, _, _ = (
+                encoder_module.postprocess_projector_callback(
+                    encoders_outputs[modal_key],
+                    input_ids,
+                    inputs_embeds,
+                    attention_mask,
+                    labels=None,
+                    pad_token_id=self.language_model.config.pad_token_id,
+                )
+            )
+
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.language_model.config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.language_model.config.output_hidden_states
+        )
+
+        return self.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            **kwargs,
+        )
