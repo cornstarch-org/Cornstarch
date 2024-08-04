@@ -1,4 +1,7 @@
-from transformers.modeling_outputs import ModelOutput
+import inspect
+from typing import Optional
+
+from transformers.modeling_outputs import BaseModelOutput, ModelOutput
 
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
     ModalDecoderModule,
@@ -14,37 +17,71 @@ class ModalModulePipelineForwards:
     def modal_encoder_module_forward(
         self: ModalEncoderModule,
         stage_manager: MultiModalPipelineStageManager,
+        return_dict: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
         *args,
         **kwargs,
     ) -> ModelOutput | tuple | dict:
-        if self.projector is None:
-            return self.module(*args, **kwargs)
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.module.config.use_return_dict
+        )
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.module.config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.module.config.output_hidden_states
+        )
 
-        module_output = self.module(*args, **kwargs)
-        if isinstance(module_output, (tuple, ModelOutput)):
-            assert stage_manager.is_last_stage(
-                check_only_in_modal=True
-            ), "Intermediate stage should not return final output."
-            assert (
-                next(self.projector.parameters(), None) is not None
-            ), "Projector parameters are released while the model returns its final output."
-            return self.projector(module_output[0])
-        else:
-            # Module returns intermediate outputs with pipeline parallelism
-            assert not stage_manager.is_last_stage(
-                check_only_in_modal=True
-            ), "Last stage should not return intermediate hidden states."
-            assert (
-                isinstance(module_output, dict)
-                and "hidden_states" in module_output.keys()
-            ), (
-                "Expected the model to return intermediate hidden states, "
-                f"but got: {list(module_output.keys())}"
+        # Merge args to kwargs
+        module_params = list(inspect.signature(self.module.forward).parameters.keys())
+        args_dict = {param_name: arg for param_name, arg in zip(module_params, args)}
+        kwargs.update(args_dict)
+
+        if stage_manager.is_first_stage():
+            # Call preprocess callback
+            kwargs = self.preprocess_callback(kwargs)
+
+        # Filter out additional arguments
+        kwargs = {k: v for k, v in kwargs.items() if k in module_params}
+
+        outputs: BaseModelOutput | dict = self.module(
+            return_dict=return_dict,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            **kwargs,
+        )
+
+        if stage_manager.is_last_stage():
+            outputs = self.postprocess_module_callback(kwargs, outputs)
+
+            assert isinstance(outputs, (tuple, ModelOutput)), (
+                f"Expected the model to return a tuple or ModelOutput, "
+                f"but got: {type(outputs)}"
             )
-            assert (
-                next(self.projector.parameters(), None) is None
-            ), "Projector parameters are not released while the model returns intermediate outputs."
-            return module_output
+
+            if self.projector is None:
+                return outputs
+
+            # `postprocess_projector_callback`` cannot be called here, since we do not have language model data.
+            # It will be called from `MultimodalModel`.
+            return self.projector(outputs[0], return_dict=return_dict)
+        else:
+            assert isinstance(outputs, dict), (
+                f"Expected the model to return a dictionary, "
+                f"but got: {type(outputs)}"
+            )
+            assert "hidden_states" in outputs.keys(), (
+                "Expected the model to return intermediate hidden states, "
+                f"but got: {list(outputs.keys())}"
+            )
+            return outputs
 
     @staticmethod
     def modal_decoder_module_forward(

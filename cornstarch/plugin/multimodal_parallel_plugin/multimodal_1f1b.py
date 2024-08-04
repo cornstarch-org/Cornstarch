@@ -12,7 +12,6 @@ from colossalai.pipeline.p2p import (
     _filling_ops_queue,
     create_send_metadata,
 )
-
 from colossalai.pipeline.schedule._utils import (
     detach,
     get_batch_size,
@@ -23,7 +22,6 @@ from colossalai.pipeline.schedule._utils import (
     to_device,
     tree_map_hf,
 )
-from colossalai.pipeline.schedule._utils import merge_batch
 from colossalai.pipeline.schedule.one_f_one_b import (
     OneForwardOneBackwardSchedule,
     PipelineSchedule,
@@ -526,34 +524,54 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         self.last_batch_size: Optional[int] = None
         self.microbatch_offset: Optional[int] = None
 
-    def _merge_tensors(self, tensors: list) -> Any:
-        assert isinstance(tensors, list)
+    def _merge_tensors(self, tensors_list: list, out_shapes: bool) -> Any:
+        assert isinstance(tensors_list, list)
 
-        if len(tensors) == 0:
+        if len(tensors_list) == 0:
             return None
 
-        if len(tensors) == 1:
-            tensors = tensors[0]
-        else:
-            if isinstance(tensors[0], torch.Tensor):
-                assert all(isinstance(item, torch.Tensor) for item in tensors)
-                tensors = torch.cat(tensors, dim=1)
-            elif isinstance(tensors[0], list):
-                assert all(isinstance(item, list) for item in tensors)
-                # Call torch.cat for every items at the same index and create one list.
-                tensors = [
-                    torch.cat([item[i] for item in tensors], dim=1)
-                    for i in range(len(tensors[0]))
-                ]
-            elif isinstance(tensors[0], dict):
-                assert all(isinstance(item, dict) for item in tensors)
-                tensors = {
-                    key: torch.cat([item[key] for item in tensors], dim=1)
-                    for key in tensors[0].keys()
-                }
-            else:
-                raise ValueError(f"Unsupported type of tensors: {type(tensors)}")
-        return tensors
+        assert all(isinstance(tensors, dict) for tensors in tensors_list)
+        tensors_list: list[dict[str, Any]] = tensors_list
+        # 1. Collect all unique keys
+        all_keys = set()
+        for tensors in tensors_list:
+            all_keys.update(tensors.keys())
+
+        # 2. create a dictionary with all keys and initialize with empty lists
+        output_tensors = {key: [] for key in all_keys}
+        output_tensors_shape = {f"{key}_shape": [] for key in all_keys}
+
+        # 3. Populate the new dictionary with values from the original list of dictionaries
+        for tensors in tensors_list:
+            for key in all_keys:
+                data = tensors.get(key, None)
+                if data is None:
+                    output_tensors[key].append(
+                        torch.empty(0, device=get_accelerator().get_current_device())
+                    )
+                    output_tensors_shape[f"{key}_shape"].append(
+                        torch.zeros([1], device=get_accelerator().get_current_device())
+                    )
+                else:
+                    output_tensors[key].append(data)
+                    output_tensors_shape[f"{key}_shape"].append(
+                        torch.tensor(
+                            [data.shape[1]],
+                            device=get_accelerator().get_current_device(),
+                        )
+                    )
+
+        # 4. Convert the lists to tensors
+        for key in all_keys:
+            output_tensors[key] = torch.cat(output_tensors[key], dim=1)
+            shape = torch.cat(output_tensors_shape[f"{key}_shape"]).to(dtype=torch.long)
+            shape.requires_grad = False
+            output_tensors_shape[f"{key}_shape"] = shape
+
+        if out_shapes:
+            output_tensors.update(output_tensors_shape)
+
+        return output_tensors
 
     def _split_tensor(self, object: Any, num_splits: int) -> list[Any]:
         assert num_splits > 0
@@ -587,7 +605,12 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         input_tensors = None
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             input_tensors = self.comm.recv_forward()
-            input_tensors = self._merge_tensors(input_tensors)
+            if not self.stage_manager.is_first_stage():
+                # If sender is in the same modal, unlist the input_tensors
+                assert isinstance(input_tensors, list) and len(input_tensors) == 1
+                input_tensors = input_tensors[0]
+            else:
+                input_tensors = self._merge_tensors(input_tensors, out_shapes=True)
 
         return input_tensors
 
@@ -595,7 +618,17 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         output_tensor_grads = None
         if not self.stage_manager.is_last_stage(check_only_in_modal=False):
             output_tensor_grads = self.comm.recv_backward()
-            output_tensor_grads = self._merge_tensors(output_tensor_grads)
+            if not self.stage_manager.is_last_stage():
+                # If receiver is in the same modal, unlist the output_tensor_grads
+                assert (
+                    isinstance(output_tensor_grads, list)
+                    and len(output_tensor_grads) == 1
+                )
+                output_tensor_grads = output_tensor_grads[0]
+            else:
+                output_tensor_grads = self._merge_tensors(
+                    output_tensor_grads, out_shapes=False
+                )
 
         return output_tensor_grads
 
@@ -622,7 +655,17 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             output_tensor_grads = self.comm.send_forward_recv_backward(
                 output_tensor, send_first=send_first, is_broadcast=True
             )
-            output_tensor_grads = self._merge_tensors(output_tensor_grads)
+            if not self.stage_manager.is_last_stage():
+                # If receiver is in the same modal, unlist the output_tensor_grads
+                assert (
+                    isinstance(output_tensor_grads, list)
+                    and len(output_tensor_grads) == 1
+                )
+                output_tensor_grads = output_tensor_grads[0]
+            else:
+                output_tensor_grads = self._merge_tensors(
+                    output_tensor_grads, out_shapes=False
+                )
 
         return output_tensor_grads
 
@@ -644,7 +687,13 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                     send_first=send_first,
                     is_broadcast=True,
                 )
-            input_tensors = self._merge_tensors(input_tensors)
+
+            if not self.stage_manager.is_first_stage():
+                # If sender is in the same modal, unlist the input_tensors
+                assert isinstance(input_tensors, list) and len(input_tensors) == 1
+                input_tensors = input_tensors[0]
+            else:
+                input_tensors = self._merge_tensors(input_tensors, out_shapes=True)
 
         return input_tensors
 

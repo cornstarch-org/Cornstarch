@@ -41,8 +41,6 @@ def prepend_modal_output_to_inputs_embeds(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Simple postprocess_projector_callback that prepends the output of the `ModalEncoderModule` to the `inputs_embeds`."""
     # output[0] == output.last_hidden_state
-    batch_size, num_tokens, _ = output[0].shape
-
     new_inputs_embeds = torch.cat([output[0], inputs_embeds], dim=1)
 
     if attention_mask is None:
@@ -50,15 +48,22 @@ def prepend_modal_output_to_inputs_embeds(
 
     new_attention_mask = torch.cat(
         [
-            torch.ones((batch_size, num_tokens), device=attention_mask.device),
+            torch.ones(output[0].shape[:2], device=attention_mask.device),
             attention_mask,
         ],
         dim=1,
-    )
-    new_position_ids = torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1
+    ).to(dtype=torch.long)
+    new_position_ids = (new_attention_mask.cumsum(-1) - 1).masked_fill_(
+        (new_attention_mask == 0), 1
+    ).to(dtype=torch.long)
 
-    new_labels = torch.full(new_inputs_embeds.shape[:2], ignore_index, device=labels.device)
-    new_labels[:, -labels.shape[1] :] = labels
+    if labels is not None:
+        new_labels = torch.full(
+            new_inputs_embeds.shape[:2], ignore_index, device=labels.device
+        )
+        new_labels[:, -labels.shape[1] :] = labels
+    else:
+        new_labels = None
 
     return (
         new_inputs_embeds,
@@ -864,9 +869,6 @@ class MultimodalModel(nn.Module):
             for additional_arg in encoder_module.additional_args:
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
-
-            for arg in args:
-                kwargs.pop(arg, None)
 
             encoders_inputs[modal_key] = args
 
