@@ -52,8 +52,10 @@ def prepend_modal_output_to_inputs_embeds(
             attention_mask,
         ],
         dim=1,
-    )
-    new_position_ids = torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1
+    ).to(dtype=torch.long)
+    new_position_ids = (new_attention_mask.cumsum(-1) - 1).masked_fill_(
+        (new_attention_mask == 0), 1
+    ).to(dtype=torch.long)
 
     if labels is not None:
         new_labels = torch.full(

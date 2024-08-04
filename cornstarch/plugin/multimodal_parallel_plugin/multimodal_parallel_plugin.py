@@ -257,9 +257,12 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                         hidden_states.shape[:2], device=attention_mask.device
                     )
                     new_attention_mask[:, -attention_mask.shape[1] :] = attention_mask
+                new_attention_mask.to(dtype=torch.long)
 
                 new_position_ids = (
-                    torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1
+                    (new_attention_mask.cumsum(-1) - 1)
+                    .masked_fill_((new_attention_mask == 0), 1)
+                    .to(dtype=torch.long)
                 )
 
                 if labels is None:
