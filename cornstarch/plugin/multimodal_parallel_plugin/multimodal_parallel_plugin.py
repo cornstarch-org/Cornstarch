@@ -23,7 +23,10 @@ from torch.utils.data import DataLoader
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.utils import logging
 
-from cornstarch.models.multimodal_language_model import MultimodalModel
+from cornstarch.models.multimodal_language_model import (
+    ModalEncoderModule,
+    MultimodalModel,
+)
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.modal_parallel_plugin import (
     ModalParallelPlugin,
@@ -132,6 +135,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
         hidden_states: Optional[torch.FloatTensor] = None,
+        hidden_states_shape: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -185,36 +189,48 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         if self.my_modal_name == "language_model":
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # Forward in the first stage of the language model
-                encoders_outputs = hidden_states
-                encoders_attention_mask = torch.ones(
-                    encoders_outputs.size()[:-1],
-                    dtype=torch.long,
-                    device=encoders_outputs.device,
+                assert hidden_states_shape is not None
+                assert len(hidden_states_shape) == len(module.encoders), (
+                    f"Expected to have {len(module.encoders)} hidden states, "
+                    f"got {len(hidden_states)}."
+                )
+
+                # Split merged encoder outputs into separate modal features
+                num_tokens_per_encoder_outputs = hidden_states_shape.tolist()
+                encoders_outputs = hidden_states.split(
+                    num_tokens_per_encoder_outputs, dim=1
                 )
 
                 # step 2. merge encoded multimodal features into text embeddings
                 inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
-                inputs_embeds = torch.cat([encoders_outputs, inputs_embeds], dim=1)
-                hidden_states = None
 
-                if attention_mask is None:
-                    attention_mask = torch.ones_like(input_ids).to(
-                        encoders_attention_mask.device
+                for modal_key, encoder_outputs in reversed(
+                    list(zip(module.encoders.keys(), encoders_outputs))
+                ):
+                    encoder_module: ModalEncoderModule = getattr(
+                        module, f"{modal_key}_encoder"
                     )
-                attention_mask = torch.cat(
-                    [encoders_attention_mask, attention_mask], dim=1
-                )
+                    encoder_inputs = {
+                        arg: kwargs[arg]
+                        for arg in module.encoders_args[modal_key]
+                        if arg in kwargs
+                    }
 
-                # Pad the labels to match the shape with LM input
-                # Lables are padded by -100 (a default ignore_index in loss calculation)
-                # so that they are ignored when calculating a loss.
-                if labels is not None and labels.shape[1] != inputs_embeds.shape[1]:
-                    batch_size, seq_length = inputs_embeds.shape[:2]
-                    new_labels = torch.full((batch_size, seq_length), -100).to(
-                        labels.device
+                    for additional_arg in encoder_module.additional_args:
+                        if additional_arg in kwargs:
+                            encoder_inputs[additional_arg] = kwargs[additional_arg]
+
+                    inputs_embeds, attention_mask, position_ids, labels = (
+                        encoder_module.postprocess_projector_callback(
+                            encoder_inputs,
+                            (encoder_outputs,),
+                            input_ids,
+                            inputs_embeds,
+                            attention_mask,
+                            labels,
+                            pad_token_id=module.language_model.config.pad_token_id,
+                        )
                     )
-                    new_labels[:, -labels.shape[1] :] = labels
-                    labels = new_labels
 
                 language_model_inputs = dict(
                     input_ids=None,
@@ -232,22 +248,38 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             else:
                 assert inputs_embeds is None
 
-                if labels is not None and labels.shape[1] != hidden_states.shape[1]:
-                    batch_size, seq_length = hidden_states.shape[:2]
-                    new_labels = torch.full((batch_size, seq_length), -100).to(
-                        labels.device
+                if attention_mask is None:
+                    new_attention_mask = torch.ones_like(
+                        hidden_states, device=hidden_states.device
+                    )
+                else:
+                    new_attention_mask = torch.ones(
+                        hidden_states.shape[:2], device=attention_mask.device
+                    )
+                    new_attention_mask[:, -attention_mask.shape[1] :] = attention_mask
+
+                new_position_ids = (
+                    torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1
+                )
+
+                if labels is None:
+                    new_labels = None
+                else:
+                    # TODO: should we get this ignore_index from somewhere if it is cutomized?
+                    ignore_index = -100
+                    new_labels = torch.full(
+                        hidden_states.shape[:2], ignore_index, device=labels.device
                     )
                     new_labels[:, -labels.shape[1] :] = labels
-                    labels = new_labels
 
                 language_model_inputs = dict(
                     input_ids=None,
-                    attention_mask=None,
-                    position_ids=None,
-                    past_key_values=None,
+                    attention_mask=new_attention_mask,
+                    position_ids=new_position_ids,
+                    past_key_values=past_key_values,
                     inputs_embeds=None,
                     hidden_states=hidden_states,
-                    labels=labels,
+                    labels=new_labels,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
@@ -271,24 +303,25 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 assert hidden_states is None
-                encoder_model_inputs = {
+                encoder_inputs = {
                     arg: kwargs[arg]
                     for arg in module.encoders_args[modal_key]
                     if arg in kwargs
                 }
+
+                for additional_arg in encoder_module.additional_args:
+                    if additional_arg in kwargs:
+                        encoder_inputs[additional_arg] = kwargs[additional_arg]
             else:
                 assert hidden_states is not None
-                encoder_model_inputs = dict(hidden_states=hidden_states)
+                encoder_inputs = dict(hidden_states=hidden_states)
 
-            encoder_model_inputs.update(
-                {
-                    "output_attentions": output_attentions,
-                    "output_hidden_states": output_hidden_states,
-                    "return_dict": return_dict,
-                }
+            return encoder_module(
+                **encoder_inputs,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
             )
-
-            return encoder_module(**encoder_model_inputs)
         elif "decoder" in self.my_modal_name:
             raise NotImplementedError()
 
