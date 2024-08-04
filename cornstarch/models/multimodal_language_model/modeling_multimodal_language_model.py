@@ -57,7 +57,9 @@ def prepend_modal_output_to_inputs_embeds(
     )
     new_position_ids = torch.sum(new_attention_mask, dim=1).unsqueeze(-1) - 1
 
-    new_labels = torch.full(new_inputs_embeds.shape[:2], ignore_index, device=labels.device)
+    new_labels = torch.full(
+        new_inputs_embeds.shape[:2], ignore_index, device=labels.device
+    )
     new_labels[:, -labels.shape[1] :] = labels
 
     return (
@@ -864,9 +866,6 @@ class MultimodalModel(nn.Module):
             for additional_arg in encoder_module.additional_args:
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
-
-            for arg in args:
-                kwargs.pop(arg, None)
 
             encoders_inputs[modal_key] = args
 
