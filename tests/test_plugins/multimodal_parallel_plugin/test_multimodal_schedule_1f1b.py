@@ -35,6 +35,7 @@ def pp_linear_fwd(
     data: torch.Tensor = None,
     input_obj: torch.Tensor = None,
     stage_manager: MultiModalPipelineStageManager = None,
+    **kwargs,
 ):
     if stage_manager.is_first_stage(check_only_in_modal=False):
         return {"input_obj": forward(data)}
@@ -168,6 +169,7 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
             modal_name: str,
             start_idx: int,
             end_idx: int,
+            **kwargs,
         ):
             if modal_name == "encoder":
                 assert start_idx >= 0 and end_idx <= 3
@@ -344,6 +346,7 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
             modal_name: str,
             start_idx: int,
             end_idx: int,
+            **kwargs,
         ):
             if modal_name == "encoder1":
                 assert start_idx >= 0 and end_idx <= 3
