@@ -57,7 +57,7 @@ def test_build_alm(
         )
 
         MultimodalModel(
-            encoders={"audio": ModalModule(audio_model)},
+            encoders={"audio": ModalEncoderModule(audio_model)},
             language_model=language_model,
         )
 

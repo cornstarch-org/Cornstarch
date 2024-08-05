@@ -48,10 +48,6 @@ def test_multimodal_model_generation(
 ):
     model_name, model_cls = model_name_class
 
-    # TODO: currently does not support llava-v1.6 due to its image patching
-    if "llava-v1.6" in model_name:
-        pytest.skip("llava-v1.6 not supported")
-
     # create cornstarch llava model
     cornstarch_model: MultimodalModel = (
         MultimodalModel.from_pretrained_multimodal_model(
