@@ -4,7 +4,7 @@ from typing import Optional, Union
 
 import numpy as np
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
-from transformers.feature_extraction_utils import BatchFeature
+from transformers.feature_extraction_utils import BatchFeature, FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor, get_size_dict
 from transformers.image_transforms import (
     convert_to_rgb,
@@ -473,7 +473,7 @@ class ImageProcessorWrapper(BaseImageProcessor):
         return self.image_processor.model_input_names
 
 
-class MultimodalModelProcessor(ProcessorMixin):
+class MultimodalModelProcessor(ProcessorMixin, FeatureExtractionMixin):
     """
     MultimodalModelProcessor is a class that processes text and images for multimodal language models.
     It is a composition of an image processor and a tokenizer.
@@ -494,7 +494,16 @@ class MultimodalModelProcessor(ProcessorMixin):
         tokenizer: PreTrainedTokenizerBase = None,
         **kwargs,
     ):
-        super().__init__(feature_extractor, image_processor, tokenizer)
+        ProcessorMixin.__init__(
+            self, image_processor=image_processor, tokenizer=tokenizer
+        )
+        FeatureExtractionMixin.__init__(
+            self,
+            feature_extractor=feature_extractor,
+            processor_class=(
+                feature_extractor.__class__.__name__ if feature_extractor else None
+            ),
+        )
         self.feature_extractor = feature_extractor
         self.image_processor = image_processor
         self.tokenizer = tokenizer
