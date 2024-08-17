@@ -53,9 +53,11 @@ def prepend_modal_output_to_inputs_embeds(
         ],
         dim=1,
     ).to(dtype=torch.long)
-    new_position_ids = (new_attention_mask.cumsum(-1) - 1).masked_fill_(
-        (new_attention_mask == 0), 1
-    ).to(dtype=torch.long)
+    new_position_ids = (
+        (new_attention_mask.cumsum(-1) - 1)
+        .masked_fill_((new_attention_mask == 0), 1)
+        .to(dtype=torch.long)
+    )
 
     if labels is not None:
         new_labels = torch.full(
@@ -370,9 +372,10 @@ class ModalModuleBase(nn.Module):
                     "ModalModule should be either ModalEncoderModule or ModalDecoderModule."
                 )
 
-    def train(self, mode: bool = True) -> ModalModuleBase:
-        self.module.train(mode)
-        self.projector.train(mode)
+    def train(self, module: False = True, projector: bool = True) -> ModalModuleBase:
+        self.module.train(module)
+        if self.projector:
+            self.projector.train(projector)
         return self
 
     def get_modules(self) -> list[nn.Module]:

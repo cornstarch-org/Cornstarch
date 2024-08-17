@@ -1,9 +1,11 @@
 import inspect
+import random
 from contextlib import contextmanager
 from dataclasses import replace
 from types import MethodType
 from typing import Any, Callable, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from colossalai.accelerator import get_accelerator
@@ -19,7 +21,8 @@ from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
 from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.utils import logging
 
@@ -455,6 +458,8 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             max_scale=max_scale,
         )
 
+        self.distributed_initialized: bool = False
+
     def __del__(self):
         pass
 
@@ -488,6 +493,9 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         return True
 
     def init_distributed(self):
+        if self.distributed_initialized:
+            return
+
         modal_templates: dict[PipelineTemplate, int] = {}
         execution_order: list[tuple[PipelineTemplate, PipelineTemplate]] = []
         for plugin in self.encoder_plugins.values():
@@ -535,6 +543,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             dist.get_world_size(self.tp_group) > 1
         )
         self.shard_config.__post_init__()
+        self.distributed_initialized = True
 
     def configure(
         self,
@@ -612,6 +621,48 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 )
 
         return model, optimizer, criterion, dataloader, lr_scheduler
+
+    def prepare_dataloader(
+        self,
+        dataset: Dataset,
+        batch_size: int,
+        shuffle: bool = False,
+        seed: int = 1024,
+        drop_last: bool = False,
+        pin_memory: bool = False,
+        num_workers: int = 0,
+        distributed_sampler_cls=None,
+        **kwargs,
+    ):
+        assert dist.is_initialized(), "torch.distributed is not initialized."
+        self.init_distributed()
+
+        _kwargs = kwargs.copy()
+        distributed_sampler_cls = distributed_sampler_cls or DistributedSampler
+        sampler = distributed_sampler_cls(
+            dataset,
+            num_replicas=self.pg_mesh.size(self.pg_mesh.dp_axis),
+            rank=self.pg_mesh.coords[0][self.pg_mesh.dp_axis],
+            shuffle=shuffle,
+        )
+
+        # Deterministic dataloader
+        def seed_worker(worker_id):
+            worker_seed = seed
+            np.random.seed(worker_seed)
+            torch.manual_seed(worker_seed)
+            random.seed(worker_seed)
+
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            worker_init_fn=seed_worker,
+            drop_last=drop_last,
+            pin_memory=pin_memory,
+            num_workers=num_workers,
+            **_kwargs,
+        )
 
     def get_checkpoint_io(self) -> CheckpointIO:
         return None
