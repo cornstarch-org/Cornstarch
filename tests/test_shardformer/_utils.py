@@ -73,10 +73,7 @@ class PolicyTestBase(MultiProcessTestCase):
             torch.cuda.set_device(device_id)
             device_ids = [device_id]
 
-        torch.manual_seed(0)
-        torch.cuda.manual_seed(0)
-        random.seed(0)
-        np.random.seed(0)
+        self.reset_seed()
 
         # Execute barrier prior to running test to ensure that every process
         # has finished initialization and that the following test
@@ -91,6 +88,12 @@ class PolicyTestBase(MultiProcessTestCase):
         dist.barrier(device_ids=device_ids)
 
         dist.destroy_process_group()
+
+    def reset_seed(self):
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        random.seed(0)
+        np.random.seed(0)
 
 
 def build_model_from_hybrid_plugin(

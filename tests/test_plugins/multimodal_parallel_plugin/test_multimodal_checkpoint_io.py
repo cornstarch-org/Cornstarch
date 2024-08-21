@@ -3,13 +3,13 @@ import sys
 import tempfile
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import torch
 import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
-from colossalai.testing.comparison import check_state_dict_equal
+from colossalai.testing.comparison import assert_close_loose, check_state_dict_equal
 from torch.optim import Adam
 from torch.testing._internal.common_distributed import TEST_SKIPS
 from torch.testing._internal.common_utils import (
@@ -104,8 +104,6 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
         model = self.model_fn()
         model.to(device=torch.device("cuda"))
 
-        optimizer = Adam(model.parameters(), lr=1e-3)
-
         vision_plugin = ModalParallelPlugin(
             tp_size=tp_size,
             pipeline_template=pipeline_template_dict[
@@ -121,7 +119,7 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
         plugin = MultimodalParallelPlugin(
             encoder_plugins={"vision": vision_plugin},
             language_model_plugin=language_plugin,
-            precision=precision if not mixed else None,
+            precision=precision if mixed else None,
             **test_config,
         )
         if not mixed:
@@ -134,6 +132,7 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
 
         booster = Booster(plugin=plugin)
 
+        optimizer = Adam(model.parameters(), lr=1e-3)
         model, optimizer, *_ = booster.boost(model, optimizer, criterion=self.loss_fn)
         return model, optimizer, booster
 
@@ -142,10 +141,12 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
         model: MultimodalParallelModule,
         optimizer: OptimizerWrapper,
         booster: Booster,
+        data: Optional[dict[str, torch.Tensor]] = None,
     ):
-        data = self.data_gen_fn()
-        for k, v in data.items():
-            data[k] = v.clone().to(device=torch.device("cuda"))
+        if data is None:
+            data = self.data_gen_fn()
+            for k, v in data.items():
+                data[k] = v.clone().to(device=torch.device("cuda"))
 
         data_iter = iter([data])
         booster.execute_pipeline(
@@ -164,6 +165,7 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
     @parametrize(
         "precision, mixed",
         [("fp16", True), ("bf16", False), ("bf16", True), ("fp32", False)],
+        name_fn=lambda p, m: f"precision_{p}_mixed" if m else f"precision_{p}",
     )
     def test_state_dict(
         self,
@@ -207,11 +209,13 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             )
             dist.barrier()
 
-            new_model: MultimodalParallelModule
-            new_model = self.model_fn().to(device=torch.device("cuda"))
-            new_optimizer = Adam(new_model.parameters(), lr=1e-3)
-            new_model, new_optimizer, criterion, *_ = booster.boost(
-                new_model, new_optimizer, criterion=self.loss_fn
+            new_model, new_optimizer, booster = self.build_model_from_multimodal_plugin(
+                tp_size=tp,
+                vision_pp_size=vision_pp,
+                language_pp_size=language_pp,
+                precision=precision,
+                mixed=mixed,
+                test_config=test_config,
             )
 
             booster.load_model(
@@ -241,9 +245,17 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             dist.barrier()
 
         # Check whether the loaded model & optimizer works well.
-        self.run_forward_backward_with_multimodal_plugin(model, optimizer, booster)
+        data = self.data_gen_fn()
+        for k, v in data.items():
+            data[k] = v.clone().to(device=torch.device("cuda"))
+
+        self.reset_seed()
         self.run_forward_backward_with_multimodal_plugin(
-            new_model, new_optimizer, booster
+            model, optimizer, booster, copy.deepcopy(data)
+        )
+        self.reset_seed()
+        self.run_forward_backward_with_multimodal_plugin(
+            new_model, new_optimizer, booster, copy.deepcopy(data)
         )
 
         optimizer.step()
@@ -251,7 +263,7 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
 
         # Check updated weights.
         for p1, p2 in zip(model.parameters(), new_model.parameters()):
-            assert torch.allclose(p1, p2, atol=5e-3, rtol=5e-3)
+            assert_close_loose(p1, p2, atol=5e-3, rtol=5e-3)
 
         dist.barrier()
 

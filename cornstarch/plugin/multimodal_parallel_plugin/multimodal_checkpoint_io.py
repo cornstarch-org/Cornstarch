@@ -166,8 +166,8 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
                 final_index_file.metadata["total_size"] += stage_index_file.metadata[
                     "total_size"
                 ]
-                for weight, weight_filename in stage_index_file.weight_map.items():
-                    final_index_file.append_weight_map(weight, weight_filename)
+                for param_id, state_filename in stage_index_file.weight_map.items():
+                    final_index_file.append_weight_map(param_id, state_filename)
 
             # Store param groups.
             final_index_file.append_meta_data("param_groups", param_group_file)
@@ -366,8 +366,6 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
             is not nn.Module.get_extra_state
         ):
             load(extra_state_key)
-
-        # TODO: update master params if mixed-precision training is enabled
 
         if self.verbose and self.coordinator.is_master():
             logging.info(
@@ -756,6 +754,9 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
                 f"Failed to load checkpoint from {checkpoint}. "
                 f"Unmatched keys: {list(checkpoint.keys())}"
             )
+
+        # Update master params if mixed-precision training is enabled.
+        model.update_master_params()
 
         return original_model
 
