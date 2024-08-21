@@ -198,9 +198,9 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             optimizer_ckpt_path = Path(tempdir) / "optimizer"
 
             booster.save_model(model, model_ckpt_path, shard=shard, size_per_shard=32)
-            # booster.save_optimizer(
-            #     optimizer, optimizer_ckpt_path, shard=shard, size_per_shard=32
-            # )
+            booster.save_optimizer(
+                optimizer, optimizer_ckpt_path, shard=shard, size_per_shard=32
+            )
             dist.barrier()
 
             new_model: MultimodalParallelModule

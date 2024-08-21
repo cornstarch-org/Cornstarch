@@ -18,15 +18,17 @@ from colossalai.checkpoint_io.utils import (
     SAFE_WEIGHTS_NAME,
     WEIGHTS_NAME,
     get_model_base_filenames,
+    get_optimizer_base_filenames,
     has_index_file,
     is_safetensors_available,
     load_shard_state_dict,
     load_state_dict_into_model,
     save_config_file,
+    save_param_groups,
     save_state_dict_shards,
 )
 from colossalai.cluster import DistCoordinator
-from colossalai.interface import ModelWrapper
+from colossalai.interface import ModelWrapper, OptimizerWrapper
 from torch.optim import Optimizer
 from transformers.modeling_utils import PreTrainedModel
 
@@ -60,7 +62,7 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         self.verbose = verbose
         self.coordinator = DistCoordinator()
 
-    def clean_index_files(
+    def clean_model_index_files(
         self,
         model: PreTrainedModel | ModalModuleBase,
         checkpoint: str,
@@ -69,7 +71,7 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         use_safetensors: bool = False,
     ):
         """
-        Integrate index files in the temp directory
+        Integrate index files in the temp directory to one final index file.
         """
         if self.dp_rank != 0:
             return
@@ -123,12 +125,73 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
                 shutil.rmtree(Path(checkpoint) / "module" / "tmp_index_files")
                 shutil.rmtree(Path(checkpoint) / "projector" / "tmp_index_files")
 
-        if self.verbose and stage_manager.is_first_stage(check_only_in_modal=True):
-            logging.info(
-                f"The model is split into checkpoint shards. "
-                f"You can find where each parameters has been saved in the "
-                f"index located at {final_index_file}."
-            )
+            if self.verbose:
+                logging.info(
+                    f"The model is split into checkpoint shards. "
+                    f"You can find where each parameters has been saved in the "
+                    f"index located at {final_index_file}."
+                )
+
+    def clean_optimizer_index_files(
+        self,
+        optimizer: OptimizerWrapper,
+        checkpoint: str,
+        stage_manager: MultiModalPipelineStageManager,
+        prefix: str | None = None,
+    ):
+        """
+        Integrate index files in the temp directory to one final index file.
+        """
+
+        # Wait until all index files are written.
+        dist.barrier(self.pp_group)
+
+        def merge_index_files(tmp_index_file_dir: Path):
+            _, save_index_file, param_group_file = get_optimizer_base_filenames(prefix)
+
+            final_index_file = CheckpointIndexFile(str(tmp_index_file_dir.parent))
+            final_index_file.append_meta_data("total_size", 0)
+
+            for filename in tmp_index_file_dir.iterdir():
+                stage_index_file = CheckpointIndexFile.from_file(
+                    tmp_index_file_dir / filename
+                )
+                final_index_file.metadata["total_size"] += stage_index_file.metadata[
+                    "total_size"
+                ]
+                for weight, weight_filename in stage_index_file.weight_map.items():
+                    final_index_file.append_weight_map(weight, weight_filename)
+
+            # Store param groups.
+            final_index_file.append_meta_data("param_groups", param_group_file)
+            group_file_path = tmp_index_file_dir / param_group_file
+            param_groups = [
+                {**group, "params": group_info["params"]}
+                for group, group_info in zip(
+                    optimizer.param_groups, optimizer.param_info["param_groups"]
+                )
+            ]
+            save_param_groups({"param_groups": param_groups}, group_file_path)
+
+            final_index_file.write_index_file(save_index_file)
+
+            return save_index_file
+
+        if stage_manager.is_first_stage(check_only_in_modal=True):
+            tmp_index_file_dir = Path(checkpoint) / "tmp_index_files"
+            final_index_file = merge_index_files(tmp_index_file_dir)
+
+        dist.barrier(self.pp_group)
+
+        if stage_manager.is_first_stage(check_only_in_modal=True):
+            shutil.rmtree(tmp_index_file_dir)
+
+            if self.verbose:
+                logging.info(
+                    f"The model is split into checkpoint shards. "
+                    f"You can find where each parameters has been saved in the "
+                    f"index located at {final_index_file}."
+                )
 
     def save_sharded_model(
         self,
@@ -162,28 +225,7 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
             index_file = CheckpointIndexFile(checkpoint)
             control_saving = self.tp_rank == 0
 
-            # if stage_manager.num_stages_in_modal == 1:
-            #     # Save the model shards as in general CheckpointIO
-            #     total_size = save_state_dict_shards(
-            #         sharded_state_dict=state_dict_shard,
-            #         checkpoint=checkpoint,
-            #         index_file=index_file,
-            #         base_filename=weights_name,
-            #         is_master=control_saving,
-            #         use_safetensors=use_safetensors,
-            #     )
-            #     if control_saving:
-            #         index_file.append_meta_data("total_size", total_size)
-            #         index_file.write_index_file(save_index_file)
-            #         save_config_file(model, checkpoint)
-            #         if self.verbose and self.coordinator.is_master():
-            #             logging.info(
-            #                 f"The model is split into checkpoint shards. "
-            #                 f"You can find where each parameters has been saved in the "
-            #                 f"index located at {save_index_file}."
-            #             )
-            # else:
-            # When pipeline is used, first each stage produces its own shard files and index files.
+            # Each stage produces its own shard files and index files.
             # Index files belonging to each stage are saved under a temporary folder ./tmp_index_files/.
             # After all the state_dicts have been saved, the master rank renames all shard files,
             # integrates all index files into one, and deletes the tmp folder.
@@ -356,6 +398,68 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
     ):
         raise NotImplementedError
 
+    def save_sharded_optimizer(
+        self,
+        optimizer: OptimizerWrapper,
+        checkpoint: str,
+        gather_dtensor: bool = True,
+        prefix: str | None = None,
+        size_per_shard: int = 1024,
+    ):
+        # Devices along the same dp_group share the same copies of states.
+        # So only let the device with dp_rank == 0 save the states.
+        if self.dp_rank != 0:
+            return
+
+        # Then collect the sharded states along tp_group.
+        # Only devices with (dp_rank == 0 and tp_rank == 0) are responsible for states saving.
+        state_dict_shard = HybridParallelCheckpointIO._optimizer_sharder(
+            optimizer,
+            use_zero=False,
+            dp_group=self.dp_group,
+            tp_group=self.tp_group,
+            size_per_shard=size_per_shard,
+        )
+        states_name, save_index_file, _ = get_optimizer_base_filenames(prefix)
+        index_file = CheckpointIndexFile(checkpoint)
+        control_saving = self.tp_rank == 0
+
+        # Each stage produces its own shard files and index files.
+        # Index files belonging to each stage are saved under a temporary folder ./tmp_index_files/.
+        # After all the state_dicts have been saved, the master rank integrates all the index files into one.
+        tmp_index_file_dir = Path(checkpoint) / "tmp_index_files"
+        tmp_index_file_dir.mkdir(parents=True, exist_ok=True)
+
+        states_name = states_name.replace(
+            ".bin", f"-stage-{self.pp_rank+1:05d}-shard.bin"
+        )
+        save_index_file = save_index_file.replace(
+            ".json", f"-stage-{self.pp_rank+1:05d}-shard.json"
+        )
+        save_index_file = tmp_index_file_dir / save_index_file
+
+        total_size = save_state_dict_shards(
+            sharded_state_dict=state_dict_shard,
+            checkpoint=checkpoint,
+            index_file=index_file,
+            base_filename=states_name,
+            is_master=control_saving,
+            use_safetensors=False,
+            use_pp_format=True,
+        )
+
+        if control_saving:
+            assert (
+                self.dp_rank == 0 and self.tp_rank == 0
+            ), "The saving process should have both dp_rank and tp_rank as 0."
+            index_file.append_meta_data("total_size", total_size)
+            index_file.write_index_file(save_index_file)
+
+    def load_sharded_optimizer(
+        self, optimizer: OptimizerWrapper, checkpoint_index_file: str, prefix: str = ""
+    ):
+        raise NotImplementedError
+
 
 class MultimodalParallelCheckpointIO(CheckpointIO):
     """
@@ -430,8 +534,8 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
             self.plugin.dp_group, self.plugin.tp_group, self.plugin.pp_groups[0]
         )
 
+        checkpoint_name = f"{str(checkpoint)}/{model.my_modal_name}"
         if shard:
-            checkpoint_name = f"{str(checkpoint)}/{model.my_modal_name}"
             checkpoint_io.save_sharded_model(
                 module,
                 checkpoint_name,
@@ -441,7 +545,7 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
                 use_safetensors,
             )
 
-            checkpoint_io.clean_index_files(
+            checkpoint_io.clean_model_index_files(
                 module,
                 checkpoint_name,
                 self.plugin.stage_manager,
@@ -451,7 +555,7 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
         else:
             checkpoint_io.save_unsharded_model(
                 module,
-                f"{str(checkpoint)}/{model.my_modal_name}",
+                checkpoint_name,
                 gather_dtensor,
                 use_safetensors,
                 self.plugin.stage_manager,
@@ -499,7 +603,6 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
             if index_file_exists:
                 checkpoint_io.load_sharded_model(module, index_file_path, strict)
             else:
-                raise NotImplementedError()
                 path = Path(checkpoint, SAFE_WEIGHTS_NAME)
                 if path.is_file():
                     checkpoint_io.load_unsharded_model(model, str(path), strict)
@@ -547,6 +650,60 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
             )
 
         return original_model
+
+    def save_optimizer(
+        self,
+        optimizer: OptimizerWrapper,
+        checkpoint: str,
+        shard: bool = False,
+        gather_dtensor=True,
+        prefix: str = None,
+        size_per_shard: int = 1024,
+    ):
+        assert isinstance(
+            optimizer, OptimizerWrapper
+        ), "Please boost the optimizer before saving!"
+        checkpoint: Path = Path(checkpoint)
+        assert (
+            not checkpoint.suffix
+        ), "checkpoint path should be a directory for multimodal model."
+        checkpoint.mkdir(parents=True, exist_ok=True)
+
+        checkpoint_io = ModalParallelCheckpointIO(
+            self.plugin.dp_group, self.plugin.tp_group, self.plugin.pp_groups[0]
+        )
+
+        checkpoint_name = f"{str(checkpoint)}/{optimizer.model.my_modal_name}"
+        if shard:
+            checkpoint_io.save_sharded_optimizer(
+                optimizer,
+                checkpoint_name,
+                gather_dtensor,
+                prefix,
+                size_per_shard,
+            )
+
+            checkpoint_io.clean_optimizer_index_files(
+                optimizer,
+                checkpoint_name,
+                self.plugin.stage_manager,
+                prefix,
+            )
+        else:
+            checkpoint_io.save_unsharded_optimizer(
+                optimizer,
+                checkpoint_name,
+                gather_dtensor,
+            )
+
+    def load_optimizer(
+        self,
+        optimizer: OptimizerWrapper,
+        checkpoint: str,
+        prefix: str = None,
+        size_per_shard: int = 1024,
+    ):
+        return super().load_optimizer(optimizer, checkpoint, prefix, size_per_shard)
 
     def load_sharded_model(self, model: nn.Module, index_file_path: str, strict: bool):
         raise NotImplementedError("Not used in MultimodalParallelCheckpointIO")
