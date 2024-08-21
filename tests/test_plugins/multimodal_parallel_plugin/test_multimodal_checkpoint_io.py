@@ -1,16 +1,17 @@
 import copy
+import sys
 import tempfile
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator
 
-import pytest
 import torch
 import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
 from colossalai.testing.comparison import check_state_dict_equal
 from torch.optim import Adam
+from torch.testing._internal.common_distributed import TEST_SKIPS
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -147,7 +148,7 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             data[k] = v.clone().to(device=torch.device("cuda"))
 
         data_iter = iter([data])
-        output = booster.execute_pipeline(
+        booster.execute_pipeline(
             data_iter,
             model,
             criterion=self.loss_fn,
@@ -155,7 +156,6 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             return_loss=True,
             return_outputs=False,
         )
-        loss = output["loss"]
 
     @parametrize("shard", [True, False])
     @parametrize(
@@ -174,8 +174,8 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
         precision: str,
         mixed: bool,
     ):
-        if not shard:
-            pytest.skip("Non-sharding is not supported yet")
+        if shard is False:
+            sys.exit(TEST_SKIPS["generic"].exit_code)
 
         test_config = {
             "num_microbatches": 4,
