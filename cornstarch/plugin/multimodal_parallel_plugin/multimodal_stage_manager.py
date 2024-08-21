@@ -279,6 +279,10 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         return self.pg_mesh.shape[self.pipeline_axis]
 
     @property
+    def num_stages_in_modal(self) -> int:
+        return self.stage_index_to_modal[self.stage].num_stages
+
+    @property
     def stage(self) -> int:
         return self.pg_mesh.coords[0][self.pipeline_axis]
 
