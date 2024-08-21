@@ -80,7 +80,7 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         """
         Integrate index files in the temp directory to one final index file.
         """
-        if self.dp_rank != 0:
+        if self.dp_rank != 0 or self.tp_rank != 0:
             return
 
         # Wait until all index files are written.
@@ -149,6 +149,8 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         """
         Integrate index files in the temp directory to one final index file.
         """
+        if self.dp_rank != 0 or self.tp_rank != 0:
+            return
 
         # Wait until all index files are written.
         dist.barrier(self.pp_group)
