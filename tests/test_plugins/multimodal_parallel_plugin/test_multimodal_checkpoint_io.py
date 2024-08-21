@@ -4,6 +4,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator
 
+import pytest
 import torch
 import torch.distributed as dist
 from colossalai.booster import Booster
@@ -173,6 +174,9 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
         precision: str,
         mixed: bool,
     ):
+        if not shard:
+            pytest.skip("Non-sharding is not supported yet")
+
         test_config = {
             "num_microbatches": 4,
             "microbatch_size": 1,
@@ -235,6 +239,21 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             check_state_dict_equal(optimizer.state_dict(), new_optimizer.state_dict())
 
             dist.barrier()
+
+        # Check whether the loaded model & optimizer works well.
+        self.run_forward_backward_with_multimodal_plugin(model, optimizer, booster)
+        self.run_forward_backward_with_multimodal_plugin(
+            new_model, new_optimizer, booster
+        )
+
+        optimizer.step()
+        new_optimizer.step()
+
+        # Check updated weights.
+        for p1, p2 in zip(model.parameters(), new_model.parameters()):
+            assert torch.allclose(p1, p2, atol=5e-3, rtol=5e-3)
+
+        dist.barrier()
 
 
 instantiate_parametrized_tests(TestMultimodalCheckpointIOClass)
