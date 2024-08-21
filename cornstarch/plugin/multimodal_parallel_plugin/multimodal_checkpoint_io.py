@@ -1,8 +1,11 @@
+import copy
 import functools
 import logging
 import shutil
 from pathlib import Path
+from typing import Optional
 
+import torch
 import torch.distributed as dist
 import torch.nn as nn
 from colossalai.checkpoint_io import (
@@ -23,9 +26,11 @@ from colossalai.checkpoint_io.utils import (
     is_safetensors_available,
     load_shard_state_dict,
     load_state_dict_into_model,
+    load_states_into_optimizer,
     save_config_file,
     save_param_groups,
     save_state_dict_shards,
+    sharded_optimizer_loading_epilogue,
 )
 from colossalai.cluster import DistCoordinator
 from colossalai.interface import ModelWrapper, OptimizerWrapper
@@ -59,6 +64,8 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         self.dp_rank = dist.get_rank(group=self.dp_group)
         self.tp_rank = dist.get_rank(group=self.tp_group)
         self.pp_rank = dist.get_rank(group=self.pp_group)
+        self.tp_size = dist.get_world_size(group=self.tp_group)
+        self.use_zero = False
         self.verbose = verbose
         self.coordinator = DistCoordinator()
 
@@ -164,7 +171,7 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
 
             # Store param groups.
             final_index_file.append_meta_data("param_groups", param_group_file)
-            group_file_path = tmp_index_file_dir / param_group_file
+            group_file_path = Path(checkpoint) / param_group_file
             param_groups = [
                 {**group, "params": group_info["params"]}
                 for group, group_info in zip(
@@ -458,7 +465,108 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
     def load_sharded_optimizer(
         self, optimizer: OptimizerWrapper, checkpoint_index_file: str, prefix: str = ""
     ):
-        raise NotImplementedError
+        assert isinstance(
+            optimizer, OptimizerWrapper
+        ), "Please boost the optimizer before loading!"
+
+        def get_param_id_from_optimizer_param(
+            param: torch.Tensor,
+            master_to_working_map: Optional[dict[int, torch.Tensor]] = None,
+        ):
+            if master_to_working_map is not None:
+                working_param = master_to_working_map[id(param)]
+            else:
+                working_param = param
+            return optimizer.param_info["param2id"][id(working_param)]
+
+        # id_map is a mapping from param ids kept by current pipeline, to their corresponding parameter objects.
+        id_map: dict[int, torch.Tensor] = {}
+        master_to_working_map = optimizer.get_master_to_working_map()
+        for pg in optimizer.optim.param_groups:
+            for param in pg["params"]:
+                param_id = get_param_id_from_optimizer_param(
+                    param, master_to_working_map
+                )
+                id_map[param_id] = param
+
+        # Read checkpoint index file.
+        ckpt_index_file = CheckpointIndexFile.from_file(checkpoint_index_file)
+        ckpt_root_path = ckpt_index_file.root_path
+        weight_map = ckpt_index_file.weight_map
+        weight_map = {
+            int(k): v for k, v in weight_map.items()
+        }  # convert saved id from str to int
+
+        # Load param groups
+        param_group_path = ckpt_index_file.get_param_group_filename()
+        if param_group_path is None:
+            raise RuntimeError(
+                f"Invalid index file path {checkpoint_index_file} for an optimizer. \
+                               Lacking param group file under current directory."
+            )
+
+        saved_groups = torch.load(param_group_path)
+
+        updated_groups = []
+        for old_pg, saved_pg in zip(optimizer.optim.param_groups, saved_groups):
+            # obtain updated param group
+            new_pg = copy.deepcopy(saved_pg)
+            new_pg["params"] = old_pg[
+                "params"
+            ]  # The parameters in the same group shouldn't change.
+            updated_groups.append(new_pg)
+        optimizer.optim.__dict__.update({"param_groups": updated_groups})
+
+        # Load saved states to optimizer.
+        # Keep a record of loaded files so that file will not be repeatedly loaded.
+        loaded_file = set()
+        for pg in optimizer.optim.param_groups:
+            for param in pg["params"]:
+                if param is None:
+                    continue
+                param_id = get_param_id_from_optimizer_param(
+                    param, master_to_working_map
+                )
+                if param_id not in weight_map:
+                    continue
+                filename = weight_map[param_id]
+
+                # If this param's states has been loaded before, directly return.
+                if filename in loaded_file:
+                    continue
+
+                file_path = ckpt_root_path / filename
+                state_dict = load_shard_state_dict(
+                    Path(file_path), use_safetensors=False
+                )
+                load_states_into_optimizer(
+                    optimizer.optim, state_dict, id_map, strict=True
+                )
+                loaded_file.add(filename)
+
+        # Then shard the loaded optimizer states if using tp.
+        for param, state in optimizer.optim.state.items():
+            device = param.device
+            if master_to_working_map is not None:
+                working_param = master_to_working_map[id(param)]
+            else:
+                working_param = param
+
+            original_shape = optimizer.param_info["param2shape"][id(working_param)]
+            sharded_state = self.shard_from_complete_optimizer_state(
+                state,
+                current_shape=working_param.shape,
+                original_shape=original_shape,
+                device=device,
+                inplace=True,
+            )
+            optimizer.optim.state[param] = sharded_state
+
+        sharded_optimizer_loading_epilogue(optimizer.optim)
+        if self.verbose and self.coordinator.is_master():
+            logging.info(
+                f"The optimizer has been successfully loaded from sharded checkpoint: {ckpt_root_path}."
+            )
 
 
 class MultimodalParallelCheckpointIO(CheckpointIO):
@@ -498,7 +606,7 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
 
         Each modal is saved hierarchically following its model structure under `checkpoint` path
         as described in the class docstring.
-        For this, `checkpoint` should be a directory.
+        For this, `checkpoint` should be a dictionary.
 
         If a module is frozen, it will not be saved.
         Whether the module is not frozen is determined by if any parameter in the module has `requires_grad` set to `True`.
@@ -699,11 +807,58 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
     def load_optimizer(
         self,
         optimizer: OptimizerWrapper,
-        checkpoint: str,
+        checkpoint: dict[str, str],
         prefix: str = None,
         size_per_shard: int = 1024,
     ):
-        return super().load_optimizer(optimizer, checkpoint, prefix, size_per_shard)
+        """
+        Load optimizer from checkpoint.
+
+        Each modal is saved hierarchically following its model structure under `checkpoint` path
+        as described in the class docstring.
+        For this, `checkpoint` should be a dictionary.
+
+        Unlike `load_model` method that loads a module and a projector for each modality separately,
+        optimizer can't be loaded separately for each modality since it is stored as one checkpoint.
+
+        Example of vision language model checkpoint structure:
+        checkpoint = {
+            "language_model": "path/to/language_model",
+            "vision_encoder": "path/to/vision_encoder",
+        }
+        """
+        assert hasattr(
+            optimizer, "model"
+        ), "optimizer should hold a module, named model."
+        assert isinstance(getattr(optimizer, "model"), MultimodalParallelModule), (
+            f"optimizer should hold a module typed MultimodalParallelModule, "
+            f"but got {type(getattr(optimizer, 'model'))}."
+        )
+
+        def load_optimizer_states(
+            optimizer: OptimizerWrapper, target_index_file_path: Path
+        ):
+            index_file_exists, index_file_path = has_index_file(
+                str(target_index_file_path)
+            )
+
+            checkpoint_io = ModalParallelCheckpointIO(
+                self.plugin.dp_group, self.plugin.tp_group, self.plugin.pp_groups[0]
+            )
+
+            if index_file_exists:
+                checkpoint_io.load_sharded_optimizer(optimizer, index_file_path, prefix)
+            else:
+                checkpoint_io.load_unsharded_optimizer(optimizer, checkpoint)
+
+        if "language_model" in checkpoint:
+            load_optimizer_states(optimizer, Path(checkpoint.pop("language_model")))
+
+        for encoder_name in optimizer.model.module.encoders.keys():
+            if f"{encoder_name}_encoder" in checkpoint:
+                load_optimizer_states(
+                    optimizer, Path(checkpoint.pop(f"{encoder_name}_encoder"))
+                )
 
     def load_sharded_model(self, model: nn.Module, index_file_path: str, strict: bool):
         raise NotImplementedError("Not used in MultimodalParallelCheckpointIO")

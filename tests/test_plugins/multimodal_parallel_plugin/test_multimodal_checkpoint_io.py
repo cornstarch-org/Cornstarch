@@ -225,8 +225,14 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             check_state_dict_equal(
                 model.unwrap().state_dict(), new_model.unwrap().state_dict()
             )
-            # booster.load_optimizer(new_optimizer, optimizer_ckpt_path)
-            # check_state_dict_equal(optimizer.state_dict(), new_optimizer.state_dict())
+            booster.load_optimizer(
+                new_optimizer,
+                {
+                    "language_model": optimizer_ckpt_path / "language_model",
+                    "vision_encoder": optimizer_ckpt_path / "vision_encoder",
+                },
+            )
+            check_state_dict_equal(optimizer.state_dict(), new_optimizer.state_dict())
 
             dist.barrier()
 
