@@ -63,7 +63,6 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
     def clean_index_files(
         self,
         model: PreTrainedModel | ModalModuleBase,
-        modal_name: str,
         checkpoint: str,
         stage_manager: MultiModalPipelineStageManager,
         prefix: str | None = None,
@@ -81,7 +80,7 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         def merge_index_files(tmp_index_file_dir: Path):
             _, save_index_file = get_model_base_filenames(prefix, use_safetensors)
 
-            final_index_file = CheckpointIndexFile(checkpoint)
+            final_index_file = CheckpointIndexFile(str(tmp_index_file_dir.parent))
             final_index_file.append_meta_data("total_size", 0)
 
             for filename in tmp_index_file_dir.iterdir():
@@ -246,10 +245,15 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
 
     def load_sharded_model(
         self,
-        model: PreTrainedModel | ModalModuleBase,
+        model: PreTrainedModel,
         checkpoint_index_file: Path,
         strict: bool = False,
     ):
+        assert isinstance(model, PreTrainedModel), (
+            f"model should be an instance of PreTrainedModel, "
+            f"but got {type(model)}."
+        )
+
         use_safetensors = False
         if "safetensors" in checkpoint_index_file.name:
             use_safetensors = True
@@ -259,99 +263,89 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
                 "`safe_serialization` requires the `safetensors` library: `pip install safetensors`."
             )
 
-        if isinstance(model, PreTrainedModel):
-            ckpt_index_file = CheckpointIndexFile.from_file(checkpoint_index_file)
-            ckpt_root_path = ckpt_index_file.root_path
-            weight_map = ckpt_index_file.weight_map
-            strict = False
+        ckpt_index_file = CheckpointIndexFile.from_file(checkpoint_index_file)
+        ckpt_root_path = ckpt_index_file.root_path
+        weight_map = ckpt_index_file.weight_map
+        strict = False
 
-            loaded_files = set()
+        loaded_files = set()
 
-            missing_keys = []
-            missing_file_keys = []
+        missing_keys = []
+        missing_file_keys = []
 
-            def load(name: str):
-                if name not in weight_map:
-                    missing_keys.append(name)
-                    return
+        def load(name: str):
+            if name not in weight_map:
+                missing_keys.append(name)
+                return
 
-                file_name = weight_map[name]
+            file_name = weight_map[name]
 
-                # If this param/buffer has been loaded before, directly return.
-                if file_name in loaded_files:
-                    return
+            # If this param/buffer has been loaded before, directly return.
+            if file_name in loaded_files:
+                return
 
-                file_path = Path(ckpt_root_path) / file_name
-                state_dict = load_shard_state_dict(file_path, use_safetensors)
+            file_path = Path(ckpt_root_path) / file_name
+            state_dict = load_shard_state_dict(file_path, use_safetensors)
 
-                load_state_dict_into_model(
-                    model,
-                    state_dict,
-                    missing_keys=missing_file_keys,
-                    strict=strict,
-                    load_sub_module=True,
-                )
-                loaded_files.add(file_name)
+            load_state_dict_into_model(
+                model,
+                state_dict,
+                missing_keys=missing_file_keys,
+                strict=strict,
+                load_sub_module=True,
+            )
+            loaded_files.add(file_name)
 
-            # Load parameters
-            for name, _ in model.named_parameters():
+        # Load parameters
+        for name, _ in model.named_parameters():
+            load(name)
+
+        # Load buffers
+        non_persistent_buffers = set()
+        for name, module in model.named_modules():
+            non_persistent_buffers |= set(
+                ".".join((name, b)) for b in module._non_persistent_buffers_set
+            )
+        for name, buf in model.named_buffers():
+            if buf is not None and name not in non_persistent_buffers:
                 load(name)
 
-            # Load buffers
-            non_persistent_buffers = set()
-            for name, module in model.named_modules():
-                non_persistent_buffers |= set(
-                    ".".join((name, b)) for b in module._non_persistent_buffers_set
-                )
-            for name, buf in model.named_buffers():
-                if buf is not None and name not in non_persistent_buffers:
-                    load(name)
+        # Load extra states
+        extra_state_key = _EXTRA_STATE_KEY_SUFFIX
+        if (
+            getattr(model.__class__, "get_extra_state", nn.Module.get_extra_state)
+            is not nn.Module.get_extra_state
+        ):
+            load(extra_state_key)
 
-            # Load extra states
-            extra_state_key = _EXTRA_STATE_KEY_SUFFIX
-            if (
-                getattr(model.__class__, "get_extra_state", nn.Module.get_extra_state)
-                is not nn.Module.get_extra_state
-            ):
-                load(extra_state_key)
+        # TODO: update master params if mixed-precision training is enabled
 
-            # TODO: update master params if mixed-precision training is enabled
-
-            if self.verbose and self.coordinator.is_master():
-                logging.info(
-                    f"The model has been successfully loaded from sharded checkpoint: {ckpt_root_path}."
-                )
-
-            if len(missing_keys) == 0:
-                raise RuntimeError(
-                    "No weigth is loaded into the model. Please check the checkpoint files and the model structure."
-                )
-
-            remain_keys = functools.reduce(lambda a, b: a & b, map(set, missing_keys))
-            remain_keys = remain_keys.union(set(missing_file_keys))
-            if len(remain_keys) > 0:
-                if strict:
-                    error_msgs = "Missing key(s) in state_dict: {}. ".format(
-                        ", ".join('"{}"'.format(k) for k in missing_keys)
-                    )
-                    raise RuntimeError(
-                        "Error(s) in loading state_dict for {}:\n\t{}".format(
-                            self.__class__.__name__, "\n\t".join(error_msgs)
-                        )
-                    )
-                else:
-                    if self.coordinator.is_master():
-                        logging.info(
-                            f"The following keys are not loaded from checkpoint: {remain_keys}"
-                        )
-
-        elif isinstance(model, ModalModuleBase):
-            pass
-        else:
-            raise ValueError(
-                f"model should be an instance of PreTrainedModel or ModalModuleBase, "
-                f"but got {type(model)}."
+        if self.verbose and self.coordinator.is_master():
+            logging.info(
+                f"The model has been successfully loaded from sharded checkpoint: {ckpt_root_path}."
             )
+
+        if len(missing_keys) == 0:
+            # No weights is loaded. This is likely because modules are separated.
+            return
+
+        remain_keys = functools.reduce(lambda a, b: a & b, map(set, missing_keys))
+        remain_keys = remain_keys.union(set(missing_file_keys))
+        if len(remain_keys) > 0:
+            if strict:
+                error_msgs = "Missing key(s) in state_dict: {}. ".format(
+                    ", ".join('"{}"'.format(k) for k in missing_keys)
+                )
+                raise RuntimeError(
+                    "Error(s) in loading state_dict for {}:\n\t{}".format(
+                        self.__class__.__name__, "\n\t".join(error_msgs)
+                    )
+                )
+            else:
+                if self.coordinator.is_master():
+                    logging.info(
+                        f"The following keys are not loaded from checkpoint: {remain_keys}"
+                    )
 
     def save_unsharded_model(
         self,
@@ -449,7 +443,6 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
 
             checkpoint_io.clean_index_files(
                 module,
-                model.my_modal_name,
                 checkpoint_name,
                 self.plugin.stage_manager,
                 prefix,
@@ -465,33 +458,93 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
             )
 
     def load_model(
-        self, model: MultimodalParallelModule, checkpoint: str, strict: bool = True
+        self,
+        model: MultimodalParallelModule,
+        checkpoint: dict[str, str],
+        strict: bool = True,
     ) -> MultimodalParallelModule:
+        """
+        Load model modules from checkpoints.
+
+        Each modality module can be loaded individually from the corresponding checkpoint path.
+        Example of vision language model checkpoint structure:
+        checkpoint = {
+            "language_model": "path/to/language_model",
+            "vision_encoder.module": "path/to/vision_encoder/module",
+            "vision_encoder.projector": "path/to/vision_encoder/projector",
+        }
+
+        A vision encoder and a projector can be loaded separately, as they are individual modules.
+        If a checkpoint includes multiple modules, same path can be used for multiple modules.
+        """
         assert isinstance(model, MultimodalParallelModule), (
             f"model should be an instance of MultimodalParallelModule, "
             f"but got {type(model)}."
         )
         original_model = model
 
-        # since we only support loaded sharded and unsharded weight format
-        # containing no distributed tensors, dtensor -> full tensor conversion
-        # should be done offline via our CLI
-        # the existence of index file means it is a sharded checkpoint
-        index_file_exists, index_file_path = has_index_file(checkpoint)
+        def load_module(module: nn.Module, target_index_file_path: Path):
+            # since we only support loaded sharded and unsharded weight format
+            # containing no distributed tensors, dtensor -> full tensor conversion
+            # should be done offline via our CLI
+            # the existence of index file means it is a sharded checkpoint
+            index_file_exists, index_file_path = has_index_file(
+                str(target_index_file_path)
+            )
 
-        if index_file_exists:
-            self.load_sharded_model(model, index_file_path, strict)
-        else:
-            raise NotImplementedError()
-            path = Path(checkpoint, SAFE_WEIGHTS_NAME)
-            if path.is_file():
-                self.load_unsharded_model(model, str(path), strict)
+            checkpoint_io = ModalParallelCheckpointIO(
+                self.plugin.dp_group, self.plugin.tp_group, self.plugin.pp_groups[0]
+            )
+
+            if index_file_exists:
+                checkpoint_io.load_sharded_model(module, index_file_path, strict)
             else:
-                path = Path(checkpoint, WEIGHTS_NAME)
+                raise NotImplementedError()
+                path = Path(checkpoint, SAFE_WEIGHTS_NAME)
                 if path.is_file():
-                    self.load_unsharded_model(model, str(path), strict)
+                    checkpoint_io.load_unsharded_model(model, str(path), strict)
                 else:
-                    self.load_unsharded_model(model, checkpoint, strict)
+                    path = Path(checkpoint, WEIGHTS_NAME)
+                    if path.is_file():
+                        checkpoint_io.load_unsharded_model(model, str(path), strict)
+                    else:
+                        checkpoint_io.load_unsharded_model(model, checkpoint, strict)
+
+        language_model = getattr(model.module, "language_model")
+        if language_model is not None:
+            assert "language_model" in checkpoint, (
+                f"language_model should be in the checkpoint, " f"but got {checkpoint}."
+            )
+            load_module(language_model, Path(checkpoint.pop("language_model")))
+
+        for encoder_name, encoder_module in model.module.encoders.items():
+            if strict:
+                assert f"{encoder_name}_encoder.module" in checkpoint, (
+                    f"{encoder_name}_encoder.module should be in the checkpoint, "
+                    f"but got {checkpoint}."
+                )
+                assert f"{encoder_name}_encoder.projector" in checkpoint, (
+                    f"{encoder_name}_encoder.projector should be in the checkpoint, "
+                    f"but got {checkpoint}."
+                )
+
+            if f"{encoder_name}_encoder.module" in checkpoint:
+                load_module(
+                    getattr(encoder_module, "module"),
+                    Path(checkpoint.pop(f"{encoder_name}_encoder.module")),
+                )
+
+            if f"{encoder_name}_encoder.projector" in checkpoint:
+                load_module(
+                    getattr(encoder_module, "projector"),
+                    Path(checkpoint.pop(f"{encoder_name}_encoder.projector")),
+                )
+
+        if strict and len(checkpoint) > 0:
+            raise ValueError(
+                f"Failed to load checkpoint from {checkpoint}. "
+                f"Unmatched keys: {list(checkpoint.keys())}"
+            )
 
         return original_model
 

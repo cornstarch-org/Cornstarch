@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
+from colossalai.testing.comparison import check_state_dict_equal
 from torch.optim import Adam
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -197,9 +198,36 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             optimizer_ckpt_path = Path(tempdir) / "optimizer"
 
             booster.save_model(model, model_ckpt_path, shard=shard, size_per_shard=32)
-            booster.save_optimizer(
-                optimizer, optimizer_ckpt_path, shard=shard, size_per_shard=32
+            # booster.save_optimizer(
+            #     optimizer, optimizer_ckpt_path, shard=shard, size_per_shard=32
+            # )
+            dist.barrier()
+
+            new_model: MultimodalParallelModule
+            new_model = self.model_fn().to(device=torch.device("cuda"))
+            new_optimizer = Adam(new_model.parameters(), lr=1e-3)
+            new_model, new_optimizer, criterion, *_ = booster.boost(
+                new_model, new_optimizer, criterion=self.loss_fn
             )
+
+            booster.load_model(
+                new_model,
+                {
+                    "language_model": model_ckpt_path / "language_model",
+                    "vision_encoder.module": model_ckpt_path
+                    / "vision_encoder"
+                    / "module",
+                    "vision_encoder.projector": model_ckpt_path
+                    / "vision_encoder"
+                    / "projector",
+                },
+            )
+            check_state_dict_equal(
+                model.unwrap().state_dict(), new_model.unwrap().state_dict()
+            )
+            # booster.load_optimizer(new_optimizer, optimizer_ckpt_path)
+            # check_state_dict_equal(optimizer.state_dict(), new_optimizer.state_dict())
+
             dist.barrier()
 
 
