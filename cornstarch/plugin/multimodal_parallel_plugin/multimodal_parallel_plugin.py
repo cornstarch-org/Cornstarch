@@ -666,7 +666,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         )
 
     def get_checkpoint_io(self) -> CheckpointIO:
-        from cornstarch.plugin.multimodal_parallel_plugin.multimodal_checkpoint_io import (
+        from cornstarch.plugin.multimodal_parallel_plugin.multimodal_parallel_checkpoint_io import (
             MultimodalParallelCheckpointIO,
         )
 
