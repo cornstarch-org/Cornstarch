@@ -558,6 +558,8 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         assert dist.is_initialized(), "torch.distributed is not initialized."
         self.init_distributed()
 
+        param_info = get_param_info(optimizer)
+
         if not isinstance(model, ModelWrapper):
             encoder_shard_configs = {}
             for modal_name, encoder in self.encoder_plugins.items():
@@ -592,7 +594,6 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
 
         if optimizer is not None:
             if not isinstance(optimizer, OptimizerWrapper):
-                param_info = get_param_info(optimizer)
                 if self.precision in ["fp16", "bf16"]:
                     optimizer = HybridParallelAMPOptimizer(
                         optimizer,

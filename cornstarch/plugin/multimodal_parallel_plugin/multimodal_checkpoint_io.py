@@ -418,11 +418,11 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         if self.dp_rank != 0:
             return
 
-        # Then collect the sharded states along tp_group.
+        # Collect the sharded states along tp_group.
         # Only devices with (dp_rank == 0 and tp_rank == 0) are responsible for states saving.
         state_dict_shard = HybridParallelCheckpointIO._optimizer_sharder(
             optimizer,
-            use_zero=False,
+            use_zero=self.use_zero,
             dp_group=self.dp_group,
             tp_group=self.tp_group,
             size_per_shard=size_per_shard,
@@ -544,25 +544,8 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
                 )
                 loaded_file.add(filename)
 
-        # Then shard the loaded optimizer states if using tp.
-        for param, state in optimizer.optim.state.items():
-            device = param.device
-            if master_to_working_map is not None:
-                working_param = master_to_working_map[id(param)]
-            else:
-                working_param = param
+        # Sharding and epiloge is done from multimodalcheckpointio
 
-            original_shape = optimizer.param_info["param2shape"][id(working_param)]
-            sharded_state = self.shard_from_complete_optimizer_state(
-                state,
-                current_shape=working_param.shape,
-                original_shape=original_shape,
-                device=device,
-                inplace=True,
-            )
-            optimizer.optim.state[param] = sharded_state
-
-        sharded_optimizer_loading_epilogue(optimizer.optim)
         if self.verbose and self.coordinator.is_master():
             logging.info(
                 f"The optimizer has been successfully loaded from sharded checkpoint: {ckpt_root_path}."
@@ -838,15 +821,15 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
             f"but got {type(getattr(optimizer, 'model'))}."
         )
 
+        checkpoint_io = ModalParallelCheckpointIO(
+            self.plugin.dp_group, self.plugin.tp_group, self.plugin.pp_groups[0]
+        )
+
         def load_optimizer_states(
             optimizer: OptimizerWrapper, target_index_file_path: Path
         ):
             index_file_exists, index_file_path = has_index_file(
                 str(target_index_file_path)
-            )
-
-            checkpoint_io = ModalParallelCheckpointIO(
-                self.plugin.dp_group, self.plugin.tp_group, self.plugin.pp_groups[0]
             )
 
             if index_file_exists:
@@ -862,6 +845,27 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
                 load_optimizer_states(
                     optimizer, Path(checkpoint.pop(f"{encoder_name}_encoder"))
                 )
+
+        # Shard the loaded optimizer states if using tp.
+        master_to_working_map = optimizer.get_master_to_working_map()
+        for i, (param, state) in enumerate(optimizer.optim.state.items()):
+            device = param.device
+            if master_to_working_map is not None:
+                working_param = master_to_working_map[id(param)]
+            else:
+                working_param = param
+
+            original_shape = optimizer.param_info["param2shape"][id(working_param)]
+            sharded_state = checkpoint_io.shard_from_complete_optimizer_state(
+                state,
+                current_shape=working_param.shape,
+                original_shape=original_shape,
+                device=device,
+                inplace=True,
+            )
+            optimizer.optim.state[param] = sharded_state
+
+        sharded_optimizer_loading_epilogue(optimizer.optim)
 
     def load_sharded_model(self, model: nn.Module, index_file_path: str, strict: bool):
         raise NotImplementedError("Not used in MultimodalParallelCheckpointIO")
