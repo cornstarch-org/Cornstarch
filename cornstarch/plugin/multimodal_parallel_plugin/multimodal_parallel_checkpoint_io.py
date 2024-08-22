@@ -109,14 +109,15 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
 
         if stage_manager.is_first_stage(check_only_in_modal=True):
             if isinstance(model, PreTrainedModel):
-                tmp_index_file_dir = Path(checkpoint) / "tmp_index_files"
-                final_index_file = merge_index_files(tmp_index_file_dir)
+                if model.training:
+                    merge_index_files(Path(checkpoint) / "tmp_index_files")
             elif isinstance(model, ModalModuleBase):
-                tmp_index_file_dir = Path(checkpoint)
-                final_index_file = merge_index_files(
-                    Path(checkpoint) / "module" / "tmp_index_files"
-                )
-                merge_index_files(Path(checkpoint) / "projector" / "tmp_index_files")
+                if model.module.training:
+                    merge_index_files(Path(checkpoint) / "module" / "tmp_index_files")
+                if model.projector.training:
+                    merge_index_files(
+                        Path(checkpoint) / "projector" / "tmp_index_files"
+                    )
             else:
                 raise ValueError(
                     f"model should be an instance of PreTrainedModel or ModalModuleBase, "
@@ -127,16 +128,18 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
 
         if stage_manager.is_first_stage(check_only_in_modal=True):
             if isinstance(model, PreTrainedModel):
-                shutil.rmtree(tmp_index_file_dir)
+                shutil.rmtree(
+                    Path(checkpoint) / "tmp_index_files",
+                    ignore_errors=True,
+                )
             elif isinstance(model, ModalModuleBase):
-                shutil.rmtree(Path(checkpoint) / "module" / "tmp_index_files")
-                shutil.rmtree(Path(checkpoint) / "projector" / "tmp_index_files")
-
-            if self.verbose:
-                logging.info(
-                    f"The model is split into checkpoint shards. "
-                    f"You can find where each parameters has been saved in the "
-                    f"index located at {final_index_file}."
+                shutil.rmtree(
+                    Path(checkpoint) / "module" / "tmp_index_files",
+                    ignore_errors=True,
+                )
+                shutil.rmtree(
+                    Path(checkpoint) / "projector" / "tmp_index_files",
+                    ignore_errors=True,
                 )
 
     def clean_optimizer_index_files(
@@ -219,12 +222,12 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         if next(model.parameters(), None) is None:
             return
 
+        if not model.training:
+            return
+
         Path(checkpoint).mkdir(parents=True, exist_ok=True)
 
         if isinstance(model, PreTrainedModel):
-            if all(not p.requires_grad for p in model.parameters()):
-                return
-
             state_dict_shard = HybridParallelCheckpointIO._model_sharder(
                 model, size_per_shard=size_per_shard
             )

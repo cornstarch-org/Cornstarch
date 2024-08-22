@@ -267,5 +267,60 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
 
         dist.barrier()
 
+    @parametrize(
+        "tp_size, vision_pp, language_pp",
+        [(1, 1, 1), (1, 2, 2), (2, 1, 1), (1, 1, 3)],
+        name_fn=lambda tp, vp, lp: f"tp_{tp}_pp_({vp},{lp})",
+    )
+    @parametrize("language_model_frozen", [True, False], name_fn=lambda f: f"lf_{f}")
+    @parametrize("vision_encoder_frozen", [True, False], name_fn=lambda f: f"vf_{f}")
+    def test_frozen_model_not_checkpointed(
+        self,
+        tp_size: int,
+        vision_pp: int,
+        language_pp: int,
+        language_model_frozen: bool,
+        vision_encoder_frozen: bool,
+    ):
+        test_config = {
+            "num_microbatches": 4,
+            "microbatch_size": 1,
+        }
+
+        model, _, booster = self.build_model_from_multimodal_plugin(
+            tp_size=tp_size,
+            vision_pp_size=vision_pp,
+            language_pp_size=language_pp,
+            precision="bf16",
+            mixed=False,
+            test_config=test_config,
+        )
+
+        # Freeze portion of model
+        model.module.language_model.train(mode=not language_model_frozen)
+        model.module.vision_encoder.train(
+            module=not vision_encoder_frozen, projector=True
+        )
+
+        # Save model
+        with shared_tempdir() as tempdir:
+            model_ckpt_path = Path(tempdir) / "model"
+            booster.save_model(model, model_ckpt_path, shard=True)
+
+            dist.barrier()
+
+            assert (
+                not language_model_frozen
+                == (model_ckpt_path / "language_model").exists()
+            )
+            assert (model_ckpt_path / "vision_encoder").exists()
+            assert (
+                not vision_encoder_frozen
+                == (model_ckpt_path / "vision_encoder" / "module").exists()
+            )
+            assert (model_ckpt_path / "vision_encoder" / "projector").exists()
+
+            dist.barrier()
+
 
 instantiate_parametrized_tests(TestMultimodalCheckpointIOClass)
