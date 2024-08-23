@@ -618,10 +618,10 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
         )
 
         checkpoint: Path = Path(checkpoint)
-        assert (
-            not checkpoint.exists() or checkpoint.is_dir()
-        ), "checkpoint path should be a directory for multimodal model."
         checkpoint.mkdir(parents=True, exist_ok=True)
+        assert (
+            checkpoint.is_dir()
+        ), "checkpoint path should be a directory for multimodal model."
 
         module = getattr(model.module, model.my_modal_name)
         checkpoint_io = ModalParallelCheckpointIO(
