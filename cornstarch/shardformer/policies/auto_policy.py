@@ -104,6 +104,10 @@ _POLICY_LIST = {
     "transformers.models.clip.modeling_clip.CLIPVisionModel": PolicyLocation(
         file_name="clip", class_name="CLIPVisionModelPolicy"
     ),
+    # EvaCLIP
+    "cornstarch.models.evaclip.modeling_evaclip.EvaCLIPVisionModel": PolicyLocation(
+        file_name="evaclip", class_name="EvaCLIPVisionModelPolicy"
+    ),
     # Mistral
     "transformers.models.mistral.modeling_mistral.MistralModel": PolicyLocation(
         file_name="mistral", class_name="MistralModelPolicy"
