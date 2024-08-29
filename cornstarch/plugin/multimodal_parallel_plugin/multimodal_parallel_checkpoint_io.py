@@ -39,6 +39,7 @@ from torch.optim import Optimizer
 from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
+    ModalEncoderModule,
     ModalModuleBase,
 )
 from cornstarch.plugin.multimodal_parallel_plugin import (
@@ -108,25 +109,31 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
 
             return save_index_file
 
-        if stage_manager.is_first_stage(check_only_in_modal=True):
-            if isinstance(model, PreTrainedModel):
-                if model.training:
-                    merge_index_files(model, Path(checkpoint) / "tmp_index_files")
-            elif isinstance(model, ModalModuleBase):
-                if model.module.training:
-                    merge_index_files(
-                        model.module, Path(checkpoint) / "module" / "tmp_index_files"
-                    )
-                if model.projector.training:
-                    merge_index_files(
-                        model.projector,
-                        Path(checkpoint) / "projector" / "tmp_index_files",
-                    )
-            else:
-                raise ValueError(
-                    f"model should be an instance of PreTrainedModel or ModalModuleBase, "
-                    f"but got {type(model)}."
+        if isinstance(model, PreTrainedModel):
+            if stage_manager.is_first_stage(check_only_in_modal=True):
+                merge_index_files(model, Path(checkpoint) / "tmp_index_files")
+        elif isinstance(model, ModalEncoderModule):
+            if (
+                stage_manager.is_first_stage(check_only_in_modal=True)
+                and model.module.training
+            ):
+                merge_index_files(
+                    model.module,
+                    Path(checkpoint) / "module" / "tmp_index_files",
                 )
+            if (
+                stage_manager.is_last_stage(check_only_in_modal=True)
+                and model.projector.training
+            ):
+                merge_index_files(
+                    model.projector,
+                    Path(checkpoint) / "projector" / "tmp_index_files",
+                )
+        else:
+            raise ValueError(
+                f"model should be an instance of PreTrainedModel or ModalModuleBase, "
+                f"but got {type(model)}."
+            )
 
         dist.barrier(self.pp_group)
 
