@@ -12,6 +12,7 @@ from transformers import (
 )
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
+from transformers.models.siglip import SiglipVisionConfig, SiglipVisionModel
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
 from cornstarch.models.multimodal_language_model import (
@@ -22,6 +23,7 @@ from cornstarch.models.multimodal_language_model import (
 vision_model = [
     ("openai/clip-vit-base-patch16", CLIPVisionConfig, CLIPVisionModel),
     ("laion/CLIP-ViT-B-32-laion2B-s34B-b79k", CLIPVisionConfig, CLIPVisionModel),
+    ("google/siglip-so400m-patch14-384", SiglipVisionConfig, SiglipVisionModel),
     ("BAAI/EVA-CLIP-18B", CLIPVisionConfig, CLIPVisionModel),
     ("facebook/dinov2-giant", Dinov2Config, Dinov2Model),
 ]
