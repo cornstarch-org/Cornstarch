@@ -25,6 +25,7 @@ from colossalai.checkpoint_io.utils import (
     has_index_file,
     is_safetensors_available,
     load_shard_state_dict,
+    load_state_dict,
     load_state_dict_into_model,
     load_states_into_optimizer,
     save_config_file,
@@ -399,6 +400,17 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
                         f"The following keys are not loaded from checkpoint: {remain_keys}"
                     )
 
+    def load_unsharded_model(
+        self, model: PreTrainedModel, checkpoint: str, strict: bool = False
+    ):
+        assert isinstance(model, PreTrainedModel), (
+            f"model should be an instance of PreTrainedModel, "
+            f"but got {type(model)}."
+        )
+
+        state_dict = load_state_dict(checkpoint)
+        model.load_state_dict(state_dict, strict=strict)
+
     def save_unsharded_model(
         self,
         model: ModelWrapper,
@@ -697,15 +709,17 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
             if index_file_exists:
                 checkpoint_io.load_sharded_model(module, index_file_path, strict)
             else:
-                path = Path(checkpoint, SAFE_WEIGHTS_NAME)
+                path = Path(target_index_file_path, SAFE_WEIGHTS_NAME)
                 if path.is_file():
-                    checkpoint_io.load_unsharded_model(model, str(path), strict)
+                    checkpoint_io.load_unsharded_model(module, str(path), strict)
                 else:
-                    path = Path(checkpoint, WEIGHTS_NAME)
+                    path = Path(target_index_file_path, WEIGHTS_NAME)
                     if path.is_file():
-                        checkpoint_io.load_unsharded_model(model, str(path), strict)
+                        checkpoint_io.load_unsharded_model(module, str(path), strict)
                     else:
-                        checkpoint_io.load_unsharded_model(model, checkpoint, strict)
+                        checkpoint_io.load_unsharded_model(
+                            module, str(target_index_file_path), strict
+                        )
 
         language_model = getattr(model.module, "language_model")
         if language_model is not None:
