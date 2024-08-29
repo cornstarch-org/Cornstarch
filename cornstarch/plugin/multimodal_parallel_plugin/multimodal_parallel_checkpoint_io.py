@@ -110,7 +110,10 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
             return save_index_file
 
         if isinstance(model, PreTrainedModel):
-            if stage_manager.is_first_stage(check_only_in_modal=True):
+            if (
+                stage_manager.is_first_stage(check_only_in_modal=True)
+                and model.training
+            ):
                 merge_index_files(model, Path(checkpoint) / "tmp_index_files")
         elif isinstance(model, ModalEncoderModule):
             if (
