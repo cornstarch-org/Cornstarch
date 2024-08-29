@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
+from colossalai.lazy import LazyInitContext, LazyTensor
 from colossalai.testing.comparison import assert_close_loose, check_state_dict_equal
 from torch.optim import Adam
 from torch.testing._internal.common_distributed import TEST_SKIPS
@@ -23,6 +24,7 @@ from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
+    MultimodalProjector,
 )
 from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
@@ -100,9 +102,11 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
         precision: str,
         mixed: bool,
         test_config: dict[str, Any],
+        model: Optional[MultimodalModel] = None,
     ) -> tuple[MultimodalParallelModule, OptimizerWrapper, Booster]:
-        model = self.model_fn()
-        model.to(device=torch.device("cuda"))
+        if model is None:
+            model = self.model_fn()
+            model.to(device=torch.device("cuda"))
 
         vision_plugin = ModalParallelPlugin(
             tp_size=tp_size,
@@ -321,6 +325,183 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
             assert (model_ckpt_path / "vision_encoder" / "projector").exists()
 
             dist.barrier()
+
+    @parametrize(
+        "tp_size, vision_pp, language_pp",
+        [(1, 1, 1), (1, 2, 2), (2, 1, 1), (1, 1, 3)],
+        name_fn=lambda tp, vp, lp: f"tp_{tp}_pp_({vp},{lp})",
+    )
+    def test_load_lazy_init_model(self, tp_size: int, vision_pp: int, language_pp: int):
+
+        test_config = {
+            "num_microbatches": 4,
+            "microbatch_size": 1,
+        }
+
+        org_model, _, booster = self.build_model_from_multimodal_plugin(
+            tp_size=tp_size,
+            vision_pp_size=vision_pp,
+            language_pp_size=language_pp,
+            precision="bf16",
+            mixed=False,
+            test_config=test_config,
+        )
+        org_model.module.language_model.train(mode=True)
+        org_model.module.vision_encoder.train(module=True, projector=True)
+
+        with shared_tempdir() as tempdir:
+            model_ckpt_path = Path(tempdir) / "model"
+            booster.save_model(
+                org_model, model_ckpt_path, shard=True, size_per_shard=32
+            )
+
+            dist.barrier()
+
+            language_model_ckpth_path = model_ckpt_path / "language_model"
+            vision_encoder_ckpth_path = model_ckpt_path / "vision_encoder" / "module"
+            vision_projector_ckpt_path = (
+                model_ckpt_path / "vision_encoder" / "projector"
+            )
+
+            with LazyInitContext():
+                vision_model = self.vision_model_class.from_pretrained(
+                    vision_encoder_ckpth_path, torch_dtype=torch.bfloat16
+                )
+                vision_projector = MultimodalProjector.from_pretrained(
+                    vision_projector_ckpt_path, torch_dtype=torch.bfloat16
+                )
+                language_model = self.language_model_class.from_pretrained(
+                    language_model_ckpth_path, torch_dtype=torch.bfloat16
+                )
+                lazy_model = MultimodalModel(
+                    encoders={
+                        "vision": ModalEncoderModule(vision_model, vision_projector)
+                    },
+                    language_model=language_model,
+                )
+
+            lazy_model, _, booster = self.build_model_from_multimodal_plugin(
+                tp_size=tp_size,
+                vision_pp_size=vision_pp,
+                language_pp_size=language_pp,
+                precision="bf16",
+                mixed=False,
+                test_config=test_config,
+                model=lazy_model,
+            )
+
+            assert all(not isinstance(p, LazyTensor) for p in lazy_model.parameters())
+
+            booster.load_model(
+                lazy_model,
+                {
+                    "language_model": lazy_model.module.language_model._pretrained,
+                    "vision_encoder.module": lazy_model.module.vision_encoder.module._pretrained,
+                    "vision_encoder.projector": lazy_model.module.vision_encoder.projector._pretrained,
+                },
+            )
+
+            dist.barrier()
+
+        org_language_params = dict(org_model.module.language_model.named_parameters())
+        lazy_language_params = dict(lazy_model.module.language_model.named_parameters())
+
+        assert list(org_language_params.keys()) == list(lazy_language_params.keys())
+        for k in org_language_params.keys():
+            assert_close_loose(
+                org_language_params[k], lazy_language_params[k], atol=1e-3
+            )
+
+        org_vision_params = dict(
+            org_model.module.vision_encoder.module.named_parameters()
+        )
+        lazy_vision_params = dict(
+            lazy_model.module.vision_encoder.module.named_parameters()
+        )
+
+        assert list(org_vision_params.keys()) == list(lazy_vision_params.keys())
+        for k in org_vision_params.keys():
+            assert_close_loose(org_vision_params[k], lazy_vision_params[k], atol=1e-3)
+
+        # Code below is a test that uses actual pretrained model from HF hub.
+        # test_config = {
+        #     "num_microbatches": 4,
+        #     "microbatch_size": 1,
+        # }
+
+        # def model_fn(tempdir: str) -> MultimodalModel:
+        #     vision_model = self.vision_model_class.from_pretrained(
+        #         "openai/clip-vit-base-patch16", cache_dir=tempdir
+        #     )
+        #     language_model = self.language_model_class.from_pretrained(
+        #         "meta-llama/Meta-Llama-3.1-8B", cache_dir=tempdir
+        #     )
+
+        #     return MultimodalModel(
+        #         encoders={"vision": ModalEncoderModule(vision_model)},
+        #         language_model=language_model,
+        #     )
+
+        # with shared_tempdir() as tempdir:
+        #     org_model = model_fn(tempdir)
+        #     assert all(not isinstance(p, LazyTensor) for p in org_model.parameters())
+
+        #     org_model, _, booster = self.build_model_from_multimodal_plugin(
+        #         tp_size=tp_size,
+        #         vision_pp_size=vision_pp,
+        #         language_pp_size=language_pp,
+        #         precision="bf16",
+        #         mixed=False,
+        #         test_config=test_config,
+        #         model=org_model,
+        #     )
+        #     assert all(not isinstance(p, LazyTensor) for p in org_model.parameters())
+
+        #     with LazyInitContext():
+        #         lazy_model = model_fn(tempdir)
+        #         assert all(isinstance(p, LazyTensor) for p in lazy_model.parameters())
+
+        #         lazy_model, _, booster = self.build_model_from_multimodal_plugin(
+        #             tp_size=tp_size,
+        #             vision_pp_size=vision_pp,
+        #             language_pp_size=language_pp,
+        #             precision="bf16",
+        #             mixed=False,
+        #             test_config=test_config,
+        #             model=lazy_model,
+        #         )
+        #         assert all(
+        #             not isinstance(p, LazyTensor) for p in lazy_model.parameters()
+        #         )
+
+        #     booster.load_model(
+        #         lazy_model,
+        #         {
+        #             "language_model": lazy_model.module.language_model._pretrained,
+        #             "vision_encoder.module": lazy_model.module.vision_encoder.module._pretrained,
+        #         },
+        #         strict=False,  # projector will not be loaded
+        #     )
+
+        # org_language_params = dict(org_model.module.language_model.named_parameters())
+        # lazy_language_params = dict(lazy_model.module.language_model.named_parameters())
+
+        # assert list(org_language_params.keys()) == list(lazy_language_params.keys())
+        # for k in org_language_params.keys():
+        #     assert_close_loose(
+        #         org_language_params[k], lazy_language_params[k], atol=1e-3
+        #     )
+
+        # org_vision_params = dict(
+        #     org_model.module.vision_encoder.module.named_parameters()
+        # )
+        # lazy_vision_params = dict(
+        #     lazy_model.module.vision_encoder.module.named_parameters()
+        # )
+
+        # assert list(org_vision_params.keys()) == list(lazy_vision_params.keys())
+        # for k in org_vision_params.keys():
+        #     assert_close_loose(org_vision_params[k], lazy_vision_params[k], atol=1e-3)
 
 
 instantiate_parametrized_tests(TestMultimodalCheckpointIOClass)

@@ -87,7 +87,7 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
         # Wait until all index files are written.
         dist.barrier(self.pp_group)
 
-        def merge_index_files(tmp_index_file_dir: Path):
+        def merge_index_files(module: PreTrainedModel, tmp_index_file_dir: Path):
             _, save_index_file = get_model_base_filenames(prefix, use_safetensors)
 
             final_index_file = CheckpointIndexFile(str(tmp_index_file_dir.parent))
@@ -104,20 +104,23 @@ class ModalParallelCheckpointIO(HybridParallelCheckpointIO):
                     final_index_file.append_weight_map(weight, weight_filename)
 
             final_index_file.write_index_file(save_index_file)
-            save_config_file(model, checkpoint)
+            save_config_file(module, str(tmp_index_file_dir.parent))
 
             return save_index_file
 
         if stage_manager.is_first_stage(check_only_in_modal=True):
             if isinstance(model, PreTrainedModel):
                 if model.training:
-                    merge_index_files(Path(checkpoint) / "tmp_index_files")
+                    merge_index_files(model, Path(checkpoint) / "tmp_index_files")
             elif isinstance(model, ModalModuleBase):
                 if model.module.training:
-                    merge_index_files(Path(checkpoint) / "module" / "tmp_index_files")
+                    merge_index_files(
+                        model.module, Path(checkpoint) / "module" / "tmp_index_files"
+                    )
                 if model.projector.training:
                     merge_index_files(
-                        Path(checkpoint) / "projector" / "tmp_index_files"
+                        model.projector,
+                        Path(checkpoint) / "projector" / "tmp_index_files",
                     )
             else:
                 raise ValueError(
