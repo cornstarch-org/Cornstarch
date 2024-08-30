@@ -1,7 +1,6 @@
 from typing import Any, Callable, Iterator
 
 import torch.distributed as dist
-from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelCheckpointIO
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import ModelWrapper, OptimizerWrapper
@@ -32,7 +31,7 @@ class ModalParallelPlugin(PipelinePluginBase):
 
     Differences of `ModalParallelPlugin` from `HybridParallelPlugin`:
     - `ModalParallelPlugin` does not infer `dp_size` and `dp_size` will be calculated in `MultimodalParallelPlugin`.
-
+    - `ModalParallelPlugin` cannot be used solely, it should be used with `MultimodalParallelPlugin`.
 
     Args:
         tp_size (int): The size of tensor parallelism.
@@ -186,8 +185,4 @@ class ModalParallelPlugin(PipelinePluginBase):
         raise NotImplementedError
 
     def get_checkpoint_io(self) -> CheckpointIO:
-        if self.tp_group is None or self.dp_group is None or self.pp_group is None:
-            raise ValueError("all groups must not be None")
-        return HybridParallelCheckpointIO(
-            self.tp_group, self.dp_group, self.pp_group, zero_stage=0
-        )
+        raise NotImplementedError

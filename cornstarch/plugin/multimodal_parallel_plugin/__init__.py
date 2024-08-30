@@ -4,9 +4,8 @@ from .multimodal_1f1b import (
     MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
     MultimodalPipelineP2PCommunication,
 )
-from .multimodal_parallel_checkpoint_io import MultimodalParallelCheckpointIO
 from .multimodal_parallel_plugin import (
-    MultimodalParallelPlugin,
     MultimodalParallelModule,
+    MultimodalParallelPlugin,
 )
 from .multimodal_stage_manager import MultiModalPipelineStageManager

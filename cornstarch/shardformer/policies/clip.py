@@ -83,6 +83,8 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         from transformers.models.clip.modeling_clip import (
             CLIPAttention,
             CLIPEncoderLayer,
+            CLIPFlashAttention2,
+            CLIPSdpaAttention,
             CLIPVisionTransformer,
         )
 
@@ -170,6 +172,13 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 target_key=CLIPVisionTransformer,
             )
 
+        ATTN_IMPLEMENTATION = {
+            "eager": CLIPAttention,
+            "flash_attention_2": CLIPFlashAttention2,
+            "sdpa": CLIPSdpaAttention,
+        }
+        attn_cls = ATTN_IMPLEMENTATION[self.model.config._attn_implementation]
+
         self.append_or_create_method_replacement(
             description={
                 "forward": (
@@ -179,10 +188,10 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 ),
             },
             policy=policy,
-            target_key=CLIPAttention,
+            target_key=attn_cls,
         )
 
-        if self.pipeline_stage_manager:
+        if self.pipeline_stage_manager is not None:
             self.set_pipeline_forward(
                 model_cls=CLIPVisionTransformer,
                 new_forward=CLIPVisionPipelineForwards.clip_vision_transformer_forward,

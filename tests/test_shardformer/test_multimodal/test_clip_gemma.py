@@ -1,29 +1,28 @@
 import torch
-
-from ._utils import VisionLanguagePolicyTestClassBase, config_class_dict
-from .._utils import (
-    get_grad_tensors_for_check,
-    check_weight,
-    check_loss,
-    check_all_grad_tensors,
-)
+from colossalai.booster import Booster
+from colossalai.interface import OptimizerWrapper
+from torch.optim import Optimizer
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-
-from colossalai.booster import Booster
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
+from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
+
+from cornstarch.models.multimodal_language_model import MultimodalModel
 from cornstarch.plugin.multimodal_parallel_plugin import (
     MultimodalParallelModule,
     MultiModalPipelineStageManager,
 )
-from cornstarch.models.multimodal_language_model import MultimodalModel
-from torch.optim import Optimizer
-from colossalai.interface import OptimizerWrapper
 
-from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
-from transformers.models.clip import CLIPVisionModel, CLIPVisionConfig
+from .._utils import (
+    check_all_grad_tensors,
+    check_loss,
+    check_weight,
+    get_grad_tensors_for_check,
+)
+from ._utils import VisionLanguagePolicyTestClassBase, config_class_dict
 
 
 class ClipGemmaForCausalLMPolicyTestClass(VisionLanguagePolicyTestClassBase):

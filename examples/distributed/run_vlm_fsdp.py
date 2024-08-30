@@ -1,26 +1,8 @@
 """
-An example of pretraining a vision language model (VLM) using hybrid parallelism.
+An example of pretraining a vision language model (VLM) using Pytorch FullyShardedDataParallel (FSDP).
 
-This still relies on colossalai APis for base features (e.g. Booster, DistCoordinate, etc),
-Cornstarch is engaged in the following ways:
-1.  Cornstarch provides `MultimodalModel` and related classes to create a vision language model
-    from a vision model and a language model.
-2.  Cornstarch provides `MultimodalParallelPlugin` and related classes to enable
-    multimodal parallelism for the created vision language model.
-3.  Cornstarch uses `PipelineTemplate` to specify how each stage in each modality
-    should be sharded.
-
-Basic flow is as follows:
-1. Load models and tokenizers/processors using transformers `.from_pretrained()` method.
-2. Create a `MultimodalModel` using the loaded models.
-3. Create a `MultimodalModelProcessor` using the loaded tokenizers/processors.
----
-Until here, it is the same with training non-distributed VLMs.
----
-4. Create a `MultimodalParallelPlugin` using `ModalParallelPlugin` and `PipelineTemplate`.
-5. Create ColossalAI `Booster` with the created plugin.
-6. Configure the `MultinodalModel` with `MultimodalParallelPlugin` and `Booster`.
-7. Use `Booster` to execute training.
+This relies on existing colossalai APIs (TorchFSDPPlugin).
+Cornstarch is used only for generating a `MultimodalModel`.
 """
 
 import functools
@@ -29,29 +11,38 @@ from pathlib import Path
 import click
 import colossalai
 import torch
+import torch.distributed as dist
+import torch.nn as nn
 from colossalai.booster import Booster
+from colossalai.booster.plugin.torch_fsdp_plugin import TorchFSDPPlugin
 from colossalai.cluster import DistCoordinator
 from datasets import load_dataset
 from PIL import Image
+from torch.distributed.fsdp.api import BackwardPrefetch, ShardingStrategy
+from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    PreTrainedModel,
     get_linear_schedule_with_warmup,
 )
-from transformers.models.clip import CLIPImageProcessor, CLIPVisionModel
+from transformers.models.clip import CLIPImageProcessor
+from transformers.models.clip.modeling_clip import (
+    CLIPEncoderLayer,
+    CLIPVisionModel,
+)
+from transformers.models.llama.modeling_llama import (
+    LlamaDecoderLayer,
+)
 
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
     MultimodalModelProcessor,
-)
-from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.plugin.multimodal_parallel_plugin import (
-    ModalParallelPlugin,
-    MultimodalParallelPlugin,
+    MultimodalProjector,
 )
 
 
@@ -69,7 +60,8 @@ def collate_fn_llava_pretrain(
         )
         for conversation in batch["conversations"]:
             assert ["from", "value"] == list(conversation.keys())
-        assert "<image>" in batch["conversations"][0]["value"]
+        # assert "<image>" in batch["conversations"][0]["value"]
+        batch["conversations"][0]["value"].replace("<image>", "")
 
         image = Image.open(f"{dataset_dir}/{batch['image']}")
         images.append(image)
@@ -118,14 +110,16 @@ def pretrain(
             vision_model_name_or_path,
             trust_remote_code=False,
             _attn_implementation="eager",
+            torch_dtype=torch.bfloat16,
         )
         vision_encoder = ModalEncoderModule(vision_encoder)
     else:
         raise NotImplementedError
-    language_model = AutoModelForCausalLM.from_pretrained(
+    language_model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
         language_model_name_or_path,
         trust_remote_code=False,
-        _attn_implementation="eager",
+        _attn_implementation="flash_attention_2",
+        torch_dtype=torch.bfloat16,
     )
 
     model = MultimodalModel(
@@ -166,30 +160,23 @@ def pretrain(
         dataset_file_name = blip_laion_cc_sbu_558k.json
     """
 
-    vision_encoder_plugin = ModalParallelPlugin(
-        tp_size=2,
-        pipeline_template=PipelineTemplate(
-            model_name=PipelineTemplate.get_model_name(vision_encoder.module),
-            modules_per_stage=[PipelineTemplate.get_modules(vision_encoder)],
+    plugin = TorchFSDPPlugin(
+        process_group=dist.group.WORLD,
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        auto_wrap_policy=ModuleWrapPolicy(
+            [
+                MultimodalProjector,
+                CLIPEncoderLayer,
+                LlamaDecoderLayer,
+                nn.Embedding,
+            ]
         ),
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
     )
-    language_model_plugin = ModalParallelPlugin(
-        tp_size=2,
-        pipeline_template=PipelineTemplate(
-            model_name=PipelineTemplate.get_model_name(language_model),
-            modules_per_stage=[PipelineTemplate.get_modules(language_model)],
-        ),
-    )
-    num_microbatches = 8
-    microbatch_size = 8
-    plugin = MultimodalParallelPlugin(
-        encoder_plugins={"vision": vision_encoder_plugin},
-        language_model_plugin=language_model_plugin,
-        num_microbatches=num_microbatches,
-        microbatch_size=microbatch_size,
-        precision=None,  # Don't use mixed precision and train with bf16
-        enable_flash_attention=True,
-    )
+    plugin.fsdp_kwargs["forward_prefetch"] = True
+
+    microbatch_size = 16
+
     booster = Booster(plugin=plugin)
 
     optimizer = Adam(model.parameters())
@@ -198,7 +185,7 @@ def pretrain(
     dataset = load_dataset("json", data_files=str(dataset_file_path))["train"]
     dataloader = plugin.prepare_dataloader(
         dataset,
-        batch_size=microbatch_size * num_microbatches,
+        batch_size=microbatch_size,
         shuffle=True,
         drop_last=True,
         collate_fn=functools.partial(
@@ -225,25 +212,19 @@ def pretrain(
 
     coordinator = DistCoordinator()
     optimizer.zero_grad()
-    is_pp_last_stage = plugin.stage_manager.is_last_stage(check_only_in_modal=False)
 
     dataloader_iter = iter(dataloader)
     with tqdm(
         range(total_steps),
-        disable=not (coordinator.is_master() or is_pp_last_stage),
+        disable=not (coordinator.is_master()),
     ) as pbar:
         for item in pbar:
-            outputs = booster.execute_pipeline(
-                dataloader_iter,
-                model,
-                criterion,
-                optimizer,
-                return_loss=True,
-                return_outputs=False,
-            )
+            inputs = next(dataloader_iter)
+            outputs = model(**inputs)
+            loss = outputs.loss
+            loss.backward()
 
-            if is_pp_last_stage:
-                loss = outputs["loss"]
+            if coordinator.is_master():
                 pbar.set_postfix({"loss": loss.item()})
 
             optimizer.step()
@@ -252,8 +233,7 @@ def pretrain(
 
     booster.save_model(
         model,
-        output_dir
-        / f"{vision_model_name_or_path.replace('/', '-')}-{language_model_name_or_path.replace('/', '-')}",
+        output_dir / f"{vision_model_name_or_path}-{language_model_name_or_path}",
         shard=True,
         use_safetensors=True,
     )
