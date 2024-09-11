@@ -7,3 +7,5 @@ from .modeling_internlm2 import (
     InternLM2Model,
     InternLM2PreTrainedModel,
 )
+from .tokenization_internlm2 import InternLM2Tokenizer
+from .tokenization_internlm2_fast import InternLM2TokenizerFast
