@@ -164,6 +164,9 @@ _POLICY_LIST = {
     "cornstarch.models.internlm2.modeling_internlm2.InternLM2Model": PolicyLocation(
         file_name="internlm2", class_name="InternLM2Policy"
     ),
+    "cornstarch.models.internlm2.modeling_internlm2.InternLM2ForCausalLM": PolicyLocation(
+        file_name="internlm2", class_name="InternLM2ForCausalLMPolicy"
+    ),
     # Whisper
     "transformers.models.whisper.modeling_whisper.WhisperEncoder": PolicyLocation(
         file_name="whisper", class_name="WhisperEncoderPolicy"
