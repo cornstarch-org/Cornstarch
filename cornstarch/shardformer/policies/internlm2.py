@@ -1,6 +1,7 @@
 import functools
+import itertools
 import warnings
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, cast
 
 import torch.nn as nn
 from colossalai.shardformer.layer import (
@@ -20,9 +21,12 @@ from colossalai.shardformer.policies.base_policy import (
 from torch import Tensor
 from transformers import PretrainedConfig
 
-from cornstarch.models.internlm import InternLM2Config
+from cornstarch.models.internlm import InternLM2Config, InternLM2Model
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.internlm2 import InternLM2Forwards, InternLM2Model
+from cornstarch.shardformer.modeling.internlm2 import (
+    InternLM2Forwards,
+    InternLM2PipelineForwards,
+)
 from cornstarch.shardformer.modeling.qkv_fused_linear import FusedLinear1D_Col
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -32,18 +36,88 @@ from cornstarch.shardformer.policies.pipeline_template_policy import (
 class InternLM2Policy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
-        raise NotImplementedError
+        assert isinstance(
+            config, InternLM2Config
+        ), "config must be an instance of InternLM2Config"
+        config: InternLM2Config = cast(InternLM2Config, config)
+
+        modules = []
+        modules.append("tok_embeddings")
+        modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
+        modules.append("norm")
+
+        return modules
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        raise NotImplementedError
+        assert (
+            "cornstarch.models.internlm.modeling_internlm2" in template.model_name
+        ), "The pipeline template is not for InternLM2 model."
+
+        prefix = "" if self.model.__class__.__name__ == "InternLM2Model" else "model."
+        modules = self.get_all_modules(self.model.config)
+        modules_in_template = list(itertools.chain(*template.modules_per_stage))
+        if modules != modules_in_template:
+            raise ValueError(
+                "Modules in the pipeline template do not match the modules in the model."
+            )
+
+        if f"{prefix}tok_embeddings" not in modules_in_template[0]:
+            raise ValueError("tok_embeddings must be in the first stage.")
+
+        if f"{prefix}norm" not in modules_in_template[-1]:
+            raise ValueError("norm must be in the last stage.")
 
     def set_pipeline_forward(
         self, model_cls: nn.Module, new_forward: Callable, policy: dict
     ):
-        raise NotImplementedError
+        if self.pipeline_stage_manager is None:
+            return
+
+        stage_manager = self.pipeline_stage_manager
+        module: InternLM2Model
+        if self.model.__class__.__name__ == "InternLM2Model":
+            module = self.model
+        else:
+            module = self.model.model
+
+        layers_per_stage = stage_manager.distribute_layers(
+            len(module.layers),
+            stage_manager.num_stages,
+        )
+        stage_index = stage_manager.get_stage_index(
+            layers_per_stage, stage_manager.stage
+        )
+        method_replacement = {
+            "forward": functools.partial(
+                new_forward,
+                stage_manager=stage_manager,
+                stage_index=stage_index,
+                shard_config=self.shard_config,
+            )
+        }
+        self.append_or_create_method_replacement(
+            description=method_replacement, policy=policy, target_key=model_cls
+        )
 
     def get_held_layers(self) -> List[nn.Module]:
-        raise NotImplementedError
+        assert self.pipeline_stage_manager is not None
+
+        module: InternLM2Model
+        if self.model.__class__.__name__ == "InternLM2Model":
+            module = self.model
+        else:
+            module = self.model.model
+        stage_manager = self.pipeline_stage_manager
+
+        held_layers = []
+        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+        if stage_manager.is_first_stage():
+            held_layers.append(module.tok_embeddings)
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        held_layers.extend(module.layers[start_idx:end_idx])
+        if stage_manager.is_last_stage():
+            held_layers.append(module.norm)
+        return held_layers
 
     def config_sanity_check(self):
         pass
@@ -212,7 +286,11 @@ class InternLM2ModelPolicy(InternLM2Policy):
         policy = super().module_policy()
 
         if self.pipeline_stage_manager:
-            raise NotImplementedError
+            self.set_pipeline_forward(
+                model_cls=InternLM2Model,
+                new_forward=InternLM2PipelineForwards.internlm2_model_forward,
+                policy=policy,
+            )
 
         return policy
 
@@ -276,7 +354,11 @@ class InternLM2ForCausalPolicy(InternLM2Policy):
         )
 
         if self.pipeline_stage_manager:
-            raise NotImplementedError
+            self.set_pipeline_forward(
+                model_cls=InternLM2ForCausalLM,
+                new_forward=InternLM2PipelineForwards.internlm2_for_causal_lm_forward,
+                policy=policy,
+            )
 
         return policy
 
