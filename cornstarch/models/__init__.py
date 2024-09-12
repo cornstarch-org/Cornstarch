@@ -14,6 +14,7 @@ from cornstarch.models.internlm import (
     InternLM2Tokenizer,
     InternLM2TokenizerFast,
 )
+from cornstarch.models.internvl2 import InternVLChatConfig, InternVLChatModel
 
 AutoModel.register(EvaCLIPConfig, EvaCLIPPreTrainedModel)
 AutoModel.register(EvaCLIPVisionConfig, EvaCLIPVisionModel)
@@ -25,3 +26,7 @@ AutoConfig.register("internlm2", InternLM2Config)
 AutoModel.register(InternLM2Config, InternLM2Model)
 AutoModelForCausalLM.register(InternLM2Config, InternLM2ForCausalLM)
 AutoTokenizer.register(InternLM2Config, InternLM2Tokenizer, InternLM2TokenizerFast)
+
+AutoConfig.register("internvl_chat", InternVLChatConfig)
+AutoModel.register(InternVLChatConfig, InternVLChatModel)
+AutoTokenizer.register(InternVLChatConfig, InternLM2Tokenizer, InternLM2TokenizerFast)
