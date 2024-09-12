@@ -3,7 +3,6 @@ from __future__ import annotations
 import functools
 import inspect
 import warnings
-from collections import namedtuple
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -26,6 +25,10 @@ from transformers.models.llava_next.modeling_llava_next import (
     image_size_to_num_patches,
 )
 
+from cornstarch.models.internvl2.modeling_internvl_chat import (
+    InternVLChatConfig,
+    InternVLChatModel,
+)
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 
@@ -108,9 +111,6 @@ class LlavaModel(PretrainedVisionLanguageModel):
 
     def __init__(self, config: LlavaConfig):
         self.config = config
-        self.FakeLlavaClass = namedtuple(
-            "LlavaForConditionalGeneration", ["pad_token_id", "config"]
-        )
 
     def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
         model: LlavaForConditionalGeneration = (
@@ -395,6 +395,54 @@ class LlavaNextModel:
         )
 
         return inputs_embeds, attention_mask, position_ids, labels
+
+
+class InternVL2Model:
+    """A class for InternVL2 pretrained models."""
+
+    def __init__(self, config: InternVLChatConfig):
+        self.config = config
+
+    def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
+        model: InternVLChatModel = InternVLChatModel.from_pretrained(
+            self.config.name_or_path, config=self.config, *args, **kwargs
+        )
+        vision_encoder = model.vision_model
+        language_model = model.language_model
+
+        # Create a projector
+        projector = model.mlp1
+        projector_state_dict = projector.state_dict()
+        for key in projector.state_dict().keys():
+            projector_state_dict[
+                key.replace("act", "activation")
+                .replace("fc1", "in_proj")
+                .replace("fc2", "out_proj")
+            ] = projector_state_dict.pop(key)
+
+        projector_config = MultimodalProjectorConfig(
+            encoder_config=vision_encoder.config,
+            text_config=language_model.config,
+            projection_type="mlp",
+        )
+        vision_projector = MultimodalProjector(projector_config)
+        vision_projector.load_state_dict(projector_state_dict, assign=True)
+
+        vision_encoder = ModalEncoderModule(
+            model=vision_encoder,
+            projector=vision_projector,
+            postprocess_module_callback=functools.partial(
+                self.postprocess_vision_callback, model=model
+            ),
+            postprocess_projector_callback=functools.partial(
+                self.postprocess_projector_callback, model=model
+            ),
+        )
+
+        return MultimodalModel(
+            encoders={"vision": vision_encoder},
+            language_model=language_model,
+        )
 
 
 class MultimodalProjector(PreTrainedModel):
@@ -813,6 +861,8 @@ class MultimodalModel(nn.Module):
             return LlavaModel(config).from_pretrained(*args, **kwargs)
         elif config.model_type == "llava_next":
             return LlavaNextModel(config).from_pretrained(*args, **kwargs)
+        elif config.model_type == "internvl_chat":
+            return InternVL2Model(config).from_pretrained(*args, **kwargs)
         else:
             raise NotImplementedError
 

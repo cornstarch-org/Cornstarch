@@ -14,11 +14,14 @@ from transformers.models.llava_next.modeling_llava_next import (
     LlavaNextForConditionalGeneration,
 )
 
+from cornstarch.models.internvl2.modeling_internvl_chat import InternVLChatModel
 from cornstarch.models.multimodal_language_model import MultimodalModel
 
 model_name_classes = [
     ("llava-hf/llava-1.5-7b-hf", LlavaForConditionalGeneration),
     ("llava-hf/llava-v1.6-vicuna-7b-hf", LlavaNextForConditionalGeneration),
+    ("OpenGVLab/InternVL2-2B", InternVLChatModel),
+    ("OpenGVLab/InternVL2-4B", InternVLChatModel),
 ]
 
 url = "https://www.ilankelman.org/stopsigns/australia.jpg"
