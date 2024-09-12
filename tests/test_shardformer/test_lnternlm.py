@@ -12,16 +12,16 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
     ModelOutput,
 )
-from transformers.models.phi3.modeling_phi3 import (
-    Phi3Config,
-    Phi3ForCausalLM,
-    Phi3Model,
-    Phi3PreTrainedModel,
-)
 
-from cornstarch.shardformer.policies.phi3 import (
-    Phi3ForCausalLMPolicy,
-    Phi3ModelPolicy,
+from cornstarch.models.internlm.modeling_internlm2 import (
+    InternLM2Config,
+    InternLM2ForCausalLM,
+    InternLM2Model,
+    InternLM2PreTrainedModel,
+)
+from cornstarch.shardformer.policies.internlm2 import (
+    InternLM2ForCausalLMPolicy,
+    InternLM2ModelPolicy,
 )
 
 from ._utils import (
@@ -37,9 +37,9 @@ from ._utils import (
 )
 
 
-class Phi3PolicyTestClassBase(PolicyTestBase, ABC):
+class InternLM2PolicyTestClassBase(PolicyTestBase, ABC):
     # Implementation for data_gen_fn and loss_fn
-    # Copied from colossalai/tests/kit/model_zoo/transformers/llama.py
+    # Copied from colossalai/tests/kit/model_zoo/transformers/InternLM2.py
     @staticmethod
     @abstractmethod
     def data_gen_fn() -> dict: ...
@@ -48,8 +48,8 @@ class Phi3PolicyTestClassBase(PolicyTestBase, ABC):
     @abstractmethod
     def loss_fn(x: ModelOutput) -> torch.Tensor: ...
 
-    model_class: Phi3PreTrainedModel
-    config = Phi3Config(
+    model_class: InternLM2PreTrainedModel
+    config = InternLM2Config(
         hidden_size=256,
         intermediate_size=256,
         num_attention_heads=64,
@@ -58,7 +58,7 @@ class Phi3PolicyTestClassBase(PolicyTestBase, ABC):
         _attn_implementation="eager",
     )
 
-    def model_fn(self) -> Phi3PreTrainedModel:
+    def model_fn(self) -> InternLM2PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
         return self.model_class(config)
@@ -107,11 +107,11 @@ class Phi3PolicyTestClassBase(PolicyTestBase, ABC):
         tp_group = booster.plugin.tp_group
 
         # unwrap model
-        model = unwrap_model(org_model, "Phi3Model", "model")
-        shard_model = unwrap_model(sharded_model, "Phi3Model", "model")
+        model = unwrap_model(org_model, "InternLM2Model", "model")
+        shard_model = unwrap_model(sharded_model, "InternLM2Model", "model")
 
-        row_layer_for_check = ["layers[0].self_attn.qkv_proj", "embed_tokens"]
-        col_layer_for_check = ["layers[0].self_attn.o_proj"]
+        row_layer_for_check = ["layers[0].attention.wqkv", "tok_embeddings"]
+        col_layer_for_check = ["layers[0].attention.wo"]
 
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
@@ -149,7 +149,7 @@ class Phi3PolicyTestClassBase(PolicyTestBase, ABC):
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
             atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
-            if org_model.__class__.__name__ == "Phi3Model":
+            if org_model.__class__.__name__ == "InternLM2Model":
                 check_output_hidden_state(
                     org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
                 )
@@ -157,8 +157,8 @@ class Phi3PolicyTestClassBase(PolicyTestBase, ABC):
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
-        if stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True):
-            atol, rtol = (1e-4, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
+        if stage_manager is None or stage_manager.is_first_stage():
+            atol, rtol = (1e-3, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
             # embed_tokens have different dimension, so skip to check row_layer weight
             check_weight(
                 model,
@@ -176,7 +176,7 @@ class Phi3PolicyTestClassBase(PolicyTestBase, ABC):
 
 
 @instantiate_parametrized_tests
-class TestPhi3ModelPolicy(Phi3PolicyTestClassBase):
+class TestInternLM2ModelPolicy(InternLM2PolicyTestClassBase):
     @staticmethod
     def data_gen_fn() -> dict:
         # the input ids are corresponding to the sentence
@@ -184,15 +184,25 @@ class TestPhi3ModelPolicy(Phi3PolicyTestClassBase):
         #
         # the code is give below:
         # -----------------------------------
-        # from transformers import LlamaTokenizerFast
-        # tokenizer = LlamaTokenizerFast.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
+        # from transformers import InternLM2TokenizerFast
+        # tokenizer = InternLM2TokenizerFast.from_pretrained("internlm/internlm2_5-1_8b")
         # input = 'Hello, my dog is cute'
         # tokenized_input = tokenizer(input, return_tensors='pt').to('cuda')
         # -----------------------------------
 
-        input_ids = torch.Tensor([[15043, 29892, 590, 11203, 338, 274, 1082]]).long()
+        input_ids = torch.Tensor(
+            [
+                [1, 9843, 328, 983, 5718, 505, 18993],
+                [1, 9843, 328, 983, 5718, 505, 18993],
+            ]
+        ).long()
 
-        attention_mask = torch.Tensor([[1, 1, 1, 1, 1, 1, 1]]).long()
+        attention_mask = torch.Tensor(
+            [
+                [1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1],
+            ]
+        ).long()
         return dict(input_ids=input_ids, attention_mask=attention_mask)
 
     @staticmethod
@@ -201,7 +211,7 @@ class TestPhi3ModelPolicy(Phi3PolicyTestClassBase):
             x.last_hidden_state, torch.ones_like(x.last_hidden_state)
         )
 
-    model_class = Phi3Model
+    model_class = InternLM2Model
 
     @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
@@ -211,16 +221,16 @@ class TestPhi3ModelPolicy(Phi3PolicyTestClassBase):
     ):
         with patch(
             "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=Phi3ModelPolicy(),
+            return_value=InternLM2ModelPolicy(),
         ):
             self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
 
 
 @instantiate_parametrized_tests
-class TestPhi3ForCausalLMPolicy(Phi3PolicyTestClassBase):
+class TestInternLM2ForCausalLMPolicy(InternLM2PolicyTestClassBase):
     @staticmethod
     def data_gen_fn() -> dict:
-        data = TestPhi3ModelPolicy.data_gen_fn()
+        data = TestInternLM2ModelPolicy.data_gen_fn()
         data["labels"] = data["input_ids"].clone()
         return data
 
@@ -228,7 +238,7 @@ class TestPhi3ForCausalLMPolicy(Phi3PolicyTestClassBase):
     def loss_fn(x: CausalLMOutputWithPast) -> torch.Tensor:
         return x.loss
 
-    model_class = Phi3ForCausalLM
+    model_class = InternLM2ForCausalLM
 
     @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
@@ -238,6 +248,6 @@ class TestPhi3ForCausalLMPolicy(Phi3PolicyTestClassBase):
     ):
         with patch(
             "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=Phi3ForCausalLMPolicy(),
+            return_value=InternLM2ForCausalLMPolicy(),
         ):
             self.run_hybrid_parallel(tp_size, pp_size, fa, precision)

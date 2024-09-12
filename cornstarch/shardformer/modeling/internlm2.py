@@ -280,7 +280,7 @@ class InternLM2PipelineForwards:
                     and shard_config.parallel_output
                 ):
                     new_vocab_size = logits.shape[-1]
-                    shift_logits = shift_logits(-1, new_vocab_size)
+                    shift_logits = shift_logits.view(-1, new_vocab_size)
                     loss = cross_entropy_1d(
                         shift_logits,
                         shift_labels,

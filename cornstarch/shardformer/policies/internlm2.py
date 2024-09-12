@@ -27,7 +27,6 @@ from cornstarch.shardformer.modeling.internlm2 import (
     InternLM2Forwards,
     InternLM2PipelineForwards,
 )
-from cornstarch.shardformer.modeling.qkv_fused_linear import FusedLinear1D_Col
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -177,8 +176,7 @@ class InternLM2Policy(PipelineTemplatePolicyBase, Policy):
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="attention.wqkv",
-                        target_module=FusedLinear1D_Col,
-                        kwargs=dict(n_fused=3),
+                        target_module=Linear1D_Col,
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.wo",
@@ -236,10 +234,12 @@ class InternLM2Policy(PipelineTemplatePolicyBase, Policy):
             )
 
             self.append_or_create_submodule_replacement(
-                description=SubModuleReplacementDescription(
-                    suffix="norm",
-                    target_module=FusedRMSNorm,
-                ),
+                description=[
+                    SubModuleReplacementDescription(
+                        suffix="norm",
+                        target_module=FusedRMSNorm,
+                    )
+                ],
                 policy=policy,
                 target_key=InternLM2Model,
             )
@@ -301,7 +301,7 @@ class InternLM2ModelPolicy(InternLM2Policy):
         return []
 
 
-class InternLM2ForCausalPolicy(InternLM2Policy):
+class InternLM2ForCausalLMPolicy(InternLM2Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> List[str]:
         modules = [
@@ -343,11 +343,13 @@ class InternLM2ForCausalPolicy(InternLM2Policy):
         policy.update(
             {
                 InternLM2ForCausalLM: ModulePolicyDescription(
-                    sub_module_replacement=SubModuleReplacementDescription(
-                        suffix="lm_head",
-                        target_module=target_module,
-                        kwargs=kwargs,
-                    ),
+                    sub_module_replacement=[
+                        SubModuleReplacementDescription(
+                            suffix="output",
+                            target_module=target_module,
+                            kwargs=kwargs,
+                        )
+                    ],
                     method_replacement=methods_replacement,
                 )
             }
@@ -375,7 +377,7 @@ class InternLM2ForCausalPolicy(InternLM2Policy):
             self.pipeline_stage_manager
             and self.pipeline_stage_manager.num_stages > 1
             and id(internlm2_model.tok_embeddings.weight)
-            == id(internlm2_model.output.weight)
+            == id(self.model.output.weight)
         ):
             # tie weights
             return [

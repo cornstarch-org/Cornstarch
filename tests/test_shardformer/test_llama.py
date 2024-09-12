@@ -110,8 +110,8 @@ class LlamaPolicyTestClassBase(PolicyTestBase, ABC):
         tp_group = booster.plugin.tp_group
 
         # unwrap model
-        gemma_model = unwrap_model(org_model, "LlamaModel", "model")
-        shard_gemma_model = unwrap_model(sharded_model, "LlamaModel", "model")
+        model = unwrap_model(org_model, "LlamaModel", "model")
+        shard_model = unwrap_model(sharded_model, "LlamaModel", "model")
 
         row_layer_for_check = ["layers[0].self_attn.q_proj", "embed_tokens"]
         col_layer_for_check = ["layers[0].self_attn.o_proj"]
@@ -123,8 +123,8 @@ class LlamaPolicyTestClassBase(PolicyTestBase, ABC):
         ) and booster.plugin.zero_stage == 0:
             atol, rtol = (1e-6, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
             row_layer_grads = get_grad_tensors_for_check(
-                gemma_model,
-                shard_gemma_model,
+                model,
+                shard_model,
                 row_layer_for_check,
                 tp_group,
                 atol=atol,
@@ -133,8 +133,8 @@ class LlamaPolicyTestClassBase(PolicyTestBase, ABC):
                 verbose=False,
             )
             col_layer_grads = get_grad_tensors_for_check(
-                gemma_model,
-                shard_gemma_model,
+                model,
+                shard_model,
                 col_layer_for_check,
                 tp_group,
                 atol=atol,
@@ -164,8 +164,8 @@ class LlamaPolicyTestClassBase(PolicyTestBase, ABC):
             atol, rtol = (1e-4, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
             # embed_tokens have different dimension, so skip to check row_layer weight
             check_weight(
-                gemma_model,
-                shard_gemma_model,
+                model,
+                shard_model,
                 col_layer_for_check,
                 tp_group,
                 atol=atol,
