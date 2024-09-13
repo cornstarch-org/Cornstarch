@@ -127,19 +127,12 @@ class LlavaModel(PretrainedVisionLanguageModel):
 
         # Create projector
         projector = model.multi_modal_projector
-        projector_state_dict = projector.state_dict()
-        for key in projector.state_dict().keys():
-            projector_state_dict[
-                key.replace("linear_1", "in_proj").replace("linear_2", "out_proj")
-            ] = projector_state_dict.pop(key)
-
         projector_config = MultimodalProjectorConfig(
             encoder_config=vision_encoder.config,
             text_config=language_model.config,
             projection_type="mlp",
         )
-        vision_projector = MultimodalProjector(projector_config)
-        vision_projector.load_state_dict(projector_state_dict, assign=True)
+        vision_projector = MultimodalProjector(projector_config, projector)
 
         vision_tower = ModalEncoderModule(
             model=vision_encoder,
@@ -238,19 +231,12 @@ class LlavaNextModel:
 
         # Create projector
         projector = model.multi_modal_projector
-        projector_state_dict = projector.state_dict()
-        for key in projector.state_dict().keys():
-            projector_state_dict[
-                key.replace("linear_1", "in_proj").replace("linear_2", "out_proj")
-            ] = projector_state_dict.pop(key)
-
         projector_config = MultimodalProjectorConfig(
             encoder_config=vision_encoder.config,
             text_config=language_model.config,
             projection_type="mlp",
         )
-        vision_projector = MultimodalProjector(projector_config)
-        vision_projector.load_state_dict(projector_state_dict, assign=True)
+        vision_projector = MultimodalProjector(projector_config, projector)
 
         vision_tower = ModalEncoderModule(
             model=vision_encoder,
@@ -412,21 +398,12 @@ class InternVL2Model:
 
         # Create a projector
         projector = model.mlp1
-        projector_state_dict = projector.state_dict()
-        for key in projector.state_dict().keys():
-            projector_state_dict[
-                key.replace("act", "activation")
-                .replace("fc1", "in_proj")
-                .replace("fc2", "out_proj")
-            ] = projector_state_dict.pop(key)
-
         projector_config = MultimodalProjectorConfig(
             encoder_config=vision_encoder.config,
             text_config=language_model.config,
             projection_type="mlp",
         )
-        vision_projector = MultimodalProjector(projector_config)
-        vision_projector.load_state_dict(projector_state_dict, assign=True)
+        vision_projector = MultimodalProjector(projector_config, projector)
 
         vision_encoder = ModalEncoderModule(
             model=vision_encoder,
@@ -458,27 +435,36 @@ class MultimodalProjector(PreTrainedModel):
 
     config: MultimodalProjectorConfig
 
-    def __init__(self, config: MultimodalProjectorConfig):
+    def __init__(
+        self,
+        config: MultimodalProjectorConfig,
+        projection: Optional[nn.Module] = None,
+    ):
         super().__init__(config)
         self.gradient_checkpointing = False
 
-        if config.projection_type == "linear":
-            self.projection = nn.Linear(
-                in_features=config.in_features,
-                out_features=config.out_features,
-            )
-        elif config.projection_type == "mlp":
-            self.in_proj = nn.Linear(
-                in_features=config.in_features,
-                out_features=config.out_features,
-            )
-            self.activation = get_activation(config.activation)
-            self.out_proj = nn.Linear(
-                in_features=config.out_features,
-                out_features=config.out_features,
-            )
-        elif config.projection_type == "qformer":
-            raise NotImplementedError
+        if projection:
+            self.projection = projection
+        else:
+            if config.projection_type == "linear":
+                self.projection = nn.Linear(
+                    in_features=config.in_features,
+                    out_features=config.out_features,
+                )
+            elif config.projection_type == "mlp":
+                self.projection = nn.Sequential(
+                    nn.Linear(
+                        in_features=config.in_features,
+                        out_features=config.out_features,
+                    ),
+                    get_activation(config.activation),
+                    nn.Linear(
+                        in_features=config.out_features,
+                        out_features=config.out_features,
+                    ),
+                )
+            elif config.projection_type == "qformer":
+                raise NotImplementedError
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -487,34 +473,12 @@ class MultimodalProjector(PreTrainedModel):
         self, inputs_embeds: torch.Tensor, return_dict: bool = True
     ) -> Union[ModelOutput, tuple]:
         if self.gradient_checkpointing and self.training:
-            if self.config.projection_type == "linear":
-                outputs = self._gradient_checkpointing_func(
-                    self.projection.__call__, inputs_embeds
-                )
-            elif self.config.projection_type == "mlp":
-                outputs = self._gradient_checkpointing_func(
-                    self.in_proj.__call__, inputs_embeds
-                )
-                outputs = self.activation(outputs)
-                outputs = self._gradient_checkpointing_func(
-                    self.out_proj.__call__, outputs
-                )
-            else:
-                raise NotImplementedError
+            outputs = self._gradient_checkpointing_func(self.projection, inputs_embeds)
         else:
-            if self.config.projection_type == "linear":
-                outputs = self.projection(inputs_embeds)
-            elif self.config.projection_type == "mlp":
-                outputs = self.in_proj(inputs_embeds)
-                outputs = self.activation(outputs)
-                outputs = self.out_proj(outputs)
-            else:
-                raise NotImplementedError
+            outputs = self.projection(inputs_embeds)
 
         if not return_dict:
-            return tuple(
-                outputs,
-            )
+            return tuple(outputs)
 
         return ModelOutput(hidden_states=outputs)
 
@@ -569,7 +533,7 @@ class ModalEncoderModule(ModalModuleBase):
         ] = lambda inputs: inputs,
         postprocess_module_callback: Callable[
             [dict, BaseModelOutput | tuple], BaseModelOutput | tuple
-        ] = lambda inputs, outputs: outputs,
+        ] = lambda inputs, output: output,
         postprocess_projector_callback: Callable[
             [
                 dict,
