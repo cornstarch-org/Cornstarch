@@ -55,14 +55,14 @@ class InternLM2Converter(SpmConverter):
         return unk_id
 
     def decoder(self, replacement, add_prefix_space):
-        decoders_sequence = [
-            decoders.Replace("▁", " "),
-            decoders.ByteFallback(),
-            decoders.Fuse(),
-        ]
-        if self.proto.normalizer_spec.add_dummy_prefix:
-            decoders_sequence.append(decoders.Strip(content=" ", left=1))
-        return decoders.Sequence(decoders_sequence)
+        return decoders.Sequence(
+            [
+                decoders.Replace("▁", " "),
+                decoders.ByteFallback(),
+                decoders.Fuse(),
+                decoders.Strip(content=" ", left=1),
+            ]
+        )
 
     def tokenizer(self, proto):
         model_type = proto.trainer_spec.model_type
