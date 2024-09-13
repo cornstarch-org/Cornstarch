@@ -141,7 +141,7 @@ def test_internvl2_model_generation(
     cornstarch_model.train(mode=False)
 
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name, cache_dir=temp_directory, trust_remote_code=False
+        model_name, cache_dir=temp_directory, trust_remote_code=False, use_fast=False
     )
     image_processor = CLIPImageProcessor.from_pretrained(
         model_name, cache_dir=temp_directory
@@ -190,3 +190,5 @@ def test_internvl2_model_generation(
             questions=prompts,
             generation_config=generation_config,
         )
+
+    assert hf_output == cornstarch_output

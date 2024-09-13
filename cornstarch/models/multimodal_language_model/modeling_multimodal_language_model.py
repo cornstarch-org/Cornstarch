@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import inspect
 import warnings
+from types import MethodType
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -83,12 +84,12 @@ class PretrainedVisionLanguageModel:
         pass
 
     def preprocess_vision_callback(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        pass
+        return inputs
 
     def postprocess_vision_callback(
         self, model: PreTrainedModel, inputs: dict, output: BaseModelOutput | tuple
     ) -> BaseModelOutput | tuple:
-        pass
+        return output
 
     def postprocess_projector_callback(
         self,
@@ -102,7 +103,16 @@ class PretrainedVisionLanguageModel:
         pad_token_id: int = -1,
         ignore_index: int = -100,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        pass
+        return prepend_modal_output_to_inputs_embeds(
+            inputs,
+            output,
+            input_ids,
+            inputs_embeds,
+            attention_mask,
+            labels,
+            pad_token_id,
+            ignore_index,
+        )
 
 
 class LlavaModel(PretrainedVisionLanguageModel):
@@ -383,7 +393,7 @@ class LlavaNextModel:
         return inputs_embeds, attention_mask, position_ids, labels
 
 
-class InternVL2Model:
+class InternVL2Model(PretrainedVisionLanguageModel):
     """A class for InternVL2 pretrained models."""
 
     def __init__(self, config: InternVLChatConfig):
@@ -416,10 +426,72 @@ class InternVL2Model:
             ),
         )
 
-        return MultimodalModel(
+        mm_model = MultimodalModel(
             encoders={"vision": vision_encoder},
             language_model=language_model,
         )
+
+        mm_model.chat = MethodType(InternVLChatModel.chat, model)
+        mm_model.batch_chat = MethodType(InternVLChatModel.batch_chat, model)
+        model.generate = MethodType(MultimodalModel.generate, mm_model)
+
+        return mm_model
+
+    @staticmethod
+    def postprocess_vision_callback(
+        model: InternVLChatModel,
+        inputs: dict,
+        output: BaseModelOutput | tuple,
+    ) -> BaseModelOutput | tuple:
+        if model.select_layer == -1:
+            vit_embeds = output.last_hidden_state
+        else:
+            vit_embeds = output.hidden_states[model.select_layer]
+        vit_embeds = vit_embeds[:, 1:, :]
+
+        h = w = int(vit_embeds.shape[1] ** 0.5)
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+        vit_embeds = model.pixel_shuffle(
+            vit_embeds, scale_factor=model.downsample_ratio
+        )
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
+
+        output.last_hidden_state = vit_embeds
+        return output
+
+    @staticmethod
+    def postprocess_projector_callback(
+        model: InternVLChatModel,
+        inputs: dict,
+        output: BaseModelOutput | tuple,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor,
+        pad_token_id: int = -1,
+        ignore_index: int = -100,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        vit_embeds = output[0]
+
+        B, N, C = inputs_embeds.shape
+        inputs_embeds = inputs_embeds.reshape(B * N, C)
+
+        input_ids = input_ids.reshape(B * N)
+        selected = input_ids == model.img_context_token_id
+        try:
+            inputs_embeds[selected] = inputs_embeds[
+                selected
+            ] * 0.0 + vit_embeds.reshape(-1, C)
+        except Exception:
+            vit_embeds = vit_embeds.reshape(-1, C)
+            n_token = selected.sum()
+            inputs_embeds[selected] = (
+                inputs_embeds[selected] * 0.0 + vit_embeds[:n_token]
+            )
+
+        inputs_embeds = inputs_embeds.reshape(B, N, C)
+
+        return inputs_embeds, attention_mask, None, labels
 
 
 class MultimodalProjector(PreTrainedModel):
@@ -636,7 +708,6 @@ class ModalEncoderModule(ModalModuleBase):
 
         outputs: BaseModelOutput = self.module(
             return_dict=return_dict,
-            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             **kwargs,
         )
@@ -991,6 +1062,7 @@ class MultimodalModel(nn.Module):
 
         return self.language_model(**language_model_inputs)
 
+    @torch.no_grad()
     def generate(
         self,
         input_ids: Optional[torch.LongTensor] = None,
