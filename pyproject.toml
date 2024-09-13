@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "torch",
-    "transformers==4.44.0",
+    "transformers==4.44.2",
     "colossalai==0.4.0",
     "loguru",
     "simple_parsing",
