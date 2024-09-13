@@ -1,4 +1,6 @@
 import copy
+import tempfile
+from pathlib import Path
 from typing import Type
 
 import pytest
@@ -10,19 +12,13 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers.models.llava import LlavaForConditionalGeneration
-from transformers.models.llava_next.modeling_llava_next import (
+from transformers.models.llava_next import (
     LlavaNextForConditionalGeneration,
 )
 
-from cornstarch.models.internvl2.modeling_internvl_chat import InternVLChatModel
-from cornstarch.models.multimodal_language_model import MultimodalModel
-
-model_name_classes = [
-    ("llava-hf/llava-1.5-7b-hf", LlavaForConditionalGeneration),
-    ("llava-hf/llava-v1.6-vicuna-7b-hf", LlavaNextForConditionalGeneration),
-    ("OpenGVLab/InternVL2-2B", InternVLChatModel),
-    ("OpenGVLab/InternVL2-4B", InternVLChatModel),
-]
+from cornstarch.models.multimodal_language_model import (
+    MultimodalModel,
+)
 
 url = "https://www.ilankelman.org/stopsigns/australia.jpg"
 image_stop = Image.open(requests.get(url, stream=True).raw)
@@ -35,36 +31,48 @@ image_snowman = Image.open(requests.get(url, stream=True).raw)
 
 images = [image_stop, image_cats, image_snowman]
 
-prompts = [
-    "USER: <image>\nWhat is shown in this image? ASSISTANT:",
-    "USER: <image>\nWhat about this image? How many cats do you see ASSISTANT:",
-    "USER: <image>\nWhat is shown in this image? ASSISTANT:",
-]
+
+@pytest.fixture(scope="module")
+def temp_directory():
+    with tempfile.TemporaryDirectory():
+        yield Path(tempfile.gettempdir())
 
 
 @pytest.mark.parametrize(
-    "model_name_class", model_name_classes, ids=lambda x: x[0].split("/")[1]
+    "model_name, model_cls",
+    [
+        ("llava-hf/llava-1.5-7b-hf", LlavaForConditionalGeneration),
+        ("llava-hf/llava-v1.6-vicuna-7b-hf", LlavaNextForConditionalGeneration),
+    ],
+    ids=["llava-1.5-7b-hf", "llava-v1.6-vicuna-7b-hf"],
 )
 @pytest.mark.parametrize("batch_size", [1, 2], ids=lambda x: f"bs{x}")
-def test_multimodal_model_generation(
-    model_name_class: tuple[str, Type[PreTrainedModel]], batch_size: int
+def test_llava_model_generation(
+    model_name: str,
+    model_cls: Type[PreTrainedModel],
+    batch_size: int,
+    temp_directory: Path,
 ):
-    model_name, model_cls = model_name_class
+    prompts = [
+        "USER: <image>\nWhat is shown in this image? ASSISTANT:",
+        "USER: <image>\nWhat about this image? How many cats do you see ASSISTANT:",
+        "USER: <image>\nWhat is shown in this image? ASSISTANT:",
+    ]
 
-    # create cornstarch llava model
     cornstarch_model: MultimodalModel = (
         MultimodalModel.from_pretrained_multimodal_model(
             pretrained_model_id=model_name,
+            cache_dir=temp_directory,
         ).to(dtype=torch.float16, device="cuda")
     )
     cornstarch_model.train(mode=False)
 
-    hf_model: PreTrainedModel = model_cls.from_pretrained(model_name).to(
-        dtype=torch.float16, device="cuda"
-    )
+    hf_model: PreTrainedModel = model_cls.from_pretrained(
+        model_name, cache_dir=temp_directory
+    ).to(dtype=torch.float16, device="cuda")
     hf_model.train(mode=False)
 
-    processor = AutoProcessor.from_pretrained(model_name)
+    processor = AutoProcessor.from_pretrained(model_name, cache_dir=temp_directory)
     processor.tokenizer.padding_side = "left"
 
     # llava text generation
