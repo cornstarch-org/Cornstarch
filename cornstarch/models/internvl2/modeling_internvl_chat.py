@@ -10,7 +10,14 @@ import torch.utils.checkpoint
 import transformers
 from torch import nn
 from torch.nn import CrossEntropyLoss
-from transformers import AutoModel, GenerationConfig, LlamaForCausalLM, LlamaTokenizer
+from transformers import (
+    AutoModel,
+    GenerationConfig,
+    LlamaForCausalLM,
+    LlamaTokenizer,
+    Phi3ForCausalLM,
+    Qwen2ForCausalLM,
+)
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
@@ -85,6 +92,10 @@ class InternVLChatModel(PreTrainedModel):
                 self.language_model = LlamaForCausalLM(config.llm_config)
             elif config.llm_config.architectures[0] == "InternLM2ForCausalLM":
                 self.language_model = InternLM2ForCausalLM(config.llm_config)
+            elif config.llm_config.architectures[0] == "Qwen2ForCausalLM":
+                self.language_model = Qwen2ForCausalLM(config.llm_config)
+            elif config.llm_config.architectures[0] == "Phi3ForCausalLM":
+                self.language_model = Phi3ForCausalLM(config.llm_config)
             else:
                 raise NotImplementedError(
                     f"{config.llm_config.architectures[0]} is not implemented."

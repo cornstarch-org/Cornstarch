@@ -9,6 +9,8 @@ import torch
 from PIL import Image
 from transformers import (
     AutoProcessor,
+    AutoTokenizer,
+    CLIPImageProcessor,
     PreTrainedModel,
 )
 from transformers.models.llava import LlavaForConditionalGeneration
@@ -16,6 +18,7 @@ from transformers.models.llava_next import (
     LlavaNextForConditionalGeneration,
 )
 
+from cornstarch.models.internvl2 import InternVLChatModel
 from cornstarch.models.multimodal_language_model import (
     MultimodalModel,
 )
@@ -102,3 +105,88 @@ def test_llava_model_generation(
     )
 
     assert hf_text_output == cornstarch_text_output
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "OpenGVLab/InternVL2-1B",  # InternViT + Qwen2
+        "OpenGVLab/InternVL2-2B",  # InternViT + InternLM2
+        "OpenGVLab/InternVL2-4B",  # InternViT + Phi-3
+    ],
+)
+@pytest.mark.parametrize("batch_size", [1, 2], ids=lambda x: f"bs{x}")
+def test_internvl2_model_generation(
+    model_name: str,
+    batch_size: int,
+    temp_directory: Path,
+):
+    prompts = [
+        "<image>\nPlease describe the image shortly.",
+        "<image>\nPlease describe the image shortly.",
+    ]
+
+    cornstarch_model: MultimodalModel = (
+        MultimodalModel.from_pretrained_multimodal_model(
+            pretrained_model_id=model_name,
+            cache_dir=temp_directory,
+            trust_remote_code=False,
+        ).to(dtype=torch.bfloat16, device="cuda")
+    )
+    cornstarch_model.train(mode=False)
+
+    hf_model: InternVLChatModel = InternVLChatModel.from_pretrained(
+        model_name, cache_dir=temp_directory, trust_remote_code=False
+    ).to(dtype=torch.bfloat16, device="cuda")
+    cornstarch_model.train(mode=False)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, cache_dir=temp_directory, trust_remote_code=False
+    )
+    image_processor = CLIPImageProcessor.from_pretrained(
+        model_name, cache_dir=temp_directory
+    )
+
+    pixel_values1 = image_processor(images[0], return_tensors="pt").pixel_values.to(
+        dtype=torch.bfloat16, device="cuda"
+    )
+    pixel_values2 = image_processor(images[1], return_tensors="pt").pixel_values.to(
+        dtype=torch.bfloat16, device="cuda"
+    )
+
+    generation_config = dict(max_new_tokens=20, do_sample=False)
+    if batch_size == 1:
+        # internlm2 text generation
+        hf_output = hf_model.chat(
+            tokenizer=tokenizer,
+            pixel_values=pixel_values1,
+            question=prompts[0],
+            generation_config=generation_config,
+        )
+
+        # cornstarch text generation
+        cornstarch_output = cornstarch_model.chat(
+            tokenizer=tokenizer,
+            pixel_values=pixel_values1,
+            question=prompts[0],
+            generation_config=generation_config,
+        )
+    else:
+        num_patches_list = [pixel_values1.size(0), pixel_values2.size(0)]
+        pixel_values = torch.cat((pixel_values1, pixel_values2), dim=0)
+        hf_output = hf_model.batch_chat(
+            tokenizer=tokenizer,
+            pixel_values=pixel_values,
+            num_patches_list=num_patches_list,
+            questions=prompts,
+            generation_config=generation_config,
+        )
+
+        # cornstarch text generation
+        cornstarch_output = cornstarch_model.batch_chat(
+            tokenizer=tokenizer,
+            pixel_values=pixel_values,
+            num_patches_list=num_patches_list,
+            questions=prompts,
+            generation_config=generation_config,
+        )
