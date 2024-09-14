@@ -17,6 +17,7 @@ from transformers.models.llava import LlavaForConditionalGeneration
 from transformers.models.llava_next import (
     LlavaNextForConditionalGeneration,
 )
+from transformers.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
 from cornstarch.models.internvl2 import InternVLChatModel
 from cornstarch.models.multimodal_language_model import (
@@ -79,32 +80,28 @@ def test_llava_model_generation(
     processor.tokenizer.padding_side = "left"
 
     # llava text generation
-    hf_inputs = processor(
+    inputs = processor(
         prompts[:batch_size], images[:batch_size], padding=True, return_tensors="pt"
     ).to(dtype=torch.float16, device="cuda")
 
     hf_output = hf_model.generate(
-        **hf_inputs,
+        **inputs,
         max_new_tokens=20,
         do_sample=False,
     )
-    hf_text_output = [
-        output.split("ASSISTANT:")[-1].strip()
-        for output in processor.batch_decode(hf_output, skip_special_tokens=True)
-    ]
+    hf_output_text = processor.batch_decode(hf_output, skip_special_tokens=True)
 
     # cornstarch text generation
-    cornstarch_inputs = copy.deepcopy(hf_inputs)
     cornstarch_output = cornstarch_model.generate(
-        **cornstarch_inputs,
+        **inputs,
         max_new_tokens=20,
         do_sample=False,
     )
-    cornstarch_text_output = processor.batch_decode(
+    cornstarch_output_text = processor.batch_decode(
         cornstarch_output, skip_special_tokens=True
     )
 
-    assert hf_text_output == cornstarch_text_output
+    assert hf_output_text == cornstarch_output_text
 
 
 @pytest.mark.parametrize(
@@ -192,3 +189,78 @@ def test_internvl2_model_generation(
         )
 
     assert hf_output == cornstarch_output
+
+
+@pytest.mark.parametrize("model_name", ["Qwen/Qwen2-VL-2B-Instruct"])
+@pytest.mark.parametrize("batch_size", [1, 2], ids=lambda x: f"bs{x}")
+def test_qwen2vl_model_generation(
+    model_name: str,
+    batch_size: int,
+    temp_directory: Path,
+):
+    cornstarch_model = MultimodalModel.from_pretrained_multimodal_model(
+        pretrained_model_id=model_name,
+        cache_dir=temp_directory,
+        trust_remote_code=False,
+    ).to(dtype=torch.bfloat16, device="cuda")
+    cornstarch_model.train(mode=False)
+
+    hf_model = Qwen2VLForConditionalGeneration.from_pretrained(
+        model_name, cache_dir=temp_directory, trust_remote_code=False
+    ).to(dtype=torch.bfloat16, device="cuda")
+    hf_model.train(mode=False)
+
+    processor = AutoProcessor.from_pretrained(model_name, cache_dir=temp_directory)
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": "Describe this image."},
+            ],
+        }
+    ]
+
+    text_prompt = processor.apply_chat_template(
+        conversation, tokenizer=False, add_generation_prompt=True
+    )
+    inputs = processor(
+        text=[text_prompt] * batch_size,
+        images=images[:batch_size],
+        padding=True,
+        return_tensors="pt",
+    ).to("cuda")
+
+    # qwen2vl text generation
+    hf_output = hf_model.generate(
+        **inputs,
+        max_new_tokens=20,
+        do_sample=False,
+    )
+    hf_output = [
+        output_ids[len(input_ids) :]
+        for input_ids, output_ids in zip(inputs.input_ids, hf_output)
+    ]
+    hf_output_text = processor.batch_decode(
+        hf_output,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=True,
+    )
+
+    # cornstarch text generation
+    cornstarch_output = cornstarch_model.generate(
+        **inputs,
+        max_new_tokens=20,
+        do_sample=False,
+    )
+    cornstarch_output = [
+        output_ids[len(input_ids) :]
+        for input_ids, output_ids in zip(inputs.input_ids, cornstarch_output)
+    ]
+    cornstarch_output_text = processor.batch_decode(
+        cornstarch_output,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=True,
+    )
+
+    assert hf_output_text == cornstarch_output_text
