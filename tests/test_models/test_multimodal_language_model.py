@@ -12,6 +12,10 @@ from transformers import (
 )
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
+from transformers.models.qwen2_audio.modeling_qwen2_audio import (
+    Qwen2AudioEncoder,
+    Qwen2AudioEncoderConfig,
+)
 from transformers.models.siglip import SiglipVisionConfig, SiglipVisionModel
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
@@ -30,6 +34,7 @@ vision_model = [
 
 audio_model = [
     ("openai/whisper-small", WhisperConfig, WhisperEncoder),
+    ("Qwen/Qwen2-Audio-7B-Instruct", Qwen2AudioEncoderConfig, Qwen2AudioEncoder),
 ]
 
 language_model = [
