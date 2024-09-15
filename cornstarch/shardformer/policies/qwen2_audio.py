@@ -1,5 +1,7 @@
+import functools
+import itertools
 import warnings
-from typing import Dict
+from typing import Callable, Dict, List, cast
 
 import torch.nn as nn
 from colossalai.shardformer.layer import (
@@ -12,15 +14,102 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
+from transformers import PretrainedConfig
 from transformers.models.qwen2_audio.configuration_qwen2_audio import (
     Qwen2AudioEncoderConfig,
 )
 from transformers.models.qwen2_audio.modeling_qwen2_audio import Qwen2AudioEncoder
 
-from cornstarch.shardformer.modeling.qwen2_audio import Qwen2AudioForwards
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.modeling.qwen2_audio import (
+    Qwen2AudioForwards,
+    Qwen2AudioPipelineForwards,
+)
+from cornstarch.shardformer.policies.pipeline_template_policy import (
+    PipelineTemplatePolicyBase,
+)
 
 
-class Qwen2AudioEncoderPolicy(Policy):
+class Qwen2AudioEncoderPolicy(PipelineTemplatePolicyBase, Policy):
+    @staticmethod
+    def get_all_modules(config: PretrainedConfig) -> list[str]:
+        assert isinstance(
+            config, Qwen2AudioEncoderConfig
+        ), f"config must be Qwen2AudioEncoderConfig, got {type(config)}"
+        config: Qwen2AudioEncoderConfig = cast(Qwen2AudioEncoderConfig, config)
+
+        modules = []
+        modules.extend(["conv1", "conv2", "embed_positions"])
+        modules.extend([f"layers.{i}" for i in range(config.encoder_layers)])
+        modules.extend(["layer_norm", "avg_pooler"])
+
+        return modules
+
+    def pipeline_template_sanity_check(self, template: PipelineTemplate):
+        assert (
+            "transformers.models.qwen2_audio.modeling_qwen2_audio"
+            in template.model_name
+        ), "The pipeline template is not for Qwen2Audio."
+
+        assert hasattr(self.model, "config"), "model must have a config attribute"
+        modules = self.get_all_modules(self.model.config)
+        modules_in_template = list(itertools.chain(*template.modules_per_stage))
+        if modules != modules_in_template:
+            raise ValueError(
+                "Modules in the pipeline template do not match the modules in the model."
+            )
+
+        if not all(
+            module in modules_in_template[0]
+            for module in ["conv1", "conv2", "embed_positions"]
+        ):
+            raise ValueError("convolutions and embeddings must be in the first stage.")
+
+        if not all(
+            module in modules_in_template[-1] for module in ["layer_norm", "avg_pooler"]
+        ):
+            raise ValueError("layer norm and avg pooler must be in the last stage.")
+
+    def set_pipeline_forward(
+        self, model_cls: nn.Module, new_forward: Callable, policy: dict
+    ):
+        if self.pipeline_stage_manager is None:
+            return
+
+        module: Qwen2AudioEncoder = self.model
+        stage_manager = self.pipeline_stage_manager
+        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+        stage_index = stage_manager.get_stage_index(layers_per_stage)
+
+        method_replacement = {
+            "forward": functools.partial(
+                new_forward,
+                stage_manager=stage_manager,
+                stage_index=stage_index,
+                shard_config=self.shard_config,
+            )
+        }
+        self.append_or_create_method_replacement(
+            description=method_replacement, policy=policy, target_key=model_cls
+        )
+
+    def get_held_layers(self) -> List[nn.Module]:
+        assert self.pipeline_stage_manager is not None
+
+        module: Qwen2AudioEncoder = self.model
+        stage_manager = self.pipeline_stage_manager
+
+        held_layers = []
+        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+        if stage_manager.is_first_stage():
+            held_layers.extend([module.conv1, module.conv2, module.embed_positions])
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        held_layers.extend(module.layers[start_idx:end_idx])
+        if stage_manager.is_last_stage():
+            held_layers.extend([module.layer_norm, module.avg_pooler])
+
+        return held_layers
+
     def config_sanity_check(self):
         pass
 
@@ -134,5 +223,12 @@ class Qwen2AudioEncoderPolicy(Policy):
                 "Qwen2Audio doesn't support JIT fusion, will ignore the flag."
             )
             self.shard_config.enable_jit_fused = False
+
+        if self.pipeline_stage_manager is not None:
+            self.set_pipeline_forward(
+                model_cls=Qwen2AudioEncoder,
+                new_forward=Qwen2AudioPipelineForwards.qwen2_audio_encoder_forward,
+                policy=policy,
+            )
 
         return policy

@@ -41,6 +41,7 @@ class TestQwen2AudioEncoderPolicy(PolicyTestBase):
                 encoder_layers=4,
                 is_encoder_decoder=False,
                 _attn_implementation="eager",
+                d_model=384,  # FlashAttention cannot support default value of 1280
             )
             (
                 org_model,
