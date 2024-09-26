@@ -4,7 +4,7 @@ description = "A versatile model toolkit for distributed training."
 readme = "README.md"
 license = {file = "LICENSE.txt"}
 requires-python = ">=3.10"
-version = "0.0.4"
+version = "0.0.5"
 authors = [
     {name = "Insu Jang", email = "insujang@umich.edu"}
 ]
@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "torch",
-    "transformers==4.44.2",
+    "transformers==4.45.0",
     "colossalai==0.4.0",
     "loguru",
     "simple_parsing",
