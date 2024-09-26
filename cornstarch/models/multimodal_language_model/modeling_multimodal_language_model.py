@@ -209,14 +209,92 @@ class LlavaModel(PretrainedVisionLanguageModel):
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
-        pad_token_id: int = -1,
-        ignore_index: int = -100,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        inputs_embeds, attention_mask, labels, position_ids = (
-            model._merge_input_ids_with_image_features(
-                output[0], inputs_embeds, input_ids, attention_mask, labels
-            )
+        config: LlavaConfig = model.config
+        if "pixel_values" not in inputs or inputs["pixel_values"] is None:
+            return inputs_embeds, attention_mask, None, labels
+
+        pixel_values = inputs["pixel_values"]
+        image_features = output[0]
+        past_key_values = (
+            inputs["past_key_values"] if "past_key_values" in inputs else None
         )
+
+        legacy_processing = (
+            (input_ids == config.image_token_index).sum(1).max()
+            < config.image_seq_length
+        ) or (input_ids.shape[-1] == 1 and pixel_values is not None)
+
+        if legacy_processing:
+            from transformers.models.llava.modeling_llava import logger
+
+            logger.warning_once(
+                "Expanding inputs for image tokens in LLaVa should be done in processing. "
+                "Please add `patch_size` and `vision_feature_select_strategy` to the model's processing config or set directly "
+                "with `processor.patch_size = {{patch_size}}` and processor.vision_feature_select_strategy = {{vision_feature_select_strategy}}`. "
+                "Using processors without these attributes in the config is deprecated and will throw an error in v4.47."
+            )
+            # prefill stage vs decoding stage (legacy behavior copied)
+            if input_ids.shape[1] != 1:
+                inputs_embeds, attention_mask, labels, position_ids = (
+                    model._merge_input_ids_with_image_features(
+                        image_features, inputs_embeds, input_ids, attention_mask, labels
+                    )
+                )
+                cache_position = torch.arange(
+                    attention_mask.shape[1], device=attention_mask.device
+                )
+            else:
+                # Retrieve the first layer to inspect the logits and mask out the hidden states
+                # that are set to 0
+                first_layer_past_key_value = past_key_values[0][0][:, :, :, 0]
+
+                # Sum all dimensions of head_dim (-2) to avoid random errors such as: https://github.com/huggingface/transformers/pull/28032#issuecomment-1863691941
+                batch_index, non_attended_tokens = torch.where(
+                    first_layer_past_key_value.float().sum(-2) == 0
+                )
+
+                # Get the target length
+                target_length = input_ids.shape[1]
+                past_length = first_layer_past_key_value.shape[-1]
+
+                extended_attention_mask = torch.ones(
+                    (attention_mask.shape[0], past_length),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+
+                # Filter out only the tokens that can be un-attended, this can happen
+                # if one uses Llava + Fused modules where the cache on the
+                # first iteration is already big enough, or if one passes custom cache
+                valid_indices = non_attended_tokens < extended_attention_mask.size(-1)
+                new_batch_index = batch_index[valid_indices]
+                new_non_attended_tokens = non_attended_tokens[valid_indices]
+
+                # Zero-out the places where we don't need to attend
+                extended_attention_mask[new_batch_index, new_non_attended_tokens] = 0
+
+                attention_mask = torch.cat(
+                    (extended_attention_mask, attention_mask[:, -target_length:]), dim=1
+                )
+                position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
+                cache_position = torch.arange(
+                    attention_mask.shape[1], device=attention_mask.device
+                )[-target_length:]
+
+        # TODO: @raushan retain only the new behavior after v4.47
+        else:
+            special_image_mask = (
+                (input_ids == config.image_token_index)
+                .unsqueeze(-1)
+                .expand_as(inputs_embeds)
+            )
+            image_features = image_features.to(
+                inputs_embeds.device, inputs_embeds.dtype
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(
+                special_image_mask, image_features
+            )
 
         return inputs_embeds, attention_mask, position_ids, labels
 
