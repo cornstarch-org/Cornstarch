@@ -6,10 +6,17 @@ Powered by [ColossalAI](https://colossalai.org/) for basic parallelism implement
 
 ## Install
 
-Use `pip` to install Cornstarch:
+Due to conflict on version dependency between ColossalAI and Cornstarch, we recommend to follow the instruction below step by step.
+
+1. First, install colossalai:
 ```
-pip install cornstarch
+pip install colossalai
 ```
+2. Then, install cornstarch:
+```
+pip install --ignore-installed cornstarch
+```
+This will upgrade `transformers` and 
 
 Then, upgrade `transformers` to 4.40 to use more recent models, e.g. phi-3 or gemma.
 ```
