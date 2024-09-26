@@ -353,18 +353,16 @@ class LlavaNextModel:
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
-        pad_token_id: int = -1,
-        ignore_index: int = -100,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        config: LlavaNextConfig = model.config
         image_sizes = inputs["image_sizes"]
-        image_newline = model.image_newline
 
         # ! infer image_num_patches from image_sizes
         image_num_patches = [
             image_size_to_num_patches(
                 image_size=imsize,
-                grid_pinpoints=model.config.image_grid_pinpoints,
-                patch_size=model.config.vision_config.image_size,
+                grid_pinpoints=config.image_grid_pinpoints,
+                patch_size=config.vision_config.image_size,
             )
             for imsize in image_sizes
         ]
@@ -377,7 +375,8 @@ class LlavaNextModel:
         image_features, feature_lens = model.pack_image_features(
             image_features,
             image_sizes,
-            image_newline=image_newline,
+            image_newline=model.image_newline,
+            vision_feature_select_strategy=config.vision_feature_select_strategy,
         )
 
         inputs_embeds = inputs_embeds.to(image_features.dtype)
@@ -390,8 +389,8 @@ class LlavaNextModel:
                 attention_mask,
                 position_ids=None,
                 labels=labels,
-                image_token_index=model.config.image_token_index,
-                ignore_index=ignore_index,
+                image_token_index=config.image_token_index,
+                ignore_index=config.ignore_index,
             )
         )
 
@@ -475,8 +474,6 @@ class InternVL2Model(PretrainedVisionLanguageModel):
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
-        pad_token_id: int = -1,
-        ignore_index: int = -100,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         vit_embeds = output[0]
 
@@ -618,8 +615,6 @@ class Qwen2VLModel(PretrainedVisionLanguageModel):
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
-        pad_token_id: int = -1,
-        ignore_index: int = -100,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if "pixel_values" in inputs:
             image_mask = input_ids == model.config.image_token_id
@@ -753,8 +748,6 @@ class ModalEncoderModule(ModalModuleBase):
                 torch.Tensor,
                 torch.Tensor,
                 torch.Tensor,
-                int,
-                int,
             ],
             torch.Tensor,
         ] = prepend_modal_output_to_inputs_embeds,
@@ -783,7 +776,7 @@ class ModalEncoderModule(ModalModuleBase):
                 Inputs to the callback:
                     dict: Inputs to the encoder module.
                     BaseModelOutput | tuple: Output of the encoder module.
-            postprocess_projector_callback (`Callable[[dict, BaseModelOutput | tuple, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]`, *optional*):
+            postprocess_projector_callback (`Callable[[dict, BaseModelOutput | tuple, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]`, *optional*):
                 A function to postprocess the output of the `ModalEncoderModule`.
                 Called after the encoder module and the projector are called.
                 Second argument of the function is the original `inputs_embeds` from the language model backbone.
@@ -797,8 +790,6 @@ class ModalEncoderModule(ModalModuleBase):
                     torch.Tensor: `inputs_embeds` from the language model backbone.
                     torch.Tensor: `attention_mask` from the language model backbone.
                     torch.Tensor: `labels` from the language model backbone.
-                    int: `pad_token_id` from the language model backbone.
-                    int: `ignore_index` from the language model backbone.
                 Outputs from the callback:
                     torch.Tensor: new `inputs_embeds` to be used in the language model backbone.
                     torch.Tensor: new `attention_mask` to be used in the language model backbone.
@@ -1177,7 +1168,6 @@ class MultimodalModel(nn.Module):
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
                     labels=labels,
-                    pad_token_id=self.language_model.config.pad_token_id,
                 )
             )
 
@@ -1290,7 +1280,6 @@ class MultimodalModel(nn.Module):
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
                     labels=None,
-                    pad_token_id=self.language_model.config.pad_token_id,
                 )
             )
 
