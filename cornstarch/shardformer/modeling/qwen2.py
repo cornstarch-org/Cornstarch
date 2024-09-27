@@ -37,6 +37,7 @@ class Qwen2PipelineForwards:
         cache_position: Optional[torch.LongTensor] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         stage_index: Optional[List[int]] = None,
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -63,14 +64,19 @@ class Qwen2PipelineForwards:
                 )
                 use_cache = False
 
-        use_legacy_cache = False
+        # kept for BC (non `Cache` `past_key_values` inputs)
+        return_legacy_cache = False
         if use_cache and not isinstance(past_key_values, Cache):
-            use_legacy_cache = True
-            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            logger.warning_once(
-                "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
-                "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
-            )
+            return_legacy_cache = True
+            if past_key_values is None:
+                past_key_values = DynamicCache()
+            else:
+                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                logger.warning_once(
+                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
+                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
+                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
+                )
 
         if stage_manager.is_first_stage():
             if (input_ids is None) ^ (inputs_embeds is not None):
@@ -92,8 +98,13 @@ class Qwen2PipelineForwards:
                 past_seen_tokens + hidden_states.shape[1],
                 device=hidden_states.device,
             )
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
+
+        if stage_manager.is_first_stage():
+            if position_ids is None:
+                position_ids = cache_position.unsqueeze(0)
+
+            # create position embeddings to be shared across the decoder layers
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         if shard_config.enable_flash_attention:
             # in this case, attention_mask is a dict rather than a tensor
@@ -135,6 +146,7 @@ class Qwen2PipelineForwards:
                     output_attentions,
                     use_cache,
                     cache_position,
+                    position_embeddings,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -145,6 +157,7 @@ class Qwen2PipelineForwards:
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
@@ -162,13 +175,9 @@ class Qwen2PipelineForwards:
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        next_cache = None
-        if use_cache:
-            next_cache = (
-                next_decoder_cache.to_legacy_cache()
-                if use_legacy_cache
-                else next_decoder_cache
-            )
+        next_cache = next_decoder_cache if use_cache else None
+        if return_legacy_cache:
+            next_cache = next_cache.to_legacy_cache()
 
         if stage_manager.is_last_stage():
             if not return_dict:
@@ -189,7 +198,11 @@ class Qwen2PipelineForwards:
                 attentions=all_self_attns,
             )
         else:
-            return {"hidden_states": hidden_states}
+            return {
+                "hidden_states": hidden_states,
+                "position_ids": position_ids,
+                "position_embeddings": position_embeddings,
+            }
 
     def qwen2_for_causal_lm_forward(
         self: Qwen2ForCausalLM,
@@ -204,6 +217,7 @@ class Qwen2PipelineForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -236,6 +250,7 @@ class Qwen2PipelineForwards:
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            position_embeddings=position_embeddings,
             stage_manager=stage_manager,
             hidden_states=hidden_states,
             stage_index=stage_index,
@@ -286,8 +301,11 @@ class Qwen2PipelineForwards:
                 attentions=outputs.attentions,
             )
 
-        hidden_states = outputs.get("hidden_states")
-        return {"hidden_states": hidden_states}
+        return {
+            "hidden_states": outputs.get("hidden_states"),
+            "position_ids": outputs.get("position_ids"),
+            "position_embeddings": outputs.get("position_embeddings"),
+        }
 
 
 class Qwen2Forwards:
@@ -334,14 +352,19 @@ class Qwen2Forwards:
                 )
                 use_cache = False
 
-        use_legacy_cache = False
+        # kept for BC (non `Cache` `past_key_values` inputs)
+        return_legacy_cache = False
         if use_cache and not isinstance(past_key_values, Cache):
-            use_legacy_cache = True
-            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            logger.warning_once(
-                "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
-                "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
-            )
+            return_legacy_cache = True
+            if past_key_values is None:
+                past_key_values = DynamicCache()
+            else:
+                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                logger.warning_once(
+                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
+                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
+                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
+                )
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -379,6 +402,9 @@ class Qwen2Forwards:
 
         hidden_states = inputs_embeds
 
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -398,6 +424,7 @@ class Qwen2Forwards:
                     output_attentions,
                     use_cache,
                     cache_position,
+                    position_embeddings,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -408,6 +435,7 @@ class Qwen2Forwards:
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
@@ -424,13 +452,9 @@ class Qwen2Forwards:
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        next_cache = None
-        if use_cache:
-            next_cache = (
-                next_decoder_cache.to_legacy_cache()
-                if use_legacy_cache
-                else next_decoder_cache
-            )
+        next_cache = next_decoder_cache if use_cache else None
+        if return_legacy_cache:
+            next_cache = next_cache.to_legacy_cache()
 
         if not return_dict:
             return tuple(
@@ -455,6 +479,9 @@ class Qwen2Forwards:
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.46
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -481,7 +508,18 @@ class Qwen2Forwards:
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
+        if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value_states, position_ids)
+        else:
+            cos, sin = position_embeddings
+
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin, position_ids
         )

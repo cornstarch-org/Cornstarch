@@ -116,6 +116,7 @@ class Qwen2Policy(PipelineTemplatePolicyBase, Policy):
         held_layers.extend(module.layers[start_idx:end_idx])
         if stage_manager.is_last_stage():
             held_layers.append(module.norm)
+        held_layers.append(module.rotary_emb)
         return held_layers
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
