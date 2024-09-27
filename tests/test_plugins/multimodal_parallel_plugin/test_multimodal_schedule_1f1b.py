@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import copy
+import functools
 import os
 import random
 import sys
@@ -93,7 +96,7 @@ class ScheduleTestClassBase(MultiProcessTestCase):
         dist.destroy_process_group()
 
 
-class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
+class SingleEncoderModelTestCaseBase:
     @property
     def world_size(self):
         return 4
@@ -157,112 +160,8 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         )
         return MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
 
-    @parametrize("num_microbatches", [4, 8, 12], name_fn=lambda x: f"mb={x}")
-    @parametrize("microbatch_size", [1, 2, 4], name_fn=lambda x: f"mbs={x}")
-    def test_schedule(self, num_microbatches: int, microbatch_size: int):
-        model = self.SingleEncoderModel()
-        pp_model = copy.deepcopy(model)
 
-        stage_manager = self.create_stage_manager(model=model)
-        schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
-            stage_manager, num_microbatches, microbatch_size
-        )
-
-        start_idx, end_idx = stage_manager.get_stage_index(
-            stage_manager.distribute_layers()
-        )
-
-        my_modal = next(
-            template
-            for template, ranks in stage_manager.pg_mesh.modal_to_ranks.items()
-            if dist.get_rank() in ranks
-        )
-
-        assert my_modal.model_name in ["encoder", "llm"]
-        pp_model.pp_config = {
-            "modal_name": my_modal.model_name,
-            "index": (start_idx, end_idx),
-            "stage_manager": stage_manager,
-        }
-
-        model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
-        pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
-
-        def criterion(x, *args, **kwargs):
-            return (x * x).mean()
-
-        input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
-        dist.all_reduce(input_list[0])
-
-        # forward and backward
-        output = model(input_list[0])
-        loss = criterion(output)
-        loss.backward()
-
-        pp_ret = schedule.forward_backward_step(
-            pp_model,
-            iter(input_list),
-            criterion,
-            pp_optimizer,
-            return_loss=True,
-            return_outputs=True,
-        )
-
-        if stage_manager.is_last_stage(check_only_in_modal=False):
-            assert torch.allclose(loss, pp_ret["loss"])
-
-        # check gradients
-        if my_modal.model_name == "encoder":
-            for i in range(start_idx, end_idx):
-                assert torch.allclose(
-                    model.encoder[i].weight.grad,
-                    pp_model.encoder[i].weight.grad,
-                )
-                assert torch.allclose(
-                    model.encoder[i].bias.grad,
-                    pp_model.encoder[i].bias.grad,
-                )
-        elif my_modal.model_name == "llm":
-            for i in range(start_idx, end_idx):
-                assert torch.allclose(
-                    model.llm[i].weight.grad,
-                    pp_model.llm[i].weight.grad,
-                )
-                assert torch.allclose(
-                    model.llm[i].bias.grad,
-                    pp_model.llm[i].bias.grad,
-                )
-
-        # step
-        model_optimizer.step()
-        pp_optimizer.step()
-        model_optimizer.zero_grad()
-        pp_optimizer.zero_grad()
-
-        # check updated param
-        if my_modal.model_name == "encoder":
-            for i in range(start_idx, end_idx):
-                assert torch.allclose(
-                    model.encoder[i].weight,
-                    pp_model.encoder[i].weight,
-                )
-                assert torch.allclose(
-                    model.encoder[i].bias,
-                    pp_model.encoder[i].bias,
-                )
-        elif my_modal.model_name == "llm":
-            for i in range(start_idx, end_idx):
-                assert torch.allclose(
-                    model.llm[i].weight,
-                    pp_model.llm[i].weight,
-                )
-                assert torch.allclose(
-                    model.llm[i].bias,
-                    pp_model.llm[i].bias,
-                )
-
-
-class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
+class MultipleEncoderModelTestCaseBase:
     @property
     def world_size(self):
         return 6
@@ -339,6 +238,375 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
         )
         return MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
 
+
+def criterion(x, *args, **kwargs):
+    return (x * x).mean()
+
+
+class ForwardBackwardOrderClassBase(MultiProcessTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.manager = torch.multiprocessing.Manager()
+        self.order_dict = self.manager.dict()
+        for rank in range(self.world_size):
+            self.order_dict[rank] = self.manager.list()
+        with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
+            self._spawn_processes()
+
+    def tearDown(self) -> None:
+        self.manager.shutdown()
+        return super().tearDown()
+
+    def _start_processes(self, proc) -> None:
+        from torch.testing._internal.common_distributed import logger
+
+        self.processes = []
+        for rank in range(self.world_size):
+            parent_conn, child_conn = torch.multiprocessing.Pipe()
+            process = proc(
+                target=self.__class__._run,
+                name="process " + str(rank),
+                args=(rank, self._current_test_name(), self.file_name, child_conn),
+                kwargs={"order_dict": self.order_dict},
+            )
+            process.start()
+            logger.info("Started process %s with pid %s", rank, process.pid)
+            self.pid_to_pipe[process.pid] = parent_conn
+            self.processes.append(process)
+
+    @classmethod
+    def _run(
+        cls,
+        rank: int,
+        test_name: str,
+        file_name: str,
+        pipe,
+        order_dict: dict[int, list[str]],
+    ) -> None:
+        # Copy from: torch/testing/_internal/common_fsdp.py FSDPTest._run
+        self = cls(test_name)
+        self.rank = rank
+        self.file_name = file_name
+        self.order_dict = order_dict
+
+        print(f"dist init r={self.rank}, world={self.world_size}")
+        backend = "gloo"
+
+        try:
+            dist.init_process_group(
+                init_method=f"{FILE_SCHEMA}{self.file_name}",
+                backend=backend,
+                world_size=self.world_size,
+                rank=self.rank,
+            )
+        except RuntimeError as e:
+            if "recompile" in e.args[0]:
+                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
+
+            raise
+
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        random.seed(0)
+        np.random.seed(0)
+
+        # Execute barrier prior to running test to ensure that every process
+        # has finished initialization and that the following test
+        # immediately exiting due to a skip doesn't cause flakiness.
+        dist.barrier()
+
+        with (
+            torch.backends.cudnn.flags(
+                enabled=True, deterministic=True, benchmark=True
+            ),
+            patch.object(
+                CudaAccelerator, "get_current_device", return_value=torch.device("cpu")
+            ),
+        ):
+            self.run_test(test_name, pipe)
+
+        dist.barrier()
+
+        dist.destroy_process_group()
+
+    @staticmethod
+    def forward_pre_hook(
+        module: nn.Module, input: torch.Tensor, order_dict: dict[int, list[str]]
+    ):
+        order_dict[dist.get_rank()].append("forward")
+
+    @staticmethod
+    def backward_pre_hook(
+        module: nn.Module, grad_input: torch.Tensor, order_dict: dict[int, list[str]]
+    ):
+        order_dict[dist.get_rank()].append("backward")
+
+    def register_hooks(self, module: nn.Module):
+        module.register_forward_pre_hook(
+            functools.partial(
+                ForwardBackwardOrderClassBase.forward_pre_hook,
+                order_dict=self.order_dict,
+            )
+        )
+        module.register_full_backward_pre_hook(
+            functools.partial(
+                ForwardBackwardOrderClassBase.backward_pre_hook,
+                order_dict=self.order_dict,
+            )
+        )
+
+
+class TestSingleEncoderForwardBackwardOrderClass(
+    ForwardBackwardOrderClassBase, SingleEncoderModelTestCaseBase
+):
+    @parametrize("num_microbatches", [4, 8, 12], name_fn=lambda x: f"mb={x}")
+    def test_forward_backward_order(self, num_microbatches: int):
+        microbatch_size = 1
+
+        model = self.SingleEncoderModel()
+        model.train(mode=True)
+        optimizer = OptimizerWrapper(torch.optim.SGD(model.parameters(), lr=1))
+
+        stage_manager = self.create_stage_manager(model=model)
+        schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
+            stage_manager, num_microbatches, microbatch_size
+        )
+
+        start_idx, end_idx = stage_manager.get_stage_index(
+            stage_manager.distribute_layers()
+        )
+
+        my_modal = next(
+            template
+            for template, ranks in stage_manager.pg_mesh.modal_to_ranks.items()
+            if dist.get_rank() in ranks
+        )
+        assert my_modal.model_name in ["encoder", "llm"]
+        self.register_hooks(
+            model.encoder[start_idx]
+            if my_modal.model_name == "encoder"
+            else model.llm[start_idx]
+        )
+
+        model.pp_config = {
+            "modal_name": my_modal.model_name,
+            "index": (start_idx, end_idx),
+            "stage_manager": stage_manager,
+        }
+
+        input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
+
+        schedule.forward_backward_step(
+            model,
+            iter(input_list),
+            criterion,
+            optimizer,
+        )
+
+        dist.barrier()
+        torch.cuda.synchronize()
+
+        for rank in range(self.world_size):
+            call_order = list(self.order_dict[rank])
+            assert len(call_order) == num_microbatches * 2
+            expected_order = (
+                ["forward"] * (4 - rank)
+                + ["backward", "forward"] * (num_microbatches - 4 + rank)
+                + ["backward"] * (4 - rank)
+            )
+
+            assert call_order == expected_order
+
+
+class TestMultipleEncoderForwardBackwardOrderClass(
+    MultipleEncoderModelTestCaseBase, ForwardBackwardOrderClassBase
+):
+    @parametrize("num_microbatches", [6, 12, 24], name_fn=lambda x: f"mb={x}")
+    def test_forward_backward_order(self, num_microbatches: int):
+        microbatch_size = 1
+
+        model = self.DoubleEncoderModel()
+        model.train(mode=True)
+        optimizer = OptimizerWrapper(torch.optim.SGD(model.parameters(), lr=1))
+
+        stage_manager = self.create_stage_manager(model=model)
+        schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
+            stage_manager, num_microbatches, microbatch_size
+        )
+
+        start_idx, end_idx = stage_manager.get_stage_index(
+            stage_manager.distribute_layers()
+        )
+
+        my_modal = next(
+            template
+            for template, ranks in stage_manager.pg_mesh.modal_to_ranks.items()
+            if dist.get_rank() in ranks
+        )
+        assert my_modal.model_name in ["encoder1", "encoder2", "llm"]
+        if my_modal.model_name == "encoder1":
+            self.register_hooks(model.encoder1[start_idx])
+        elif my_modal.model_name == "encoder2":
+            self.register_hooks(model.encoder2[start_idx])
+        else:
+            self.register_hooks(model.llm[start_idx])
+
+        model.pp_config = {
+            "modal_name": my_modal.model_name,
+            "index": (start_idx, end_idx),
+            "stage_manager": stage_manager,
+        }
+
+        input_list = [torch.rand(num_microbatches * microbatch_size, 4, 8)]
+
+        schedule.forward_backward_step(
+            model,
+            iter(input_list),
+            criterion,
+            optimizer,
+        )
+
+        dist.barrier()
+        torch.cuda.synchronize()
+
+        # TODO: add assertions for the order of forward and backward calls
+        for rank in range(self.world_size):
+            call_order = list(self.order_dict[rank])
+            assert len(call_order) == num_microbatches * 2
+
+            # Encoder 1 has 1 stage, encoder 2 has 2 stages, llm has 3 stages
+            # Maximum pipeline has 5 stages
+            if rank == 0:
+                expected_order = (
+                    ["forward"] * 4
+                    + ["backward", "forward"] * (num_microbatches - 4)
+                    + ["backward"] * 4
+                )
+            elif rank in [1, 2]:
+                warmup = 5 - (rank - 1)
+                expected_order = (
+                    ["forward"] * warmup
+                    + ["backward", "forward"] * (num_microbatches - warmup)
+                    + ["backward"] * warmup
+                )
+            else:
+                warmup = 3 - (rank - 3)
+                expected_order = (
+                    ["forward"] * warmup
+                    + ["backward", "forward"] * (num_microbatches - warmup)
+                    + ["backward"] * warmup
+                )
+            assert call_order == expected_order
+
+
+class TestScheduleSingleEncoderClass(
+    SingleEncoderModelTestCaseBase, ScheduleTestClassBase
+):
+    @parametrize("num_microbatches", [4, 8, 12], name_fn=lambda x: f"mb={x}")
+    @parametrize("microbatch_size", [1, 2, 4], name_fn=lambda x: f"mbs={x}")
+    def test_schedule(self, num_microbatches: int, microbatch_size: int):
+        model = self.SingleEncoderModel()
+        pp_model = copy.deepcopy(model)
+
+        stage_manager = self.create_stage_manager(model=model)
+        schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
+            stage_manager, num_microbatches, microbatch_size
+        )
+
+        start_idx, end_idx = stage_manager.get_stage_index(
+            stage_manager.distribute_layers()
+        )
+
+        my_modal = next(
+            template
+            for template, ranks in stage_manager.pg_mesh.modal_to_ranks.items()
+            if dist.get_rank() in ranks
+        )
+
+        assert my_modal.model_name in ["encoder", "llm"]
+        pp_model.pp_config = {
+            "modal_name": my_modal.model_name,
+            "index": (start_idx, end_idx),
+            "stage_manager": stage_manager,
+        }
+
+        model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
+        pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
+
+        input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
+        dist.all_reduce(input_list[0])
+
+        # forward and backward
+        output = model(input_list[0])
+        loss = criterion(output)
+        loss.backward()
+
+        pp_ret = schedule.forward_backward_step(
+            pp_model,
+            iter(input_list),
+            criterion,
+            pp_optimizer,
+            return_loss=True,
+            return_outputs=True,
+        )
+
+        if stage_manager.is_last_stage(check_only_in_modal=False):
+            assert torch.allclose(loss, pp_ret["loss"])
+
+        # check gradients
+        if my_modal.model_name == "encoder":
+            for i in range(start_idx, end_idx):
+                assert torch.allclose(
+                    model.encoder[i].weight.grad,
+                    pp_model.encoder[i].weight.grad,
+                )
+                assert torch.allclose(
+                    model.encoder[i].bias.grad,
+                    pp_model.encoder[i].bias.grad,
+                )
+        elif my_modal.model_name == "llm":
+            for i in range(start_idx, end_idx):
+                assert torch.allclose(
+                    model.llm[i].weight.grad,
+                    pp_model.llm[i].weight.grad,
+                )
+                assert torch.allclose(
+                    model.llm[i].bias.grad,
+                    pp_model.llm[i].bias.grad,
+                )
+
+        # step
+        model_optimizer.step()
+        pp_optimizer.step()
+        model_optimizer.zero_grad()
+        pp_optimizer.zero_grad()
+
+        # check updated param
+        if my_modal.model_name == "encoder":
+            for i in range(start_idx, end_idx):
+                assert torch.allclose(
+                    model.encoder[i].weight,
+                    pp_model.encoder[i].weight,
+                )
+                assert torch.allclose(
+                    model.encoder[i].bias,
+                    pp_model.encoder[i].bias,
+                )
+        elif my_modal.model_name == "llm":
+            for i in range(start_idx, end_idx):
+                assert torch.allclose(
+                    model.llm[i].weight,
+                    pp_model.llm[i].weight,
+                )
+                assert torch.allclose(
+                    model.llm[i].bias,
+                    pp_model.llm[i].bias,
+                )
+
+
+class TestScheduleMultipleEncoderClass(
+    MultipleEncoderModelTestCaseBase, ScheduleTestClassBase
+):
     @parametrize("num_microbatches", [6, 12, 24], name_fn=lambda x: f"mb={x}")
     @parametrize("microbatch_size", [1, 2, 4], name_fn=lambda x: f"mbs={x}")
     def test_schedule(self, num_microbatches: int, microbatch_size: int):
@@ -369,9 +637,6 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
 
         model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
         pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
-
-        def criterion(x, *args, **kwargs):
-            return (x * x).mean()
 
         input_list = [torch.rand(num_microbatches * microbatch_size, 4, 8)]
         dist.all_reduce(input_list[0])
@@ -464,5 +729,7 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
                 )
 
 
+instantiate_parametrized_tests(TestSingleEncoderForwardBackwardOrderClass)
+instantiate_parametrized_tests(TestMultipleEncoderForwardBackwardOrderClass)
 instantiate_parametrized_tests(TestScheduleSingleEncoderClass)
 instantiate_parametrized_tests(TestScheduleMultipleEncoderClass)
