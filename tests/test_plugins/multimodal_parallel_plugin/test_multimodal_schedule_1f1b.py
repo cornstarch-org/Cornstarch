@@ -1,9 +1,7 @@
 import copy
-import functools
 import os
 import random
 import sys
-from types import MethodType
 from typing import Any
 from unittest.mock import patch
 
@@ -27,24 +25,8 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultiModalProcessGroupMesh,
 )
 
+
 # TODO (insujang): add tests for the cases without modal parallelism (modalities are colocated)
-
-
-def pp_linear_fwd(
-    forward,
-    data: torch.Tensor = None,
-    input_obj: torch.Tensor = None,
-    stage_manager: MultiModalPipelineStageManager = None,
-    **kwargs,
-):
-    if stage_manager.is_first_stage(check_only_in_modal=False):
-        return {"input_obj": forward(data)}
-    elif stage_manager.is_last_stage(check_only_in_modal=False):
-        return forward(input_obj)
-    else:
-        return {"input_obj": forward(input_obj)}
-
-
 class ScheduleTestClassBase(MultiProcessTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -121,6 +103,7 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
             super().__init__()
             self.encoder = nn.ModuleList([nn.Linear(8, 8) for _ in range(3)])
             self.llm = nn.ModuleList([nn.Linear(8, 8) for _ in range(6)])
+            self.pp_config: dict = None
 
         def get_templates(self) -> list[PipelineTemplate]:
             return [
@@ -130,13 +113,39 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
                 ),
             ]
 
-        def forward(self, x):
-            for layer in self.encoder:
-                x = layer(x)
-            for layer in self.llm:
-                x = layer(x)
+        def forward(
+            self, x: torch.Tensor = None, input_obj: torch.Tensor = None, **kwargs
+        ):
+            if self.pp_config:
+                modal_name: str = self.pp_config["modal_name"]
+                stage_manager: MultiModalPipelineStageManager = self.pp_config[
+                    "stage_manager"
+                ]
+                start_idx, end_idx = self.pp_config["index"]
 
-            return x
+                if not stage_manager.is_first_stage(check_only_in_modal=False):
+                    x = input_obj
+
+                if modal_name == "encoder":
+                    assert start_idx >= 0 and end_idx <= 3
+                    for layer in self.encoder[start_idx:end_idx]:
+                        x = layer(x)
+                elif modal_name == "llm":
+                    assert start_idx >= 0 and end_idx <= 6
+                    for layer in self.llm[start_idx:end_idx]:
+                        x = layer(x)
+
+                if stage_manager.is_last_stage(check_only_in_modal=False):
+                    return x
+                else:
+                    return {"input_obj": x}
+            else:
+                for layer in self.encoder:
+                    x = layer(x)
+                for layer in self.llm:
+                    x = layer(x)
+
+                return x
 
     def create_stage_manager(
         self, model: SingleEncoderModel
@@ -163,24 +172,6 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
             stage_manager.distribute_layers()
         )
 
-        def pp_forward(
-            self: TestScheduleSingleEncoderClass.SingleEncoderModel,
-            x,
-            modal_name: str,
-            start_idx: int,
-            end_idx: int,
-            **kwargs,
-        ):
-            if modal_name == "encoder":
-                assert start_idx >= 0 and end_idx <= 3
-                for layer in self.encoder[start_idx:end_idx]:
-                    x = layer(x)
-            elif modal_name == "llm":
-                assert start_idx >= 0 and end_idx <= 6
-                for layer in self.llm[start_idx:end_idx]:
-                    x = layer(x)
-            return x
-
         my_modal = next(
             template
             for template, ranks in stage_manager.pg_mesh.modal_to_ranks.items()
@@ -188,19 +179,11 @@ class TestScheduleSingleEncoderClass(ScheduleTestClassBase):
         )
 
         assert my_modal.model_name in ["encoder", "llm"]
-        pp_model._forward = MethodType(
-            functools.partial(
-                pp_forward,
-                modal_name=my_modal.model_name,
-                start_idx=start_idx,
-                end_idx=end_idx,
-            ),
-            pp_model,
-        )
-        pp_model.forward = MethodType(
-            functools.partial(pp_linear_fwd, stage_manager=stage_manager),
-            pp_model._forward,
-        )
+        pp_model.pp_config = {
+            "modal_name": my_modal.model_name,
+            "index": (start_idx, end_idx),
+            "stage_manager": stage_manager,
+        }
 
         model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
         pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
@@ -290,6 +273,7 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
             self.encoder1 = nn.ModuleList([nn.Linear(8, 8) for _ in range(3)])
             self.encoder2 = nn.ModuleList([nn.Linear(8, 8) for _ in range(2)])
             self.llm = nn.ModuleList([nn.Linear(8, 8) for _ in range(6)])
+            self.pp_config: dict = None
 
         def get_templates(self) -> list[PipelineTemplate]:
             return [
@@ -302,18 +286,48 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
                 ),
             ]
 
-        def forward(self, x):
-            x1 = copy.deepcopy(x)
-            x2 = copy.deepcopy(x)
-            for layer in self.encoder1:
-                x1 = layer(x1)
-            for layer in self.encoder2:
-                x2 = layer(x2)
-            x = torch.cat([x1, x2], dim=1)
-            for layer in self.llm:
-                x = layer(x)
+        def forward(
+            self, x: torch.Tensor = None, input_obj: torch.Tensor = None, **kwargs
+        ):
+            if self.pp_config:
+                modal_name: str = self.pp_config["modal_name"]
+                stage_manager: MultiModalPipelineStageManager = self.pp_config[
+                    "stage_manager"
+                ]
+                start_idx, end_idx = self.pp_config["index"]
 
-            return x
+                if not stage_manager.is_first_stage(check_only_in_modal=False):
+                    x = input_obj
+
+                if modal_name == "encoder1":
+                    assert start_idx >= 0 and end_idx <= 3
+                    for layer in self.encoder1[start_idx:end_idx]:
+                        x = layer(x)
+                elif modal_name == "encoder2":
+                    assert start_idx >= 0 and end_idx <= 2
+                    for layer in self.encoder2[start_idx:end_idx]:
+                        x = layer(x)
+                elif modal_name == "llm":
+                    assert start_idx >= 0 and end_idx <= 6
+                    for layer in self.llm[start_idx:end_idx]:
+                        x = layer(x)
+
+                if stage_manager.is_last_stage(check_only_in_modal=False):
+                    return x
+                else:
+                    return {"input_obj": x}
+            else:
+                x1 = copy.deepcopy(x)
+                x2 = copy.deepcopy(x)
+                for layer in self.encoder1:
+                    x1 = layer(x1)
+                for layer in self.encoder2:
+                    x2 = layer(x2)
+                x = torch.cat([x1, x2], dim=1)
+                for layer in self.llm:
+                    x = layer(x)
+
+                return x
 
     def create_stage_manager(
         self, model: DoubleEncoderModel
@@ -340,29 +354,6 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
             stage_manager.distribute_layers()
         )
 
-        def pp_forward(
-            self: TestScheduleMultipleEncoderClass.DoubleEncoderModel,
-            x,
-            modal_name: str,
-            start_idx: int,
-            end_idx: int,
-            **kwargs,
-        ):
-            if modal_name == "encoder1":
-                assert start_idx >= 0 and end_idx <= 3
-                for layer in self.encoder1[start_idx:end_idx]:
-                    x = layer(x)
-            elif modal_name == "encoder2":
-                assert start_idx >= 0 and end_idx <= 2
-                for layer in self.encoder2[start_idx:end_idx]:
-                    x = layer(x)
-            elif modal_name == "llm":
-                assert start_idx >= 0 and end_idx <= 6
-                for layer in self.llm[start_idx:end_idx]:
-                    x = layer(x)
-
-            return x
-
         my_modal = next(
             template
             for template, ranks in stage_manager.pg_mesh.modal_to_ranks.items()
@@ -370,19 +361,11 @@ class TestScheduleMultipleEncoderClass(ScheduleTestClassBase):
         )
 
         assert my_modal.model_name in ["encoder1", "encoder2", "llm"]
-        pp_model._forward = MethodType(
-            functools.partial(
-                pp_forward,
-                modal_name=my_modal.model_name,
-                start_idx=start_idx,
-                end_idx=end_idx,
-            ),
-            pp_model,
-        )
-        pp_model.forward = MethodType(
-            functools.partial(pp_linear_fwd, stage_manager=stage_manager),
-            pp_model._forward,
-        )
+        pp_model.pp_config = {
+            "modal_name": my_modal.model_name,
+            "index": (start_idx, end_idx),
+            "stage_manager": stage_manager,
+        }
 
         model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
         pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
