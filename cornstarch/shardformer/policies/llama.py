@@ -3,7 +3,7 @@ from __future__ import annotations
 import functools
 import itertools
 import warnings
-from typing import Dict, cast
+from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedRMSNorm,
@@ -250,6 +250,12 @@ class LlamaModelPolicy(LlamaPolicy, ColossalLlamaModelPolicy):
 
         return policy
 
+    def get_held_layers(self) -> List[nn.Module]:
+        layers = super().get_held_layers()
+        layers.append(self.model.rotary_emb)
+
+        return layers
+
 
 class LlamaForCausalLMPolicy(LlamaPolicy, ColossalLlamaForCausalLMPolicy):
     @staticmethod
@@ -312,6 +318,12 @@ class LlamaForCausalLMPolicy(LlamaPolicy, ColossalLlamaForCausalLMPolicy):
 
         return policy
 
+    def get_held_layers(self) -> List[nn.Module]:
+        layers = super().get_held_layers()
+        layers.append(self.model.model.rotary_emb)
+
+        return layers
+
 
 class LlamaForSequenceClassificationPolicy(
     LlamaPolicy, ColossalLlamaForSequenceClassificationPolicy
@@ -357,3 +369,9 @@ class LlamaForSequenceClassificationPolicy(
             )
 
         return policy
+
+    def get_held_layers(self) -> List[nn.Module]:
+        layers = super().get_held_layers()
+        layers.append(self.model.model.rotary_emb)
+
+        return layers

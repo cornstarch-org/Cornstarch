@@ -38,6 +38,7 @@ class LlamaPipelineForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -75,16 +76,19 @@ class LlamaPipelineForwards:
 
             hidden_states = inputs_embeds
 
+        # kept for BC (non `Cache` `past_key_values` inputs)
         return_legacy_cache = False
-        if use_cache and not isinstance(
-            past_key_values, Cache
-        ):  # kept for BC (non `Cache` `past_key_values` inputs)
+        if use_cache and not isinstance(past_key_values, Cache):
             return_legacy_cache = True
-            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            logger.warning_once(
-                "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
-                "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
-            )
+            if past_key_values is None:
+                past_key_values = DynamicCache()
+            else:
+                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                logger.warning_once(
+                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
+                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
+                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
+                )
 
         past_seen_tokens = 0
         if cache_position is None:
@@ -96,6 +100,13 @@ class LlamaPipelineForwards:
                 past_seen_tokens + hidden_states.shape[1],
                 device=hidden_states.device,
             )
+
+        if stage_manager.is_first_stage():
+            if position_ids is None:
+                position_ids = cache_position.unsqueeze(0)
+
+            # create position embeddings to be shared across the decoder layers
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         if output_attentions:
             logger.warning_once(
@@ -112,9 +123,6 @@ class LlamaPipelineForwards:
                 "use_cache=True is not supported for pipeline models at the moment."
             )
             use_cache = False
-
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
 
         if shard_config.enable_flash_attention:
             batch_size, seq_length = hidden_states.shape[:2]
@@ -157,6 +165,7 @@ class LlamaPipelineForwards:
                     output_attentions,
                     use_cache,
                     cache_position,
+                    position_embeddings,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -167,6 +176,7 @@ class LlamaPipelineForwards:
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
@@ -207,7 +217,11 @@ class LlamaPipelineForwards:
             )
 
         # always return dict for imediate stage
-        return {"hidden_states": hidden_states}
+        return {
+            "hidden_states": hidden_states,
+            "position_ids": position_ids,
+            "position_embeddings": position_embeddings,
+        }
 
     @staticmethod
     def llama_for_causal_lm_forward(
@@ -223,6 +237,7 @@ class LlamaPipelineForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -267,6 +282,7 @@ class LlamaPipelineForwards:
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            position_embeddings=position_embeddings,
             stage_manager=stage_manager,
             hidden_states=hidden_states,
             stage_index=stage_index,
@@ -315,9 +331,12 @@ class LlamaPipelineForwards:
                 hidden_states=outputs.hidden_states,
                 attentions=outputs.attentions,
             )
-        else:
-            hidden_states = outputs.get("hidden_states")
-            return {"hidden_states": hidden_states}
+
+        return {
+            "hidden_states": outputs.get("hidden_states"),
+            "position_ids": outputs.get("position_ids"),
+            "position_embeddings": outputs.get("position_embeddings"),
+        }
 
     def llama_for_sequence_classification_forward(
         self: LlamaForSequenceClassification,
@@ -331,6 +350,8 @@ class LlamaPipelineForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         stage_index: Optional[List[int]] = None,
@@ -351,7 +372,7 @@ class LlamaPipelineForwards:
             )
             output_hidden_states = False
 
-        transformer_outputs = LlamaPipelineForwards.llama_model_forward(
+        outputs = LlamaPipelineForwards.llama_model_forward(
             self.model,
             input_ids,
             attention_mask=attention_mask,
@@ -366,6 +387,8 @@ class LlamaPipelineForwards:
             hidden_states=hidden_states,
             stage_index=stage_index,
             shard_config=shard_config,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
         )
 
         if input_ids is not None:
@@ -376,7 +399,7 @@ class LlamaPipelineForwards:
             batch_size = hidden_states.shape[0]
 
         if stage_manager.is_last_stage():
-            hidden_states = transformer_outputs[0]
+            hidden_states = outputs[0]
             logits = self.score(hidden_states)
 
             if self.config.pad_token_id is None and batch_size != 1:
@@ -424,21 +447,24 @@ class LlamaPipelineForwards:
                 elif self.config.problem_type == "multi_label_classification":
                     loss_fct = BCEWithLogitsLoss()
                     loss = loss_fct(pooled_logits, labels)
+
             if not return_dict:
-                output = (pooled_logits,) + transformer_outputs[1:]
+                output = (pooled_logits,) + outputs[1:]
                 return ((loss,) + output) if loss is not None else output
 
             return SequenceClassifierOutputWithPast(
                 loss=loss,
                 logits=pooled_logits,
-                past_key_values=transformer_outputs.past_key_values,
-                hidden_states=transformer_outputs.hidden_states,
-                attentions=transformer_outputs.attentions,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
             )
 
-        else:
-            hidden_states = transformer_outputs.get("hidden_states")
-            return {"hidden_states": hidden_states}
+        return {
+            "hidden_states": outputs.get("hidden_states"),
+            "position_ids": outputs.get("position_ids"),
+            "position_embeddings": outputs.get("position_embeddings"),
+        }
 
 
 class LlamaForwards:
@@ -455,6 +481,7 @@ class LlamaForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -486,16 +513,19 @@ class LlamaForwards:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
+        # kept for BC (non `Cache` `past_key_values` inputs)
         return_legacy_cache = False
-        if use_cache and not isinstance(
-            past_key_values, Cache
-        ):  # kept for BC (non `Cache` `past_key_values` inputs)
+        if use_cache and not isinstance(past_key_values, Cache):
             return_legacy_cache = True
-            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            logger.warning_once(
-                "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
-                "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
-            )
+            if past_key_values is None:
+                past_key_values = DynamicCache()
+            else:
+                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                logger.warning_once(
+                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
+                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
+                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
+                )
 
         if cache_position is None:
             past_seen_tokens = (
@@ -532,6 +562,9 @@ class LlamaForwards:
         # embed positions
         hidden_states = inputs_embeds
 
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -551,6 +584,7 @@ class LlamaForwards:
                     output_attentions,
                     use_cache,
                     cache_position,
+                    position_embeddings,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -561,6 +595,7 @@ class LlamaForwards:
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
