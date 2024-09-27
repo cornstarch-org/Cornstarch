@@ -1,6 +1,6 @@
 import inspect
 import random
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from types import MethodType
 from typing import Any, Callable, Optional, Tuple
@@ -18,6 +18,7 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
+from colossalai.logging import get_dist_logger
 from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
@@ -390,6 +391,9 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
     def sync_sp_grads(self):
         pass
 
+    def _hook_context(self):
+        return nullcontext()
+
 
 class MultimodalParallelPlugin(HybridParallelPlugin):
     """Plugin for multimodal language model.
@@ -419,6 +423,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         make_vocab_size_divisible_by: int = 64,
     ):
         PipelinePluginBase.__init__(self)
+        self.logger = get_dist_logger()
         self.encoder_plugins = encoder_plugins
         self.language_model_plugin = language_model_plugin
 

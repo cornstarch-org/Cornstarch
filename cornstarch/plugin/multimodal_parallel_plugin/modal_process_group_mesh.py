@@ -184,7 +184,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
                 sorted(set([self._mesh[coord] for coord in coords_in_group]))
             )
 
-            group = self.get_group(ranks_in_group, backend=backend)
+            group = self._get_group(ranks_in_group, backend=backend)
             if target_ranks_in_group == ranks_in_group:
                 target_group = group
         return target_group
