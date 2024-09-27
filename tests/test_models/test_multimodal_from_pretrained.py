@@ -1,4 +1,3 @@
-import copy
 import tempfile
 from pathlib import Path
 from typing import Type

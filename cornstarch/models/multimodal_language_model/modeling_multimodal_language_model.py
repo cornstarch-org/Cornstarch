@@ -295,8 +295,9 @@ class LlavaModel(PretrainedVisionLanguageModel):
             inputs_embeds = inputs_embeds.masked_scatter(
                 special_image_mask, image_features
             )
+            position_ids = None
 
-        return inputs_embeds, attention_mask, None, labels
+        return inputs_embeds, attention_mask, position_ids, labels
 
 
 class LlavaNextModel:
@@ -339,10 +340,15 @@ class LlavaNextModel:
                 self.preprocess_vision_callback, model=model
             ),
             postprocess_module_callback=functools.partial(
-                self.postprocess_vision_callback, model=model
+                self.postprocess_vision_callback,
+                model=model,
+                vision_feature_layer=self.config.vision_feature_layer,
+                vision_feature_select_strategy=self.config.vision_feature_select_strategy,
             ),
             postprocess_projector_callback=functools.partial(
-                self.postprocess_projector_callback, model=model
+                self.postprocess_projector_callback,
+                model=model,
+                vision_feature_select_strategy=self.config.vision_feature_select_strategy,
             ),
         )
 
@@ -393,10 +399,9 @@ class LlavaNextModel:
         model: LlavaNextForConditionalGeneration,
         inputs: dict,
         output: BaseModelOutput | tuple,
+        vision_feature_layer: Optional[int] = None,
+        vision_feature_select_strategy: Optional[str] = None,
     ) -> BaseModelOutput | tuple:
-        vision_feature_layer = model.config.vision_feature_layer
-        vision_feature_select_strategy = model.config.vision_feature_select_strategy
-
         if isinstance(output, ModelOutput):
             if output.hidden_states is None:
                 # vision_tower is executed without output_hidden_states=True.
@@ -431,11 +436,20 @@ class LlavaNextModel:
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
+        vision_feature_select_strategy: Optional[str] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if "pixel_values" not in inputs or inputs["pixel_values"] is None:
+            return inputs_embeds, attention_mask, None, labels
+
         config: LlavaNextConfig = model.config
+        pixel_values = inputs["pixel_values"]
         image_sizes = inputs["image_sizes"]
 
-        # ! infer image_num_patches from image_sizes
+        legacy_processing = (
+            (input_ids == config.image_token_index).sum(1).max()
+            < config.image_seq_length
+        ) or (input_ids.shape[-1] == 1 and pixel_values is not None)
+
         image_num_patches = [
             image_size_to_num_patches(
                 image_size=imsize,
@@ -454,23 +468,54 @@ class LlavaNextModel:
             image_features,
             image_sizes,
             image_newline=model.image_newline,
-            vision_feature_select_strategy=config.vision_feature_select_strategy,
+            vision_feature_select_strategy=vision_feature_select_strategy,
         )
 
-        inputs_embeds = inputs_embeds.to(image_features.dtype)
-        inputs_embeds, attention_mask, position_ids, labels, _ = (
-            model._merge_input_ids_with_image_features(
-                image_features,
-                feature_lens,
-                inputs_embeds,
-                input_ids,
-                attention_mask,
-                position_ids=None,
-                labels=labels,
-                image_token_index=config.image_token_index,
-                ignore_index=config.ignore_index,
+        if legacy_processing:
+            from transformers.models.llava_next.modeling_llava_next import logger
+
+            logger.warning_once(
+                "Expanding inputs for image tokens in LLaVa-NeXT should be done in processing. "
+                "Please add `patch_size` and `vision_feature_select_strategy` to the model's processing config or set directly "
+                "with `processor.patch_size = {{patch_size}}` and processor.vision_feature_select_strategy = {{vision_feature_select_strategy}}`. "
+                "Using processors without these attributes in the config is deprecated and will throw an error in v4.47."
             )
-        )
+
+            if input_ids.shape[1] != 1:
+                inputs_embeds = inputs_embeds.to(image_features.dtype)
+                inputs_embeds, attention_mask, position_ids, labels, _ = (
+                    model._merge_input_ids_with_image_features(
+                        image_features,
+                        feature_lens,
+                        inputs_embeds,
+                        input_ids,
+                        attention_mask,
+                        position_ids=None,
+                        labels=labels,
+                    )
+                )
+                cache_position = torch.arange(
+                    attention_mask.shape[1], device=attention_mask.device
+                )
+            else:
+                raise ValueError(
+                    "input_ids.shape[1] == 1 is not supported in LLaVa-NeXT."
+                )
+
+        # TODO: @raushan retain only the new behavior after v4.47
+        else:
+            special_image_mask = (
+                (input_ids == config.image_token_index)
+                .unsqueeze(-1)
+                .expand_as(inputs_embeds)
+            )
+            image_features = image_features.to(
+                inputs_embeds.device, inputs_embeds.dtype
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(
+                special_image_mask, image_features
+            )
+            position_ids = None
 
         return inputs_embeds, attention_mask, position_ids, labels
 
