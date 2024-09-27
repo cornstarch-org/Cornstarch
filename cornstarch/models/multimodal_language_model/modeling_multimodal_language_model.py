@@ -296,7 +296,7 @@ class LlavaModel(PretrainedVisionLanguageModel):
                 special_image_mask, image_features
             )
 
-        return inputs_embeds, attention_mask, position_ids, labels
+        return inputs_embeds, attention_mask, None, labels
 
 
 class LlavaNextModel:

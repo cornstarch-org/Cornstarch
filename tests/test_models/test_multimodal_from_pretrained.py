@@ -78,6 +78,10 @@ def test_llava_model_generation(
 
     processor = AutoProcessor.from_pretrained(model_name, cache_dir=temp_directory)
     processor.tokenizer.padding_side = "left"
+    processor.patch_size = hf_model.config.vision_config.patch_size
+    processor.vision_feature_select_strategy = (
+        hf_model.config.vision_feature_select_strategy
+    )
 
     # llava text generation
     inputs = processor(
