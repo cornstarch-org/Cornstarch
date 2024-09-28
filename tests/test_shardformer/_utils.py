@@ -150,6 +150,34 @@ class PolicyTestBase(MultiProcessTestCase, ABC):
 
         return []
 
+    @staticmethod
+    def all_to_all_gloo(
+        output_tensor_list: list[torch.Tensor],
+        input_tensor_list: list[torch.Tensor],
+        group: Optional[dist.ProcessGroup] = None,
+        async_op: Optional[bool] = False,
+    ):
+        """Backend gloo doesn't support all_to_all, so we simulate it here."""
+        world_size = dist.get_world_size(group)
+        rank = dist.get_rank(group)
+
+        # Each rank gathers the "i-th" input from all ranks
+        for i in range(world_size):
+            chunk = input_tensor_list[i].to("cpu")  # Each rank's i-th input tensor
+            gathered_tensors = [
+                torch.empty_like(chunk) for _ in range(world_size)
+            ]  # Buffers for allgather
+
+            # Perform all_gather to collect the i-th tensor from all ranks
+            dist.all_gather(gathered_tensors, chunk, group)
+
+            if i == rank:
+                assert len(output_tensor_list) == len(gathered_tensors)
+                for output_tensor, gathered_tensor in zip(
+                    output_tensor_list, gathered_tensors
+                ):
+                    output_tensor.copy_(gathered_tensor)
+
 
 class ColossalaiHybridParallelBase(PolicyTestBase):
     def model_fn(self) -> PreTrainedModel:
@@ -176,7 +204,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             precision=precision,
         )
         if sp_mode is not None:
-            raise unittest.SkipTest("sp_mode is not supported yet")
             test_config.update(
                 {
                     "enable_sequence_parallelism": True,
@@ -206,6 +233,11 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
                 dist,
                 "batch_isend_irecv",
                 new=PolicyTestBase.batch_isend_irecv_gloo,
+            ),
+            patch.object(
+                dist,
+                "all_to_all",
+                new=PolicyTestBase.all_to_all_gloo,
             ),
             patch(
                 "colossalai.pipeline.p2p._check_device",
