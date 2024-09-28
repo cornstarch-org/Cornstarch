@@ -178,6 +178,30 @@ class PolicyTestBase(MultiProcessTestCase, ABC):
                 ):
                     output_tensor.copy_(gathered_tensor)
 
+    @staticmethod
+    def all_to_all_single_gloo(
+        output: torch.Tensor,
+        input: torch.Tensor,
+        group: Optional[dist.ProcessGroup] = None,
+        async_op: Optional[bool] = False,
+    ):
+        world_size = dist.get_world_size(group)
+        rank = dist.get_rank(group)
+
+        chunk_size = input.size(0) // world_size
+        gathered_tensors = [torch.empty_like(input) for _ in range(world_size)]
+
+        dist.all_gather(gathered_tensors, input, group)
+
+        output_tensor = torch.cat(
+            [
+                gathered_tensors[i][rank * chunk_size : (rank + 1) * chunk_size]
+                for i in range(world_size)
+            ],
+            dim=0,
+        )
+        output.copy_(output_tensor)
+
 
 class ColossalaiHybridParallelBase(PolicyTestBase):
     def model_fn(self) -> PreTrainedModel:
@@ -238,6 +262,11 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
                 dist,
                 "all_to_all",
                 new=PolicyTestBase.all_to_all_gloo,
+            ),
+            patch.object(
+                dist,
+                "all_to_all_single",
+                new=PolicyTestBase.all_to_all_single_gloo,
             ),
             patch(
                 "colossalai.pipeline.p2p._check_device",
