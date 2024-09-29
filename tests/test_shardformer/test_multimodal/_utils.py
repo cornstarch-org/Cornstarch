@@ -208,10 +208,8 @@ def build_model_from_muiltimodal_plugin(
     org_model = model_fn()
     sharded_model = copy.deepcopy(org_model)
 
-    org_model = org_model.to(device=torch.device("cuda"))
     org_optimizer = Adam(org_model.parameters(), lr=1e-3)
     sharded_optimizer = Adam(sharded_model.parameters(), lr=1e-3)
-    criterion = loss_fn
 
     vision_pp_size = test_config.pop("vision_pp_size")
     language_pp_size = test_config.pop("language_pp_size")
@@ -235,7 +233,7 @@ def build_model_from_muiltimodal_plugin(
     booster = Booster(plugin=plugin)
 
     sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
-        sharded_model, sharded_optimizer, criterion
+        sharded_model, sharded_optimizer, loss_fn
     )
 
     return (

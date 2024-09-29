@@ -217,6 +217,9 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         fa: bool,
         precision: str,
     ):
+        if fa and precision == "fp32":
+            raise unittest.SkipTest("Flash Attention does not support fp32")
+
         test_config = dict(
             tp_size=tp_size,
             pp_size=pp_size,
