@@ -246,11 +246,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             sharded_optimizer,
             criterion,
             booster,
-        ) = self.build_model_from_hybrid_plugin(
-            model_fn=self.model_fn,
-            loss_fn=self.loss_fn,
-            test_config=test_config,
-        )
+        ) = self.build_model_from_hybrid_plugin(test_config=test_config)
 
         org_model.gradient_checkpointing_enable()
         sharded_model.unwrap().gradient_checkpointing_enable()
@@ -300,9 +296,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             sharded_loss=sharded_loss,
         )
 
-    def build_model_from_hybrid_plugin(
-        self, model_fn: Callable, loss_fn: Callable, test_config: dict[str, Any]
-    ) -> tuple[
+    def build_model_from_hybrid_plugin(self, test_config: dict[str, Any]) -> tuple[
         PreTrainedModel,
         Optimizer,
         HybridParallelModule,
@@ -311,10 +305,12 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         Booster,
     ]:
         use_lazy_init = test_config.pop("use_lazy_init", False)
+        precision = test_config.pop("precision")
+        precision = torch.bfloat16 if precision == "bf16" else torch.float32
 
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
-            org_model = model_fn()
+            org_model = self.model_fn().to(dtype=precision, device="cuda")
             sharded_model = copy.deepcopy(org_model)
         if use_lazy_init:
             ctx.materialize(org_model)
@@ -327,10 +323,11 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             return_value=get_autopolicy(_fullname(org_model)),
         ):
             plugin = HybridParallelPlugin(**test_config)
+            plugin.precision = None
             booster = Booster(plugin=plugin)
 
             sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
-                sharded_model, sharded_optimizer, loss_fn
+                sharded_model, sharded_optimizer, self.loss_fn
             )
 
         return (
@@ -352,9 +349,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         output_transform_fn: Callable,
         booster: Booster,
     ):
-        org_model.cuda()
-        sharded_model.cuda()
-
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
             loss = criterion(outputs)
