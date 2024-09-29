@@ -1,8 +1,6 @@
 import torch
-import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.interface import ModelWrapper, OptimizerWrapper
-from colossalai.pipeline.stage_manager import PipelineStageManager
 from torch.optim import Optimizer
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -66,8 +64,8 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         org_loss: torch.Tensor,
         sharded_loss: torch.Tensor,
     ):
-        stage_manager: PipelineStageManager = booster.plugin.stage_manager
-        tp_group: dist.ProcessGroup = booster.plugin.tp_group
+        stage_manager = booster.plugin.stage_manager
+        tp_group = booster.plugin.tp_group
         precision = booster.plugin.precision
 
         # unwrap model

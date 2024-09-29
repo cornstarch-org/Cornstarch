@@ -1,7 +1,9 @@
-from abc import ABC, abstractmethod
 from unittest.mock import patch
 
 import torch
+from colossalai.booster import Booster
+from colossalai.interface import ModelWrapper, OptimizerWrapper
+from torch.optim import Optimizer
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -27,29 +29,17 @@ from cornstarch.shardformer.policies.dinov2 import (
 )
 
 from ._utils import (
-    PolicyTestBase,
-    build_model_from_hybrid_plugin,
+    ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
     check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
-    run_forward_backward_with_hybrid_plugin,
     unwrap_model,
 )
 
 
-class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
-    # Implementation for data_gen_fn and loss_fn
-    # Copied from colossalai/tests/kit/model_zoo/transformers/vit.py
-    @staticmethod
-    @abstractmethod
-    def data_gen_fn() -> dict: ...
-
-    @staticmethod
-    @abstractmethod
-    def loss_fn(x: ModelOutput) -> torch.Tensor: ...
-
+class Dinov2PolicyTestClassBase(ColossalaiHybridParallelBase):
     model_class: Dinov2PreTrainedModel
     config = Dinov2Config(
         num_hidden_layers=4,
@@ -57,59 +47,33 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
         num_attention_heads=4,
     )
 
-    def model_fn(self) -> Dinov2PreTrainedModel:
-        return self.model_class(self.config)
+    def data_gen_fn(self) -> dict:
+        image_size = self.config.image_size
+        num_channels = self.config.num_channels
+        num_batch = self.num_microbatches * self.microbatch_size
+        return {
+            "pixel_values": torch.randn(num_batch, num_channels, image_size, image_size)
+        }
 
-    def run_hybrid_parallel(
+    def check_fn(
         self,
-        tp_size: int,
-        pp_size: int,
-        base_model_class_name: str,
-        fa: bool,
-        precision: str,
+        booster: Booster,
+        org_model: Dinov2Model,
+        sharded_model: ModelWrapper,
+        org_optim: Optimizer,
+        sharded_optim: OptimizerWrapper,
+        org_output: ModelOutput,
+        sharded_output: dict,
+        org_loss: torch.Tensor,
+        sharded_loss: torch.Tensor,
     ):
-        (
-            org_model,
-            org_optimizer,
-            sharded_model,
-            sharded_optimizer,
-            criterion,
-            booster,
-        ) = build_model_from_hybrid_plugin(
-            model_fn=self.model_fn,
-            loss_fn=self.loss_fn,
-            test_config={
-                "tp_size": tp_size,
-                "pp_size": pp_size,
-                "precision": precision,
-                "zero_stage": 0,
-                "num_microbatches": 4,
-                "initial_scale": 1,
-                "enable_flash_attention": fa,
-            },
-        )
-
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
-
-        org_loss, org_output, sharded_loss, sharded_output = (
-            run_forward_backward_with_hybrid_plugin(
-                org_model,
-                sharded_model,
-                sharded_optimizer,
-                self.data_gen_fn,
-                lambda x: x,  # output_transform_fn,
-                criterion,
-                booster,
-            )
-        )
-
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
+        precision = booster.plugin.precision
 
         # unwrap model
-        dino_model = unwrap_model(org_model, base_model_class_name, "dinov2")
-        shard_dino_model = unwrap_model(sharded_model, base_model_class_name, "dinov2")
+        dino_model = unwrap_model(org_model, "Dinov2Model", "dinov2")
+        shard_dino_model = unwrap_model(sharded_model, "Dinov2Model", "dinov2")
 
         row_layer_for_check = ["encoder.layer[0].attention.attention.query"]
         col_layer_for_check = ["encoder.layer[0].attention.output.dense"]
@@ -145,8 +109,8 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
             grads_to_check.update(col_layer_grads)
 
         # optimizer executes step
-        org_optimizer.step()
-        sharded_optimizer.step()
+        org_optim.step()
+        sharded_optim.step()
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
@@ -185,8 +149,7 @@ class Dinov2PolicyTestClassBase(PolicyTestBase, ABC):
 
 @instantiate_parametrized_tests
 class TestDinov2ModelPolicy(Dinov2PolicyTestClassBase):
-    @staticmethod
-    def data_gen_fn() -> dict:
+    def data_gen_fn(self) -> dict:
         pixel_values = torch.randn(1, 3, 224, 224)
         return dict(pixel_values=pixel_values)
 
@@ -206,13 +169,12 @@ class TestDinov2ModelPolicy(Dinov2PolicyTestClassBase):
             "colossalai.shardformer.shard.sharder.get_autopolicy",
             return_value=Dinov2ModelPolicy(),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Model", fa, precision)
+            self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
 
 
 @instantiate_parametrized_tests
 class TestDinov2ForImageClassificationPolicy(Dinov2PolicyTestClassBase):
-    @staticmethod
-    def data_gen_fn() -> dict:
+    def data_gen_fn(self) -> dict:
         data = TestDinov2ModelPolicy.data_gen_fn()
         data["labels"] = torch.tensor([0])
         return data
@@ -233,13 +195,12 @@ class TestDinov2ForImageClassificationPolicy(Dinov2PolicyTestClassBase):
             "colossalai.shardformer.shard.sharder.get_autopolicy",
             return_value=Dinov2ForImageClassificationPolicy(),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Model", fa, precision)
+            self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
 
 
 @instantiate_parametrized_tests
 class TestDinov2BackbonePolicy(Dinov2PolicyTestClassBase):
-    @staticmethod
-    def data_gen_fn() -> dict:
+    def data_gen_fn(self) -> dict:
         return TestDinov2ModelPolicy.data_gen_fn()
 
     @staticmethod
@@ -258,4 +219,4 @@ class TestDinov2BackbonePolicy(Dinov2PolicyTestClassBase):
             "colossalai.shardformer.shard.sharder.get_autopolicy",
             return_value=Dinov2BackbonePolicy(),
         ):
-            self.run_hybrid_parallel(tp_size, pp_size, "Dinov2Backbone", fa, precision)
+            self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)

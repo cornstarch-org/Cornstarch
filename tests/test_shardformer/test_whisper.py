@@ -1,88 +1,56 @@
-from unittest.mock import patch
-
 import torch
+from colossalai.booster import Booster
+from colossalai.interface import ModelWrapper, OptimizerWrapper
+from torch.optim import Optimizer
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
+from transformers.modeling_outputs import ModelOutput
+from transformers.modeling_utils import PreTrainedModel
 from transformers.models.whisper.modeling_whisper import (
     WhisperConfig,
     WhisperEncoder,
 )
 
-from cornstarch.shardformer.policies.whisper import WhisperEncoderPolicy
-
 from ._utils import (
-    PolicyTestBase,
-    build_model_from_hybrid_plugin,
+    ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
     check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
-    run_forward_backward_with_hybrid_plugin,
 )
 
 
 @instantiate_parametrized_tests
-class TestWhisperEncoderPolicy(PolicyTestBase):
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
-    @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp32", "fp16"])
-    def test_hybrid_parallel(
-        self, tp_size: int, pp_size: int, fa: bool, precision: str
+class TestWhisperEncoderPolicy(ColossalaiHybridParallelBase):
+    model_class = WhisperEncoder
+    config = WhisperConfig(
+        encoder_attention_heads=4,
+        encoder_layers=4,
+        is_encoder_decoder=False,
+        _attn_implementation="eager",
+    )
+
+    def data_gen_fn(self) -> dict:
+        return {"input_features": torch.rand(1, self.config.num_mel_bins, 3000)}
+
+    def check_fn(
+        self,
+        booster: Booster,
+        org_model: PreTrainedModel,
+        sharded_model: ModelWrapper,
+        org_optim: Optimizer,
+        sharded_optim: OptimizerWrapper,
+        org_output: ModelOutput,
+        sharded_output: dict,
+        org_loss: torch.Tensor,
+        sharded_loss: torch.Tensor,
     ):
-        with patch(
-            "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=WhisperEncoderPolicy(),
-        ):
-            config = WhisperConfig(
-                encoder_attention_heads=4,
-                encoder_layers=4,
-                is_encoder_decoder=False,
-                _attn_implementation="eager",
-            )
-            (
-                org_model,
-                org_optimizer,
-                sharded_model,
-                sharded_optimizer,
-                criterion,
-                booster,
-            ) = build_model_from_hybrid_plugin(
-                model_fn=lambda: WhisperEncoder(config),
-                loss_fn=lambda x: x["last_hidden_state"].mean(),
-                test_config={
-                    "tp_size": tp_size,
-                    "pp_size": pp_size,
-                    "precision": precision,
-                    "zero_stage": 0,
-                    "num_microbatches": 4,
-                    "initial_scale": 1,
-                    "enable_flash_attention": fa,
-                    "enable_metadata_cache": False,
-                },
-            )
-
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
-
-        org_loss, org_output, sharded_loss, sharded_output = (
-            run_forward_backward_with_hybrid_plugin(
-                org_model,
-                sharded_model,
-                sharded_optimizer,
-                lambda: dict(
-                    input_features=torch.rand(1, config.num_mel_bins, 3000)
-                ),  # data_gen_fn
-                lambda x: x,  # output_transform_fn
-                criterion,
-                booster,
-            )
-        )
-
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
+        precision = booster.plugin.precision
 
         # unwrap model
         whisper_model: WhisperEncoder = org_model
@@ -120,8 +88,8 @@ class TestWhisperEncoderPolicy(PolicyTestBase):
             grads_to_check.update(row_layer_grads)
 
         # optimizer executes step
-        org_optimizer.step()
-        sharded_optimizer.step()
+        org_optim.step()
+        sharded_optim.step()
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
@@ -153,3 +121,11 @@ class TestWhisperEncoderPolicy(PolicyTestBase):
             )
 
         check_all_grad_tensors(grads_to_check)
+
+    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("fa", [True, False])
+    @parametrize("precision", ["fp32", "fp16"])
+    def test_hybrid_parallel(
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
+    ):
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)

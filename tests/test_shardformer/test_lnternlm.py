@@ -1,8 +1,7 @@
-import copy
-from abc import ABC, abstractmethod
-from unittest.mock import patch
-
 import torch
+from colossalai.booster import Booster
+from colossalai.interface import ModelWrapper, OptimizerWrapper
+from torch.optim import Optimizer
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -19,35 +18,19 @@ from cornstarch.models.internlm.modeling_internlm2 import (
     InternLM2Model,
     InternLM2PreTrainedModel,
 )
-from cornstarch.shardformer.policies.internlm2 import (
-    InternLM2ForCausalLMPolicy,
-    InternLM2ModelPolicy,
-)
 
 from ._utils import (
-    PolicyTestBase,
-    build_model_from_hybrid_plugin,
+    ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
     check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
-    run_forward_backward_with_hybrid_plugin,
     unwrap_model,
 )
 
 
-class InternLM2PolicyTestClassBase(PolicyTestBase, ABC):
-    # Implementation for data_gen_fn and loss_fn
-    # Copied from colossalai/tests/kit/model_zoo/transformers/InternLM2.py
-    @staticmethod
-    @abstractmethod
-    def data_gen_fn() -> dict: ...
-
-    @staticmethod
-    @abstractmethod
-    def loss_fn(x: ModelOutput) -> torch.Tensor: ...
-
+class InternLM2PolicyTestClassBase(ColossalaiHybridParallelBase):
     model_class: InternLM2PreTrainedModel
     config = InternLM2Config(
         hidden_size=256,
@@ -58,53 +41,31 @@ class InternLM2PolicyTestClassBase(PolicyTestBase, ABC):
         _attn_implementation="eager",
     )
 
-    def model_fn(self) -> InternLM2PreTrainedModel:
-        config = copy.deepcopy(self.config)
-        config.pad_token_id = config.eos_token_id
-        return self.model_class(config)
-
-    def run_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool, precision: str):
-        # Implementation copied from
-        # https://github.com/hpcaitech/ColossalAI/blob/8020f4263095373e4c7ad1b15e54b966a8ccb683/tests/test_shardformer/test_model/test_shard_gemma.py#L26
-        test_config = {
-            "tp_size": tp_size,
-            "pp_size": pp_size,
-            "precision": precision,
-            "zero_stage": 0,
-            "num_microbatches": 4,
-            "initial_scale": 1,
-            "enable_flash_attention": fa,
+    def data_gen_fn(self) -> dict:
+        num_batch = self.num_microbatches * self.microbatch_size
+        input = {
+            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
+            "attention_mask": torch.ones(num_batch, 64),
         }
-        (
-            org_model,
-            org_optimizer,
-            sharded_model,
-            sharded_optimizer,
-            criterion,
-            booster,
-        ) = build_model_from_hybrid_plugin(
-            model_fn=self.model_fn,
-            loss_fn=self.loss_fn,
-            test_config=test_config,
-        )
+        input["labels"] = input["input_ids"]
 
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
+        return input
 
-        org_loss, org_output, sharded_loss, sharded_output = (
-            run_forward_backward_with_hybrid_plugin(
-                org_model,
-                sharded_model,
-                sharded_optimizer,
-                self.data_gen_fn,
-                lambda x: x,  # output_transform_fn,
-                criterion,
-                booster,
-            )
-        )
-
+    def check_fn(
+        self,
+        booster: Booster,
+        org_model: InternLM2Model,
+        sharded_model: ModelWrapper,
+        org_optim: Optimizer,
+        sharded_optim: OptimizerWrapper,
+        org_output: ModelOutput,
+        sharded_output: dict,
+        org_loss: torch.Tensor,
+        sharded_loss: torch.Tensor,
+    ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
+        precision = booster.plugin.precision
 
         # unwrap model
         model = unwrap_model(org_model, "InternLM2Model", "model")
@@ -143,8 +104,8 @@ class InternLM2PolicyTestClassBase(PolicyTestBase, ABC):
             grads_to_check.update(row_layer_grads)
 
         # optimizer executes step
-        org_optimizer.step()
-        sharded_optimizer.step()
+        org_optim.step()
+        sharded_optim.step()
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
@@ -178,34 +139,6 @@ class InternLM2PolicyTestClassBase(PolicyTestBase, ABC):
 @instantiate_parametrized_tests
 class TestInternLM2ModelPolicy(InternLM2PolicyTestClassBase):
     @staticmethod
-    def data_gen_fn() -> dict:
-        # the input ids are corresponding to the sentence
-        # 'Hello, my dog is cute'
-        #
-        # the code is give below:
-        # -----------------------------------
-        # from transformers import InternLM2TokenizerFast
-        # tokenizer = InternLM2TokenizerFast.from_pretrained("internlm/internlm2_5-1_8b")
-        # input = 'Hello, my dog is cute'
-        # tokenized_input = tokenizer(input, return_tensors='pt').to('cuda')
-        # -----------------------------------
-
-        input_ids = torch.Tensor(
-            [
-                [1, 9843, 328, 983, 5718, 505, 18993],
-                [1, 9843, 328, 983, 5718, 505, 18993],
-            ]
-        ).long()
-
-        attention_mask = torch.Tensor(
-            [
-                [1, 1, 1, 1, 1, 1, 1],
-                [1, 1, 1, 1, 1, 1, 1],
-            ]
-        ).long()
-        return dict(input_ids=input_ids, attention_mask=attention_mask)
-
-    @staticmethod
     def loss_fn(x: BaseModelOutputWithPast) -> torch.Tensor:
         return torch.nn.functional.mse_loss(
             x.last_hidden_state, torch.ones_like(x.last_hidden_state)
@@ -219,21 +152,11 @@ class TestInternLM2ModelPolicy(InternLM2PolicyTestClassBase):
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
-        with patch(
-            "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=InternLM2ModelPolicy(),
-        ):
-            self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
 
 
 @instantiate_parametrized_tests
 class TestInternLM2ForCausalLMPolicy(InternLM2PolicyTestClassBase):
-    @staticmethod
-    def data_gen_fn() -> dict:
-        data = TestInternLM2ModelPolicy.data_gen_fn()
-        data["labels"] = data["input_ids"].clone()
-        return data
-
     @staticmethod
     def loss_fn(x: CausalLMOutputWithPast) -> torch.Tensor:
         return x.loss
@@ -246,8 +169,4 @@ class TestInternLM2ForCausalLMPolicy(InternLM2PolicyTestClassBase):
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
-        with patch(
-            "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=InternLM2ForCausalLMPolicy(),
-        ):
-            self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)

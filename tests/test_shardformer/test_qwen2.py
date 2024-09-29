@@ -1,8 +1,7 @@
-import copy
-from abc import ABC, abstractmethod
-from unittest.mock import patch
-
 import torch
+from colossalai.booster import Booster
+from colossalai.interface import ModelWrapper, OptimizerWrapper
+from torch.optim import Optimizer
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -19,35 +18,18 @@ from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2PreTrainedModel,
 )
 
-from cornstarch.shardformer.policies.qwen2 import (
-    Qwen2ForCausalLMPolicy,
-    Qwen2ModelPolicy,
-)
-
 from ._utils import (
-    PolicyTestBase,
-    build_model_from_hybrid_plugin,
+    ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
     check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
-    run_forward_backward_with_hybrid_plugin,
     unwrap_model,
 )
 
 
-class Qwen2PolicyTestClassBase(PolicyTestBase, ABC):
-    # Implementation for data_gen_fn and loss_fn
-    # Copied from colossalai/tests/kit/model_zoo/transformers/qwen2.py
-    @staticmethod
-    @abstractmethod
-    def data_gen_fn() -> dict: ...
-
-    @staticmethod
-    @abstractmethod
-    def loss_fn(x: ModelOutput) -> torch.Tensor: ...
-
+class Qwen2PolicyTestClassBase(ColossalaiHybridParallelBase):
     model_class: Qwen2PreTrainedModel
     config = Qwen2Config(
         hidden_size=256,
@@ -57,53 +39,31 @@ class Qwen2PolicyTestClassBase(PolicyTestBase, ABC):
         _attn_implementation="eager",
     )
 
-    def model_fn(self) -> Qwen2PreTrainedModel:
-        config = copy.deepcopy(self.config)
-        config.pad_token_id = config.eos_token_id
-        return self.model_class(config)
-
-    def run_hybrid_parallel(self, tp_size: int, pp_size: int, fa: bool, precision: str):
-        # Implementation copied from
-        # https://github.com/hpcaitech/ColossalAI/blob/8020f4263095373e4c7ad1b15e54b966a8ccb683/tests/test_shardformer/test_model/test_shard_qwen2.py#L26
-        test_config = {
-            "tp_size": tp_size,
-            "pp_size": pp_size,
-            "precision": precision,
-            "zero_stage": 0,
-            "num_microbatches": 4,
-            "initial_scale": 1,
-            "enable_flash_attention": fa,
+    def data_gen_fn(self) -> dict:
+        num_batch = self.num_microbatches * self.microbatch_size
+        input = {
+            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
+            "attention_mask": torch.ones(num_batch, 64),
         }
-        (
-            org_model,
-            org_optimizer,
-            sharded_model,
-            sharded_optimizer,
-            criterion,
-            booster,
-        ) = build_model_from_hybrid_plugin(
-            model_fn=self.model_fn,
-            loss_fn=self.loss_fn,
-            test_config=test_config,
-        )
+        input["labels"] = input["input_ids"]
 
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
+        return input
 
-        org_loss, org_output, sharded_loss, sharded_output = (
-            run_forward_backward_with_hybrid_plugin(
-                org_model,
-                sharded_model,
-                sharded_optimizer,
-                self.data_gen_fn,
-                lambda x: x,  # output_transform_fn,
-                criterion,
-                booster,
-            )
-        )
-
+    def check_fn(
+        self,
+        booster: Booster,
+        org_model: Qwen2Model,
+        sharded_model: ModelWrapper,
+        org_optim: Optimizer,
+        sharded_optim: OptimizerWrapper,
+        org_output: ModelOutput,
+        sharded_output: dict,
+        org_loss: torch.Tensor,
+        sharded_loss: torch.Tensor,
+    ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
+        precision = booster.plugin.precision
 
         # unwrap model
         qwen2_model = unwrap_model(org_model, "Qwen2Model", "model")
@@ -142,8 +102,8 @@ class Qwen2PolicyTestClassBase(PolicyTestBase, ABC):
             grads_to_check.update(row_layer_grads)
 
         # optimizer executes step
-        org_optimizer.step()
-        sharded_optimizer.step()
+        org_optim.step()
+        sharded_optim.step()
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
@@ -177,22 +137,6 @@ class Qwen2PolicyTestClassBase(PolicyTestBase, ABC):
 @instantiate_parametrized_tests
 class TestQwen2ModelPolicy(Qwen2PolicyTestClassBase):
     @staticmethod
-    def data_gen_fn() -> dict:
-        # the input ids are corresponding to the sentence
-        # 'Hello, my dog is cute'
-        #
-        # the code is give below:
-        # -----------------------------------
-        # from transformers import Qwen2TokenizerFast
-        # tokenizer = Qwen2TokenizerFast.from_pretrained("Qwen/Qwen2-7B-Instruct")
-        # input = 'Hello, my dog is cute'
-        # tokenized_input = tokenizer(input, return_tensors='pt').to('cuda')
-        # -----------------------------------
-        input_ids = torch.tensor([[9707, 11, 847, 5562, 374, 18838]], dtype=torch.int64)
-        attention_mask = torch.tensor([[1, 1, 1, 1, 1, 1]], dtype=torch.int64)
-        return dict(input_ids=input_ids, attention_mask=attention_mask)
-
-    @staticmethod
     def loss_fn(x: BaseModelOutputWithPast) -> torch.Tensor:
         return torch.nn.functional.mse_loss(
             x.last_hidden_state, torch.ones_like(x.last_hidden_state)
@@ -206,21 +150,11 @@ class TestQwen2ModelPolicy(Qwen2PolicyTestClassBase):
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
-        with patch(
-            "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=Qwen2ModelPolicy(),
-        ):
-            self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
 
 
 @instantiate_parametrized_tests
 class TestQwen2ForCausalLMPolicy(Qwen2PolicyTestClassBase):
-    @staticmethod
-    def data_gen_fn() -> dict:
-        data = TestQwen2ModelPolicy.data_gen_fn()
-        data["labels"] = data["input_ids"].clone()
-        return data
-
     @staticmethod
     def loss_fn(x: CausalLMOutputWithPast) -> torch.Tensor:
         return x.loss
@@ -233,8 +167,4 @@ class TestQwen2ForCausalLMPolicy(Qwen2PolicyTestClassBase):
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
-        with patch(
-            "colossalai.shardformer.shard.sharder.get_autopolicy",
-            return_value=Qwen2ForCausalLMPolicy(),
-        ):
-            self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
