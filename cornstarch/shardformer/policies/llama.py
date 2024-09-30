@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import functools
 import itertools
-import warnings
 from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
@@ -32,10 +31,14 @@ from colossalai.shardformer.policies.llama import (
 )
 from torch import nn
 from transformers import LlamaConfig, PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.llama.modeling_llama import LlamaModel
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.llama import LlamaForwards, LlamaPipelineForwards
+from cornstarch.shardformer.modeling.llama import (
+    LlamaAttentionForwards,
+    LlamaModelForwards,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -91,68 +94,120 @@ class LlamaPolicy(PipelineTemplatePolicyBase, ColossalLlamaPolicy):
             LlamaSdpaAttention,
         )
 
+        config: LlamaConfig = self.model.config
+        ATTN_IMPLEMENTATION = {
+            "eager": LlamaAttention,
+            "flash_attention_2": LlamaFlashAttention2,
+            "sdpa": LlamaSdpaAttention,
+        }
+        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
+
         policy = {}
 
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn("Cornstarch llama doesn't support sequence parallelism.")
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
+        sp_size = self.shard_config.sequence_parallel_size or None
+        if sp_mode == "ring_attn" and not self.is_causal:
+            raise ValueError(
+                "Ring attention is only meant for causal language modeling."
+            )
+
+        tp_size = self.shard_config.tensor_parallel_size
+        num_q_heads = config.num_attention_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", None)
+        hidden_size = config.hidden_size
+
+        if sp_mode == "all_to_all":
+            # Ulysses all-to-all context parallelism needs to partition number of heads
+
+            assert (
+                num_q_heads % sp_size == 0
+            ), "The number of attention heads must be divisible by the sequence parallel size."
+            num_q_heads //= sp_size
+
+            if num_kv_heads:
+                assert (
+                    num_kv_heads % sp_size == 0
+                ), "The number of key_value heads must be divisible by the sequence parallel size."
+                num_kv_heads //= sp_size
 
         if self.shard_config.enable_tensor_parallelism:
-            assert (
-                self.model.config.num_attention_heads
-                % self.shard_config.tensor_parallel_size
-                == 0
-            ), "The number of attention heads must be divisible by tensor parallel size."
-            if hasattr(self.model.config, "num_key_value_heads"):
-                assert (
-                    self.model.config.num_key_value_heads
-                    >= self.shard_config.tensor_parallel_size
-                    and self.model.config.num_key_value_heads
-                    % self.shard_config.tensor_parallel_size
-                    == 0
-                ), "The number of key_value heads must be divisible by, and must not be less than tensor parallel size."
-            decoder_attribute_replacement = {
-                "self_attn.hidden_size": self.model.config.hidden_size
-                // self.shard_config.tensor_parallel_size,
-                "self_attn.num_heads": self.model.config.num_attention_heads
-                // self.shard_config.tensor_parallel_size,
-            }
-            if getattr(self.model.config, "num_key_value_heads", False):
-                decoder_attribute_replacement["self_attn.num_key_value_heads"] = (
-                    self.model.config.num_key_value_heads
-                    // self.shard_config.tensor_parallel_size
-                )
+            hidden_size //= tp_size
 
+            assert (
+                num_q_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_q_heads //= tp_size
+
+            if num_kv_heads:
+                assert (
+                    num_kv_heads % tp_size == 0
+                ), "The number of key_value heads must be divisible by the tensor parallel size."
+                num_kv_heads //= tp_size
+
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["hidden_size"] = hidden_size
+        attention_attribute_replacement["num_heads"] = num_q_heads
+        if num_kv_heads:
+            attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
+
+        policy[attn_cls] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    LlamaAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
+        )
+
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
+            )
+
+            policy[LlamaModel] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2"
+                }
+            )
+
+        if self.shard_config.enable_tensor_parallelism:
             policy[LlamaDecoderLayer] = ModulePolicyDescription(
-                attribute_replacement=decoder_attribute_replacement,
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.k_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.v_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.o_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.gate_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.up_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.down_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                 ],
             )
@@ -202,31 +257,6 @@ class LlamaPolicy(PipelineTemplatePolicyBase, ColossalLlamaPolicy):
                 target_key=LlamaModel,
             )
 
-        if self.shard_config.enable_flash_attention:
-            ATTN_IMPLEMENTATION = {
-                "eager": LlamaAttention,
-                "flash_attention_2": LlamaFlashAttention2,
-                "sdpa": LlamaSdpaAttention,
-            }
-            attn_cls = ATTN_IMPLEMENTATION[self.model.config._attn_implementation]
-            self.append_or_create_method_replacement(
-                description={"forward": LlamaForwards.llama_flash_attention_forward},
-                policy=policy,
-                target_key=attn_cls,
-            )
-            if self.pipeline_stage_manager is None:
-                # replace llama model forward method
-                self.append_or_create_method_replacement(
-                    description={
-                        "forward": functools.partial(
-                            LlamaForwards.llama_model_forward_for_flash_attention,
-                            shard_config=self.shard_config,
-                        ),
-                    },
-                    policy=policy,
-                    target_key=LlamaModel,
-                )
-
         return policy
 
 
@@ -241,12 +271,16 @@ class LlamaModelPolicy(LlamaPolicy, ColossalLlamaModelPolicy):
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         policy = super().module_policy()
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=LlamaModel,
-                new_forward=LlamaPipelineForwards.llama_model_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    LlamaModelForwards.llama_model_forward,
+                    shard_config=self.shard_config,
+                ),
+            },
+            policy=policy,
+            target_key=LlamaModel,
+        )
 
         return policy
 
@@ -272,6 +306,7 @@ class LlamaForCausalLMPolicy(LlamaPolicy, ColossalLlamaForCausalLMPolicy):
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
+        self.is_causal = True
         policy = super().module_policy()
 
         if self.shard_config.enable_tensor_parallelism:
@@ -281,40 +316,32 @@ class LlamaForCausalLMPolicy(LlamaPolicy, ColossalLlamaForCausalLMPolicy):
                 "gather_output": not self.shard_config.parallel_output,
                 "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by,
             }
-            methods_replacement = {
-                "forward": functools.partial(
-                    LlamaForwards.llama_for_causal_lm_forward_with_dist_cross_entropy,
-                    shard_config=self.shard_config,
-                )
-            }
         else:
             target_module = PaddingLMHead
             kwargs = {
                 "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by
             }
-            methods_replacement = None
 
-        policy.update(
-            {
-                LlamaForCausalLM: ModulePolicyDescription(
-                    sub_module_replacement=[
-                        SubModuleReplacementDescription(
-                            suffix="lm_head",
-                            target_module=target_module,
-                            kwargs=kwargs,
-                        )
-                    ],
-                    method_replacement=methods_replacement,
-                )
-            }
+        self.append_or_create_submodule_replacement(
+            description=SubModuleReplacementDescription(
+                suffix="lm_head",
+                target_module=target_module,
+                kwargs=kwargs,
+            ),
+            policy=policy,
+            target_key=LlamaForCausalLM,
         )
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=LlamaForCausalLM,
-                new_forward=LlamaPipelineForwards.llama_for_causal_lm_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    LlamaModelForwards.llama_for_causal_lm_forward,
+                    shard_config=self.shard_config,
+                ),
+            },
+            policy=policy,
+            target_key=LlamaForCausalLM,
+        )
 
         return policy
 
@@ -347,26 +374,26 @@ class LlamaForSequenceClassificationPolicy(
         policy = super().module_policy()
 
         if self.shard_config.enable_tensor_parallelism:
-            policy.update(
-                {
-                    LlamaForSequenceClassification: ModulePolicyDescription(
-                        sub_module_replacement=[
-                            SubModuleReplacementDescription(
-                                suffix="score",
-                                target_module=Linear1D_Col,
-                                kwargs=dict(gather_output=True),
-                            )
-                        ],
-                    )
-                }
+            self.append_or_create_submodule_replacement(
+                description=SubModuleReplacementDescription(
+                    suffix="score",
+                    target_module=Linear1D_Col,
+                    kwargs=dict(gather_output=True),
+                ),
+                policy=policy,
+                target_key=LlamaForSequenceClassification,
             )
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=LlamaForSequenceClassification,
-                new_forward=LlamaPipelineForwards.llama_for_sequence_classification_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    LlamaModelForwards.llama_for_sequence_classification_forward,
+                    shard_config=self.shard_config,
+                ),
+            },
+            policy=policy,
+            target_key=LlamaForSequenceClassification,
+        )
 
         return policy
 

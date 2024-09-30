@@ -188,7 +188,7 @@ class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("sp_mode", ["all_to_all", "ring_attn"])
+    @parametrize("sp_mode", ["all_to_all", "ring_attn"], name_fn=lambda x: x)
     def test_context_parallel(self, tp_size: int, pp_size: int, sp_mode: str):
         self.run_hybrid_parallel(tp_size, pp_size, sp_mode, True, "bf16")
 
