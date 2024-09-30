@@ -48,7 +48,6 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
             "input_ids": torch.randint(0, 2048, (num_batch, 64)),
             "attention_mask": torch.ones(num_batch, 64),
         }
-        input["labels"] = input["input_ids"]
 
         return input
 
@@ -170,6 +169,11 @@ class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
         return x.loss
 
     model_class = LlamaForCausalLM
+
+    def data_gen_fn(self) -> dict:
+        input = super().data_gen_fn()
+        input["labels"] = input["input_ids"]
+        return input
 
     @parametrize(
         "tp_size, pp_size",

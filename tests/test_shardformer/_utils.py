@@ -280,7 +280,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
                     org_model=org_model,
                     sharded_model=sharded_model,
                     sharded_optimizer=sharded_optimizer,
-                    data_gen_fn=self.data_gen_fn,
                     criterion=criterion,
                     output_transform_fn=lambda x: x,
                     booster=booster,
@@ -347,7 +346,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         org_model: nn.Module,
         sharded_model: nn.Module,
         sharded_optimizer: Optimizer,
-        data_gen_fn: Callable[[], dict[str, torch.Tensor]],
         criterion: Callable[[torch.Tensor], torch.Tensor],
         output_transform_fn: Callable,
         booster: Booster,
@@ -357,7 +355,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             loss = criterion(outputs)
             return loss
 
-        data = data_gen_fn()
+        data = self.data_gen_fn()
 
         shard_test_data = {}
         for k, v in data.items():

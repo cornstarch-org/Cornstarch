@@ -451,7 +451,7 @@ class LlamaModelForwards:
             shard_config=shard_config,
         )
 
-        if stage_manager is not None and stage_manager.is_last_stage():
+        if stage_manager is None or stage_manager.is_last_stage():
             hidden_states = outputs[0]
             logits = self.score(hidden_states)
 
