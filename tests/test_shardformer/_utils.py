@@ -139,16 +139,19 @@ class PolicyTestBase(MultiProcessTestCase, ABC):
 
             reqs.append((work, tensor))
 
+        send_reqs = []
         with torch.no_grad():
             for (req, tensor), p2p_op in zip(reqs, p2p_op_list):
                 if req is None:
                     continue
 
-                req.wait()
                 if p2p_op.op == dist.irecv:
+                    req.wait()
                     p2p_op.tensor.copy_(tensor)
+                else:
+                    send_reqs.append(req)
 
-        return []
+        return send_reqs
 
     @staticmethod
     def all_to_all_gloo(
@@ -363,6 +366,11 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         for k, v in data.items():
             unshard_test_data[k] = v.clone().to("cuda")
 
+        org_model.train()
+        org_output = org_model(**unshard_test_data)
+        org_loss = criterion(org_output)
+        org_loss.backward()
+
         sharded_model.train()
         if booster.plugin.stage_manager is not None:
             data_iter = iter([shard_test_data])
@@ -379,11 +387,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             sharded_output = sharded_model(**shard_test_data)
             sharded_loss = criterion(sharded_output)
             sharded_optimizer.backward(sharded_loss)
-
-        org_model.train()
-        org_output = org_model(**unshard_test_data)
-        org_loss = criterion(org_output)
-        org_loss.backward()
 
         return org_loss, org_output, sharded_loss, sharded_output
 
