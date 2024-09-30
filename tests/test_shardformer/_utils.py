@@ -396,12 +396,11 @@ def check_output_hidden_state(
     atol: float = 1e-5,
     rtol: float = 1e-3,
 ):
+    assert (
+        stage_manager is None or stage_manager.is_last_stage()
+    ), "check_output_hidden_state only supports last stage"
     org_hidden_state = org_output.last_hidden_state
-
-    if stage_manager and stage_manager.is_last_stage(ignore_chunk=True):
-        sharded_hidden_state = sharded_output["outputs"]["last_hidden_state"]
-    else:
-        sharded_hidden_state = sharded_output.last_hidden_state
+    sharded_hidden_state = sharded_output.last_hidden_state
 
     assert_close(
         org_hidden_state.float(), sharded_hidden_state.float(), atol=atol, rtol=rtol

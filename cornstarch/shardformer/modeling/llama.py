@@ -237,7 +237,9 @@ class LlamaModelForwards:
 
         if stage_manager is None or stage_manager.is_last_stage():
             hidden_states = self.norm(hidden_states)
-            if (not shard_config.parallel_output) or force_sp_gather:
+            if shard_config.enable_sequence_parallelism and (
+                (not shard_config.parallel_output) or force_sp_gather
+            ):
                 hidden_states = gather_sp_output(hidden_states, shard_config)
 
             # add hidden states from the last decoder layer

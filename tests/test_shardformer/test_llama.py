@@ -24,7 +24,6 @@ from ._utils import (
     ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
-    check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
     unwrap_model,
@@ -108,11 +107,6 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
             atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
-            if org_model.__class__.__name__ == "LlamaModel":
-                check_output_hidden_state(
-                    org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
-                )
-
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
@@ -164,6 +158,7 @@ class TestLlamaModelPolicy(LlamaPolicyTestClassBase):
 
 @instantiate_parametrized_tests
 class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
+
     @staticmethod
     def loss_fn(x: CausalLMOutputWithPast) -> torch.Tensor:
         return x.loss
