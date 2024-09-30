@@ -146,16 +146,21 @@ class TestLlamaModelPolicy(LlamaPolicyTestClassBase):
     model_class = LlamaModel
 
     @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
-    @parametrize(
-        "sp_mode",
-        [None, "all_to_all", "ring_attn"],
-    )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
-        self, tp_size: int, pp_size: int, sp_mode: str | None, fa: bool, precision: str
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
-        self.run_hybrid_parallel(tp_size, pp_size, sp_mode, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
+    def test_context_parallel(self, tp_size: int, pp_size: int):
+        # ring_attn is for causal lm only
+        self.run_hybrid_parallel(tp_size, pp_size, "all_to_all", True, "bf16")
 
 
 @instantiate_parametrized_tests
@@ -166,17 +171,26 @@ class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
 
     model_class = LlamaForCausalLM
 
-    @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize(
-        "sp_mode",
-        [None, "all_to_all", "ring_attn"],
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
-        self, tp_size: int, pp_size: int, sp_mode: str | None, fa: bool, precision: str
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
-        self.run_hybrid_parallel(tp_size, pp_size, sp_mode, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
+    @parametrize("sp_mode", ["all_to_all", "ring_attn"])
+    def test_context_parallel(self, tp_size: int, pp_size: int, sp_mode: str):
+        self.run_hybrid_parallel(tp_size, pp_size, sp_mode, True, "bf16")
 
 
 @instantiate_parametrized_tests
@@ -187,14 +201,23 @@ class TestLlamaForSequenceClassificationPolicy(LlamaPolicyTestClassBase):
 
     model_class = LlamaForSequenceClassification
 
-    @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize(
-        "sp_mode",
-        [None, "all_to_all", "ring_attn"],
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
-        self, tp_size: int, pp_size: int, fa: bool, sp_mode: str | None, precision: str
+        self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
-        self.run_hybrid_parallel(tp_size, pp_size, sp_mode, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
+    def test_context_parallel(self, tp_size: int, pp_size: int):
+        # ring_attn is for causal lm only
+        self.run_hybrid_parallel(tp_size, pp_size, "all_to_all", True, "bf16")
