@@ -148,7 +148,11 @@ class LlamaModelForwards:
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
 
-        if sp_mode is None or sp_mode == "all_to_all":
+        if sp_mode == "ring_attn":
+            _, causal_mask, _ = RingAttention.prepare_varlen_batch(
+                attention_mask, sp_group
+            )
+        else:
             causal_mask = self._update_causal_mask(
                 attention_mask,
                 hidden_states,
@@ -157,37 +161,32 @@ class LlamaModelForwards:
                 output_attentions,
             )
 
-            if (
-                stage_manager is None or stage_manager.is_first_stage()
-            ) and sp_mode == "all_to_all":
-                hidden_states = split_forward_gather_backward(
-                    hidden_states, dim=1, process_group=sp_group, grad_scale=1 / sp_size
-                )
-        else:
-            assert sp_mode == "ring_attn"
-            assert (
-                self.config._attn_implementation == "flash_attention_2"
-            ), "RingAttention inherently requires Flash Attention"
-
-            if stage_manager is None or not stage_manager.is_first_stage():
-                _, causal_mask, _ = RingAttention.prepare_varlen_batch(
-                    attention_mask, sp_group
-                )
-
-            if stage_manager is None or stage_manager.is_first_stage():
-                if attention_mask.bool().all():
-                    hidden_states, position_ids = split_batch_zigzag(
-                        [hidden_states, position_ids], sp_group
-                    )
-                else:
+        # Support SP + PP. Later stages have already received the split input.
+        split_input = stage_manager is None or stage_manager.is_first_stage()
+        if split_input:
+            # Ring Attention zigzag batch processing
+            if sp_mode == "ring_attn":
+                assert (
+                    self.config._attn_implementation == "flash_attention_2"
+                ), "Ring Attention inherently requires Flash Attention."
+                if not attention_mask.bool().all():
                     hidden_states, causal_mask, position_ids = (
                         RingAttention.prepare_varlen_batch(
                             attention_mask, sp_group, hidden_states, position_ids
                         )
                     )
+                else:
+                    hidden_states, position_ids = split_batch_zigzag(
+                        [hidden_states, position_ids], sp_group
+                    )
 
-                # Recompute position embeddings
-                position_embeddings = self.rotary_emb(hidden_states, position_ids)
+            elif sp_mode == "all_to_all":
+                hidden_states = split_forward_gather_backward(
+                    hidden_states, 1, sp_group, 1 / sp_size
+                )
+
+            # Recompute position embeddings
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -793,6 +792,8 @@ class LlamaAttentionForwards:
                     **kwargs,
                 )
             )
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
         else:
             attn_output, attn_weights = (
                 LlamaAttentionForwards.llama_attention_forward_after_qkv(
@@ -807,6 +808,8 @@ class LlamaAttentionForwards:
                     **kwargs,
                 )
             )
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
 
         # sp: all-to-all communication when introducing ulysses context parallelism
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
