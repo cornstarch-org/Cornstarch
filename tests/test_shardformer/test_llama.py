@@ -34,7 +34,7 @@ from ._utils import (
 class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
     model_class: LlamaPreTrainedModel
     config = LlamaConfig(
-        hidden_size=64,
+        hidden_size=128,
         intermediate_size=64,
         num_attention_heads=16,
         num_hidden_layers=4,
