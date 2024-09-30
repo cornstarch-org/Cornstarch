@@ -402,6 +402,7 @@ class LlamaModelForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
@@ -446,6 +447,7 @@ class LlamaModelForwards:
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            cache_position=cache_position,
             position_embeddings=position_embeddings,
             hidden_states=hidden_states,
             shard_config=shard_config,
@@ -514,7 +516,11 @@ class LlamaModelForwards:
                 attentions=outputs.attentions,
             )
         else:
-            return outputs
+            return {
+                "hidden_states": outputs.get("hidden_states"),
+                "position_ids": outputs.get("position_ids"),
+                "cache_position": outputs.get("position_ids"),
+            }
 
 
 class LlamaAttentionForwards:
