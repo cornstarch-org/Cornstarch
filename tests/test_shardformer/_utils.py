@@ -104,6 +104,10 @@ class PolicyTestBase(MultiProcessTestCase, ABC):
 
             raise
 
+        if torch.cuda.is_available() and torch.cuda.device_count():
+            device_id = self.rank % torch.cuda.device_count()
+            torch.cuda.set_device(device_id)
+
         self.reset_seed()
 
         # Execute barrier prior to running test to ensure that every process
@@ -220,6 +224,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         fa: bool,
         precision: str,
     ):
+        assert precision in ["bf16", "fp32"]
         if fa and precision == "fp32":
             raise unittest.SkipTest("Flash Attention does not support fp32")
 
@@ -285,6 +290,14 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
                     booster=booster,
                 )
             )
+
+            org_loss = org_loss.to(
+                dtype=torch.bfloat16 if precision == "bf16" else torch.float32
+            )
+            if sharded_loss is not None:
+                sharded_loss = sharded_loss.to(
+                    dtype=torch.bfloat16 if precision == "bf16" else torch.float32
+                )
 
         self.check_fn(
             booster=booster,
