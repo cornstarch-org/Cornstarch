@@ -13,7 +13,7 @@ from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.utils import logging
 
 from cornstarch.models.intern_vit.configuration_intern_vit import InternVisionConfig
-from cornstarch.models.internlm.configuration_internlm2 import InternLM2Config
+from cornstarch.models.internlm2.configuration_internlm2 import InternLM2Config
 
 logger = logging.get_logger(__name__)
 

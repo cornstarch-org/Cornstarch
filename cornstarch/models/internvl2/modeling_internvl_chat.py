@@ -26,7 +26,7 @@ from cornstarch.models.intern_vit.modeling_intern_vit import (
     InternVisionModel,
     has_flash_attn,
 )
-from cornstarch.models.internlm.modeling_internlm2 import InternLM2ForCausalLM
+from cornstarch.models.internlm2.modeling_internlm2 import InternLM2ForCausalLM
 
 from .configuration_internvl_chat import InternVLChatConfig
 from .conversation import get_conv_template

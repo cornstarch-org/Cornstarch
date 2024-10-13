@@ -12,7 +12,7 @@ from transformers.modeling_outputs import (
     ModelOutput,
 )
 
-from cornstarch.models.internlm.modeling_internlm2 import (
+from cornstarch.models.internlm2.modeling_internlm2 import (
     InternLM2Config,
     InternLM2ForCausalLM,
     InternLM2Model,
@@ -47,7 +47,6 @@ class InternLM2PolicyTestClassBase(ColossalaiHybridParallelBase):
             "input_ids": torch.randint(0, 2048, (num_batch, 64)),
             "attention_mask": torch.ones(num_batch, 64),
         }
-        input["labels"] = input["input_ids"]
 
         return input
 
@@ -148,7 +147,7 @@ class TestInternLM2ModelPolicy(InternLM2PolicyTestClassBase):
 
     @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
@@ -157,6 +156,12 @@ class TestInternLM2ModelPolicy(InternLM2PolicyTestClassBase):
 
 @instantiate_parametrized_tests
 class TestInternLM2ForCausalLMPolicy(InternLM2PolicyTestClassBase):
+    def data_gen_fn(self) -> dict:
+        input = super().data_gen_fn()
+        input["labels"] = input["input_ids"]
+
+        return input
+
     @staticmethod
     def loss_fn(x: CausalLMOutputWithPast) -> torch.Tensor:
         return x.loss
@@ -165,7 +170,7 @@ class TestInternLM2ForCausalLMPolicy(InternLM2PolicyTestClassBase):
 
     @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):

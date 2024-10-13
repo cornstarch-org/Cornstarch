@@ -21,7 +21,7 @@ from colossalai.shardformer.policies.base_policy import (
 from torch import Tensor
 from transformers import PretrainedConfig
 
-from cornstarch.models.internlm import InternLM2Config, InternLM2Model
+from cornstarch.models.internlm2 import InternLM2Config, InternLM2Model
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.internlm2 import (
     InternLM2Forwards,
@@ -129,7 +129,7 @@ class InternLM2Policy(PipelineTemplatePolicyBase, Policy):
         return self.model
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
-        from cornstarch.models.internlm.modeling_internlm2 import (
+        from cornstarch.models.internlm2.modeling_internlm2 import (
             InternLM2Attention,
             InternLM2DecoderLayer,
             InternLM2FlashAttention2,
@@ -316,7 +316,7 @@ class InternLM2ForCausalLMPolicy(InternLM2Policy):
             raise ValueError("The lm_head layer must be in the last stage.")
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
-        from cornstarch.models.internlm.modeling_internlm2 import InternLM2ForCausalLM
+        from cornstarch.models.internlm2.modeling_internlm2 import InternLM2ForCausalLM
 
         policy = super().module_policy()
 

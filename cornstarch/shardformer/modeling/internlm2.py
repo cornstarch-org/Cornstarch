@@ -13,7 +13,7 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
 )
 
-from cornstarch.models.internlm.modeling_internlm2 import (
+from cornstarch.models.internlm2.modeling_internlm2 import (
     InternLM2Attention,
     InternLM2ForCausalLM,
     InternLM2Model,

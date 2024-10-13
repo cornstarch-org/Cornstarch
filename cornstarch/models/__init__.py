@@ -7,7 +7,7 @@ from cornstarch.models.evaclip import (
     EvaCLIPVisionModel,
 )
 from cornstarch.models.intern_vit import InternVisionConfig, InternVisionModel
-from cornstarch.models.internlm import (
+from cornstarch.models.internlm2 import (
     InternLM2Config,
     InternLM2ForCausalLM,
     InternLM2Model,
