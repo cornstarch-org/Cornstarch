@@ -1,7 +1,6 @@
 import functools
 import itertools
-import warnings
-from typing import Callable, Dict, List, cast
+from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedRMSNorm,
@@ -19,10 +18,14 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import Tensor, nn
 from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.gemma import GemmaConfig, GemmaForCausalLM, GemmaModel
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.gemma import GemmaForwards, GemmaPipelineForwards
+from cornstarch.shardformer.modeling.gemma import (
+    GemmaAttentionForwards,
+    GemmaModelForwards,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -75,36 +78,6 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
     def postprocess(self) -> nn.Module:
         return self.model
 
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, new_forward: Callable, policy: dict
-    ):
-        if self.pipeline_stage_manager is None:
-            return
-
-        stage_manager = self.pipeline_stage_manager
-        if self.model.__class__.__name__ == "GemmaModel":
-            module = self.model
-        else:
-            module = self.model.model
-
-        layers_per_stage = stage_manager.distribute_layers(
-            len(module.layers), stage_manager.num_stages
-        )
-        stage_index = stage_manager.get_stage_index(
-            layers_per_stage, stage_manager.stage
-        )
-        method_replacement = {
-            "forward": functools.partial(
-                new_forward,
-                stage_manager=stage_manager,
-                stage_index=stage_index,
-                shard_config=self.shard_config,
-            )
-        }
-        self.append_or_create_method_replacement(
-            description=method_replacement, policy=policy, target_key=model_cls
-        )
-
     def get_held_layers(self) -> List[nn.Module]:
         assert self.pipeline_stage_manager is not None
 
@@ -145,37 +118,85 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
             GemmaSdpaAttention,
         )
 
+        config: GemmaConfig = self.model.config
+        ATTN_IMPLEMENTATION = {
+            "eager": GemmaAttention,
+            "spda": GemmaSdpaAttention,
+            "flash_attention_2": GemmaFlashAttention2,
+        }
+        attn_cls = ATTN_IMPLEMENTATION[self.model.config._attn_implementation]
+
         policy = {}
 
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "Gemma doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
+        sp_size = self.shard_config.sequence_parallel_size or None
+        if sp_mode == "ring_attn" and not self.is_causal:
+            raise ValueError(
+                "Ring attention is only meant for causal language modeling."
+            )
+
+        tp_size = self.shard_config.tensor_parallel_size
+        num_q_heads = config.num_attention_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", None)
+        hidden_size = config.hidden_size
+
+        if sp_mode == "all_to_all":
+            # Ulysses all-to-all context parallelism needs to partition number of heads
+
+            assert (
+                num_q_heads % sp_size == 0
+            ), "The number of attention heads must be divisible by the sequence parallel size."
+            num_q_heads //= sp_size
+
+            if num_kv_heads:
+                assert (
+                    num_kv_heads % sp_size == 0
+                ), "The number of key_value heads must be divisible by the sequence parallel size."
+                num_kv_heads //= sp_size
+
+        if self.shard_config.enable_tensor_parallelism:
+            hidden_size //= tp_size
+
+            assert (
+                num_q_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_q_heads //= tp_size
+
+            if num_kv_heads:
+                assert (
+                    num_kv_heads % tp_size == 0
+                ), "The number of key_value heads must be divisible by the tensor parallel size."
+                num_kv_heads //= tp_size
+
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["hidden_size"] = hidden_size
+        attention_attribute_replacement["num_heads"] = num_q_heads
+        if num_kv_heads:
+            attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
+
+        policy[attn_cls] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    GemmaAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
+        )
+
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
+            )
+
+            policy[GemmaModel] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2"
+                }
             )
 
         if self.shard_config.enable_tensor_parallelism:
-            assert (
-                self.model.config.num_attention_heads
-                % self.shard_config.tensor_parallel_size
-                == 0
-            ), "The number of attention heads must be divisible by tensor parallel size."
-            assert (
-                self.model.config.num_key_value_heads
-                % self.shard_config.tensor_parallel_size
-                == 0
-            ), "The number of key_value heads must be divisible by tensor parallel size."
-
-            decoder_attribute_replacement = {
-                "self_attn.hidden_size": self.model.config.hidden_size
-                // self.shard_config.tensor_parallel_size,
-                "self_attn.num_heads": self.model.config.num_attention_heads
-                // self.shard_config.tensor_parallel_size,
-                "self_attn.num_key_value_heads": self.model.config.num_key_value_heads
-                // self.shard_config.tensor_parallel_size,
-            }
-
             policy[GemmaDecoderLayer] = ModulePolicyDescription(
-                attribute_replacement=decoder_attribute_replacement,
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
@@ -243,32 +264,6 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
                 target_key=GemmaDecoderLayer,
             )
 
-        if self.shard_config.enable_flash_attention:
-            ATTN_IMPLEMENTATION = {
-                "eager": GemmaAttention,
-                "spda": GemmaSdpaAttention,
-                "flash_attention_2": GemmaFlashAttention2,
-            }
-            attn_cls = ATTN_IMPLEMENTATION[self.model.config._attn_implementation]
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": GemmaForwards.gemma_flash_attention_forward,
-                },
-                policy=policy,
-                target_key=attn_cls,
-            )
-            if self.pipeline_stage_manager is None:
-                self.append_or_create_method_replacement(
-                    description={
-                        "forward": functools.partial(
-                            GemmaForwards.gemma_model_forward_for_flash_attention,
-                            shard_config=self.shard_config,
-                        )
-                    },
-                    policy=policy,
-                    target_key=GemmaModel,
-                )
-
         return policy
 
 
@@ -278,17 +273,21 @@ class GemmaModelPolicy(GemmaPolicy):
         return GemmaPolicy.get_all_modules(config)
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        return super().pipeline_template_sanity_check(template)
+        super().pipeline_template_sanity_check(template)
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         policy = super().module_policy()
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=GemmaModel,
-                new_forward=GemmaPipelineForwards.gemma_model_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    GemmaModelForwards.gemma_model_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=GemmaModel,
+        )
 
         return policy
 
@@ -309,6 +308,7 @@ class GemmaForCausalLMPolicy(GemmaPolicy):
             raise ValueError("lm_head must be in the last stage.")
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
+        self.is_causal = True
         policy = super().module_policy()
 
         if self.shard_config.enable_tensor_parallelism:
@@ -317,49 +317,42 @@ class GemmaForCausalLMPolicy(GemmaPolicy):
                 "gather_output": not self.shard_config.parallel_output,
                 "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by,
             }
-            methods_replacement = {
-                "forward": functools.partial(
-                    GemmaForwards.gemma_for_causal_lm_forward_with_dist_cross_entropy,
-                    shard_config=self.shard_config,
-                )
-            }
         else:
             target_module = PaddingLMHead
             kwargs = {
                 "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by
             }
-            methods_replacement = None
 
-        policy.update(
-            {
-                GemmaForCausalLM: ModulePolicyDescription(
-                    sub_module_replacement=[
-                        SubModuleReplacementDescription(
-                            suffix="lm_head",
-                            target_module=target_module,
-                            kwargs=kwargs,
-                        )
-                    ],
-                    method_replacement=methods_replacement,
-                )
-            }
+        self.append_or_create_submodule_replacement(
+            description=SubModuleReplacementDescription(
+                suffix="lm_head",
+                target_module=target_module,
+                kwargs=kwargs,
+            ),
+            policy=policy,
+            target_key=GemmaForCausalLM,
         )
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=GemmaForCausalLM,
-                new_forward=GemmaPipelineForwards.gemma_for_causal_lm_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    GemmaModelForwards.gemma_for_causal_lm_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=GemmaForCausalLM,
+        )
 
         return policy
 
     def get_held_layers(self) -> List[nn.Module]:
         stage_manager = self.pipeline_stage_manager
-        held_layers = super().get_held_layers()
-        if stage_manager.is_last_stage(ignore_chunk=True):
-            held_layers.append(self.model.lm_head)
-        return held_layers
+        layers = super().get_held_layers()
+        if stage_manager.is_last_stage():
+            layers.append(self.model.lm_head)
+
+        return layers
 
     def get_shared_params(self) -> List[Dict[int, Tensor]]:
         gemma_model = self.model.model
