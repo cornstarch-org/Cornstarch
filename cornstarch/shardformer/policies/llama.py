@@ -29,7 +29,7 @@ from colossalai.shardformer.policies.llama import (
 from colossalai.shardformer.policies.llama import (
     LlamaPolicy as ColossalLlamaPolicy,
 )
-from torch import nn
+from torch import Tensor, nn
 from transformers import LlamaConfig, PretrainedConfig
 from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.llama.modeling_llama import LlamaModel
@@ -346,10 +346,28 @@ class LlamaForCausalLMPolicy(LlamaPolicy, ColossalLlamaForCausalLMPolicy):
         return policy
 
     def get_held_layers(self) -> List[nn.Module]:
+        stage_manager = self.pipeline_stage_manager
         layers = super().get_held_layers()
+        if stage_manager.is_last_stage():
+            layers.append(self.model.lm_head)
         layers.append(self.model.model.rotary_emb)
 
         return layers
+
+    def get_shared_params(self) -> List[Dict[int, Tensor]]:
+        llama_model = self.model.model
+        if self.pipeline_stage_manager and self.pipeline_stage_manager.num_stages > 1:
+            if id(llama_model.embed_tokens.weight) == id(self.model.lm_head.weight):
+                # tie weights
+                return [
+                    {
+                        0: llama_model.embed_tokens.weight,
+                        self.pipeline_stage_manager.num_stages
+                        - 1: self.model.lm_head.weight,
+                    }
+                ]
+
+        return []
 
 
 class LlamaForSequenceClassificationPolicy(
