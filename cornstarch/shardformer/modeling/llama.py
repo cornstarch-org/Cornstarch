@@ -527,153 +527,6 @@ class LlamaModelForwards:
 
 class LlamaAttentionForwards:
     @staticmethod
-    def llama_attention_forward_after_qkv(
-        self: LlamaAttention,
-        batch_size: int,
-        sequence_length: int,
-        query_states: torch.Tensor,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        position_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(
-            query_states, key_states.transpose(2, 3)
-        ) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32
-        ).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(
-            attn_weights, p=self.attention_dropout, training=self.training
-        )
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        if attn_output.size() != (
-            batch_size,
-            self.num_heads,
-            sequence_length,
-            self.head_dim,
-        ):
-            raise ValueError(
-                f"`attn_output` should be of size {(batch_size, self.num_heads, sequence_length, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        return attn_output, attn_weights
-
-    @staticmethod
-    def llama_flash_attention_forward_after_qkv(
-        self: LlamaAttention,
-        batch_size: int,
-        sequence_length: int,
-        query_states: torch.Tensor,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        position_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
-        # to be able to avoid many of these transpose/reshape/view.
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        dropout_rate = self.attention_dropout if self.training else 0.0
-
-        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-        # therefore the input hidden states gets silently casted in float32. Hence, we need
-        # cast them back in the correct dtype just to be sure everything works as expected.
-        # This might slowdown training & inference so it is recommended to not cast the LayerNorms
-        # in fp32. (LlamaRMSNorm handles it correctly)
-
-        input_dtype = query_states.dtype
-        if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
-            # Handle the case where the model is quantized
-            elif hasattr(self.config, "_pre_quantization_dtype"):
-                target_dtype = self.config._pre_quantization_dtype
-            else:
-                target_dtype = self.q_proj.weight.dtype
-
-            logger.warning_once(
-                f"The input hidden states seems to be silently casted in float32, this might be related to"
-                f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
-                f" {target_dtype}."
-            )
-
-            query_states = query_states.to(target_dtype)
-            key_states = key_states.to(target_dtype)
-            value_states = value_states.to(target_dtype)
-
-        attn_output = _flash_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            sequence_length,
-            position_ids=position_ids,
-            dropout=dropout_rate,
-            sliding_window=getattr(self, "sliding_window", None),
-            use_top_left_mask=self._flash_attn_uses_top_left_mask,
-            is_causal=self.is_causal,
-        )
-
-        return attn_output, None
-
-    @staticmethod
-    def llama_sdpa_attention_forward_after_qkv(
-        self: LlamaAttention,
-        batch_size: int,
-        sequence_length: int,
-        query_states: torch.Tensor,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        position_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        causal_mask = attention_mask
-        if attention_mask is not None:
-            causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
-
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and causal_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-
-        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-        is_causal = True if causal_mask is None and sequence_length > 1 else False
-
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=causal_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=is_causal,
-        )
-
-        return attn_output, None
-
-    @staticmethod
     def forward(
         self: LlamaAttention,
         hidden_states: torch.Tensor,
@@ -758,6 +611,7 @@ class LlamaAttentionForwards:
         # Common qkv computation part is done, now we can call the specific attention function
         # ==========
 
+        attn_weights = None
         if sp_mode == "ring_attn":
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -771,51 +625,88 @@ class LlamaAttentionForwards:
                 inner_ring_size=shard_config.inner_ring_size,
             )
             attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_weights = None
         elif self.config._attn_implementation == "flash_attention_2":
-            attn_output, attn_weights = (
-                LlamaAttentionForwards.llama_flash_attention_forward_after_qkv(
-                    self,
-                    bsz,
-                    q_len,
-                    query_states,
-                    key_states,
-                    value_states,
-                    position_ids=position_ids,
-                    attention_mask=attention_mask,
-                    **kwargs,
-                )
+            # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
+            # to be able to avoid many of these transpose/reshape/view.
+            query_states = query_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
+
+            dropout_rate = self.attention_dropout if self.training else 0.0
+
+            attn_output = _flash_attention_forward(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                q_len,
+                position_ids=position_ids,
+                dropout=dropout_rate,
+                sliding_window=getattr(self, "sliding_window", None),
+                use_top_left_mask=self._flash_attn_uses_top_left_mask,
+                is_causal=self.is_causal,
             )
+
         elif self.config._attn_implementation == "sdpa":
-            attn_output, attn_weights = (
-                LlamaAttentionForwards.llama_sdpa_attention_forward_after_qkv(
-                    self,
-                    bsz,
-                    q_len,
-                    query_states,
-                    key_states,
-                    value_states,
-                    position_ids=position_ids,
-                    attention_mask=attention_mask,
-                    **kwargs,
-                )
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            causal_mask = attention_mask
+            if attention_mask is not None:
+                causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
+
+            # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+            # Reference: https://github.com/pytorch/pytorch/issues/112577.
+            if query_states.device.type == "cuda" and causal_mask is not None:
+                query_states = query_states.contiguous()
+                key_states = key_states.contiguous()
+                value_states = value_states.contiguous()
+
+            # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
+            # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
+            is_causal = True if causal_mask is None and q_len > 1 else False
+
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=causal_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                is_causal=is_causal,
             )
 
             attn_output = attn_output.transpose(1, 2).contiguous()
         else:
-            attn_output, attn_weights = (
-                LlamaAttentionForwards.llama_attention_forward_after_qkv(
-                    self,
-                    bsz,
-                    q_len,
-                    query_states,
-                    key_states,
-                    value_states,
-                    position_ids=position_ids,
-                    attention_mask=attention_mask,
-                    **kwargs,
-                )
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            attn_weights = torch.matmul(
+                query_states, key_states.transpose(2, 3)
+            ) / math.sqrt(self.head_dim)
+
+            if attention_mask is not None:  # no matter the length, we just slice it
+                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                attn_weights = attn_weights + causal_mask
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(
+                attn_weights, dim=-1, dtype=torch.float32
+            ).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(
+                attn_weights, p=self.attention_dropout, training=self.training
             )
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            if attn_output.size() != (
+                bsz,
+                self.num_heads,
+                q_len,
+                self.head_dim,
+            ):
+                raise ValueError(
+                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                    f" {attn_output.size()}"
+                )
 
             attn_output = attn_output.transpose(1, 2).contiguous()
 
