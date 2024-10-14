@@ -124,7 +124,7 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
             "spda": GemmaSdpaAttention,
             "flash_attention_2": GemmaFlashAttention2,
         }
-        attn_cls = ATTN_IMPLEMENTATION[self.model.config._attn_implementation]
+        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
 
@@ -174,16 +174,6 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
         if num_kv_heads:
             attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
 
-        policy[attn_cls] = ModulePolicyDescription(
-            attribute_replacement=attention_attribute_replacement,
-            method_replacement={
-                "forward": functools.partial(
-                    GemmaAttentionForwards.forward,
-                    shard_config=self.shard_config,
-                )
-            },
-        )
-
         if self.shard_config.enable_flash_attention:
             attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
                 not is_flash_attn_greater_or_equal("2.1.0")
@@ -194,6 +184,16 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
                     "config._attn_implementation": "flash_attention_2"
                 }
             )
+
+        policy[attn_cls] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    GemmaAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
+        )
 
         if self.shard_config.enable_tensor_parallelism:
             policy[GemmaDecoderLayer] = ModulePolicyDescription(
