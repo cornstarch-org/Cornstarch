@@ -4,11 +4,8 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer.layer import (
-    ColoAttention,
     RingAttention,
-    cross_entropy_1d,
     dist_cross_entropy,
 )
 from colossalai.shardformer.layer._operation import (
@@ -18,7 +15,6 @@ from colossalai.shardformer.layer._operation import (
 )
 from colossalai.shardformer.layer.utils import split_batch_zigzag
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from torch.nn import CrossEntropyLoss
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import (
@@ -29,7 +25,6 @@ from transformers.models.mistral.modeling_mistral import (
     MistralAttention,
     MistralForCausalLM,
     MistralModel,
-    MistralSdpaAttention,
     apply_rotary_pos_emb,
     logger,
     repeat_kv,
