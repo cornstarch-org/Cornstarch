@@ -1,7 +1,6 @@
 import functools
 import itertools
-import warnings
-from typing import Callable, Dict, List, cast
+from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedRMSNorm,
