@@ -106,149 +106,16 @@ class PolicyTestBase(ABC):
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = "12355"
         dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+        torch.cuda.set_device(rank)
         self.rank = rank
         # self.world_size = world_size
         self.reset_seed()
 
-
-
-    # def setUp(self) -> None:
-    #     super().setUp()
-    #     with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
-    #         self._spawn_processes()
-# 
-    # def tearDown(self) -> None:
-        # return super().tearDown()
-# 
-    # @classmethod
-    # def _run(cls, rank: int, test_name: str, file_name: str, pipe) -> None:
-        # Copy from: torch/testing/_internal/common_fsdp.py FSDPTest._run
-        # self = cls(test_name)
-        # self.rank = rank
-        # self.file_name = file_name
-# 
-        # print(f"dist init r={self.rank}, world={self.world_size}")
-# 
-        # backend = "gloo"
-# 
-        # try:
-        #     dist.init_process_group(
-        #         init_method=f"{FILE_SCHEMA}{self.file_name}",
-        #         backend=backend,
-        #         world_size=int(self.world_size),
-        #         rank=self.rank,
-        #     )
-        # except RuntimeError as e:
-        #     if "recompile" in e.args[0]:
-        #         sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
-# 
-            # raise
-# 
-        # if torch.cuda.is_available() and torch.cuda.device_count():
-            # device_id = self.rank % torch.cuda.device_count()
-            # torch.cuda.set_device(device_id)
-# 
-        # self.reset_seed()
-# 
-        # Execute barrier prior to running test to ensure that every process
-        # has finished initialization and that the following test
-        # immediately exiting due to a skip doesn't cause flakiness.
-        # dist.barrier()
-# 
-        # with torch.backends.cudnn.flags(
-            # enabled=True, deterministic=True, benchmark=True
-        # ):
-            # self.run_test(test_name, pipe)
-# 
-        # dist.barrier()
-# 
-        # dist.destroy_process_group()
-# 
     def reset_seed(self):
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
         random.seed(0)
         np.random.seed(0)
-# 
-    # @staticmethod
-    # def batch_isend_irecv_gloo(p2p_op_list: list[dist.P2POp]) -> list[dist.Work]:
-        # reqs: list[tuple[dist.Work, torch.Tensor]] = []
-        # for p2p_op in p2p_op_list:
-            # if p2p_op.op == dist.isend:
-                # tensor = p2p_op.tensor.to("cpu")
-                # work = p2p_op.op(tensor, p2p_op.peer, p2p_op.group, p2p_op.tag)
-            # else:
-                # tensor = torch.empty_like(p2p_op.tensor, device="cpu")
-                # work = p2p_op.op(tensor, p2p_op.peer, p2p_op.group, p2p_op.tag)
-# 
-            # reqs.append((work, tensor))
-# 
-        # send_reqs = []
-        # with torch.no_grad():
-            # for (req, tensor), p2p_op in zip(reqs, p2p_op_list):
-                # if req is None:
-                    # continue
-# 
-                # if p2p_op.op == dist.irecv:
-                    # req.wait()
-                    # p2p_op.tensor.copy_(tensor)
-                # else:
-                    # send_reqs.append(req)
-# 
-        # return send_reqs
-# 
-    # @staticmethod
-    # def all_to_all_gloo(
-        # output_tensor_list: list[torch.Tensor],
-        # input_tensor_list: list[torch.Tensor],
-        # group: Optional[dist.ProcessGroup] = None,
-        # async_op: Optional[bool] = False,
-    # ):
-        # """Backend gloo doesn't support all_to_all, so we simulate it here."""
-        # world_size = dist.get_world_size(group)
-        # rank = dist.get_rank(group)
-# 
-        # Each rank gathers the "i-th" input from all ranks
-        # for i in range(world_size):
-            # chunk = input_tensor_list[i].to("cpu")  # Each rank's i-th input tensor
-            # gathered_tensors = [
-                # torch.empty_like(chunk) for _ in range(world_size)
-            # ]  # Buffers for allgather
-# 
-            # Perform all_gather to collect the i-th tensor from all ranks
-            # dist.all_gather(gathered_tensors, chunk, group)
-# 
-            # if i == rank:
-                # assert len(output_tensor_list) == len(gathered_tensors)
-                # for output_tensor, gathered_tensor in zip(
-                    # output_tensor_list, gathered_tensors
-                # ):
-                    # output_tensor.copy_(gathered_tensor)
-# 
-    # @staticmethod
-    # def all_to_all_single_gloo(
-        # output: torch.Tensor,
-        # input: torch.Tensor,
-        # group: Optional[dist.ProcessGroup] = None,
-        # async_op: Optional[bool] = False,
-    # ):
-        # world_size = dist.get_world_size(group)
-        # rank = dist.get_rank(group)
-# 
-        # chunk_size = input.size(0) // world_size
-        # gathered_tensors = [torch.empty_like(input) for _ in range(world_size)]
-# 
-        # dist.all_gather(gathered_tensors, input, group)
-# 
-        # output_tensor = torch.cat(
-            # [
-                # gathered_tensors[i][rank * chunk_size : (rank + 1) * chunk_size]
-                # for i in range(world_size)
-            # ],
-            # dim=0,
-        # )
-        # output.copy_(output_tensor)
-
 
 class ColossalaiHybridParallelBase(PolicyTestBase):
     def model_fn(self) -> PreTrainedModel:
@@ -270,8 +137,10 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         #     raise unittest.SkipTest("Flash Attention does not support fp32")
 
         test_config = dict(
+            # dp_size=1,
             tp_size=tp_size,
             pp_size=pp_size,
+            sp_size=sp_size,
             zero_stage=0,
             num_microbatches=self.num_microbatches,
             microbatch_size=self.microbatch_size,
@@ -378,7 +247,8 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         #     "colossalai.shardformer.shard.sharder.get_autopolicy",
         #     return_value=get_autopolicy(_fullname(org_model)),
         # ):
-        plugin = HybridParallelPlugin(**test_config)
+        policy = get_autopolicy(_fullname(org_model))
+        plugin = HybridParallelPlugin(**test_config, custom_policy=policy)
         plugin.precision = None
         booster = Booster(plugin=plugin)
 
@@ -449,9 +319,9 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         hidden_size=128,
         intermediate_size=64,
         num_attention_heads=16,
-        num_hidden_layers=4,
+        num_hidden_layers=2,
         use_cache=False,
-        _attn_implementation="eager",
+        _attn_implementati2n="eager",
     )
 
     def data_gen_fn(self) -> dict:
@@ -559,11 +429,34 @@ class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
     def test_context_parallel(self, tp_size: int, pp_size: int, sp_size: int, sp_mode: str):
         self.run_hybrid_parallel(tp_size, pp_size, sp_size, sp_mode, True, "bf16")
 
-def run(rank: int, world_size: int):
+def run(rank: int, world_size: int, tp_size: int, pp_size: int, sp_size: int, sp_mode: str):
     test_class = TestLlamaForCausalLMPolicy(rank, world_size)
-    test_class.test_context_parallel(1, 1, world_size, "ring_attn")
+    print(f"rank {rank} done, tp_size={tp_size}, pp_size={pp_size}, sp_size={sp_size}, sp_mode={sp_mode}")
+    test_class.test_context_parallel(tp_size, pp_size, sp_size, sp_mode)
+
+'''
+CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.utils_ring --world_size 2 --tp_size 2 --pp_size 1 --sp_size 1
+CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.utils_ring --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.utils_ring --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+'''
+
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--world_size", type=int, default=4)
+    parser.add_argument("--tp_size", type=int, default=1)
+    parser.add_argument("--pp_size", type=int, default=1)
+    parser.add_argument("--sp_size", type=int, default=4)
+    parser.add_argument("--sp_mode", type=str, default=None)
+    return parser.parse_args()
 
 if __name__ == "__main__":
     from torch.multiprocessing import spawn
-    world_size = 4
-    spawn(run, nprocs=world_size, args=(world_size,))
+    args = parse_args()
+    world_size = args.world_size
+    tp_size = args.tp_size
+    pp_size = args.pp_size
+    sp_size = args.sp_size
+    sp_mode = args.sp_mode
+    assert world_size == tp_size * pp_size * sp_size
+    spawn(run, nprocs=world_size, args=(world_size, tp_size, pp_size, sp_size, sp_mode))
