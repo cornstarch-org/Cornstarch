@@ -143,6 +143,7 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
 
         if sp_mode == "all_to_all":
             # Ulysses all-to-all context parallelism needs to partition number of heads
+            hidden_size //= sp_size
 
             assert (
                 num_q_heads % sp_size == 0
