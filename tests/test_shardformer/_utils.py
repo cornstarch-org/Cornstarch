@@ -229,6 +229,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         assert precision in ["bf16", "fp32"]
         if fa and precision == "fp32":
             raise unittest.SkipTest("Flash Attention does not support fp32")
+        precision = torch.bfloat16 if precision == "bf16" else torch.float32
 
         test_config = dict(
             tp_size=tp_size,
@@ -290,6 +291,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
                     criterion=criterion,
                     output_transform_fn=lambda x: x,
                     booster=booster,
+                    precision=precision,
                 )
             )
 
@@ -315,7 +317,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
     ]:
         use_lazy_init = test_config.pop("use_lazy_init", False)
         precision = test_config.pop("precision")
-        precision = torch.bfloat16 if precision == "bf16" else torch.float32
 
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
@@ -358,6 +359,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         criterion: Callable[[torch.Tensor], torch.Tensor],
         output_transform_fn: Callable,
         booster: Booster,
+        precision: torch.dtype,
     ):
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
@@ -375,7 +377,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
 
         org_model.train()
         org_output = org_model(**unshard_test_data)
-        org_loss = criterion(org_output)
+        org_loss = criterion(org_output).to(precision)
         org_loss.backward()
 
         sharded_model.train()
@@ -392,7 +394,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             sharded_loss = sharded_output["loss"]
         else:
             sharded_output = sharded_model(**shard_test_data)
-            sharded_loss = criterion(sharded_output)
+            sharded_loss = criterion(sharded_output).to(precision)
             sharded_optimizer.backward(sharded_loss)
 
         return org_loss, org_output, sharded_loss, sharded_output
@@ -417,7 +419,10 @@ def check_output_hidden_state(
 
 
 def check_loss(
-    org_loss: Tensor, sharded_loss: Tensor, atol: float = 1e-5, rtol: float = 1e-3
+    org_loss: Tensor,
+    sharded_loss: Tensor,
+    atol: float = 1e-5,
+    rtol: float = 1e-3,
 ):
     assert torch.allclose(org_loss.float(), sharded_loss.float(), atol=atol, rtol=rtol)
 

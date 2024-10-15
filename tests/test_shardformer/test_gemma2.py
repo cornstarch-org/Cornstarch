@@ -107,7 +107,7 @@ class Gemma2PolicyTestClassBase(ColossalaiHybridParallelBase):
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
             atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
-            check_loss(org_loss, sharded_loss, atol=1e-5, rtol=1e-3)
+            check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True):

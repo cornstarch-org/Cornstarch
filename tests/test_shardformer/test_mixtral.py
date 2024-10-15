@@ -66,7 +66,7 @@ class MixtralPolicyTestCaseBase(ColossalaiHybridParallelBase):
     ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
-        precision = booster.plugin.precision
+        precision = org_loss.dtype
 
         # unwrap model
         mixtral_model = unwrap_model(org_model, "MixtralModel", "model")
@@ -80,7 +80,7 @@ class MixtralPolicyTestCaseBase(ColossalaiHybridParallelBase):
         if (
             stage_manager is None or stage_manager.is_first_stage()
         ) and booster.plugin.zero_stage == 0:
-            atol, rtol = (5e-5, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
+            atol, rtol = (5e-5, 1e-4) if precision == torch.float32 else (5e-3, 5e-3)
             row_layer_grads = get_grad_tensors_for_check(
                 mixtral_model,
                 shard_mixtral_model,
@@ -110,12 +110,12 @@ class MixtralPolicyTestCaseBase(ColossalaiHybridParallelBase):
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
-            atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
-            check_loss(org_loss, sharded_loss, atol=1e-5, rtol=1e-3)
+            atol, rtol = (1e-5, 1e-3) if precision == torch.float32 else (5e-3, 5e-3)
+            check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True):
-            atol, rtol = (2e-4, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
+            atol, rtol = (2e-4, 1e-3) if precision == torch.float32 else (5e-3, 5e-3)
             # embed_tokens have different dimension, so skip to check row_layer weight
             check_weight(
                 mixtral_model,
