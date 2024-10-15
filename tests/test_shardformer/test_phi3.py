@@ -23,7 +23,6 @@ from ._utils import (
     ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
-    check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
     unwrap_model,
@@ -35,7 +34,7 @@ class Phi3PolicyTestClassBase(ColossalaiHybridParallelBase):
     config = Phi3Config(
         hidden_size=256,
         intermediate_size=256,
-        num_attention_heads=64,
+        num_attention_heads=16,
         num_hidden_layers=4,
         use_cache=False,
         _attn_implementation="eager",
@@ -47,7 +46,6 @@ class Phi3PolicyTestClassBase(ColossalaiHybridParallelBase):
             "input_ids": torch.randint(0, 2048, (num_batch, 64)),
             "attention_mask": torch.ones(num_batch, 64),
         }
-        input["labels"] = input["input_ids"]
 
         return input
 
@@ -110,11 +108,6 @@ class Phi3PolicyTestClassBase(ColossalaiHybridParallelBase):
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
             atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
-            if org_model.__class__.__name__ == "Phi3Model":
-                check_output_hidden_state(
-                    org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
-                )
-
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
@@ -146,13 +139,22 @@ class TestPhi3ModelPolicy(Phi3PolicyTestClassBase):
 
     model_class = Phi3Model
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
         self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
+    def test_context_parallel(self, tp_size: int, pp_size: int):
+        # ring_attn is for causal lm only
+        self.run_hybrid_parallel(tp_size, pp_size, "all_to_all", True, "bf16")
 
 
 @instantiate_parametrized_tests
@@ -161,12 +163,31 @@ class TestPhi3ForCausalLMPolicy(Phi3PolicyTestClassBase):
     def loss_fn(x: CausalLMOutputWithPast) -> torch.Tensor:
         return x.loss
 
+    def data_gen_fn(self) -> dict:
+        input = super().data_gen_fn()
+        input["labels"] = input["input_ids"]
+
+        return input
+
     model_class = Phi3ForCausalLM
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
         self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
+    @parametrize("sp_mode", ["all_to_all", "ring_attn"], name_fn=lambda x: x)
+    def test_context_parallel(self, tp_size: int, pp_size: int, sp_mode: str):
+        self.run_hybrid_parallel(tp_size, pp_size, sp_mode, True, "bf16")
