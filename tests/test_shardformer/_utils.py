@@ -293,14 +293,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
                 )
             )
 
-            # org_loss = org_loss.to(
-            #     dtype=torch.bfloat16 if precision == "bf16" else torch.float32
-            # )
-            # if sharded_loss is not None:
-            #     sharded_loss = sharded_loss.to(
-            #         dtype=torch.bfloat16 if precision == "bf16" else torch.float32
-            #     )
-
         self.check_fn(
             booster=booster,
             org_model=org_model,
