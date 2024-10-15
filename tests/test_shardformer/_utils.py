@@ -211,9 +211,11 @@ class PolicyTestBase(MultiProcessTestCase, ABC):
 
 
 class ColossalaiHybridParallelBase(PolicyTestBase):
-    def model_fn(self) -> PreTrainedModel:
+    def model_fn(self, fa: bool) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
+        config._attn_implementation = "flash_attention_2" if fa else "eager"
+        config.attn_implementation = config._attn_implementation
         return self.model_class(config)
 
     def run_hybrid_parallel(
@@ -291,13 +293,13 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
                 )
             )
 
-            org_loss = org_loss.to(
-                dtype=torch.bfloat16 if precision == "bf16" else torch.float32
-            )
-            if sharded_loss is not None:
-                sharded_loss = sharded_loss.to(
-                    dtype=torch.bfloat16 if precision == "bf16" else torch.float32
-                )
+            # org_loss = org_loss.to(
+            #     dtype=torch.bfloat16 if precision == "bf16" else torch.float32
+            # )
+            # if sharded_loss is not None:
+            #     sharded_loss = sharded_loss.to(
+            #         dtype=torch.bfloat16 if precision == "bf16" else torch.float32
+            #     )
 
         self.check_fn(
             booster=booster,
@@ -325,7 +327,9 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
 
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
-            org_model = self.model_fn().to(dtype=precision, device="cuda")
+            org_model = self.model_fn(test_config["enable_flash_attention"]).to(
+                dtype=precision, device="cuda"
+            )
             sharded_model = copy.deepcopy(org_model)
         if use_lazy_init:
             ctx.materialize(org_model)

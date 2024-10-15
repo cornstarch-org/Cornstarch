@@ -166,7 +166,7 @@ _POLICY_LIST = {
     ),
     # InternLM2
     "cornstarch.models.internlm2.modeling_internlm2.InternLM2Model": PolicyLocation(
-        file_name="internlm2", class_name="InternLM2Policy"
+        file_name="internlm2", class_name="InternLM2ModelPolicy"
     ),
     "cornstarch.models.internlm2.modeling_internlm2.InternLM2ForCausalLM": PolicyLocation(
         file_name="internlm2", class_name="InternLM2ForCausalLMPolicy"
