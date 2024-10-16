@@ -168,6 +168,10 @@ _POLICY_LIST = {
     "transformers.models.qwen2.modeling_qwen2.Qwen2ForCausalLM": PolicyLocation(
         file_name="qwen2", class_name="Qwen2ForCausalLMPolicy"
     ),
+    # Qwen2Audio
+    "transformers.models.qwen2_audio.modeling_qwen2_audio.Qwen2AudioEncoder": PolicyLocation(
+        file_name="qwen2_audio", class_name="Qwen2AudioEncoderPolicy"
+    ),
     # InternLM2
     "cornstarch.models.internlm2.modeling_internlm2.InternLM2Model": PolicyLocation(
         file_name="internlm2", class_name="InternLM2ModelPolicy"
