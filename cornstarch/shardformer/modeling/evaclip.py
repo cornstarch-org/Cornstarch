@@ -1,31 +1,29 @@
 from typing import Optional, Tuple, Union
 
 import torch
-from colossalai.pipeline.stage_manager import PipelineStageManager
-from colossalai.shardformer.layer import ColoAttention
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch import nn
+from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
 from cornstarch.models.evaclip.modeling_evaclip import (
     EvaCLIPAttention,
     EvaCLIPVisionModel,
     EvaCLIPVisionTransformer,
+    logger,
 )
 
 
-class EvaCLIPPipelineForwards:
+class EvaCLIPModelForwards:
     @staticmethod
-    def evaclip_vision_transformer_forward(
+    def eva_clip_vision_transformer_forward(
         self: EvaCLIPVisionTransformer,
         pixel_values: Optional[torch.FloatTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
-        stage_index: Optional[list[int]] = None,
-        shard_config: Optional[ShardConfig] = None,
+        shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = (
             output_attentions
@@ -41,30 +39,45 @@ class EvaCLIPPipelineForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        if stage_manager.is_first_stage():
+        stage_manager = shard_config.pipeline_stage_manager
+
+        if stage_manager is not None:
+            if output_attentions:
+                logger.warning_once(
+                    "output_attentions=True is not supported for pipeline models at the moment."
+                )
+                output_attentions = False
+            if output_hidden_states:
+                logger.warning_once(
+                    "output_hidden_states=True is not supported for pipeline models at the moment."
+                )
+                output_hidden_states = False
+
+        if stage_manager is None or stage_manager.is_first_stage():
             if pixel_values is None:
                 raise ValueError("You have to specify pixel_values")
 
             hidden_states = self.embeddings(pixel_values)
-        else:
-            if hidden_states is None:
-                raise ValueError(
-                    "hidden_states shouldn't be None for stages other than the first stage."
-                )
 
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
 
-        start_idx, end_idx = stage_index
+        if stage_manager is not None:
+            layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layers))
+            start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        else:
+            start_idx, end_idx = (0, len(self.encoder.layers))
+
         for encoder_layer in self.encoder.layers[start_idx:end_idx]:
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
+
             if self.encoder.gradient_checkpointing and self.training:
                 layer_outputs = self.encoder._gradient_checkpointing_func(
                     encoder_layer.__call__,
                     hidden_states,
-                    None,  # attention_mask
-                    None,  # causal_attention_mask
+                    None,
+                    None,
                     output_attentions,
                 )
             else:
@@ -83,7 +96,7 @@ class EvaCLIPPipelineForwards:
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        if stage_manager.is_last_stage():
+        if stage_manager is None or stage_manager.is_last_stage():
             encoder_outputs = BaseModelOutput(
                 last_hidden_state=hidden_states,
                 hidden_states=encoder_states,
@@ -113,31 +126,23 @@ class EvaCLIPPipelineForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
-        stage_index: Optional[list[int]] = None,
-        shard_config: Optional[ShardConfig] = None,
+        shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
-        return EvaCLIPPipelineForwards.evaclip_vision_transformer_forward(
+        return EvaCLIPModelForwards.eva_clip_vision_transformer_forward(
             self.vision_model,
             pixel_values=pixel_values,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            stage_manager=stage_manager,
             hidden_states=hidden_states,
-            stage_index=stage_index,
             shard_config=shard_config,
         )
 
 
-class EvaCLIPForwards:
+class EvaCLIPAttentionForwards:
     @staticmethod
-    def evaclip_flash_attention_forward(
+    def flash_attention_forward(
         self: EvaCLIPAttention,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -145,7 +150,7 @@ class EvaCLIPForwards:
         output_attentions: Optional[bool] = False,
         shard_config: Optional[ShardConfig] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, tgt_len, _ = hidden_states.size()
+        bsz, q_len, _ = hidden_states.size()
 
         # [batch_size, tgt_len, embed_dim]
         query_states = self.q_proj(hidden_states)
@@ -153,15 +158,9 @@ class EvaCLIPForwards:
         value_states = self.v_proj(hidden_states)
 
         # [batch_size, tgt_len, embed_dim] -> [batch_size, tgt_len, num_heads, head_dim]
-        query_states = query_states.view(
-            bsz, -1, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(bsz, -1, self.num_heads, self.head_dim).transpose(
-            1, 2
-        )
-        value_states = value_states.view(
-            bsz, -1, self.num_heads, self.head_dim
-        ).transpose(1, 2)
+        query_states = query_states.view(bsz, -1, self.num_heads, self.head_dim)
+        key_states = key_states.view(bsz, -1, self.num_heads, self.head_dim)
+        value_states = value_states.view(bsz, -1, self.num_heads, self.head_dim)
 
         attn_mask = (
             causal_attention_mask
@@ -171,32 +170,26 @@ class EvaCLIPForwards:
         if attention_mask is not None and causal_attention_mask is not None:
             attn_mask = attn_mask + attention_mask
 
-        attn_output = ColoAttention.attention(
+        dropout_rate = self.dropout if self.training else 0.0
+
+        attn_output = _flash_attention_forward(
             query_states,
             key_states,
             value_states,
-            attention_mask=(
-                attn_mask if causal_attention_mask is not None else attention_mask
-            ),
-            dropout_p=self.dropout if self.training else 0.0,
-            scale=self.scale,
+            attention_mask,
+            q_len,
+            dropout=dropout_rate,
+            is_causal=causal_attention_mask is not None,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
 
-        if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
-        attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+        attn_output = attn_output.reshape(bsz, q_len, self.embed_dim)
 
         attn_output = self.out_proj(attn_output)
 
         return attn_output, None
 
-    def evaclip_eager_forward(
+    def eager_forward(
         self: EvaCLIPAttention,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
