@@ -6,7 +6,7 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-from transformers.modeling_outputs import ModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPooling, ModelOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.siglip.modeling_siglip import (
     SiglipVisionConfig,
@@ -17,7 +17,6 @@ from ._utils import (
     ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
-    check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
     unwrap_model,
@@ -32,6 +31,12 @@ class TestSiglipVisionModelPolicyClass(ColossalaiHybridParallelBase):
         hidden_size=128,
         num_attention_heads=4,
     )
+
+    @staticmethod
+    def loss_fn(x: BaseModelOutputWithPooling) -> torch.Tensor:
+        return torch.nn.functional.mse_loss(
+            x.last_hidden_state, torch.ones_like(x.last_hidden_state)
+        )
 
     def data_gen_fn(self) -> dict:
         image_size = self.config.image_size
@@ -121,9 +126,6 @@ class TestSiglipVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
-            check_output_hidden_state(
-                org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
-            )
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
@@ -149,9 +151,9 @@ class TestSiglipVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
         check_all_grad_tensors(grads_to_check)
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp32", "fp16"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):

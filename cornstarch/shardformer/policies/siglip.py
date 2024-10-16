@@ -1,7 +1,7 @@
 import itertools
 import warnings
 from functools import partial
-from typing import Callable, Dict, List, cast
+from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedLayerNorm,
@@ -15,14 +15,12 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import nn
 from transformers import PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.siglip.configuration_siglip import SiglipVisionConfig
 from transformers.models.siglip.modeling_siglip import SiglipVisionTransformer
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.siglip import (
-    SiglipVisionForwards,
-    SiglipVisionPipelineForwards,
-)
+from cornstarch.shardformer.modeling.siglip import SiglipVisionModelForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -85,10 +83,20 @@ class SiglipVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         from transformers.models.siglip.modeling_siglip import (
             SiglipAttention,
             SiglipEncoderLayer,
+            SiglipFlashAttention2,
             SiglipMultiheadAttentionPoolingHead,
+            SiglipSdpaAttention,
         )
 
-        policy: dict[str | nn.Module, ModulePolicyDescription] = {}
+        config: SiglipVisionConfig = self.model.config
+        ATTN_IMPLEMENTATION = {
+            "eager": SiglipAttention,
+            "sdpa": SiglipSdpaAttention,
+            "flash_attention_2": SiglipFlashAttention2,
+        }
+        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
+
+        policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
@@ -96,22 +104,38 @@ class SiglipVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 "CLIP doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
             )
 
-        config: SiglipVisionConfig = cast(SiglipVisionConfig, self.model.config)
+        tp_size = self.shard_config.tensor_parallel_size
+        num_heads = config.num_attention_heads
+        hidden_size = config.hidden_size
+
         if self.shard_config.enable_tensor_parallelism:
+            hidden_size //= tp_size
+
             assert (
-                config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
-            ), (
-                f"The number of attention heads {config.num_attention_heads} must be divisible "
-                f"by tensor parallel size {self.shard_config.tensor_parallel_size}."
+                num_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_heads //= tp_size
+
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["embed_dim"] = hidden_size
+        attention_attribute_replacement["num_heads"] = num_heads
+
+        policy[attn_cls] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+        )
+
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
             )
 
+            policy[attn_cls] = ModulePolicyDescription(
+                attribute_replacement=attention_attribute_replacement,
+                method_replacement={"forward": (SiglipFlashAttention2.forward)},
+            )
+
+        if self.shard_config.enable_tensor_parallelism:
             policy[SiglipEncoderLayer] = ModulePolicyDescription(
-                attribute_replacement={
-                    "self_attn.num_heads": config.num_attention_heads
-                    // self.shard_config.tensor_parallel_size,
-                    "self_attn.embed_dim": config.hidden_size
-                    // self.shard_config.tensor_parallel_size,
-                },
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
@@ -187,51 +211,15 @@ class SiglipVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 target_key=SiglipMultiheadAttentionPoolingHead,
             )
 
-        if self.shard_config.enable_flash_attention:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": SiglipVisionForwards.clip_flash_attention_forward,
-                },
-                policy=policy,
-                target_key=SiglipAttention,
-            )
-
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=SiglipVisionTransformer,
-                new_forward=SiglipVisionPipelineForwards.siglip_vision_transformer_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": SiglipVisionModelForwards.siglip_vision_transformer_forward,
+            },
+            policy=policy,
+            target_key=SiglipVisionTransformer,
+        )
 
         return policy
-
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
-    ):
-        if self.pipeline_stage_manager is None:
-            return
-
-        module: SiglipVisionTransformer
-        if self.model.__class__.__name__ == "SiglipVisionTransformer":
-            module = self.model
-        else:
-            module = self.model.vision_model
-
-        stage_manager = self.pipeline_stage_manager
-        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layers))
-        stage_index = stage_manager.get_stage_index(layers_per_stage)
-
-        method_replacement = {
-            "forward": partial(
-                new_forward,
-                stage_manager=stage_manager,
-                stage_index=stage_index,
-                shard_config=self.shard_config,
-            )
-        }
-        self.append_or_create_method_replacement(
-            description=method_replacement, policy=policy, target_key=model_cls
-        )
 
     def get_held_layers(self) -> List[nn.Module]:
         assert self.pipeline_stage_manager is not None
@@ -276,12 +264,16 @@ class SiglipVisionModelPolicy(SiglipVisionTransformerPolicy):
 
         policy = super().module_policy()
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=SiglipVisionModel,
-                new_forward=SiglipVisionPipelineForwards.siglip_vision_model_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": partial(
+                    SiglipVisionModelForwards.siglip_vision_model_forward,
+                    shard_config=self.shard_config,
+                ),
+            },
+            policy=policy,
+            target_key=SiglipVisionModel,
+        )
 
         return policy
 

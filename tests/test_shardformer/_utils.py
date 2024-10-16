@@ -370,9 +370,13 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
 
         shard_test_data = {}
         for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
             shard_test_data[k] = v.clone().to("cuda")
         unshard_test_data = {}
         for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
             unshard_test_data[k] = v.clone().to("cuda")
 
         org_model.train()
