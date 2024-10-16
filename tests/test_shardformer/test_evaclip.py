@@ -35,7 +35,7 @@ class TestEvaCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
         num_attention_heads=16,
     )
 
-    # HF does not provide Dinov2 flash attention yet.
+    # HF does not provide EvaCLIP flash attention yet.
     # Use SDPA implementation and compare against ColoAttention.
     def model_fn(self, fa: bool) -> PreTrainedModel:
         config = copy.deepcopy(self.config)

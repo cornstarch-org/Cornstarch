@@ -133,21 +133,9 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
 
-        policy[EvaCLIPAttention] = ModulePolicyDescription(
-            attribute_replacement=attention_attribute_replacement,
-            method_replacement={"forward": EvaCLIPAttentionForwards.eager_forward},
-        )
-
         if self.shard_config.enable_flash_attention:
             attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
                 not is_flash_attn_greater_or_equal("2.1.0")
-            )
-
-            policy[EvaCLIPAttention] = ModulePolicyDescription(
-                attribute_replacement=attention_attribute_replacement,
-                method_replacement={
-                    "forward": EvaCLIPAttentionForwards.flash_attention_forward
-                },
             )
 
         policy[EvaCLIPAttention] = ModulePolicyDescription(
