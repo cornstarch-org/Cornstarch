@@ -39,7 +39,10 @@ class TestQwen2AudioEncoderPolicy(ColossalaiHybridParallelBase):
         )
 
     def data_gen_fn(self) -> dict:
-        return dict(input_features=torch.rand(4, self.config.num_mel_bins, 3000))
+        batch_size = self.num_microbatches * self.microbatch_size
+        return dict(
+            input_features=torch.rand(batch_size, self.config.num_mel_bins, 3000)
+        )
 
     def check_fn(
         self,

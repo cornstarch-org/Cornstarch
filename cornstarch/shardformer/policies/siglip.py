@@ -134,6 +134,12 @@ class SiglipVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 method_replacement={"forward": (SiglipFlashAttention2.forward)},
             )
 
+            policy[SiglipVisionTransformer] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2"
+                }
+            )
+
         if self.shard_config.enable_tensor_parallelism:
             policy[SiglipEncoderLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
