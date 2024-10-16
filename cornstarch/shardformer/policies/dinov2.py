@@ -270,7 +270,9 @@ class Dinov2ModelPolicy(Dinov2Policy):
 class Dinov2BackbonePolicy(Dinov2Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
-        return Dinov2Policy.get_all_modules(config)
+        modules = Dinov2Policy.get_all_modules(config)
+        modules.append("layernorm")
+        return modules
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
         super().pipeline_template_sanity_check(template)

@@ -6,7 +6,6 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPo
 from transformers.models.siglip.modeling_siglip import (
     SiglipVisionModel,
     SiglipVisionTransformer,
-    logger,
 )
 
 
@@ -20,6 +19,8 @@ class SiglipVisionModelForwards:
         return_dict: Optional[bool] = None,
         interpolate_pos_encoding: Optional[bool] = False,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = (
@@ -38,25 +39,10 @@ class SiglipVisionModelForwards:
 
         stage_manager = shard_config.pipeline_stage_manager
 
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
-
         if stage_manager is None or stage_manager.is_first_stage():
             hidden_states = self.embeddings(
                 pixel_values, interpolate_pos_encoding=interpolate_pos_encoding
             )
-
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layers))
@@ -90,28 +76,33 @@ class SiglipVisionModelForwards:
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=hidden_states,
-                hidden_states=encoder_states,
-                attentions=all_attentions,
-            )
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {"hidden_states": hidden_states}
+            if output_hidden_states:
+                outputs["encoder_states"] = encoder_states
+            if output_attentions:
+                outputs["all_attentions"] = all_attentions
+            return outputs
 
-            last_hidden_state = encoder_outputs[0]
-            last_hidden_state = self.post_layernorm(last_hidden_state)
+        encoder_outputs = BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
+        )
 
-            pooler_output = self.head(last_hidden_state) if self.use_head else None
-            if not return_dict:
-                return (last_hidden_state, pooler_output) + encoder_outputs[1:]
+        last_hidden_state = encoder_outputs[0]
+        last_hidden_state = self.post_layernorm(last_hidden_state)
 
-            return BaseModelOutputWithPooling(
-                last_hidden_state=last_hidden_state,
-                pooler_output=pooler_output,
-                hidden_states=encoder_outputs.hidden_states,
-                attentions=encoder_outputs.attentions,
-            )
+        pooler_output = self.head(last_hidden_state) if self.use_head else None
+        if not return_dict:
+            return (last_hidden_state, pooler_output) + encoder_outputs[1:]
 
-        return {"hidden_states": hidden_states}
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooler_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
 
     @staticmethod
     def siglip_vision_model_forward(
@@ -122,6 +113,8 @@ class SiglipVisionModelForwards:
         return_dict: Optional[bool] = None,
         interpolate_pos_encoding: bool = False,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         return_dict = (
@@ -136,5 +129,7 @@ class SiglipVisionModelForwards:
             return_dict,
             interpolate_pos_encoding,
             hidden_states,
+            encoder_states,
+            all_attentions,
             shard_config,
         )

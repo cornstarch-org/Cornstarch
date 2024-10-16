@@ -36,7 +36,6 @@ class GemmaPolicyTestClassBase(ColossalaiHybridParallelBase):
         num_attention_heads=16,
         num_hidden_layers=4,
         use_cache=False,
-        _attn_implementation="eager",
     )
 
     def data_gen_fn(self) -> dict:

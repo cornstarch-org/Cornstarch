@@ -4,10 +4,7 @@ import torch
 from colossalai.shardformer.shard import ShardConfig
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutput
-from transformers.models.whisper.modeling_whisper import (
-    WhisperEncoder,
-    logger,
-)
+from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 
 class WhisperModelForwards:
@@ -21,6 +18,8 @@ class WhisperModelForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, BaseModelOutput]:
         output_attentions = (
@@ -39,18 +38,6 @@ class WhisperModelForwards:
 
         stage_manager = shard_config.pipeline_stage_manager
 
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
-
         # Process inputs if at the first stage of encoder.
         if stage_manager is None or stage_manager.is_first_stage():
             inputs_embeds = nn.functional.gelu(self.conv1(input_features))
@@ -68,9 +55,6 @@ class WhisperModelForwards:
             assert head_mask.size()[0] == (
                 len(self.layers)
             ), f"The head_mask should be specified for {len(self.layers)} layers, but it is for {head_mask.size()[0]}."
-
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
@@ -117,21 +101,26 @@ class WhisperModelForwards:
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[1],)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = self.layer_norm(hidden_states)
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {"hidden_states": hidden_states}
             if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
+                outputs["encoder_states"] = encoder_states
+            if output_attentions:
+                outputs["all_attentions"] = all_attentions
+            return outputs
 
-            if not return_dict:
-                return tuple(
-                    v
-                    for v in [hidden_states, encoder_states, all_attentions]
-                    if v is not None
-                )
-            return BaseModelOutput(
-                last_hidden_state=hidden_states,
-                hidden_states=encoder_states,
-                attentions=all_attentions,
+        hidden_states = self.layer_norm(hidden_states)
+        if output_hidden_states:
+            encoder_states = encoder_states + (hidden_states,)
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [hidden_states, encoder_states, all_attentions]
+                if v is not None
             )
-
-        return {"hidden_states": hidden_states}
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
+        )

@@ -52,6 +52,9 @@ class MixtralModelForwards:
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_router_logits: Optional[Tuple[torch.Tensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
     ) -> Union[Tuple, MoeModelOutputWithPast]:
@@ -82,28 +85,6 @@ class MixtralModelForwards:
         )
 
         stage_manager = shard_config.pipeline_stage_manager
-
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_router_logits:
-                logger.warning_once(
-                    "output_router_logits=True is not supported for pipeline models at the moment."
-                )
-                output_router_logits = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
-            if use_cache:
-                logger.warning_once(
-                    "use_cache=True is not supported for pipeline models at the moment."
-                )
-                use_cache = False
 
         if stage_manager is None or stage_manager.is_first_stage():
             if (input_ids is None) ^ (inputs_embeds is not None):
@@ -184,9 +165,6 @@ class MixtralModelForwards:
                 )
 
         # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
         if stage_manager is not None:
@@ -229,51 +207,58 @@ class MixtralModelForwards:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                all_self_attentions += (layer_outputs[1],)
 
             if output_router_logits:
                 all_router_logits += (layer_outputs[-1],)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = self.norm(hidden_states)
-            if shard_config.enable_sequence_parallelism and (
-                (not shard_config.parallel_output) or force_sp_gather
-            ):
-                hidden_states = gather_sp_output(hidden_states, shard_config)
-
-            # add hidden states from the last decoder layer
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {
+                "hidden_states": hidden_states,
+                "cache_position": cache_position,
+                "position_ids": position_ids,
+            }
             if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+                outputs["all_hidden_states"] = all_hidden_states
+            if output_attentions:
+                outputs["all_self_attentions"] = all_self_attentions
+            if output_router_logits:
+                outputs["all_router_logits"] = all_router_logits
+            return outputs
 
-            next_cache = next_decoder_cache if use_cache else None
-            if return_legacy_cache:
-                next_cache = next_cache.to_legacy_cache()
+        hidden_states = self.norm(hidden_states)
+        if shard_config.enable_sequence_parallelism and (
+            (not shard_config.parallel_output) or force_sp_gather
+        ):
+            hidden_states = gather_sp_output(hidden_states, shard_config)
 
-            if not return_dict:
-                return tuple(
-                    v
-                    for v in [
-                        hidden_states,
-                        next_cache,
-                        all_hidden_states,
-                        all_self_attns,
-                        all_router_logits,
-                    ]
-                    if v is not None
-                )
-            return MoeModelOutputWithPast(
-                last_hidden_state=hidden_states,
-                past_key_values=next_cache,
-                hidden_states=all_hidden_states,
-                attentions=all_self_attns,
-                router_logits=all_router_logits,
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        next_cache = next_decoder_cache if use_cache else None
+        if return_legacy_cache:
+            next_cache = next_cache.to_legacy_cache()
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_self_attentions,
+                    all_router_logits,
+                ]
+                if v is not None
             )
-
-        return {
-            "hidden_states": hidden_states,
-            "cache_position": cache_position,
-            "position_ids": position_ids,
-        }
+        return MoeModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+            router_logits=all_router_logits,
+        )
 
     def mixtral_for_causal_lm_forward(
         self: MixtralForCausalLM,
@@ -291,6 +276,9 @@ class MixtralModelForwards:
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_router_logits: Optional[Tuple[torch.Tensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         output_attentions = (
@@ -312,24 +300,6 @@ class MixtralModelForwards:
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
-        stage_manager = shard_config.pipeline_stage_manager
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_router_logits:
-                logger.warning_once(
-                    "output_router_logits=True is not supported for pipeline models at the moment."
-                )
-                output_router_logits = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
 
         if (
             shard_config.sequence_parallelism_mode == "ring_attn"
@@ -360,57 +330,61 @@ class MixtralModelForwards:
             return_dict=return_dict,
             cache_position=cache_position,
             hidden_states=hidden_states,
+            all_hidden_states=all_hidden_states,
+            all_router_logits=all_router_logits,
+            all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
         )
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = outputs[0]
-            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
-
-            loss = None
-            if labels is not None:
-                # Upcast to float if we need to compute the loss to avoid potential precision issues
-                logits = logits.float()
-                loss = dist_cross_entropy(
-                    labels,
-                    logits,
-                    shard_config,
-                    self.lm_head.out_features,
-                    self.model.dtype,
-                )
-
-            aux_loss = None
-            if output_router_logits:
-                aux_loss = load_balancing_loss_func(
-                    outputs.router_logits if return_dict else outputs[-1],
-                    self.num_experts,
-                    self.num_experts_per_tok,
-                    attention_mask,
-                )
-                if labels is not None:
-                    loss += self.router_aux_loss_coef * aux_loss.to(
-                        loss.device
-                    )  # make sure to reside in the same device
-
-            if not return_dict:
-                output = (logits,) + outputs[1:]
-                if output_router_logits:
-                    output = (aux_loss,) + output
-                return (loss,) + output if loss is not None else output
-
-            return MoeCausalLMOutputWithPast(
-                loss=loss,
-                aux_loss=aux_loss,
-                logits=logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
-                router_logits=outputs.router_logits,
-            )
-        else:
+        stage_manager = shard_config.pipeline_stage_manager
+        if not (stage_manager is None or stage_manager.is_last_stage()):
             return outputs
+
+        hidden_states = outputs[0]
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+
+        loss = None
+        if labels is not None:
+            # Upcast to float if we need to compute the loss to avoid potential precision issues
+            logits = logits.float()
+            loss = dist_cross_entropy(
+                labels,
+                logits,
+                shard_config,
+                self.lm_head.out_features,
+                self.model.dtype,
+            )
+
+        aux_loss = None
+        if output_router_logits:
+            aux_loss = load_balancing_loss_func(
+                outputs.router_logits if return_dict else outputs[-1],
+                self.num_experts,
+                self.num_experts_per_tok,
+                attention_mask,
+            )
+            if labels is not None:
+                loss += self.router_aux_loss_coef * aux_loss.to(
+                    loss.device
+                )  # make sure to reside in the same device
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            if output_router_logits:
+                output = (aux_loss,) + output
+            return (loss,) + output if loss is not None else output
+
+        return MoeCausalLMOutputWithPast(
+            loss=loss,
+            aux_loss=aux_loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            router_logits=outputs.router_logits,
+        )
 
 
 class MixtralAttentionForwards:

@@ -57,6 +57,8 @@ class LlamaModelForwards:
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -82,23 +84,6 @@ class LlamaModelForwards:
         )
 
         stage_manager = shard_config.pipeline_stage_manager
-
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
-            if use_cache:
-                logger.warning_once(
-                    "use_cache=True is not supported for pipeline models at the moment."
-                )
-                use_cache = False
 
         if stage_manager is None or stage_manager.is_first_stage():
             if (input_ids is None) ^ (inputs_embeds is not None):
@@ -189,8 +174,6 @@ class LlamaModelForwards:
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
         if stage_manager is not None:
@@ -233,47 +216,52 @@ class LlamaModelForwards:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                all_self_attentions += (layer_outputs[1],)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = self.norm(hidden_states)
-            if shard_config.enable_sequence_parallelism and (
-                (not shard_config.parallel_output) or force_sp_gather
-            ):
-                hidden_states = gather_sp_output(hidden_states, shard_config)
-
-            # add hidden states from the last decoder layer
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {
+                "hidden_states": hidden_states,
+                "cache_position": cache_position,
+                "position_ids": position_ids,
+                "position_embeddings": position_embeddings,
+            }
             if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+                outputs["all_hidden_states"] = all_hidden_states
+            if output_attentions:
+                outputs["all_self_attentions"] = all_self_attentions
+            return outputs
 
-            next_cache = next_decoder_cache if use_cache else None
-            if return_legacy_cache:
-                next_cache = next_cache.to_legacy_cache()
+        hidden_states = self.norm(hidden_states)
+        if shard_config.enable_sequence_parallelism and (
+            (not shard_config.parallel_output) or force_sp_gather
+        ):
+            hidden_states = gather_sp_output(hidden_states, shard_config)
 
-            if not return_dict:
-                return tuple(
-                    v
-                    for v in [
-                        hidden_states,
-                        next_cache,
-                        all_hidden_states,
-                        all_self_attns,
-                    ]
-                    if v is not None
-                )
-            return BaseModelOutputWithPast(
-                last_hidden_state=hidden_states,
-                past_key_values=next_cache,
-                hidden_states=all_hidden_states,
-                attentions=all_self_attns,
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        next_cache = next_decoder_cache if use_cache else None
+        if return_legacy_cache:
+            next_cache = next_cache.to_legacy_cache()
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_self_attentions,
+                ]
+                if v is not None
             )
-
-        return {
-            "hidden_states": hidden_states,
-            "cache_position": cache_position,
-            "position_ids": position_ids,
-            "position_embeddings": position_embeddings,
-        }
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+        )
 
     @staticmethod
     def llama_for_causal_lm_forward(
@@ -294,6 +282,8 @@ class LlamaModelForwards:
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
@@ -309,19 +299,6 @@ class LlamaModelForwards:
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
-        stage_manager = shard_config.pipeline_stage_manager
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
 
         if (
             shard_config.sequence_parallelism_mode == "ring_attn"
@@ -352,44 +329,47 @@ class LlamaModelForwards:
             cache_position=cache_position,
             position_embeddings=position_embeddings,
             hidden_states=hidden_states,
+            all_hidden_states=all_hidden_states,
+            all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
         )
         past_key_values = None
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = outputs[0]
-            if labels is None and not is_torchdynamo_compiling():
-                logger.warning_once(
-                    "Starting from v4.46, the `logits` model output will have the same type as the model (except at train time, where it will always be FP32)"
-                )
-            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-            # TODO: remove the float() operation in v4.46
-            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).float()
-
-            loss = None
-            if labels is not None:
-                loss = dist_cross_entropy(
-                    labels,
-                    logits,
-                    shard_config,
-                    self.lm_head.out_features,
-                    self.model.dtype,
-                )
-
-            if not return_dict:
-                output = (logits,) + outputs[1:]
-                return (loss,) + output if loss is not None else output
-
-            return CausalLMOutputWithPast(
-                loss=loss,
-                logits=logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
-            )
-        else:
+        stage_manager = shard_config.pipeline_stage_manager
+        if not (stage_manager is None or stage_manager.is_last_stage()):
             return outputs
+
+        hidden_states = outputs[0]
+        if labels is None and not is_torchdynamo_compiling():
+            logger.warning_once(
+                "Starting from v4.46, the `logits` model output will have the same type as the model (except at train time, where it will always be FP32)"
+            )
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        # TODO: remove the float() operation in v4.46
+        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).float()
+
+        loss = None
+        if labels is not None:
+            loss = dist_cross_entropy(
+                labels,
+                logits,
+                shard_config,
+                self.lm_head.out_features,
+                self.model.dtype,
+            )
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
     @staticmethod
     def llama_for_sequence_classification_forward(
@@ -409,6 +389,8 @@ class LlamaModelForwards:
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
         output_attentions = (
@@ -425,19 +407,6 @@ class LlamaModelForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        stage_manager = shard_config.pipeline_stage_manager
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
-
         outputs = LlamaModelForwards.llama_model_forward(
             self.model,
             input_ids=input_ids,
@@ -452,77 +421,76 @@ class LlamaModelForwards:
             cache_position=cache_position,
             position_embeddings=position_embeddings,
             hidden_states=hidden_states,
+            all_hidden_states=all_hidden_states,
+            all_self_attentions=all_self_attentions,
             shard_config=shard_config,
         )
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = outputs[0]
-            logits = self.score(hidden_states)
+        stage_manager = shard_config.pipeline_stage_manager
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            return outputs
 
-            batch_size = hidden_states.shape[0]
-            if self.config.pad_token_id is None and batch_size != 1:
-                raise ValueError(
-                    "Cannot handle batch sizes > 1 if no padding token is defined."
-                )
-            if self.config.pad_token_id is not None and input_ids is not None:
-                # if no pad token found, use modulo instead of reverse indexing for ONNX compatibility
-                sequence_lengths = (
-                    torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
-                )
-                sequence_lengths = sequence_lengths % input_ids.shape[-1]
-                sequence_lengths = sequence_lengths.to(logits.device)
-            else:
-                sequence_lengths = -1
+        hidden_states = outputs[0]
+        logits = self.score(hidden_states)
 
-            pooled_logits = logits[
-                torch.arange(batch_size, device=logits.device), sequence_lengths
-            ]
-
-            loss = None
-            if labels is not None:
-                labels = labels.to(logits.device)
-                if self.config.problem_type is None:
-                    if self.num_labels == 1:
-                        self.config.problem_type = "regression"
-                    elif self.num_labels > 1 and (
-                        labels.dtype == torch.long or labels.dtype == torch.int
-                    ):
-                        self.config.problem_type = "single_label_classification"
-                    else:
-                        self.config.problem_type = "multi_label_classification"
-
-                if self.config.problem_type == "regression":
-                    loss_fct = MSELoss()
-                    if self.num_labels == 1:
-                        loss = loss_fct(pooled_logits.squeeze(), labels.squeeze())
-                    else:
-                        loss = loss_fct(pooled_logits, labels)
-                elif self.config.problem_type == "single_label_classification":
-                    loss_fct = CrossEntropyLoss()
-                    loss = loss_fct(
-                        pooled_logits.view(-1, self.num_labels), labels.view(-1)
-                    )
-                elif self.config.problem_type == "multi_label_classification":
-                    loss_fct = BCEWithLogitsLoss()
-                    loss = loss_fct(pooled_logits, labels)
-
-            if not return_dict:
-                output = (pooled_logits,) + outputs[1:]
-                return ((loss,) + output) if loss is not None else output
-
-            return SequenceClassifierOutputWithPast(
-                loss=loss,
-                logits=pooled_logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
+        batch_size = hidden_states.shape[0]
+        if self.config.pad_token_id is None and batch_size != 1:
+            raise ValueError(
+                "Cannot handle batch sizes > 1 if no padding token is defined."
             )
+        if self.config.pad_token_id is not None and input_ids is not None:
+            # if no pad token found, use modulo instead of reverse indexing for ONNX compatibility
+            sequence_lengths = (
+                torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
+            )
+            sequence_lengths = sequence_lengths % input_ids.shape[-1]
+            sequence_lengths = sequence_lengths.to(logits.device)
         else:
-            return {
-                "hidden_states": outputs.get("hidden_states"),
-                "position_ids": outputs.get("position_ids"),
-                "cache_position": outputs.get("position_ids"),
-            }
+            sequence_lengths = -1
+
+        pooled_logits = logits[
+            torch.arange(batch_size, device=logits.device), sequence_lengths
+        ]
+
+        loss = None
+        if labels is not None:
+            labels = labels.to(logits.device)
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (
+                    labels.dtype == torch.long or labels.dtype == torch.int
+                ):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(pooled_logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(pooled_logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(
+                    pooled_logits.view(-1, self.num_labels), labels.view(-1)
+                )
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(pooled_logits, labels)
+
+        if not return_dict:
+            output = (pooled_logits,) + outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutputWithPast(
+            loss=loss,
+            logits=pooled_logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 class LlamaAttentionForwards:

@@ -144,7 +144,7 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
                 "forward": (
                     EvaCLIPAttentionForwards.flash_attention_forward
                     if self.shard_config.enable_flash_attention
-                    else EvaCLIPAttentionForwards.eager_forward
+                    else EvaCLIPAttentionForwards.sdpa_forward
                 )
             },
         )

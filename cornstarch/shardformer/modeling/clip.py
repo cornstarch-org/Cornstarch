@@ -27,6 +27,8 @@ class CLIPVisionModelForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = (
@@ -65,9 +67,6 @@ class CLIPVisionModelForwards:
             hidden_states = self.embeddings(pixel_values)
             hidden_states = self.pre_layrnorm(hidden_states)
 
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layers))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
@@ -102,28 +101,33 @@ class CLIPVisionModelForwards:
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=hidden_states,
-                hidden_states=encoder_states,
-                attentions=all_attentions,
-            )
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {"hidden_states": hidden_states}
+            if output_hidden_states:
+                outputs["encoder_states"] = encoder_states
+            if output_attentions:
+                outputs["attentions"] = all_attentions
+            return outputs
 
-            last_hidden_state = encoder_outputs[0]
-            pooled_output = last_hidden_state[:, 0, :]
-            pooled_output = self.post_layernorm(pooled_output)
+        encoder_outputs = BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
+        )
 
-            if not return_dict:
-                return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+        last_hidden_state = encoder_outputs[0]
+        pooled_output = last_hidden_state[:, 0, :]
+        pooled_output = self.post_layernorm(pooled_output)
 
-            return BaseModelOutputWithPooling(
-                last_hidden_state=last_hidden_state,
-                pooler_output=pooled_output,
-                hidden_states=encoder_outputs.hidden_states,
-                attentions=encoder_outputs.attentions,
-            )
+        if not return_dict:
+            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
 
-        return {"hidden_states": hidden_states}
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooled_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
 
     def clip_vision_model_forward(
         self: CLIPVisionModel,
@@ -132,6 +136,8 @@ class CLIPVisionModelForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         return CLIPVisionModelForwards.clip_vision_transformer_forward(
@@ -141,6 +147,8 @@ class CLIPVisionModelForwards:
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             hidden_states=hidden_states,
+            encoder_states=encoder_states,
+            all_attentions=all_attentions,
             shard_config=shard_config,
         )
 

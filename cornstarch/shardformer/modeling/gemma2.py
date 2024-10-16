@@ -50,6 +50,8 @@ class Gemma2ModelForwards:
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -77,16 +79,6 @@ class Gemma2ModelForwards:
         stage_manager = shard_config.pipeline_stage_manager
 
         if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
             if use_cache:
                 logger.warning_once(
                     "use_cache=True is not supported for pipeline models at the moment."
@@ -176,16 +168,13 @@ class Gemma2ModelForwards:
                     hidden_states, 1, sp_group, 1 / sp_size
                 )
 
-        # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         else:
             start_idx, end_idx = (0, len(self.layers))
 
+        # decoder layers
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -215,43 +204,48 @@ class Gemma2ModelForwards:
             hidden_states = layer_outputs[0]
 
             if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                all_self_attentions += (layer_outputs[1],)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = self.norm(hidden_states)
-            if shard_config.enable_sequence_parallelism and (
-                (not shard_config.parallel_output) or force_sp_gather
-            ):
-                hidden_states = gather_sp_output(hidden_states, shard_config)
-
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {
+                "hidden_states": hidden_states,
+                "cache_position": cache_position,
+                "position_ids": position_ids,
+            }
             if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+                outputs["all_hidden_states"] = all_hidden_states
+            if output_attentions:
+                outputs["all_self_attentions"] = all_self_attentions
+            return outputs
 
-            next_cache = past_key_values if use_cache else None
+        hidden_states = self.norm(hidden_states)
+        if shard_config.enable_sequence_parallelism and (
+            (not shard_config.parallel_output) or force_sp_gather
+        ):
+            hidden_states = gather_sp_output(hidden_states, shard_config)
 
-            if not return_dict:
-                return tuple(
-                    v
-                    for v in [
-                        hidden_states,
-                        next_cache,
-                        all_hidden_states,
-                        all_self_attns,
-                    ]
-                    if v is not None
-                )
-            return BaseModelOutputWithPast(
-                last_hidden_state=hidden_states,
-                past_key_values=next_cache,
-                hidden_states=all_hidden_states,
-                attentions=all_self_attns,
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        next_cache = past_key_values if use_cache else None
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_self_attentions,
+                ]
+                if v is not None
             )
-
-        return {
-            "hidden_states": hidden_states,
-            "cache_position": cache_position,
-            "position_ids": position_ids,
-        }
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+        )
 
     def gemma2_for_causal_lm_forward(
         self: Gemma2ForCausalLM,
@@ -268,6 +262,8 @@ class Gemma2ModelForwards:
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if self.training and self.config._attn_implementation != "eager":
@@ -289,19 +285,6 @@ class Gemma2ModelForwards:
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
-        stage_manager = shard_config.pipeline_stage_manager
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
 
         if (
             shard_config.sequence_parallelism_mode == "ring_attn"
@@ -331,45 +314,48 @@ class Gemma2ModelForwards:
             return_dict=return_dict,
             cache_position=cache_position,
             hidden_states=hidden_states,
+            all_hidden_states=all_hidden_states,
+            all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
         )
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = outputs[0]
-            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
-            if self.config.final_logit_softcapping is not None:
-                logits = logits / self.config.final_logit_softcapping
-                logits = torch.tanh(logits)
-                logits = logits * self.config.final_logit_softcapping
-
-            loss = None
-            if labels is not None:
-                # Upcast to float if we need to compute the loss to avoid potential precision issues
-                logits = logits.float()
-
-                loss = dist_cross_entropy(
-                    labels,
-                    logits,
-                    shard_config,
-                    self.lm_head.out_features,
-                    self.model.dtype,
-                )
-
-            if not return_dict:
-                output = (logits,) + outputs[1:]
-                return (loss,) + output if loss is not None else output
-
-            return CausalLMOutputWithPast(
-                loss=loss,
-                logits=logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
-            )
-        else:
+        stage_manager = shard_config.pipeline_stage_manager
+        if not(stage_manager is None or stage_manager.is_last_stage()):
             return outputs
+        
+        hidden_states = outputs[0]
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+        if self.config.final_logit_softcapping is not None:
+            logits = logits / self.config.final_logit_softcapping
+            logits = torch.tanh(logits)
+            logits = logits * self.config.final_logit_softcapping
+
+        loss = None
+        if labels is not None:
+            # Upcast to float if we need to compute the loss to avoid potential precision issues
+            logits = logits.float()
+
+            loss = dist_cross_entropy(
+                labels,
+                logits,
+                shard_config,
+                self.lm_head.out_features,
+                self.model.dtype,
+            )
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 class Gemma2AttentionForwards:

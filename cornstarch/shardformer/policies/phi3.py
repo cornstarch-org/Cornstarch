@@ -10,6 +10,7 @@ from colossalai.shardformer.layer import (
     VocabParallelEmbedding1D,
     VocabParallelLMHead1D,
 )
+from colossalai.shardformer.layer.qkv_fused_linear import FusedLinear1D_Col
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
@@ -25,7 +26,6 @@ from cornstarch.shardformer.modeling.phi3 import (
     Phi3AttentionForwards,
     Phi3ModelForwards,
 )
-from cornstarch.shardformer.modeling.qkv_fused_linear import FusedLinear1D_Col
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )

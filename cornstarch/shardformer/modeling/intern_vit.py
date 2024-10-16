@@ -12,7 +12,6 @@ from transformers.modeling_outputs import (
 from cornstarch.models.intern_vit.modeling_intern_vit import (
     InternAttention,
     InternVisionModel,
-    logger,
 )
 
 
@@ -25,6 +24,7 @@ class InternVisionModelForwards:
         return_dict: Optional[bool] = None,
         pixel_embeds: Optional[torch.FloatTensor] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_hidden_states = (
@@ -38,13 +38,6 @@ class InternVisionModelForwards:
 
         stage_manager = shard_config.pipeline_stage_manager
 
-        if stage_manager is not None:
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
-
         if stage_manager is None or stage_manager.is_first_stage():
             if pixel_values is None and pixel_embeds is None:
                 raise ValueError("You have to specify pixel_values or pixel_embeds")
@@ -56,8 +49,6 @@ class InternVisionModelForwards:
                     hidden_states = self.embeddings(pixel_values)
                 else:
                     raise ValueError(f"wrong pixel_values size: {pixel_values.shape}")
-
-        encoder_states = () if output_hidden_states else None
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layers))
@@ -82,26 +73,28 @@ class InternVisionModelForwards:
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=hidden_states, hidden_states=encoder_states
-            )
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {"hidden_states": hidden_states}
+            if output_hidden_states:
+                outputs["encoder_states"] = encoder_states
+            return outputs
 
-            last_hidden_state = encoder_outputs.last_hidden_state
-            pooled_output = last_hidden_state[:, 0, :]
+        encoder_outputs = BaseModelOutput(
+            last_hidden_state=hidden_states, hidden_states=encoder_states
+        )
 
-            if not return_dict:
-                return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+        last_hidden_state = encoder_outputs.last_hidden_state
+        pooled_output = last_hidden_state[:, 0, :]
 
-            return BaseModelOutputWithPooling(
-                last_hidden_state=last_hidden_state,
-                pooler_output=pooled_output,
-                hidden_states=encoder_outputs.hidden_states,
-                attentions=encoder_outputs.attentions,
-            )
+        if not return_dict:
+            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
 
-        # always return dict for intermediate stage
-        return {"hidden_states": hidden_states}
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooled_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
 
 
 class InternVisionAttentionForwards:

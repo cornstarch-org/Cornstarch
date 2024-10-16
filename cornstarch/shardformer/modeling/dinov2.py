@@ -13,7 +13,6 @@ from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2Encoder,
     Dinov2Model,
     Dinov2SelfAttention,
-    logger,
 )
 
 
@@ -66,26 +65,25 @@ class Dinov2ModelForwards:
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            if not return_dict:
-                return tuple(
-                    v
-                    for v in [hidden_states, all_hidden_states, all_self_attentions]
-                    if v is not None
-                )
-            return BaseModelOutput(
-                last_hidden_state=hidden_states,
-                hidden_states=all_hidden_states,
-                attentions=all_self_attentions,
-            )
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {"hidden_states": hidden_states}
+            if output_hidden_states:
+                outputs["all_hidden_states"] = all_hidden_states
+            if output_attentions:
+                outputs["all_self_attentions"] = all_self_attentions
+            return outputs
 
-        if output_hidden_states:
-            return {
-                "hidden_states": hidden_states,
-                "all_hidden_states": all_hidden_states,
-            }
-        else:
-            return {"hidden_states": hidden_states}
+        if not return_dict:
+            return tuple(
+                v
+                for v in [hidden_states, all_hidden_states, all_self_attentions]
+                if v is not None
+            )
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+        )
 
     @staticmethod
     def dinov2_model_forward(
@@ -98,6 +96,7 @@ class Dinov2ModelForwards:
         return_dict: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = (
@@ -115,13 +114,6 @@ class Dinov2ModelForwards:
         )
 
         stage_manager = shard_config.pipeline_stage_manager
-
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
@@ -147,26 +139,27 @@ class Dinov2ModelForwards:
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             all_hidden_states=all_hidden_states,
+            all_self_attentions=all_self_attentions,
             shard_config=shard_config,
         )
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            sequence_output = encoder_outputs[0]
-            sequence_output = self.layernorm(sequence_output)
-            pooled_output = sequence_output[:, 0, :]
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            return encoder_outputs
 
-            if not return_dict:
-                head_outputs = (sequence_output, pooled_output)
-                return head_outputs + encoder_outputs[1:]
+        sequence_output = encoder_outputs[0]
+        sequence_output = self.layernorm(sequence_output)
+        pooled_output = sequence_output[:, 0, :]
 
-            return BaseModelOutputWithPooling(
-                last_hidden_state=sequence_output,
-                pooler_output=pooled_output,
-                hidden_states=encoder_outputs.hidden_states,
-                attentions=encoder_outputs.attentions,
-            )
+        if not return_dict:
+            head_outputs = (sequence_output, pooled_output)
+            return head_outputs + encoder_outputs[1:]
 
-        return encoder_outputs
+        return BaseModelOutputWithPooling(
+            last_hidden_state=sequence_output,
+            pooler_output=pooled_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
 
     @staticmethod
     def dinov2_backbone_forward(
@@ -177,6 +170,7 @@ class Dinov2ModelForwards:
         return_dict: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
     ) -> BackboneOutput:
         return_dict = (
@@ -195,13 +189,6 @@ class Dinov2ModelForwards:
 
         stage_manager = shard_config.pipeline_stage_manager
 
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-
         if stage_manager is None or stage_manager.is_first_stage():
             if pixel_values is None:
                 raise ValueError("You have to specify pixel_values")
@@ -216,43 +203,44 @@ class Dinov2ModelForwards:
             output_hidden_states=True,
             return_dict=return_dict,
             all_hidden_states=all_hidden_states,
+            all_self_attentions=all_self_attentions,
             shard_config=shard_config,
         )
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = outputs.hidden_states if return_dict else outputs[1]
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            return outputs
 
-            feature_maps = ()
-            for stage, hidden_state in zip(self.stage_names, hidden_states):
-                if stage in self.out_features:
-                    if self.config.apply_layernorm:
-                        hidden_state = self.layernorm(hidden_state)
-                    if self.config.reshape_hidden_states:
-                        hidden_state = hidden_state[:, 1:]
-                        # this was actually a bug in the original implementation that we copied here,
-                        # cause normally the order is height, width
-                        batch_size, _, height, width = pixel_values.shape
-                        patch_size = self.config.patch_size
-                        hidden_state = hidden_state.reshape(
-                            batch_size, height // patch_size, width // patch_size, -1
-                        )
-                        hidden_state = hidden_state.permute(0, 3, 1, 2).contiguous()
-                    feature_maps += (hidden_state,)
+        hidden_states = outputs.hidden_states if return_dict else outputs[1]
 
-            if not return_dict:
-                if output_hidden_states:
-                    output = (feature_maps,) + outputs[1:]
-                else:
-                    output = (feature_maps,) + outputs[2:]
-                return output
+        feature_maps = ()
+        for stage, hidden_state in zip(self.stage_names, hidden_states):
+            if stage in self.out_features:
+                if self.config.apply_layernorm:
+                    hidden_state = self.layernorm(hidden_state)
+                if self.config.reshape_hidden_states:
+                    hidden_state = hidden_state[:, 1:]
+                    # this was actually a bug in the original implementation that we copied here,
+                    # cause normally the order is height, width
+                    batch_size, _, height, width = pixel_values.shape
+                    patch_size = self.config.patch_size
+                    hidden_state = hidden_state.reshape(
+                        batch_size, height // patch_size, width // patch_size, -1
+                    )
+                    hidden_state = hidden_state.permute(0, 3, 1, 2).contiguous()
+                feature_maps += (hidden_state,)
 
-            return BackboneOutput(
-                feature_maps=feature_maps,
-                hidden_states=outputs.hidden_states if output_hidden_states else None,
-                attentions=outputs.attentions if output_attentions else None,
-            )
+        if not return_dict:
+            if output_hidden_states:
+                output = (feature_maps,) + outputs[1:]
+            else:
+                output = (feature_maps,) + outputs[2:]
+            return output
 
-        return outputs
+        return BackboneOutput(
+            feature_maps=feature_maps,
+            hidden_states=outputs.hidden_states if output_hidden_states else None,
+            attentions=outputs.attentions if output_attentions else None,
+        )
 
 
 class Dinov2SelfAttentionForwards:

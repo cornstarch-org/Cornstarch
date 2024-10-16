@@ -6,7 +6,6 @@ from colossalai.shardformer.shard.shard_config import ShardConfig
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.qwen2_audio.modeling_qwen2_audio import (
     Qwen2AudioEncoder,
-    logger,
 )
 
 
@@ -21,6 +20,8 @@ class Qwen2AudioModelForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, BaseModelOutput]:
         expected_seq_length = (
@@ -49,18 +50,6 @@ class Qwen2AudioModelForwards:
 
         stage_manager = shard_config.pipeline_stage_manager
 
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
-
         # Process inputs if at the first stage of encoder.
         if stage_manager is None or stage_manager.is_first_stage():
             # Ignore copy
@@ -78,9 +67,6 @@ class Qwen2AudioModelForwards:
             hidden_states = nn.functional.dropout(
                 hidden_states, p=self.dropout, training=self.training
             )
-
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
 
         # check if head_mask has a correct number of layers specified if desired
         if head_mask is not None:
@@ -133,26 +119,31 @@ class Qwen2AudioModelForwards:
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[1],)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            # Ignore copy
-            hidden_states = hidden_states.permute(0, 2, 1)
-            hidden_states = self.avg_pooler(hidden_states)
-            hidden_states = hidden_states.permute(0, 2, 1)
-
-            hidden_states = self.layer_norm(hidden_states)
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {"hidden_states": hidden_states}
             if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
+                outputs["encoder_states"] = encoder_states
+            if output_attentions:
+                outputs["all_attentions"] = all_attentions
+            return outputs
 
-            if not return_dict:
-                return tuple(
-                    v
-                    for v in [hidden_states, encoder_states, all_attentions]
-                    if v is not None
-                )
-            return BaseModelOutput(
-                last_hidden_state=hidden_states,
-                hidden_states=encoder_states,
-                attentions=all_attentions,
+        # Ignore copy
+        hidden_states = hidden_states.permute(0, 2, 1)
+        hidden_states = self.avg_pooler(hidden_states)
+        hidden_states = hidden_states.permute(0, 2, 1)
+
+        hidden_states = self.layer_norm(hidden_states)
+        if output_hidden_states:
+            encoder_states = encoder_states + (hidden_states,)
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [hidden_states, encoder_states, all_attentions]
+                if v is not None
             )
-
-        return {"hidden_states": hidden_states}
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
+        )

@@ -50,6 +50,8 @@ class InternLM2ModelForwards:
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -64,7 +66,6 @@ class InternLM2ModelForwards:
             else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
         if use_cache and self.gradient_checkpointing and self.training:
             logger.warning_once(
                 "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
@@ -77,16 +78,6 @@ class InternLM2ModelForwards:
         stage_manager = shard_config.pipeline_stage_manager
 
         if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
             if use_cache:
                 logger.warning_once(
                     "use_cache=True is not supported for pipeline models at the moment."
@@ -165,8 +156,6 @@ class InternLM2ModelForwards:
                 )
 
         # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
         if stage_manager is not None:
@@ -207,46 +196,51 @@ class InternLM2ModelForwards:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                all_self_attentions += (layer_outputs[1],)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = self.norm(hidden_states)
-            if shard_config.enable_sequence_parallelism and (
-                (not shard_config.parallel_output) or force_sp_gather
-            ):
-                hidden_states = gather_sp_output(hidden_states, shard_config)
-
-            # add hidden states from the last decoder layer
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {
+                "hidden_states": hidden_states,
+                "cache_position": cache_position,
+                "position_ids": position_ids,
+            }
             if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+                outputs["all_hidden_states"] = all_hidden_states
+            if output_attentions:
+                outputs["all_self_attentions"] = all_self_attentions
+            return outputs
 
-            next_cache = next_decoder_cache if use_cache else None
-            if return_legacy_cache:
-                next_cache = next_cache.to_legacy_cache()
+        hidden_states = self.norm(hidden_states)
+        if shard_config.enable_sequence_parallelism and (
+            (not shard_config.parallel_output) or force_sp_gather
+        ):
+            hidden_states = gather_sp_output(hidden_states, shard_config)
 
-            if not return_dict:
-                return tuple(
-                    v
-                    for v in [
-                        hidden_states,
-                        next_cache,
-                        all_hidden_states,
-                        all_self_attns,
-                    ]
-                    if v is not None
-                )
-            return BaseModelOutputWithPast(
-                last_hidden_state=hidden_states,
-                past_key_values=next_cache,
-                hidden_states=all_hidden_states,
-                attentions=all_self_attns,
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        next_cache = next_decoder_cache if use_cache else None
+        if return_legacy_cache:
+            next_cache = next_cache.to_legacy_cache()
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_self_attentions,
+                ]
+                if v is not None
             )
-
-        return {
-            "hidden_states": hidden_states,
-            "cache_position": cache_position,
-            "position_ids": position_ids,
-        }
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+        )
 
     @staticmethod
     def internlm2_for_causal_lm_forward(
@@ -263,8 +257,9 @@ class InternLM2ModelForwards:
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
-        force_sp_gather: bool = True,  # Set to false only when computing cross entropy
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -279,19 +274,6 @@ class InternLM2ModelForwards:
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
-        stage_manager = shard_config.pipeline_stage_manager
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
 
         if (
             shard_config.sequence_parallelism_mode == "ring_attn"
@@ -321,37 +303,40 @@ class InternLM2ModelForwards:
             return_dict=return_dict,
             cache_position=cache_position,
             hidden_states=hidden_states,
+            all_hidden_states=all_hidden_states,
+            all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
         )
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            hidden_states = outputs[0]
-            logits = self.output(hidden_states).float()
-
-            loss = None
-            if labels is not None:
-                loss = dist_cross_entropy(
-                    labels,
-                    logits,
-                    shard_config,
-                    self.output.out_features,
-                    self.model.dtype,
-                )
-
-            if not return_dict:
-                output = (logits,) + outputs[1:]
-                return (loss,) + output if loss is not None else output
-
-            return CausalLMOutputWithPast(
-                loss=loss,
-                logits=logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
-            )
-        else:
+        stage_manager = shard_config.pipeline_stage_manager
+        if not (stage_manager is None or stage_manager.is_last_stage()):
             return outputs
+
+        hidden_states = outputs[0]
+        logits = self.output(hidden_states).float()
+
+        loss = None
+        if labels is not None:
+            loss = dist_cross_entropy(
+                labels,
+                logits,
+                shard_config,
+                self.output.out_features,
+                self.model.dtype,
+            )
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 class InternLM2AttentionForwards:

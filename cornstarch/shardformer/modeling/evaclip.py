@@ -2,15 +2,14 @@ from typing import Optional, Tuple, Union
 
 import torch
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from torch import nn
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
+from transformers.pytorch_utils import is_torch_greater_or_equal_than_2_2
 
 from cornstarch.models.evaclip.modeling_evaclip import (
     EvaCLIPAttention,
     EvaCLIPVisionModel,
     EvaCLIPVisionTransformer,
-    logger,
 )
 
 
@@ -23,6 +22,8 @@ class EvaCLIPModelForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = (
@@ -41,26 +42,11 @@ class EvaCLIPModelForwards:
 
         stage_manager = shard_config.pipeline_stage_manager
 
-        if stage_manager is not None:
-            if output_attentions:
-                logger.warning_once(
-                    "output_attentions=True is not supported for pipeline models at the moment."
-                )
-                output_attentions = False
-            if output_hidden_states:
-                logger.warning_once(
-                    "output_hidden_states=True is not supported for pipeline models at the moment."
-                )
-                output_hidden_states = False
-
         if stage_manager is None or stage_manager.is_first_stage():
             if pixel_values is None:
                 raise ValueError("You have to specify pixel_values")
 
             hidden_states = self.embeddings(pixel_values)
-
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layers))
@@ -96,28 +82,33 @@ class EvaCLIPModelForwards:
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        if stage_manager is None or stage_manager.is_last_stage():
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=hidden_states,
-                hidden_states=encoder_states,
-                attentions=all_attentions,
-            )
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {"hidden_states": hidden_states}
+            if output_hidden_states:
+                outputs["encoder_states"] = encoder_states
+            if output_attentions:
+                outputs["all_attentions"] = all_attentions
+            return outputs
 
-            last_hidden_state = encoder_outputs[0]
-            pooled_output = last_hidden_state[:, 0, :]
-            pooled_output = self.post_layernorm(pooled_output)
+        encoder_outputs = BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
+        )
 
-            if not return_dict:
-                return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+        last_hidden_state = encoder_outputs[0]
+        pooled_output = last_hidden_state[:, 0, :]
+        pooled_output = self.post_layernorm(pooled_output)
 
-            return BaseModelOutputWithPooling(
-                last_hidden_state=last_hidden_state,
-                pooler_output=pooled_output,
-                hidden_states=encoder_outputs.hidden_states,
-                attentions=encoder_outputs.attentions,
-            )
+        if not return_dict:
+            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
 
-        return {"hidden_states": hidden_states}
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooled_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
 
     @staticmethod
     def evaclip_vision_model_forward(
@@ -127,6 +118,8 @@ class EvaCLIPModelForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         return EvaCLIPModelForwards.eva_clip_vision_transformer_forward(
@@ -136,6 +129,8 @@ class EvaCLIPModelForwards:
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             hidden_states=hidden_states,
+            encoder_states=encoder_states,
+            all_attentions=all_attentions,
             shard_config=shard_config,
         )
 
@@ -189,7 +184,8 @@ class EvaCLIPAttentionForwards:
 
         return attn_output, None
 
-    def eager_forward(
+    @staticmethod
+    def sdpa_forward(
         self: EvaCLIPAttention,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -197,82 +193,54 @@ class EvaCLIPAttentionForwards:
         output_attentions: Optional[bool] = False,
         shard_config: Optional[ShardConfig] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        # CLIP text model uses both `causal_attention_mask` and `attention_mask`
+        if attention_mask is not None and causal_attention_mask is not None:
+            attn_mask = attention_mask + causal_attention_mask
+        elif causal_attention_mask is not None:
+            attn_mask = causal_attention_mask
+        else:
+            attn_mask = attention_mask
+
         bsz, tgt_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states) * self.scale
-        key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-        value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
-        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
-        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
-        key_states = key_states.view(*proj_shape)
-        value_states = value_states.view(*proj_shape)
+        query_states = query_states.view(
+            bsz, tgt_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, tgt_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, tgt_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
 
-        src_len = key_states.size(1)
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
+        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+        # Reference: https://github.com/pytorch/pytorch/issues/112577.
+        if (
+            not is_torch_greater_or_equal_than_2_2
+            and query_states.device.type == "cuda"
+            and attn_mask is not None
+        ):
+            query_states = query_states.contiguous()
+            key_states = key_states.contiguous()
+            value_states = value_states.contiguous()
 
-        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
-                f" {attn_weights.size()}"
-            )
-
-        # apply the causal_attention_mask first
-        if causal_attention_mask is not None:
-            if causal_attention_mask.size() != (bsz, 1, tgt_len, src_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is"
-                    f" {causal_attention_mask.size()}"
-                )
-            attn_weights = (
-                attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                + causal_attention_mask
-            )
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, tgt_len, src_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = (
-                attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                + attention_mask
-            )
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-
-        if output_attentions:
-            # this operation is a bit akward, but it's required to
-            # make sure that attn_weights keeps its gradient.
-            # In order to do so, attn_weights have to reshaped
-            # twice and have to be reused in the following
-            attn_weights_reshaped = attn_weights.view(
-                bsz, self.num_heads, tgt_len, src_len
-            )
-            attn_weights = attn_weights_reshaped.view(
-                bsz * self.num_heads, tgt_len, src_len
-            )
-        else:
-            attn_weights_reshaped = None
-
-        attn_probs = nn.functional.dropout(
-            attn_weights, p=self.dropout, training=self.training
+        # CLIP text model uses both `causal_attention_mask` and `attention_mask` sequentially.
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            scale=self.scale,
         )
 
-        attn_output = torch.bmm(attn_probs, value_states)
-
-        if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights_reshaped
+        return attn_output, None
