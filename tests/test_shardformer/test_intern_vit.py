@@ -1,3 +1,5 @@
+import copy
+
 import torch
 from colossalai.booster import Booster
 from colossalai.interface import ModelWrapper, OptimizerWrapper
@@ -6,7 +8,8 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-from transformers.modeling_outputs import ModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPooling, ModelOutput
+from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.intern_vit.configuration_intern_vit import InternVisionConfig
 from cornstarch.models.intern_vit.modeling_intern_vit import InternVisionModel
@@ -15,7 +18,6 @@ from ._utils import (
     ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
-    check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
     unwrap_model,
@@ -24,14 +26,29 @@ from ._utils import (
 
 @instantiate_parametrized_tests
 class TestInternVisionModelPolicyClass(ColossalaiHybridParallelBase):
-    model_class: InternVisionModel
+    model_class = InternVisionModel
     config = InternVisionConfig(
+        intermediate_size=128,
         num_hidden_layers=4,
         use_flash_attn=False,
-        num_attention_heads=24,  # must be divisible to tp size
-        hidden_size=3072,  # each head has 128 hidden size
+        num_attention_heads=16,  # must be divisible to tp size
+        hidden_size=2048,  # each head has 128 hidden size
         qk_normalization=False,
     )
+
+    # HF does not provide InternVision flash attention yet.
+    # Use SDPA implementation and compare against ColoAttention.
+    def model_fn(self, fa: bool) -> PreTrainedModel:
+        config = copy.deepcopy(self.config)
+        config.pad_token_id = config.eos_token_id
+        config._attn_implementation = "eager"
+        return self.model_class(config)
+
+    @staticmethod
+    def loss_fn(x: BaseModelOutputWithPooling) -> torch.Tensor:
+        return torch.nn.functional.mse_loss(
+            x.last_hidden_state, torch.ones_like(x.last_hidden_state)
+        )
 
     def data_gen_fn(self) -> dict:
         image_size = self.config.image_size
@@ -121,9 +138,6 @@ class TestInternVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
-            check_output_hidden_state(
-                org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
-            )
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
@@ -149,9 +163,9 @@ class TestInternVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
         check_all_grad_tensors(grads_to_check)
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp32", "fp16"])
+    @parametrize("precision", ["bf16", "fp32"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):

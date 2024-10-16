@@ -1,7 +1,7 @@
 import functools
 import itertools
 import warnings
-from typing import Callable, Dict, List, cast
+from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedLinear1D_Col,
@@ -16,13 +16,14 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import nn
 from transformers import PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 
 from cornstarch.models.intern_vit.configuration_intern_vit import InternVisionConfig
 from cornstarch.models.intern_vit.modeling_intern_vit import InternVisionModel
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.intern_vit import (
-    InternVisionForwards,
-    InternVisionPipelineForwards,
+    InternVisionAttentionForwards,
+    InternVisionModelForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -74,7 +75,9 @@ class InternVisionModelPolicy(PipelineTemplatePolicyBase, Policy):
             InternVisionEncoderLayer,
         )
 
-        policy: dict[str | nn.Module, ModulePolicyDescription] = {}
+        config: InternVisionConfig = self.model.config
+
+        policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
@@ -82,27 +85,44 @@ class InternVisionModelPolicy(PipelineTemplatePolicyBase, Policy):
                 "InternVision doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
             )
 
-        config: InternVisionConfig = self.model.config
+        tp_size = self.shard_config.tensor_parallel_size
+        num_heads = config.num_attention_heads
+        hidden_size = config.hidden_size
+
         if self.shard_config.enable_tensor_parallelism:
+            hidden_size = hidden_size // tp_size
+
             assert (
-                config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
-            ), (
-                f"The number of attention heads {config.num_attention_heads} must be divisible "
-                f"by tensor parallel size {self.shard_config.tensor_parallel_size}."
-            )
+                num_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_heads //= tp_size
+
             assert (
                 not config.qk_normalization
             ), "QK normalization is not supported with tensor parallelism."
 
-            attribute_replacement = {
-                "attn.num_heads": config.num_attention_heads
-                // self.shard_config.tensor_parallel_size,
-                "attn.embed_dim": config.hidden_size
-                // self.shard_config.tensor_parallel_size,
-            }
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["embed_dim"] = hidden_size
+        attention_attribute_replacement["num_heads"] = num_heads
 
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
+            )
+
+        policy[InternAttention] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": (
+                    InternVisionAttentionForwards.flash_attention_forward
+                    if self.shard_config.enable_flash_attention
+                    else InternVisionAttentionForwards.eager_attention_forward
+                ),
+            },
+        )
+
+        if self.shard_config.enable_tensor_parallelism:
             policy[InternVisionEncoderLayer] = ModulePolicyDescription(
-                attribute_replacement=attribute_replacement,
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="attn.qkv",
@@ -140,53 +160,18 @@ class InternVisionModelPolicy(PipelineTemplatePolicyBase, Policy):
                 target_key=InternVisionEncoderLayer,
             )
 
-        if self.shard_config.enable_flash_attention:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": InternVisionForwards.intern_flash_attention_forward
-                },
-                policy=policy,
-                target_key=InternAttention,
-            )
-        else:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": InternVisionForwards.intern_eager_attention_forward,
-                },
-                policy=policy,
-                target_key=InternAttention,
-            )
-
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=InternVisionModel,
-                new_forward=InternVisionPipelineForwards.intern_vit_model_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    InternVisionModelForwards.intern_vit_model_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=InternVisionModel,
+        )
 
         return policy
-
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
-    ):
-        assert self.pipeline_stage_manager is not None
-
-        module: InternVisionModel = self.model
-        stage_manager = self.pipeline_stage_manager
-        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layers))
-        stage_index = stage_manager.get_stage_index(layers_per_stage)
-
-        method_replacement = {
-            "forward": functools.partial(
-                new_forward,
-                stage_manager=stage_manager,
-                stage_index=stage_index,
-                shard_config=self.shard_config,
-            )
-        }
-        self.append_or_create_method_replacement(
-            description=method_replacement, policy=policy, target_key=model_cls
-        )
 
     def get_held_layers(self) -> List[nn.Module]:
         assert self.pipeline_stage_manager is not None

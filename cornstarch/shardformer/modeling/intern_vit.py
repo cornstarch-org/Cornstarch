@@ -1,10 +1,9 @@
 from typing import Optional, Tuple, Union
 
 import torch
-from colossalai.pipeline.stage_manager import PipelineStageManager
-from colossalai.shardformer.layer import ColoAttention
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch import nn
+from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPooling,
@@ -13,19 +12,19 @@ from transformers.modeling_outputs import (
 from cornstarch.models.intern_vit.modeling_intern_vit import (
     InternAttention,
     InternVisionModel,
+    logger,
 )
 
 
-class InternVisionPipelineForwards:
+class InternVisionModelForwards:
+    @staticmethod
     def intern_vit_model_forward(
         self: InternVisionModel,
         pixel_values: Optional[torch.FloatTensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         pixel_embeds: Optional[torch.FloatTensor] = None,
-        stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
-        stage_index: Optional[list[int]] = None,
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_hidden_states = (
@@ -37,7 +36,16 @@ class InternVisionPipelineForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        if stage_manager.is_first_stage():
+        stage_manager = shard_config.pipeline_stage_manager
+
+        if stage_manager is not None:
+            if output_hidden_states:
+                logger.warning_once(
+                    "output_hidden_states=True is not supported for pipeline models at the moment."
+                )
+                output_hidden_states = False
+
+        if stage_manager is None or stage_manager.is_first_stage():
             if pixel_values is None and pixel_embeds is None:
                 raise ValueError("You have to specify pixel_values or pixel_embeds")
 
@@ -51,7 +59,12 @@ class InternVisionPipelineForwards:
 
         encoder_states = () if output_hidden_states else None
 
-        start_idx, end_idx = stage_index
+        if stage_manager is not None:
+            layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layers))
+            start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        else:
+            start_idx, end_idx = (0, len(self.encoder.layers))
+
         for encoder_layer in self.encoder.layers[start_idx:end_idx]:
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
@@ -69,7 +82,7 @@ class InternVisionPipelineForwards:
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        if stage_manager.is_last_stage():
+        if stage_manager is None or stage_manager.is_last_stage():
             encoder_outputs = BaseModelOutput(
                 last_hidden_state=hidden_states, hidden_states=encoder_states
             )
@@ -91,9 +104,11 @@ class InternVisionPipelineForwards:
         return {"hidden_states": hidden_states}
 
 
-class InternVisionForwards:
-    def intern_flash_attention_forward(
-        self: InternAttention, hidden_states: torch.Tensor
+class InternVisionAttentionForwards:
+    @staticmethod
+    def flash_attention_forward(
+        self: InternAttention,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         bsz, tgt_len, _ = hidden_states.size()
 
@@ -104,32 +119,22 @@ class InternVisionForwards:
         value_states = qkv[..., query_pos + self.embed_dim :]
 
         # [batch_size, tgt_len, embed_dim] -> [batch_size, tgt_len, num_heads, head_dim]
-        query_states = query_states.view(
-            bsz, -1, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(bsz, -1, self.num_heads, self.head_dim).transpose(
-            1, 2
-        )
-        value_states = value_states.view(
-            bsz, -1, self.num_heads, self.head_dim
-        ).transpose(1, 2)
+        query_states = query_states.view(bsz, -1, self.num_heads, self.head_dim)
+        key_states = key_states.view(bsz, -1, self.num_heads, self.head_dim)
+        value_states = value_states.view(bsz, -1, self.num_heads, self.head_dim)
 
-        attn_output = ColoAttention.attention(
+        attn_output = _flash_attention_forward(
             query_states,
             key_states,
             value_states,
             attention_mask=None,
-            dropout_p=self.attn_drop.p,
-            scale=self.scale,
+            query_length=tgt_len,
+            is_causal=False,
+            dropout=self.attn_drop.p,
+            softmax_scale=self.scale,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
 
-        if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
 
         attn_output = self.proj(attn_output)
@@ -137,8 +142,10 @@ class InternVisionForwards:
 
         return attn_output
 
-    def intern_eager_attention_forward(
-        self: InternAttention, hidden_states: torch.Tensor
+    @staticmethod
+    def eager_attention_forward(
+        self: InternAttention,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         def shape(self: InternAttention, tensor: torch.Tensor, seq_len: int, bsz: int):
             return (
