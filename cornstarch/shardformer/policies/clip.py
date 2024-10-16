@@ -124,13 +124,10 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         policy[attn_cls] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
-                "forward": functools.partial(
-                    (
-                        CLIPAttentionForwards.flash_attention_forward
-                        if config._attn_implementation == "flash_attention_2"
-                        else CLIPAttentionForwards.sdpa_forward
-                    ),
-                    shard_config=self.shard_config,
+                "forward": (
+                    CLIPAttentionForwards.flash_attention_forward
+                    if config._attn_implementation == "flash_attention_2"
+                    else CLIPAttentionForwards.sdpa_forward
                 )
             },
         )
@@ -143,10 +140,7 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
             policy[attn_cls] = ModulePolicyDescription(
                 attribute_replacement=attention_attribute_replacement,
                 method_replacement={
-                    "forward": functools.partial(
-                        CLIPAttentionForwards.flash_attention_forward,
-                        shard_config=self.shard_config,
-                    )
+                    "forward": CLIPAttentionForwards.flash_attention_forward
                 },
             )
 
