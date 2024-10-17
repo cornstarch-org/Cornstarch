@@ -645,7 +645,7 @@ class LlamaAttentionForwards:
             # attn_output = attn_output.transpose(1, 2).contiguous()
 
             # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
-            attn_output = RingAttentionBase.apply(
+            attn_output = RingAttentionBase.attention(
                 query_states,
                 key_states,
                 value_states,

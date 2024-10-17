@@ -64,6 +64,9 @@ from ._utils import (
     unwrap_model,
 )
 
+def print_rank0(msg):
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        print(msg)
 
 class PolicyTestBase(ABC):
     @staticmethod
@@ -169,27 +172,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         org_model.gradient_checkpointing_enable()
         sharded_model.unwrap().gradient_checkpointing_enable()
 
-        # with (
-        #     patch.object(
-        #         dist,
-        #         "batch_isend_irecv",
-        #         new=PolicyTestBase.batch_isend_irecv_gloo,
-        #     ),
-        #     patch.object(
-        #         dist,
-        #         "all_to_all",
-        #         new=PolicyTestBase.all_to_all_gloo,
-        #     ),
-        #     patch.object(
-        #         dist,
-        #         "all_to_all_single",
-        #         new=PolicyTestBase.all_to_all_single_gloo,
-        #     ),
-        #     patch(
-        #         "colossalai.pipeline.p2p._check_device",
-        #         return_value=(torch.device("cuda"), False),
-        #     ),
-        # ):
         org_loss, org_output, sharded_loss, sharded_output = (
             self.run_forward_backward_with_hybrid_plugin(
                 org_model=org_model,
@@ -248,6 +230,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         #     return_value=get_autopolicy(_fullname(org_model)),
         # ):
         policy = get_autopolicy(_fullname(org_model))
+        print_rank0(policy)
         plugin = HybridParallelPlugin(**test_config, custom_policy=policy)
         plugin.precision = None
         booster = Booster(plugin=plugin)
@@ -255,6 +238,8 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
             sharded_model, sharded_optimizer, self.loss_fn
         )
+
+        print_rank0(sharded_model)
 
         return (
             org_model,
@@ -322,6 +307,7 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         num_hidden_layers=2,
         use_cache=False,
         _attn_implementati2n="eager",
+        # _attn_implementati2n="flash_attention_2",
     )
 
     def data_gen_fn(self) -> dict:
@@ -436,8 +422,10 @@ def run(rank: int, world_size: int, tp_size: int, pp_size: int, sp_size: int, sp
 
 '''
 CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.utils_ring --world_size 2 --tp_size 2 --pp_size 1 --sp_size 1
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.test_shardformer.utils_ring --world_size 4 --tp_size 2 --pp_size 2 --sp_size 1
 CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.utils_ring --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
 CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.utils_ring --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=0,1 python -m tests.test_shardformer.utils_ring --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
 '''
 
 def parse_args():

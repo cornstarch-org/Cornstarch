@@ -57,7 +57,7 @@ class RingAttentionBase(torch.autograd.Function):
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
         ctx.group = sp_group
-        return out if not return_softmax else (out, softmax_lse, None)
+        return out if not return_softmax else (out, softmax_lse)
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -73,7 +73,8 @@ class RingAttentionBase(torch.autograd.Function):
             softmax_scale=ctx.softmax_scale,
             dropout_p=ctx.dropout_p,
             causal=ctx.causal,
-            window_size=ctx.window_size,
+            window_size_left=ctx.window_size_left,
+            window_size_right=ctx.window_size_right,
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
         )
@@ -134,17 +135,26 @@ class RingAttentionBase(torch.autograd.Function):
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
 
+        kwargs = {
+            "casual": True,
+            "dropout_p": dropout_p,
+            "softmax_scale": softmax_scale,
+            "deterministic": deterministic,
+            "return_softmax": return_softmax,
+            "inner_ring_size": inner_ring_size,
+        }
+
         out, softmax_lse = RingAttentionBase.apply(
             q,
             k,
             v,
             sp_group,
-            casual=True,
-            dropout_p=dropout_p,
-            softmax_scale=softmax_scale,
-            deterministic=deterministic,
-            return_softmax=return_softmax,
-            inner_ring_size=inner_ring_size,
+            True, # causal
+            True, # return_softmax
+            dropout_p,
+            softmax_scale,
+            deterministic,
+            inner_ring_size,
         )
 
         out = out.contiguous()

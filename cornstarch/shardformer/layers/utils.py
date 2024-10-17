@@ -85,8 +85,6 @@ def split_batch_uniform(
     if sp_size == 1:
         return batch
 
-    if isinstance(batch, torch.Tensor):
-        batch = [batch]
     seq_dim = seq_dim if seq_dim != -1 else batch[0].dim() - 1
 
     seq_len = batch.shape[seq_dim]

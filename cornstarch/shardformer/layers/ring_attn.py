@@ -1,5 +1,5 @@
 import torch
-from utils import RingComm, get_default_args, update_out_and_lse
+from .utils import RingComm, get_default_args, update_out_and_lse
 from flash_attn import flash_attn_qkvpacked_func
 from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
 
@@ -97,7 +97,8 @@ def ring_flash_attn_forward(
     softmax_scale,
     dropout_p=0,
     causal=True,
-    window_size=(-1, -1),
+    window_size_left=-1,
+    window_size_right=-1,
     alibi_slopes=None,
     deterministic=False,
 ):
@@ -124,12 +125,13 @@ def ring_flash_attn_forward(
                     "dropout_p": dropout_p,
                     "softmax_scale": softmax_scale,
                     "causal": causal and step == 0,
-                    "window_size": window_size,
+                    "window_size_left": window_size_left,
+                    "window_size_right": window_size_right,
                     "alibi_slopes": alibi_slopes,
                     "return_softmax": True and dropout_p > 0,
                 }
             )
-            block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(**params)
+            block_out, block_lse, _, _ = _flash_attn_forward(**params)
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
@@ -153,7 +155,8 @@ def ring_flash_attn_backward(
     softmax_scale,
     dropout_p=0,
     causal=True,
-    window_size=(-1, -1),
+    window_size_left=-1,
+    window_size_right=-1,
     alibi_slopes=None,
     deterministic=False,
 ):
@@ -191,7 +194,8 @@ def ring_flash_attn_backward(
                     "dropout_p": dropout_p,
                     "softmax_scale": softmax_scale,
                     "causal": bwd_causal,
-                    "window_size": window_size,
+                    "window_size_left": window_size_left,
+                    "window_size_right": window_size_right,
                     "alibi_slopes": alibi_slopes,
                     "deterministic": deterministic,
                 }
