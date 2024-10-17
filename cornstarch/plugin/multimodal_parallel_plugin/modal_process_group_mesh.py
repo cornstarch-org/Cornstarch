@@ -27,17 +27,18 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
     Args:
         modal_templates (dict[PipelineTemplate, int]): The modal templates and their tp sizes.
             Each modal may have different number of stages and different tp sizes.
+        llm_template (tuple[PipelineTemplate, int, int]): The LLM template, tp size, and sp size.
         execution_order (list[tuple[PipelineTemplate, PipelineTemplate]]): The execution order of the modals.
             `MultiModalProcessGroupMesh` uses topological sort to determine the order of the modals.
             This is not related to actual execution order, but only used to assign ranks to modal models.
     """
 
-    pp_axis, dp_axis, tp_axis = 0, 1, 2
+    pp_axis, dp_axis, sp_axis, tp_axis = 0, 1, 2, 3
 
     def __init__(
         self,
         encoder_templates: Optional[dict[PipelineTemplate, int]] = None,
-        llm_template: Optional[tuple[PipelineTemplate, int]] = None,
+        llm_template: Optional[tuple[PipelineTemplate, int, int]] = None,
         decoder_templates: Optional[dict[PipelineTemplate, int]] = None,
     ) -> None:
         assert dist.is_initialized(), "Please initialize torch.distributed first."
@@ -61,6 +62,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
             *self.decoder_templates.keys(),
         ]
 
+        llm_tp_size, llm_sp_size = llm_template[1], llm_template[2]
         num_ranks_in_model = (
             sum(
                 template.num_stages * tp_size
@@ -69,7 +71,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
             + (
                 0
                 if llm_template is None
-                else llm_template[0].num_stages * llm_template[1]
+                else llm_template[0].num_stages * llm_tp_size * llm_sp_size
             )
             + sum(
                 template.num_stages * tp_size
@@ -78,14 +80,13 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         )
         assert (
             dist.get_world_size() % num_ranks_in_model == 0
-        ), "The world size must be divisible by tp_size * pp_size."
-
+        ), "The world size must be divisible by sp_size * tp_size * pp_size."
         dp_size = dist.get_world_size() // num_ranks_in_model
 
         max_tp_size = max(
             [
                 *encoder_templates.values(),
-                0 if llm_template is None else llm_template[1],
+                0 if llm_template is None else llm_tp_size,
                 *decoder_templates.values(),
             ]
         )
@@ -95,23 +96,37 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
 
         for iterable in [
             encoder_templates.items(),
-            [llm_template],
+            [llm_template[:2]],
             decoder_templates.items(),
         ]:
             for modal, tp_size in iterable:
                 for _ in range(modal.num_stages):
                     stage_mesh = []
                     for _ in range(dp_size):
-                        # create a list of ranks with length `max_tp_size`, where each rank is repeated `max_tp_size // tp_size` times.
-                        # Example: [0, 0, 1, 1] for tp_size=2 and max_tp_size=4
-                        ranks = [
-                            i
-                            for i in range(rank_index, rank_index + tp_size)
-                            for _ in range(max_tp_size // tp_size)
-                        ]
-                        rank_index += tp_size
+                        # LLM may have context parallelism,
+                        # in that case different ranks must be assigned.
+                        if modal == llm_template[0]:
+                            tp_mesh = []
+                            for _ in range(llm_sp_size):
+                                ranks = [
+                                    i
+                                    for i in range(rank_index, rank_index + tp_size)
+                                    for _ in range(max_tp_size // tp_size)
+                                ]
+                                rank_index += tp_size
+                                tp_mesh.append(ranks)
+                        else:
+                            # create a list of ranks with length `max_tp_size`, where each rank is repeated `max_tp_size // tp_size` times.
+                            # Example: [0, 0, 1, 1] for tp_size=2 and max_tp_size=4
+                            ranks = [
+                                i
+                                for i in range(rank_index, rank_index + tp_size)
+                                for _ in range(max_tp_size // tp_size)
+                            ]
+                            rank_index += tp_size
+                            tp_mesh = [ranks for _ in range(llm_sp_size)]
 
-                        stage_mesh.append(ranks)
+                        stage_mesh.append(tp_mesh)
                         modal_to_ranks[modal].extend(ranks)
                     meshes.append(stage_mesh)
 
