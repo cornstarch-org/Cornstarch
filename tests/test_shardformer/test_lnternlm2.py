@@ -1,3 +1,5 @@
+import copy
+
 import torch
 from colossalai.booster import Booster
 from colossalai.interface import ModelWrapper, OptimizerWrapper
@@ -11,6 +13,7 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
     ModelOutput,
 )
+from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.internlm2.modeling_internlm2 import (
     InternLM2Config,
@@ -23,7 +26,6 @@ from ._utils import (
     ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
-    check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
     unwrap_model,
@@ -40,6 +42,13 @@ class InternLM2PolicyTestClassBase(ColossalaiHybridParallelBase):
         use_cache=False,
         _attn_implementation="eager",
     )
+
+    def model_fn(self, fa: bool) -> PreTrainedModel:
+        config = copy.deepcopy(self.config)
+        config.pad_token_id = config.eos_token_id
+        config._attn_implementation = "flash_attention_2" if fa else "eager"
+        config.attn_implementation = config._attn_implementation
+        return self.model_class(config)
 
     def data_gen_fn(self) -> dict:
         num_batch = self.num_microbatches * self.microbatch_size
@@ -64,7 +73,6 @@ class InternLM2PolicyTestClassBase(ColossalaiHybridParallelBase):
     ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
-        precision = booster.plugin.precision
 
         # unwrap model
         model = unwrap_model(org_model, "InternLM2Model", "model")
@@ -78,7 +86,7 @@ class InternLM2PolicyTestClassBase(ColossalaiHybridParallelBase):
         if (
             stage_manager is None or stage_manager.is_first_stage()
         ) and booster.plugin.zero_stage == 0:
-            atol, rtol = (1e-6, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
+            atol, rtol = 5e-3, 5e-3
             row_layer_grads = get_grad_tensors_for_check(
                 model,
                 shard_model,
@@ -108,12 +116,12 @@ class InternLM2PolicyTestClassBase(ColossalaiHybridParallelBase):
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
-            atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
+            atol, rtol = 5e-3, 5e-3
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage():
-            atol, rtol = (1e-3, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
+            atol, rtol = 5e-3, 5e-3
             # embed_tokens have different dimension, so skip to check row_layer weight
             check_weight(
                 model,
@@ -142,7 +150,7 @@ class TestInternLM2ModelPolicy(InternLM2PolicyTestClassBase):
 
     @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp32"])
+    @parametrize("precision", ["bf16", "fp16"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
@@ -178,7 +186,7 @@ class TestInternLM2ForCausalLMPolicy(InternLM2PolicyTestClassBase):
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp32"])
+    @parametrize("precision", ["bf16", "fp16"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):

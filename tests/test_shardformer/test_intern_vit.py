@@ -72,7 +72,6 @@ class TestInternVisionModelPolicyClass(ColossalaiHybridParallelBase):
     ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
-        precision = booster.plugin.precision
 
         # unwrap model
         intern_model = unwrap_model(org_model, "InternVisionModel", "model")
@@ -91,7 +90,7 @@ class TestInternVisionModelPolicyClass(ColossalaiHybridParallelBase):
             "encoder.layers[0].norm2",
         ]
 
-        atol, rtol = (5e-5, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
+        atol, rtol = 5e-3, 5e-3
 
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
@@ -165,7 +164,7 @@ class TestInternVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
     @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp32"])
+    @parametrize("precision", ["bf16", "fp16"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):

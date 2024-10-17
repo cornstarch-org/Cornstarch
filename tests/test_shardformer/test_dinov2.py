@@ -68,7 +68,6 @@ class TestDinov2PolicyClass(ColossalaiHybridParallelBase):
     ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
-        precision = booster.plugin.precision
 
         # unwrap model
         dino_model = org_model
@@ -77,7 +76,7 @@ class TestDinov2PolicyClass(ColossalaiHybridParallelBase):
         row_layer_for_check = ["encoder.layer[0].attention.attention.query"]
         col_layer_for_check = ["encoder.layer[0].attention.output.dense"]
 
-        atol, rtol = (5e-5, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
+        atol, rtol = 5e-3, 5e-3
 
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
@@ -152,7 +151,7 @@ class TestDinov2ModelPolicy(TestDinov2PolicyClass):
 
     @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp32"])
+    @parametrize("precision", ["bf16", "fp16"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
@@ -170,7 +169,7 @@ class TestDinov2ModelPolicy(TestDinov2PolicyClass):
 
 #     @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
 #     @parametrize("fa", [True, False])
-#     @parametrize("precision", ["bf16", "fp32"])
+#     @parametrize("precision", ["bf16", "fp16"])
 #     def test_hybrid_parallel(
 #         self, tp_size: int, pp_size: int, fa: bool, precision: str
 #     ):

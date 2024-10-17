@@ -80,7 +80,7 @@ class MixtralPolicyTestCaseBase(ColossalaiHybridParallelBase):
         if (
             stage_manager is None or stage_manager.is_first_stage()
         ) and booster.plugin.zero_stage == 0:
-            atol, rtol = (5e-5, 1e-4) if precision == torch.float32 else (5e-3, 5e-3)
+            atol, rtol = 5e-3, 5e-3
             row_layer_grads = get_grad_tensors_for_check(
                 mixtral_model,
                 shard_mixtral_model,
@@ -110,12 +110,12 @@ class MixtralPolicyTestCaseBase(ColossalaiHybridParallelBase):
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
-            atol, rtol = (1e-5, 1e-3) if precision == torch.float32 else (5e-3, 5e-3)
+            atol, rtol = 5e-3, 5e-3
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True):
-            atol, rtol = (2e-4, 1e-3) if precision == torch.float32 else (5e-3, 5e-3)
+            atol, rtol = 5e-3, 5e-3
             # embed_tokens have different dimension, so skip to check row_layer weight
             check_weight(
                 mixtral_model,
@@ -144,7 +144,7 @@ class TestMixtralModelPolicy(MixtralPolicyTestCaseBase):
 
     @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp32"])
+    @parametrize("precision", ["bf16", "fp16"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
@@ -180,7 +180,7 @@ class TestMixtralForCausalLMPolicy(MixtralPolicyTestCaseBase):
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp32"])
+    @parametrize("precision", ["bf16", "fp16"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
