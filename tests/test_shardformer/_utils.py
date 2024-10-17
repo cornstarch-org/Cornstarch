@@ -385,7 +385,9 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()
-        with torch.autocast(device_type="cuda", enabled=precision == torch.float16):
+        with torch.autocast(
+            device_type="cuda", enabled=precision == torch.float16, dtype=torch.float16
+        ):
             org_output = org_model(**unshard_test_data)
             org_loss = criterion(org_output).to(precision)
         org_loss.backward()
