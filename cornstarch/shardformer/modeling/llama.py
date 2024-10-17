@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from cornstarch.shardformer.layers.attn import RingAttentionBase
 from colossalai.shardformer.layer import (
     RingAttention,
     dist_cross_entropy,
@@ -13,7 +14,8 @@ from colossalai.shardformer.layer._operation import (
     gather_sp_output,
     split_forward_gather_backward,
 )
-from colossalai.shardformer.layer.utils import split_batch_zigzag
+# from colossalai.shardformer.layer.utils import split_batch_zigzag
+from cornstarch.shardformer.layers.utils import split_batch_uniform
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch.nn.modules.loss import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.cache_utils import Cache, DynamicCache
@@ -35,6 +37,10 @@ from transformers.models.llama.modeling_llama import (
     repeat_kv,
 )
 from transformers.utils.import_utils import is_torchdynamo_compiling
+
+from transformers.utils import logging
+
+logger = logging.get_logger(__name__)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -149,7 +155,10 @@ class LlamaModelForwards:
         sp_size = shard_config.sequence_parallel_size
 
         if sp_mode == "ring_attn":
-            _, causal_mask, _ = RingAttention.prepare_varlen_batch(
+            # _, causal_mask, _ = RingAttention.prepare_varlen_batch(
+            #     attention_mask, sp_group
+            # )
+            causal_mask = RingAttentionBase.prepare_batch(
                 attention_mask, sp_group
             )
         else:
@@ -170,15 +179,18 @@ class LlamaModelForwards:
                     self.config._attn_implementation == "flash_attention_2"
                 ), "Ring Attention inherently requires Flash Attention."
                 if not attention_mask.bool().all():
+                    raise NotImplementedError("Var len version not implemented for ring attention")
                     hidden_states, causal_mask, position_ids = (
                         RingAttention.prepare_varlen_batch(
                             attention_mask, sp_group, hidden_states, position_ids
                         )
                     )
                 else:
-                    hidden_states, position_ids = split_batch_zigzag(
-                        [hidden_states, position_ids], sp_group
-                    )
+                    # hidden_states, position_ids = split_batch_zigzag(
+                    #     [hidden_states, position_ids], sp_group
+                    # )
+                    hidden_states = split_batch_uniform(hidden_states, sp_group)
+                    position_ids = split_batch_uniform(position_ids, sp_group)
 
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
@@ -323,16 +335,22 @@ class LlamaModelForwards:
                 )
                 output_hidden_states = False
 
+        logger.info(f"shard_config parallel_output: {shard_config.parallel_output}")
+        logger.info(f"shard_config parallelism mode: {shard_config.sequence_parallelism_mode}")
         if (
             shard_config.sequence_parallelism_mode == "ring_attn"
             and shard_config.parallel_output
         ):
             # Split labels in a zigzag fashion too
             sp_group = shard_config.sequence_parallel_process_group
-            if attention_mask.bool().all():
-                labels = split_batch_zigzag(labels, sp_group, seq_dim=1, is_label=True)
+            if attention_mask.bool().all(): # non var len version
+                # labels = split_batch_zigzag(labels, sp_group, seq_dim=1, is_label=True)
+                labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
+                logger.info(f"non var len version")
             else:
                 # [B, max_seqlen // sp_size]
+                logger.info(f"var len version")
+                raise NotImplementedError("Var len version not implemented for ring attention")
                 labels, _, _ = RingAttention.prepare_varlen_batch(
                     attention_mask, sp_group, labels, is_label=True
                 )
@@ -616,15 +634,25 @@ class LlamaAttentionForwards:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-            attn_output = RingAttention.attention(
+            # attn_output = RingAttention.attention(
+            #     query_states,
+            #     key_states,
+            #     value_states,
+            #     sp_group,
+            #     attention_mask,
+            #     inner_ring_size=shard_config.inner_ring_size,
+            # )
+            # attn_output = attn_output.transpose(1, 2).contiguous()
+
+            # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
+            attn_output = RingAttentionBase.apply(
                 query_states,
                 key_states,
                 value_states,
                 sp_group,
-                **attention_mask,
-                inner_ring_size=shard_config.inner_ring_size,
+                return_softmax=False
             )
-            attn_output = attn_output.transpose(1, 2).contiguous()
+
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
             # to be able to avoid many of these transpose/reshape/view.
