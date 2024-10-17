@@ -22,11 +22,9 @@ class RingAttentionBase(torch.autograd.Function):
         dropout_p=0.0,
         softmax_scale=None,
         deterministic=False,
-        inner_ring_size=None,
         window_size_left=-1,
         window_size_right=-1,
         alibi_slopes=None,
-        **kwargs,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -78,7 +76,7 @@ class RingAttentionBase(torch.autograd.Function):
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
     
     @staticmethod
     def prepare_batch(
@@ -108,7 +106,6 @@ class RingAttentionBase(torch.autograd.Function):
         softmax_scale=None,
         deterministic=False,
         return_softmax=False,
-        inner_ring_size=None,
         **kwargs,):
         """
         Ring Attention forward pass supporting variable-length sequences. When using varlen mode,
@@ -135,15 +132,6 @@ class RingAttentionBase(torch.autograd.Function):
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
 
-        kwargs = {
-            "casual": True,
-            "dropout_p": dropout_p,
-            "softmax_scale": softmax_scale,
-            "deterministic": deterministic,
-            "return_softmax": return_softmax,
-            "inner_ring_size": inner_ring_size,
-        }
-
         out, softmax_lse = RingAttentionBase.apply(
             q,
             k,
@@ -154,7 +142,6 @@ class RingAttentionBase(torch.autograd.Function):
             dropout_p,
             softmax_scale,
             deterministic,
-            inner_ring_size,
         )
 
         out = out.contiguous()

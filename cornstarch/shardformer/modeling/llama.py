@@ -650,7 +650,9 @@ class LlamaAttentionForwards:
                 key_states,
                 value_states,
                 sp_group,
-                return_softmax=False
+                causal=self.is_causal,
+                return_softmax=False,
+                dropout_p=self.attention_dropout if self.training else 0.0,
             )
 
         elif self.config._attn_implementation == "flash_attention_2":
