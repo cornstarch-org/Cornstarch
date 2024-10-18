@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "torch",
-    "transformers==4.45.0",
+    "transformers==4.45.2",
     "colossalai==0.4.4",
     "loguru",
     "simple_parsing",
@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "torch>=2.1.0",
+    "torch>=2.5.0",
     "ruff",
     "black>=23.0",
     "isort>=5.12",
