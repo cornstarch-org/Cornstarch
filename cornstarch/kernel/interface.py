@@ -9,13 +9,13 @@ def _flash_attn_anymask_forward(
     k: torch.Tensor,
     v: torch.Tensor,
     mask: torch.Tensor,
-    dropout_p: float, # TODO(@runyu) not used
-    softmax_scale: float,
-    window_size_left: int,
-    window_size_right: int,
-    softcap: float,
-    alibi_slopes: Optional[torch.Tensor],
-    return_softmax: bool
+    softmax_scale: float = 1.0,
+    dropout_p: float = 0.0, # TODO(@runyu) not used
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    softcap: float = 0.0,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    return_softmax: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
@@ -69,14 +69,13 @@ def _flash_attn_anymask_backward(
     dk: Optional[torch.Tensor],
     dv: Optional[torch.Tensor],
     mask: torch.Tensor,
-    dropout_p: float,
-    softmax_scale: float,
-    causal: bool,
-    window_size_left: int,
-    window_size_right: int,
-    softcap: float,
-    alibi_slopes: Optional[torch.Tensor],
-    deterministic: bool,
+    dropout_p: float = 0.0,
+    softmax_scale: float = 1.0,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    softcap: float = 0.0,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    deterministic: bool = False,
     rng_state: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert dout.is_contiguous()
@@ -119,3 +118,35 @@ def _flash_attn_anymask_backward(
         num_warps=NUM_WARPS,  #
         num_stages=NUM_STAGES,  #
     )
+
+    return dq, dk, dv
+
+class FlashAttnAnyMask(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, q, k, v, mask, softmax_scale, dropout_p):
+        window_size_left, window_size_right, softcap, alibi_slopes, return_softmax = -1, -1, 0.0, None, False
+        out, softmax_lse, _, _ = _flash_attn_anymask_forward(q, k, v, mask, softmax_scale, dropout_p, window_size_left, window_size_right, softcap, alibi_slopes, return_softmax)
+        ctx.save_for_backward(q, k, v, out, softmax_lse, mask)
+        ctx.softmax_scale = softmax_scale
+        ctx.softcap = softcap
+        ctx.dropout_p = dropout_p
+        ctx.window_size_left = window_size_left
+        ctx.window_size_right = window_size_right
+        ctx.alibi_slopes = alibi_slopes
+        ctx.return_softmax = return_softmax
+        return out, softmax_lse
+
+    @staticmethod   
+    def backward(ctx, dout, *args):
+        q, k, v, out, softmax_lse, mask = ctx.saved_tensors
+        dq, dk, dv = None, None, None
+        dropout_p = ctx.dropout_p
+        softmax_scale = ctx.softmax_scale
+        window_size_left = ctx.window_size_left
+        window_size_right = ctx.window_size_right
+        softcap = ctx.softcap
+        alibi_slopes = ctx.alibi_slopes
+        dq, dk, dv = _flash_attn_anymask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv, mask, dropout_p, softmax_scale, window_size_left, window_size_right, softcap, alibi_slopes)
+        return dq, dk, dv, None, None, None
+    

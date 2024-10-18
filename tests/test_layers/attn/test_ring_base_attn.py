@@ -3,7 +3,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+from flash_attn import flash_attn_func
 from cornstarch.shardformer.layers.attn import RingAttentionBase
 
 def set_seed(rank):
