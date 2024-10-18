@@ -1,9 +1,10 @@
 import torch
-from flash_attn import flash_attn_qkvpacked_func
 from typing import Optional
 import torch.distributed as dist
 from cornstarch.shardformer.layers.utils import split_batch_uniform
-from cornstarch.shardformer.layers.ring_attn import ring_flash_attn_forward, ring_flash_attn_backward
+from cornstarch.shardformer.layers.ring_attn import ring_flash_attn_forward, ring_flash_attn_backward, ring_flash_attn_anymask_forward, ring_flash_attn_anymask_backward
+from cornstarch.kernel.interface import _flash_attn_anymask_forward
+
 
 class RingAttentionBase(torch.autograd.Function):
     """
@@ -148,7 +149,6 @@ class RingAttentionBase(torch.autograd.Function):
 
         return out if not return_softmax else (out, softmax_lse)
 
-
 class RingAttentionVarlen(RingAttentionBase):
     """
     support variable length input.
@@ -161,9 +161,71 @@ class RingAttentionAnyMask(RingAttentionBase):
     """
     support any mask.
     """
+
     @staticmethod
-    def forward(ctx, qkv, mask_info, sp_group, sp_size, inner_ring_size):
-        pass
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        sp_group,
+        mask,
+        return_softmax,
+        dropout_p=0.0,
+        softmax_scale=None,
+        deterministic=False,
+        window_size_left=-1,
+        window_size_right=-1,
+        alibi_slopes=None,
+    ):
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+        sm_scale = softmax_scale
+
+        assert alibi_slopes is None
+        k = k.contiguous()
+        v = v.contiguous()
+
+        out, softmax_lse = ring_flash_attn_anymask_forward(
+            sp_group,
+            q,
+            k,
+            v,
+            mask,
+            softmax_scale=softmax_scale,
+            ATTN_IMPL=_flash_attn_anymask_forward,
+            dropout_p=dropout_p,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
+            alibi_slopes=alibi_slopes,
+            deterministic=deterministic,
+        )
+
+        ctx.save_for_backward(q, k, v, out, mask, softmax_lse)
+        # ctx.grid = grid
+        ctx.group = sp_group
+        ctx.sm_scale = sm_scale
+        ctx.HEAD_DIM = q.shape[-1]
+        ctx.USE_MASK = True
+
+        return out if not return_softmax else (out, softmax_lse)
+
+    @staticmethod
+    def backward(ctx, dout):
+        q, k, v, out, mask, softmax_lse = ctx.saved_tensors
+        dq, dk, dv = ring_flash_attn_anymask_backward(
+            ctx.group,
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            mask,
+            softmax_scale=ctx.sm_scale,
+        )
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+ 
 
 class DoubleRingAttention(torch.autograd.Function):
     @staticmethod
