@@ -1,7 +1,7 @@
 import functools
 import itertools
 import warnings
-from typing import Callable, Dict, List, cast
+from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedRMSNorm,
@@ -15,6 +15,7 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import nn
 from transformers import PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 
 from cornstarch.models.evaclip.configuration_evaclip import EvaCLIPVisionConfig
 from cornstarch.models.evaclip.modeling_evaclip import (
@@ -23,8 +24,8 @@ from cornstarch.models.evaclip.modeling_evaclip import (
 )
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.evaclip import (
-    EvaCLIPForwards,
-    EvaCLIPPipelineForwards,
+    EvaCLIPAttentionForwards,
+    EvaCLIPModelForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -80,34 +81,6 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
     def postprocess(self) -> nn.Module:
         return self.model
 
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, new_forward: Callable, policy: dict
-    ):
-        if self.pipeline_stage_manager is None:
-            return
-
-        module: EvaCLIPVisionTransformer
-        if self.model.__class__.__name__ == "EvaCLIPVisionTransformer":
-            module = self.model
-        else:
-            module = self.model.vision_model
-
-        stage_manager = self.pipeline_stage_manager
-        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layers))
-        stage_index = stage_manager.get_stage_index(layers_per_stage)
-
-        method_replacement = {
-            "forward": functools.partial(
-                new_forward,
-                stage_manager=stage_manager,
-                stage_index=stage_index,
-                shard_config=self.shard_config,
-            )
-        }
-        self.append_or_create_method_replacement(
-            description=method_replacement, policy=policy, target_key=model_cls
-        )
-
     def get_held_layers(self) -> List[nn.Module]:
         assert self.pipeline_stage_manager is not None
 
@@ -135,6 +108,7 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
             EvaCLIPVisionTransformer,
         )
 
+        config: EvaCLIPVisionConfig = self.model.config
         policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
         if self.shard_config.enable_sequence_parallelism:
@@ -143,20 +117,40 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
                 "EvaCLIP doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
             )
 
-        config: EvaCLIPVisionConfig = cast(EvaCLIPVisionConfig, self.model.config)
-        if self.shard_config.enable_tensor_parallelism:
-            assert (
-                config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
-            ), "The number of attention heads must be divisible by tensor parallel size."
+        tp_size = self.shard_config.tensor_parallel_size
+        num_heads = config.num_attention_heads
+        hidden_size = config.hidden_size
 
-            attribute_replacement = {
-                "self_attn.num_heads": config.num_attention_heads
-                // self.shard_config.tensor_parallel_size,
-                "self_attn.embed_dim": config.hidden_size
-                // self.shard_config.tensor_parallel_size,
-            }
+        if self.shard_config.enable_tensor_parallelism:
+            hidden_size //= tp_size
+
+            assert (
+                num_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_heads //= tp_size
+
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["embed_dim"] = hidden_size
+        attention_attribute_replacement["num_heads"] = num_heads
+
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
+            )
+
+        policy[EvaCLIPAttention] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": (
+                    EvaCLIPAttentionForwards.flash_attention_forward
+                    if self.shard_config.enable_flash_attention
+                    else EvaCLIPAttentionForwards.sdpa_forward
+                )
+            },
+        )
+
+        if self.shard_config.enable_tensor_parallelism:
             policy[EvaCLIPEncoderLayer] = ModulePolicyDescription(
-                attribute_replacement=attribute_replacement,
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
@@ -210,18 +204,6 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
                 target_key=EvaCLIPVisionTransformer,
             )
 
-        self.append_or_create_method_replacement(
-            description={
-                "forward": (
-                    EvaCLIPForwards.evaclip_flash_attention_forward
-                    if self.shard_config.enable_flash_attention
-                    else EvaCLIPForwards.evaclip_eager_forward
-                )
-            },
-            policy=policy,
-            target_key=EvaCLIPAttention,
-        )
-
         return policy
 
 
@@ -236,12 +218,16 @@ class EvaCLIPVisionTransformerPolicy(EvaCLIPVisionPolicy):
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         policy = super().module_policy()
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=EvaCLIPVisionTransformer,
-                new_forward=EvaCLIPPipelineForwards.evaclip_vision_transformer_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    EvaCLIPModelForwards.eva_clip_vision_transformer_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=EvaCLIPVisionTransformer,
+        )
 
         return policy
 
@@ -262,11 +248,15 @@ class EvaCLIPVisionModelPolicy(EvaCLIPVisionPolicy):
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         policy = super().module_policy()
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=EvaCLIPVisionModel,
-                new_forward=EvaCLIPPipelineForwards.evaclip_vision_model_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    EvaCLIPModelForwards.evaclip_vision_model_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=EvaCLIPVisionModel,
+        )
 
         return policy

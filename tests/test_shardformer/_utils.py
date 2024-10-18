@@ -2,7 +2,6 @@ import copy
 import os
 import random
 import sys
-import unittest
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
@@ -211,9 +210,10 @@ class PolicyTestBase(MultiProcessTestCase, ABC):
 
 
 class ColossalaiHybridParallelBase(PolicyTestBase):
-    def model_fn(self) -> PreTrainedModel:
+    def model_fn(self, fa: bool) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
+        config._attn_implementation = "flash_attention_2" if fa else "eager"
         return self.model_class(config)
 
     def run_hybrid_parallel(
@@ -224,9 +224,8 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         fa: bool,
         precision: str,
     ):
-        assert precision in ["bf16", "fp32"]
-        if fa and precision == "fp32":
-            raise unittest.SkipTest("Flash Attention does not support fp32")
+        assert precision in ["bf16", "fp16"]
+        precision = torch.bfloat16 if precision == "bf16" else torch.float16
 
         test_config = dict(
             tp_size=tp_size,
@@ -236,7 +235,6 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             microbatch_size=self.microbatch_size,
             initial_scale=1,
             enable_flash_attention=fa,
-            precision=precision,
         )
         if sp_mode is not None:
             test_config.update(
@@ -254,7 +252,9 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             sharded_optimizer,
             criterion,
             booster,
-        ) = self.build_model_from_hybrid_plugin(test_config=test_config)
+        ) = self.build_model_from_hybrid_plugin(
+            test_config=test_config, precision=precision
+        )
 
         org_model.gradient_checkpointing_enable()
         sharded_model.unwrap().gradient_checkpointing_enable()
@@ -288,16 +288,9 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
                     criterion=criterion,
                     output_transform_fn=lambda x: x,
                     booster=booster,
+                    precision=precision,
                 )
             )
-
-            org_loss = org_loss.to(
-                dtype=torch.bfloat16 if precision == "bf16" else torch.float32
-            )
-            if sharded_loss is not None:
-                sharded_loss = sharded_loss.to(
-                    dtype=torch.bfloat16 if precision == "bf16" else torch.float32
-                )
 
         self.check_fn(
             booster=booster,
@@ -311,7 +304,9 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             sharded_loss=sharded_loss,
         )
 
-    def build_model_from_hybrid_plugin(self, test_config: dict[str, Any]) -> tuple[
+    def build_model_from_hybrid_plugin(
+        self, test_config: dict[str, Any], precision: torch.dtype
+    ) -> tuple[
         PreTrainedModel,
         Optimizer,
         HybridParallelModule,
@@ -319,13 +314,12 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         Callable,
         Booster,
     ]:
-        use_lazy_init = test_config.pop("use_lazy_init", False)
-        precision = test_config.pop("precision")
-        precision = torch.bfloat16 if precision == "bf16" else torch.float32
+        use_lazy_init: bool = test_config.pop("use_lazy_init", False)
+        use_flash_attention: bool = test_config["enable_flash_attention"]
 
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
-            org_model = self.model_fn().to(dtype=precision, device="cuda")
+            org_model = self.model_fn(use_flash_attention).to(device="cuda")
             sharded_model = copy.deepcopy(org_model)
         if use_lazy_init:
             ctx.materialize(org_model)
@@ -338,7 +332,14 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             return_value=get_autopolicy(_fullname(org_model)),
         ):
             plugin = HybridParallelPlugin(**test_config)
-            plugin.precision = None
+            if precision == torch.bfloat16:
+                org_model.to(dtype=precision)
+                sharded_model.to(dtype=precision)
+                plugin.precision = None
+            else:
+                # Do not cast org_model for fp16 here, as it will be casted in
+                # torch.autocast amp
+                plugin.precision = "fp16"
             booster = Booster(plugin=plugin)
 
             sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
@@ -362,6 +363,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         criterion: Callable[[torch.Tensor], torch.Tensor],
         output_transform_fn: Callable,
         booster: Booster,
+        precision: torch.dtype,
     ):
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
@@ -372,14 +374,22 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
 
         shard_test_data = {}
         for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
             shard_test_data[k] = v.clone().to("cuda")
         unshard_test_data = {}
         for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
             unshard_test_data[k] = v.clone().to("cuda")
 
+        # use torch.autocast AMP for fp16 training test cases
         org_model.train()
-        org_output = org_model(**unshard_test_data)
-        org_loss = criterion(org_output)
+        with torch.autocast(
+            device_type="cuda", enabled=precision == torch.float16, dtype=torch.float16
+        ):
+            org_output = org_model(**unshard_test_data)
+            org_loss = criterion(org_output).to(precision)
         org_loss.backward()
 
         sharded_model.train()
@@ -396,7 +406,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             sharded_loss = sharded_output["loss"]
         else:
             sharded_output = sharded_model(**shard_test_data)
-            sharded_loss = criterion(sharded_output)
+            sharded_loss = criterion(sharded_output).to(precision)
             sharded_optimizer.backward(sharded_loss)
 
         return org_loss, org_output, sharded_loss, sharded_output
@@ -421,7 +431,10 @@ def check_output_hidden_state(
 
 
 def check_loss(
-    org_loss: Tensor, sharded_loss: Tensor, atol: float = 1e-5, rtol: float = 1e-3
+    org_loss: Tensor,
+    sharded_loss: Tensor,
+    atol: float = 1e-5,
+    rtol: float = 1e-3,
 ):
     assert torch.allclose(org_loss.float(), sharded_loss.float(), atol=atol, rtol=rtol)
 

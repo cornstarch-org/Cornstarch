@@ -1,10 +1,10 @@
 from typing import Optional, Tuple, Union
 
 import torch
-from colossalai.pipeline.stage_manager import PipelineStageManager
-from colossalai.shardformer.layer import ColoAttention
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from torch import nn
+from transformers.modeling_flash_attention_utils import (
+    _flash_attention_forward,
+)
 from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPooling,
@@ -15,14 +15,10 @@ from transformers.models.clip.modeling_clip import (
     CLIPVisionTransformer,
     logger,
 )
+from transformers.pytorch_utils import is_torch_greater_or_equal_than_2_2
 
 
-class CLIPVisionPipelineForwards:
-    """
-    This class servers as a micro library for forward function substitution of CLIPVision models
-    under pipeline setting.
-    """
-
+class CLIPVisionModelForwards:
     @staticmethod
     def clip_vision_transformer_forward(
         self: CLIPVisionTransformer,
@@ -30,9 +26,9 @@ class CLIPVisionPipelineForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
-        stage_index: Optional[list[int]] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = (
@@ -49,32 +45,44 @@ class CLIPVisionPipelineForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
+        stage_manager = shard_config.pipeline_stage_manager
+
+        if stage_manager is not None:
+            if output_attentions:
+                logger.warning_once(
+                    "output_attentions=True is not supported for pipeline models at the moment."
+                )
+                output_attentions = False
+            if output_hidden_states:
+                logger.warning_once(
+                    "output_hidden_states=True is not supported for pipeline models at the moment."
+                )
+                output_hidden_states = False
+
         # retrive pixel_values
-        if stage_manager.is_first_stage():
+        if stage_manager is None or stage_manager.is_first_stage():
             if pixel_values is None:
                 raise ValueError("You have to specify pixel_values")
 
             hidden_states = self.embeddings(pixel_values)
             hidden_states = self.pre_layrnorm(hidden_states)
+
+        if stage_manager is not None:
+            layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layers))
+            start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         else:
-            if hidden_states is None:
-                raise ValueError(
-                    "hidden_states shouldn't be None for stages other than the first stage."
-                )
+            start_idx, end_idx = (0, len(self.encoder.layers))
 
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-
-        start_idx, end_idx = stage_index[0], stage_index[1]
         for encoder_layer in self.encoder.layers[start_idx:end_idx]:
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
+
             if self.encoder.gradient_checkpointing and self.training:
                 layer_outputs = self.encoder._gradient_checkpointing_func(
                     encoder_layer.__call__,
                     hidden_states,
-                    None,  # attention_mask
-                    None,  # causal_attention_mask
+                    None,
+                    None,
                     output_attentions,
                 )
             else:
@@ -93,217 +101,160 @@ class CLIPVisionPipelineForwards:
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        if stage_manager.is_last_stage():
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=hidden_states,
-                hidden_states=encoder_states,
-                attentions=all_attentions,
-            )
+        if not (stage_manager is None or stage_manager.is_last_stage()):
+            outputs = {"hidden_states": hidden_states}
+            if output_hidden_states:
+                outputs["encoder_states"] = encoder_states
+            if output_attentions:
+                outputs["attentions"] = all_attentions
+            return outputs
 
-            last_hidden_state = encoder_outputs[0]
-            pooled_output = last_hidden_state[:, 0, :]
-            pooled_output = self.post_layernorm(pooled_output)
+        encoder_outputs = BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=encoder_states,
+            attentions=all_attentions,
+        )
 
-            if not return_dict:
-                return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+        last_hidden_state = encoder_outputs[0]
+        pooled_output = last_hidden_state[:, 0, :]
+        pooled_output = self.post_layernorm(pooled_output)
 
-            return BaseModelOutputWithPooling(
-                last_hidden_state=last_hidden_state,
-                pooler_output=pooled_output,
-                hidden_states=encoder_outputs.hidden_states,
-                attentions=encoder_outputs.attentions,
-            )
+        if not return_dict:
+            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
 
-        # always return dict for intermediate stage
-        return {"hidden_states": hidden_states}
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooled_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
 
-    @staticmethod
     def clip_vision_model_forward(
         self: CLIPVisionModel,
         pixel_values: Optional[torch.FloatTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        stage_manager: Optional[PipelineStageManager] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
-        stage_index: Optional[list[int]] = None,
+        encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
+        all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
-        return CLIPVisionPipelineForwards.clip_vision_transformer_forward(
+        return CLIPVisionModelForwards.clip_vision_transformer_forward(
             self.vision_model,
             pixel_values=pixel_values,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            stage_manager=stage_manager,
             hidden_states=hidden_states,
-            stage_index=stage_index,
+            encoder_states=encoder_states,
+            all_attentions=all_attentions,
             shard_config=shard_config,
         )
 
 
-class CLIPForwards:
-    def clip_flash_attention_forward(
+class CLIPAttentionForwards:
+    @staticmethod
+    def sdpa_forward(
         self: CLIPAttention,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         causal_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        """Input shape: Batch x Time x Channel"""
-        if output_attentions:
-            # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
-            logger.warning_once(
-                "CLIPModel is using ClipSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not "
-                "support `output_attentions=True`. Falling back to the manual attention implementation, but specifying "
-                "the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can "
-                'be removed using the argument `attn_implementation="eager"` when loading the model.'
-            )
-            output_attentions = False
+        shard_config: Optional[ShardConfig] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # CLIP text model uses both `causal_attention_mask` and `attention_mask`
+        if attention_mask is not None and causal_attention_mask is not None:
+            attn_mask = attention_mask + causal_attention_mask
+        elif causal_attention_mask is not None:
+            attn_mask = causal_attention_mask
+        else:
+            attn_mask = attention_mask
 
         bsz, tgt_len, _ = hidden_states.size()
 
-        # Code borrowed from:
-        # https://github.com/huggingface/transformers/pull/30390/files#diff-7f53db5caa73a4cbeb0dca3b396e3d52f30f025b8c48d4daf51eb7abb6e2b949
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
-        # [batch_size, tgt_len, embed_dim]
+        query_states = query_states.view(
+            bsz, tgt_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, tgt_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, tgt_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+
+        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+        # Reference: https://github.com/pytorch/pytorch/issues/112577.
+        if (
+            not is_torch_greater_or_equal_than_2_2
+            and query_states.device.type == "cuda"
+            and attn_mask is not None
+        ):
+            query_states = query_states.contiguous()
+            key_states = key_states.contiguous()
+            value_states = value_states.contiguous()
+
+        # CLIP text model uses both `causal_attention_mask` and `attention_mask` sequentially.
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            scale=self.scale,
+        )
+
+        attn_output = attn_output.transpose(1, 2)
+        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output, None
+
+    @staticmethod
+    def flash_attention_forward(
+        self: CLIPAttention,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        causal_attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = False,
+        shard_config: Optional[ShardConfig] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        batch_size, q_len, _ = hidden_states.size()
+
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
         # [batch_size, tgt_len, embed_dim] -> [batch_size, tgt_len, num_heads, head_dim]
         query_states = query_states.view(
-            bsz, -1, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(bsz, -1, self.num_heads, self.head_dim).transpose(
-            1, 2
+            batch_size, q_len, self.num_heads, self.head_dim
         )
+        key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim)
         value_states = value_states.view(
-            bsz, -1, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-
-        attn_mask = (
-            causal_attention_mask
-            if causal_attention_mask is not None
-            else attention_mask
+            batch_size, q_len, self.num_heads, self.head_dim
         )
-        if attention_mask is not None and causal_attention_mask is not None:
-            attn_mask = attn_mask + attention_mask
 
-        # CLIP text model uses both  `causal_attention_mask` and `attention_mask` sequentially.
-        attn_output = ColoAttention.attention(
+        dropout_rate = self.dropout if self.training else 0.0
+
+        attn_output = _flash_attention_forward(
             query_states,
             key_states,
             value_states,
-            attention_mask=(
-                attn_mask if causal_attention_mask is not None else attention_mask
-            ),
-            dropout_p=self.dropout if self.training else 0.0,
-            scale=self.scale,
+            attention_mask,
+            q_len,
+            dropout=dropout_rate,
+            is_causal=causal_attention_mask is not None,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
-        if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.transpose(1, 2).reshape(bsz, tgt_len, self.embed_dim)
-
+        # sp: all-to-all communication when introducing ulysses context parallelism
+        attn_output = attn_output.reshape(
+            batch_size, q_len, self.embed_dim
+        ).contiguous()
         attn_output = self.out_proj(attn_output)
 
         return attn_output, None
-
-    def clip_eager_forward(
-        self: CLIPAttention,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        causal_attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        """
-        Copied from https://github.com/huggingface/transformers/blob/v4.40.2/src/transformers/models/clip/modeling_clip.py,
-        with the following changes:
-        - Use `self.embed_dim` instead of `self.hidden_size` to get the size of the hidden dimension.
-          This is required for tensor parallelism.
-        """
-        # Input shape: Batch x Time x Channel
-        bsz, tgt_len, _ = hidden_states.size()
-
-        # get query proj
-        query_states = self.q_proj(hidden_states) * self.scale
-        key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-        value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-
-        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
-        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
-        key_states = key_states.view(*proj_shape)
-        value_states = value_states.view(*proj_shape)
-
-        src_len = key_states.size(1)
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
-
-        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
-                f" {attn_weights.size()}"
-            )
-
-        # apply the causal_attention_mask first
-        if causal_attention_mask is not None:
-            if causal_attention_mask.size() != (bsz, 1, tgt_len, src_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is"
-                    f" {causal_attention_mask.size()}"
-                )
-            attn_weights = (
-                attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                + causal_attention_mask
-            )
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, tgt_len, src_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = (
-                attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-                + attention_mask
-            )
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-
-        if output_attentions:
-            # this operation is a bit akward, but it's required to
-            # make sure that attn_weights keeps its gradient.
-            # In order to do so, attn_weights have to reshaped
-            # twice and have to be reused in the following
-            attn_weights_reshaped = attn_weights.view(
-                bsz, self.num_heads, tgt_len, src_len
-            )
-            attn_weights = attn_weights_reshaped.view(
-                bsz * self.num_heads, tgt_len, src_len
-            )
-        else:
-            attn_weights_reshaped = None
-
-        attn_probs = nn.functional.dropout(
-            attn_weights, p=self.dropout, training=self.training
-        )
-
-        attn_output = torch.bmm(attn_probs, value_states)
-
-        if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
-        attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
-
-        attn_output = self.out_proj(attn_output)
-
-        return attn_output, attn_weights_reshaped

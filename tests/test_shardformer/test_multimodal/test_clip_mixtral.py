@@ -8,7 +8,7 @@ from torch.testing._internal.common_utils import (
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.clip import CLIPVisionModel
-from transformers.models.qwen2 import Qwen2ForCausalLM
+from transformers.models.mixtral import MixtralForCausalLM
 
 from cornstarch.models.multimodal_language_model import MultimodalModel
 from cornstarch.plugin.multimodal_parallel_plugin import (
@@ -22,18 +22,18 @@ from .._utils import (
     check_weight,
     get_grad_tensors_for_check,
 )
-from ._utils import CornstarchMultimodalParallelBase, clip_config, qwen2_config
+from ._utils import CornstarchMultimodalParallelBase, clip_config, mixtral_config
 
 
 @instantiate_parametrized_tests
-class ClipQwen2ForCausalLMPolicyTestClass(CornstarchMultimodalParallelBase):
+class ClipMixtralForCausalLMPolicyTestClass(CornstarchMultimodalParallelBase):
     model_class = {
         "vision": CLIPVisionModel,
-        "llm": Qwen2ForCausalLM,
+        "llm": MixtralForCausalLM,
     }
     config = {
         "vision": clip_config,
-        "llm": qwen2_config,
+        "llm": mixtral_config,
     }
 
     def data_gen_fn(self) -> dict:
@@ -157,6 +157,16 @@ class ClipQwen2ForCausalLMPolicyTestClass(CornstarchMultimodalParallelBase):
             check_weight(
                 org_vision_model,
                 sharded_vision_model,
+                vision_row_layer_for_check,
+                tp_group,
+                atol=atol,
+                rtol=rtol,
+                dim=0,
+                verbose=False,
+            )
+            check_weight(
+                org_vision_model,
+                sharded_vision_model,
                 vision_col_layer_for_check,
                 tp_group,
                 atol=atol,
@@ -165,7 +175,16 @@ class ClipQwen2ForCausalLMPolicyTestClass(CornstarchMultimodalParallelBase):
                 verbose=False,
             )
         elif is_language_first_stage:
-            # embed_tokens have different dimension, so skip to check row_layer weight
+            check_weight(
+                org_language_model,
+                sharded_language_model,
+                language_row_layer_for_check,
+                tp_group,
+                atol=atol,
+                rtol=rtol,
+                dim=0,
+                verbose=False,
+            )
             check_weight(
                 org_language_model,
                 sharded_language_model,

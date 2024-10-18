@@ -1,7 +1,7 @@
+import functools
 import itertools
 import warnings
-from functools import partial
-from typing import Callable, Dict, List, cast
+from typing import List, cast
 
 from colossalai.shardformer.layer import (
     FusedLayerNorm,
@@ -15,13 +15,14 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import nn
 from transformers import PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.clip.configuration_clip import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPVisionTransformer
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.clip import (
-    CLIPForwards,
-    CLIPVisionPipelineForwards,
+    CLIPAttentionForwards,
+    CLIPVisionModelForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -88,7 +89,15 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
             CLIPVisionTransformer,
         )
 
-        policy: dict[str | nn.Module, ModulePolicyDescription] = {}
+        config: CLIPVisionConfig = self.model.config
+        ATTN_IMPLEMENTATION = {
+            "eager": CLIPAttention,
+            "flash_attention_2": CLIPFlashAttention2,
+            "sdpa": CLIPSdpaAttention,
+        }
+        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
+
+        policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
@@ -96,21 +105,53 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 "CLIP doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
             )
 
-        config: CLIPVisionConfig = cast(CLIPVisionConfig, self.model.config)
+        tp_size = self.shard_config.tensor_parallel_size
+        num_heads = config.num_attention_heads
+        hidden_size = config.hidden_size
+
         if self.shard_config.enable_tensor_parallelism:
+            hidden_size //= tp_size
+
             assert (
-                config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
-            ), (
-                f"The number of attention heads {config.num_attention_heads} must be divisible "
-                f"by tensor parallel size {self.shard_config.tensor_parallel_size}."
+                num_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_heads //= tp_size
+
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["embed_dim"] = hidden_size
+        attention_attribute_replacement["num_heads"] = num_heads
+
+        policy[attn_cls] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": (
+                    CLIPAttentionForwards.flash_attention_forward
+                    if config._attn_implementation == "flash_attention_2"
+                    else CLIPAttentionForwards.sdpa_forward
+                )
+            },
+        )
+
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
             )
-            policy[CLIPEncoderLayer] = ModulePolicyDescription(
-                attribute_replacement={
-                    "self_attn.num_heads": config.num_attention_heads
-                    // self.shard_config.tensor_parallel_size,
-                    "self_attn.embed_dim": config.hidden_size
-                    // self.shard_config.tensor_parallel_size,
+
+            policy[attn_cls] = ModulePolicyDescription(
+                attribute_replacement=attention_attribute_replacement,
+                method_replacement={
+                    "forward": CLIPAttentionForwards.flash_attention_forward
                 },
+            )
+
+            policy[CLIPVisionTransformer] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2"
+                }
+            )
+
+        if self.shard_config.enable_tensor_parallelism:
+            policy[CLIPEncoderLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
@@ -172,31 +213,16 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 target_key=CLIPVisionTransformer,
             )
 
-        ATTN_IMPLEMENTATION = {
-            "eager": CLIPAttention,
-            "flash_attention_2": CLIPFlashAttention2,
-            "sdpa": CLIPSdpaAttention,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[self.model.config._attn_implementation]
-
         self.append_or_create_method_replacement(
             description={
-                "forward": (
-                    CLIPForwards.clip_flash_attention_forward
-                    if self.shard_config.enable_flash_attention
-                    else CLIPForwards.clip_eager_forward
+                "forward": functools.partial(
+                    CLIPVisionModelForwards.clip_vision_transformer_forward,
+                    shard_config=self.shard_config,
                 ),
             },
             policy=policy,
-            target_key=attn_cls,
+            target_key=CLIPVisionTransformer,
         )
-
-        if self.pipeline_stage_manager is not None:
-            self.set_pipeline_forward(
-                model_cls=CLIPVisionTransformer,
-                new_forward=CLIPVisionPipelineForwards.clip_vision_transformer_forward,
-                policy=policy,
-            )
 
         return policy
 
@@ -222,36 +248,6 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
 
         return held_layers
 
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
-    ):
-        """If under pipeline parallel setting, replacing the original forward method of huggingface
-        to customized forward method, and add this changing to policy."""
-        if self.pipeline_stage_manager is None:
-            return
-
-        module: CLIPVisionTransformer
-        if self.model.__class__.__name__ == "CLIPVisionTransformer":
-            module = self.model
-        else:
-            module = self.model.vision_model
-
-        stage_manager = self.pipeline_stage_manager
-        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layers))
-        stage_index = stage_manager.get_stage_index(layers_per_stage)
-
-        method_replacement = {
-            "forward": partial(
-                new_forward,
-                stage_manager=stage_manager,
-                stage_index=stage_index,
-                shard_config=self.shard_config,
-            )
-        }
-        self.append_or_create_method_replacement(
-            description=method_replacement, policy=policy, target_key=model_cls
-        )
-
 
 class CLIPVisionModelPolicy(CLIPVisionTransformerPolicy):
     @staticmethod
@@ -270,12 +266,16 @@ class CLIPVisionModelPolicy(CLIPVisionTransformerPolicy):
 
         policy = super().module_policy()
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=CLIPVisionModel,
-                new_forward=CLIPVisionPipelineForwards.clip_vision_model_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    CLIPVisionModelForwards.clip_vision_model_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=CLIPVisionModel,
+        )
 
         return policy
 

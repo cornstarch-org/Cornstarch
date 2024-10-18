@@ -1,6 +1,7 @@
+import functools
 import itertools
-from functools import partial
-from typing import Callable, cast
+import warnings
+from typing import cast
 
 from colossalai.shardformer.layer import (
     DropoutForParallelInput,
@@ -15,18 +16,14 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
-from torch import nn
 from torch.nn.modules import Module
 from transformers import PretrainedConfig
 from transformers.models.dinov2.configuration_dinov2 import Dinov2Config
-from transformers.models.dinov2.modeling_dinov2 import (
-    Dinov2SelfAttention,
-)
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.dinov2 import (
-    Dinov2Forwards,
-    Dinov2PipelineForwards,
+    Dinov2ModelForwards,
+    Dinov2SelfAttentionForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -84,9 +81,54 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
             Dinov2Embeddings,
             Dinov2Layer,
             Dinov2Model,
+            Dinov2SdpaSelfAttention,
+            Dinov2SelfAttention,
         )
 
+        config: Dinov2Config = self.model.config
+        ATTN_IMPLEMENTATION = {
+            "eager": Dinov2SelfAttention,
+            "sdpa": Dinov2SdpaSelfAttention,
+        }
+        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
+
         policy = {}
+
+        if self.shard_config.enable_sequence_parallelism:
+            self.shard_config.enable_sequence_parallelism = False
+            warnings.warn(
+                "Dinov2 doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
+            )
+
+        tp_size = self.shard_config.tensor_parallel_size
+        num_heads = config.num_attention_heads
+        hidden_size = config.hidden_size
+
+        if self.shard_config.enable_tensor_parallelism:
+            hidden_size //= tp_size
+
+            assert (
+                num_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_heads //= tp_size
+
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["num_attention_heads"] = num_heads
+        attention_attribute_replacement["all_head_size"] = hidden_size
+        attention_attribute_replacement["attention_probs_dropout_prob"] = (
+            config.attention_probs_dropout_prob
+        )
+
+        policy[attn_cls] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": (
+                    Dinov2SelfAttentionForwards.flash_attention_forward
+                    if self.shard_config.enable_flash_attention
+                    else Dinov2SelfAttentionForwards.sdpa_forward
+                ),
+            },
+        )
 
         if self.shard_config.enable_tensor_parallelism:
             policy[Dinov2Embeddings] = ModulePolicyDescription(
@@ -100,12 +142,6 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
             )
 
             policy[Dinov2Layer] = ModulePolicyDescription(
-                attribute_replacement={
-                    "attention.attention.num_attention_heads": self.model.config.num_attention_heads
-                    // self.shard_config.tensor_parallel_size,
-                    "attention.attention.all_head_size": self.model.config.hidden_size
-                    // self.shard_config.tensor_parallel_size,
-                },
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="attention.attention.query",
@@ -148,14 +184,6 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                         target_module=Linear1D_Row,
                     ),
                 ],
-            )
-
-        # use flash attention
-        if self.shard_config.enable_flash_attention:
-            self.append_or_create_method_replacement(
-                description={"forward": Dinov2Forwards.dinov2_flash_attention_forward},
-                policy=policy,
-                target_key=Dinov2SelfAttention,
             )
 
         if self.shard_config.enable_fused_normalization:
@@ -212,34 +240,6 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
 
         return held_layers
 
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, new_forward: Callable, policy: dict
-    ):
-        """If under pipeline parallel setting, replacing the original forward method of huggingface
-        to customized forward method, and add this changing to policy."""
-        if self.pipeline_stage_manager is None:
-            return
-
-        if self.model.__class__.__name__ in ["Dinov2Model", "Dinov2Backbone"]:
-            module = self.model
-        else:
-            module = self.model.dinov2
-
-        stage_manager = self.pipeline_stage_manager
-        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layer))
-        stage_index = stage_manager.get_stage_index(layers_per_stage)
-        method_replacement = {
-            "forward": partial(
-                new_forward,
-                stage_manager=stage_manager,
-                stage_index=stage_index,
-                shard_config=self.shard_config,
-            )
-        }
-        self.append_or_create_method_replacement(
-            description=method_replacement, policy=policy, target_key=model_cls
-        )
-
 
 class Dinov2ModelPolicy(Dinov2Policy):
     @staticmethod
@@ -253,77 +253,26 @@ class Dinov2ModelPolicy(Dinov2Policy):
         policy = super().module_policy()
         from transformers.models.dinov2.modeling_dinov2 import Dinov2Model
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=Dinov2Model,
-                new_forward=Dinov2PipelineForwards.dinov2_model_forward,
-                policy=policy,
-            )
-
-        return policy
-
-
-class Dinov2ForImageClassificationPolicy(Dinov2ModelPolicy):
-    @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> list[str]:
-        modules = [
-            f"dinov2.{module}" for module in Dinov2Policy.get_all_modules(config)
-        ]
-        modules.append("classifier")
-        return modules
-
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-        if "classifier" not in template.modules_per_stage[-1]:
-            raise ValueError("classifier must be in the last stage.")
-
-    def module_policy(self) -> dict[str | Module, ModulePolicyDescription]:
-        from transformers.models.dinov2.modeling_dinov2 import (
-            Dinov2ForImageClassification,
-            Dinov2Model,
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    Dinov2ModelForwards.dinov2_model_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=Dinov2Model,
         )
 
-        policy = super().module_policy()
-        if self.shard_config.enable_tensor_parallelism:
-            new_item = {
-                Dinov2ForImageClassification: ModulePolicyDescription(
-                    sub_module_replacement=[
-                        SubModuleReplacementDescription(
-                            suffix="classifier",
-                            target_module=Linear1D_Col,
-                            kwargs=dict(gather_output=True),
-                        )
-                    ]
-                )
-            }
-            policy.update(new_item)
-
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=Dinov2Model,
-                new_forward=Dinov2PipelineForwards.dinov2_model_forward,
-                policy=policy,
-            )
-            self.set_pipeline_forward(
-                model_cls=Dinov2ForImageClassification,
-                new_forward=Dinov2PipelineForwards.dinov2_for_image_classification_forward,
-                policy=policy,
-            )
-
         return policy
-
-    def get_held_layers(self) -> list[Module]:
-        stage_manager = self.pipeline_stage_manager
-        held_layers = super().get_held_layers()
-        if stage_manager.is_last_stage(ignore_chunk=True):
-            held_layers.append(self.model.classifier)
-        return held_layers
 
 
 class Dinov2BackbonePolicy(Dinov2Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
-        return Dinov2Policy.get_all_modules(config)
+        modules = Dinov2Policy.get_all_modules(config)
+        modules.append("layernorm")
+        return modules
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
         super().pipeline_template_sanity_check(template)
@@ -345,11 +294,15 @@ class Dinov2BackbonePolicy(Dinov2Policy):
             target_key=Dinov2Backbone,
         )
 
-        if self.pipeline_stage_manager:
-            self.set_pipeline_forward(
-                model_cls=Dinov2Backbone,
-                new_forward=Dinov2PipelineForwards.dinov2_backbone_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    Dinov2ModelForwards.dinov2_backbone_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=Dinov2Backbone,
+        )
 
         return policy

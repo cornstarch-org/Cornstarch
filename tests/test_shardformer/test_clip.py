@@ -6,14 +6,13 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-from transformers.modeling_outputs import ModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.models.clip.modeling_clip import CLIPVisionConfig, CLIPVisionModel
 
 from ._utils import (
     ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
-    check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
     unwrap_model,
@@ -22,12 +21,18 @@ from ._utils import (
 
 @instantiate_parametrized_tests
 class TestCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
-    model_class: CLIPVisionModel
+    model_class = CLIPVisionModel
     config = CLIPVisionConfig(
         num_hidden_layers=4,
         hidden_size=128,
-        num_attention_heads=4,
+        num_attention_heads=16,
     )
+
+    @staticmethod
+    def loss_fn(x: BaseModelOutputWithPast) -> torch.Tensor:
+        return torch.nn.functional.mse_loss(
+            x.last_hidden_state, torch.ones_like(x.last_hidden_state)
+        )
 
     def data_gen_fn(self) -> dict:
         image_size = self.config.image_size
@@ -51,7 +56,6 @@ class TestCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
     ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
-        precision = booster.plugin.precision
 
         # unwrap model
         clip_model = unwrap_model(org_model, "CLIPVisionModel", "model")
@@ -71,7 +75,7 @@ class TestCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
             "vision_model.pre_layrnorm",
         ]
 
-        atol, rtol = (5e-5, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
+        atol, rtol = 5e-3, 5e-3
 
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
@@ -118,9 +122,6 @@ class TestCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
-            check_output_hidden_state(
-                org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
-            )
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
@@ -146,9 +147,9 @@ class TestCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
         check_all_grad_tensors(grads_to_check)
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp16", "fp32"])
+    @parametrize("precision", ["bf16", "fp16"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):

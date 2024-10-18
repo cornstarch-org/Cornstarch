@@ -1,7 +1,7 @@
 import functools
 import itertools
 import warnings
-from typing import Callable, Dict, List, cast
+from typing import Dict, List, cast
 
 import torch.nn as nn
 from colossalai.shardformer.layer import (
@@ -15,16 +15,14 @@ from colossalai.shardformer.policies.base_policy import (
     SubModuleReplacementDescription,
 )
 from transformers import PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.qwen2_audio.configuration_qwen2_audio import (
     Qwen2AudioEncoderConfig,
 )
 from transformers.models.qwen2_audio.modeling_qwen2_audio import Qwen2AudioEncoder
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.qwen2_audio import (
-    Qwen2AudioForwards,
-    Qwen2AudioPipelineForwards,
-)
+from cornstarch.shardformer.modeling.qwen2_audio import Qwen2AudioModelForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -70,29 +68,6 @@ class Qwen2AudioEncoderPolicy(PipelineTemplatePolicyBase, Policy):
         ):
             raise ValueError("layer norm and avg pooler must be in the last stage.")
 
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, new_forward: Callable, policy: dict
-    ):
-        if self.pipeline_stage_manager is None:
-            return
-
-        module: Qwen2AudioEncoder = self.model
-        stage_manager = self.pipeline_stage_manager
-        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
-        stage_index = stage_manager.get_stage_index(layers_per_stage)
-
-        method_replacement = {
-            "forward": functools.partial(
-                new_forward,
-                stage_manager=stage_manager,
-                stage_index=stage_index,
-                shard_config=self.shard_config,
-            )
-        }
-        self.append_or_create_method_replacement(
-            description=method_replacement, policy=policy, target_key=model_cls
-        )
-
     def get_held_layers(self) -> List[nn.Module]:
         assert self.pipeline_stage_manager is not None
 
@@ -128,6 +103,14 @@ class Qwen2AudioEncoderPolicy(PipelineTemplatePolicyBase, Policy):
             Qwen2AudioSdpaAttention,
         )
 
+        config: Qwen2AudioEncoderConfig = self.model.config
+        ATTN_IMPLEMENTATION = {
+            "eager": Qwen2AudioAttention,
+            "sdpa": Qwen2AudioSdpaAttention,
+            "flash_attention_2": Qwen2AudioFlashAttention2,
+        }
+        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
+
         policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
@@ -136,20 +119,38 @@ class Qwen2AudioEncoderPolicy(PipelineTemplatePolicyBase, Policy):
                 "Qwen2Audio doesn't support sequence parallelism, will ignore the sequence parallelism flag."
             )
 
-        config: Qwen2AudioEncoderConfig = self.model.config
-        if self.shard_config.enable_tensor_parallelism:
-            assert (
-                config.encoder_attention_heads % self.shard_config.tensor_parallel_size
-                == 0
-            ), "The number of attention heads must be divisible by tensor parallel size."
+        tp_size = self.shard_config.tensor_parallel_size
+        num_heads = config.encoder_attention_heads
+        hidden_size = config.d_model
 
+        if self.shard_config.enable_tensor_parallelism:
+            hidden_size //= tp_size
+
+            assert (
+                num_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_heads //= tp_size
+
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["embed_dim"] = hidden_size
+        attention_attribute_replacement["num_heads"] = num_heads
+
+        policy[attn_cls] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+        )
+
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
+            )
+
+            policy[attn_cls] = ModulePolicyDescription(
+                attribute_replacement=attention_attribute_replacement,
+                method_replacement={"forward": Qwen2AudioFlashAttention2.forward},
+            )
+
+        if self.shard_config.enable_tensor_parallelism:
             policy[Qwen2AudioEncoderLayer] = ModulePolicyDescription(
-                attribute_replacement={
-                    "self_attn.embed_dim": config.d_model
-                    // self.shard_config.tensor_parallel_size,
-                    "self_attn.num_heads": config.encoder_attention_heads
-                    // self.shard_config.tensor_parallel_size,
-                },
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
@@ -203,32 +204,21 @@ class Qwen2AudioEncoderPolicy(PipelineTemplatePolicyBase, Policy):
                 target_key=Qwen2AudioEncoder,
             )
 
-        if self.shard_config.enable_flash_attention:
-            ATTN_IMPLEMENTATION = {
-                "eager": Qwen2AudioAttention,
-                "sdpa": Qwen2AudioSdpaAttention,
-                "flash_attention_2": Qwen2AudioFlashAttention2,
-            }
-            attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": Qwen2AudioForwards.qwen2_audio_flash_attention_forward
-                },
-                policy=policy,
-                target_key=attn_cls,
-            )
-
         if self.shard_config.enable_jit_fused:
             warnings.warn(
                 "Qwen2Audio doesn't support JIT fusion, will ignore the flag."
             )
             self.shard_config.enable_jit_fused = False
 
-        if self.pipeline_stage_manager is not None:
-            self.set_pipeline_forward(
-                model_cls=Qwen2AudioEncoder,
-                new_forward=Qwen2AudioPipelineForwards.qwen2_audio_encoder_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    Qwen2AudioModelForwards.qwen2_audio_encoder_forward,
+                    shard_config=self.shard_config,
+                )
+            },
+            policy=policy,
+            target_key=Qwen2AudioEncoder,
+        )
 
         return policy

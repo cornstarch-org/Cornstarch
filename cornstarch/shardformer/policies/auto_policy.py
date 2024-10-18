@@ -108,6 +108,10 @@ _POLICY_LIST = {
     "cornstarch.models.evaclip.modeling_evaclip.EvaCLIPVisionModel": PolicyLocation(
         file_name="evaclip", class_name="EvaCLIPVisionModelPolicy"
     ),
+    # InternViT
+    "cornstarch.models.intern_vit.modeling_intern_vit.InternVisionModel": PolicyLocation(
+        file_name="intern_vit", class_name="InternVisionModelPolicy"
+    ),
     # Siglip
     "transformers.models.siglip.modeling_siglip.SiglipVisionModel": PolicyLocation(
         file_name="siglip", class_name="SiglipVisionModelPolicy"
@@ -164,9 +168,13 @@ _POLICY_LIST = {
     "transformers.models.qwen2.modeling_qwen2.Qwen2ForCausalLM": PolicyLocation(
         file_name="qwen2", class_name="Qwen2ForCausalLMPolicy"
     ),
+    # Qwen2Audio
+    "transformers.models.qwen2_audio.modeling_qwen2_audio.Qwen2AudioEncoder": PolicyLocation(
+        file_name="qwen2_audio", class_name="Qwen2AudioEncoderPolicy"
+    ),
     # InternLM2
     "cornstarch.models.internlm2.modeling_internlm2.InternLM2Model": PolicyLocation(
-        file_name="internlm2", class_name="InternLM2Policy"
+        file_name="internlm2", class_name="InternLM2ModelPolicy"
     ),
     "cornstarch.models.internlm2.modeling_internlm2.InternLM2ForCausalLM": PolicyLocation(
         file_name="internlm2", class_name="InternLM2ForCausalLMPolicy"

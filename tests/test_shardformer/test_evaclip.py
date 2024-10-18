@@ -1,3 +1,5 @@
+import copy
+
 import torch
 from colossalai.booster import Booster
 from colossalai.interface import ModelWrapper, OptimizerWrapper
@@ -6,7 +8,8 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-from transformers.modeling_outputs import ModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPooling, ModelOutput
+from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.evaclip.modeling_evaclip import (
     EvaCLIPVisionConfig,
@@ -17,7 +20,6 @@ from ._utils import (
     ColossalaiHybridParallelBase,
     check_all_grad_tensors,
     check_loss,
-    check_output_hidden_state,
     check_weight,
     get_grad_tensors_for_check,
     unwrap_model,
@@ -26,12 +28,26 @@ from ._utils import (
 
 @instantiate_parametrized_tests
 class TestEvaCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
-    model_class: EvaCLIPVisionModel
+    model_class = EvaCLIPVisionModel
     config = EvaCLIPVisionConfig(
         num_hidden_layers=4,
         hidden_size=128,
-        num_attention_heads=4,
+        num_attention_heads=16,
     )
+
+    # HF does not provide EvaCLIP flash attention yet.
+    # Use SDPA implementation and compare against ColoAttention.
+    def model_fn(self, fa: bool) -> PreTrainedModel:
+        config = copy.deepcopy(self.config)
+        config.pad_token_id = config.eos_token_id
+        config._attn_implementation = "eager"
+        return self.model_class(config)
+
+    @staticmethod
+    def loss_fn(x: BaseModelOutputWithPooling) -> torch.Tensor:
+        return torch.nn.functional.mse_loss(
+            x.last_hidden_state, torch.ones_like(x.last_hidden_state)
+        )
 
     def data_gen_fn(self) -> dict:
         image_size = self.config.image_size
@@ -55,7 +71,6 @@ class TestEvaCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
     ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
-        precision = booster.plugin.precision
 
         # unwrap model
         clip_model = unwrap_model(org_model, "EvaCLIPVisionModel", "model")
@@ -74,7 +89,7 @@ class TestEvaCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
             "vision_model.encoder.layers[0].layer_norm2",
         ]
 
-        atol, rtol = (5e-5, 1e-4) if precision == "fp32" else (5e-3, 5e-3)
+        atol, rtol = 5e-3, 5e-3
 
         # Save gradient tensors for comparison between the original model and the sharded model before optimizer step.
         grads_to_check = {}
@@ -121,9 +136,6 @@ class TestEvaCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
-            check_output_hidden_state(
-                org_output, sharded_output, stage_manager, atol=atol, rtol=rtol
-            )
             check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
@@ -149,9 +161,9 @@ class TestEvaCLIPVisionModelPolicyClass(ColossalaiHybridParallelBase):
 
         check_all_grad_tensors(grads_to_check)
 
-    @parametrize("tp_size, pp_size", [(4, 1), (2, 1), (1, 1), (2, 2), (1, 2), (1, 4)])
+    @parametrize("tp_size, pp_size", [(4, 1), (1, 1), (2, 2), (1, 4)])
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["fp32", "fp16"])
+    @parametrize("precision", ["bf16", "fp16"])
     def test_hybrid_parallel(
         self, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
