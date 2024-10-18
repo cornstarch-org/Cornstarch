@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Tuple
 
-from kernel.triton.attn import _attn_any_mask_fwd, _attn_any_mask_bwd, _attn_any_mask_bwd_preprocess
+from cornstarch.kernel.triton.attn import _attn_any_mask_fwd, _attn_any_mask_bwd, _attn_any_mask_bwd_preprocess
 import triton
 
 def _flash_attn_anymask_forward(
