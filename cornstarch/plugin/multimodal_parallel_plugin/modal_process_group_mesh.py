@@ -127,7 +127,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
                             tp_mesh = [ranks for _ in range(llm_sp_size)]
 
                         stage_mesh.append(tp_mesh)
-                        modal_to_ranks[modal].extend(ranks)
+                        modal_to_ranks[modal].extend(list(itertools.chain(*tp_mesh)))
                     meshes.append(stage_mesh)
 
         self._rank = dist.get_rank()
