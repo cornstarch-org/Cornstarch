@@ -104,21 +104,19 @@ class Qwen2ModelForwards:
                     "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
                 )
 
-        if stage_manager is None or stage_manager.is_first_stage():
-            if cache_position is None:
-                past_seen_tokens = (
-                    past_key_values.get_seq_length()
-                    if past_key_values is not None
-                    else 0
-                )
-                cache_position = torch.arange(
-                    past_seen_tokens,
-                    past_seen_tokens + hidden_states.shape[1],
-                    device=hidden_states.device,
-                )
-            if position_ids is None:
-                position_ids = cache_position.unsqueeze(0)
+        if cache_position is None:
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + hidden_states.shape[1],
+                device=hidden_states.device,
+            )
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
 
+        if position_embeddings is None:
             # create position embeddings to be shared across the decoder layers
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 

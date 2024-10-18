@@ -117,8 +117,8 @@ class MixtralModelForwards:
             )
             cache_position = torch.arange(
                 past_seen_tokens,
-                past_seen_tokens + inputs_embeds.shape[1],
-                device=inputs_embeds.device,
+                past_seen_tokens + hidden_states.shape[1],
+                device=hidden_states.device,
             )
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)

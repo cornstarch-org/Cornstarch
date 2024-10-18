@@ -33,9 +33,10 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
 )
 
 from ...test_shardformer.test_multimodal._utils import (
+    CornstarchMultimodalParallelBase,
     PolicyTestBase,
-    config_class_dict,
-    pipeline_template_dict,
+    clip_config,
+    llama_config,
 )
 
 
@@ -59,11 +60,10 @@ def shared_tempdir() -> Iterator[str]:
 class TestMultimodalCheckpointIOClass(PolicyTestBase):
     vision_model_class = CLIPVisionModel
     language_model_class = LlamaForCausalLM
-    vision_config: CLIPVisionConfig = config_class_dict["clip_vision_model"]
-    language_config: LlamaConfig = config_class_dict["llama"]
+    vision_config: CLIPVisionConfig = clip_config
+    language_config: LlamaConfig = llama_config
 
-    @staticmethod
-    def data_gen_fn() -> dict:
+    def data_gen_fn(self) -> dict:
         microbatch_size = 1
         num_microbatches = 4
         num_batch = microbatch_size * num_microbatches
@@ -76,8 +76,11 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
 
         return input
 
+    def check_fn(self, *args, **kwargs):
+        pass
+
     @staticmethod
-    def loss_fn(outputs: CausalLMOutputWithPast, inputs: Any) -> torch.Tensor:
+    def loss_fn(outputs: CausalLMOutputWithPast) -> torch.Tensor:
         return outputs.loss
 
     def model_fn(self) -> MultimodalModel:
@@ -110,15 +113,15 @@ class TestMultimodalCheckpointIOClass(PolicyTestBase):
 
         vision_plugin = ModalParallelPlugin(
             tp_size=tp_size,
-            pipeline_template=pipeline_template_dict[
-                (model.vision_encoder.config[0].model_type, vision_pp_size)
-            ],
+            pipeline_template=CornstarchMultimodalParallelBase.get_pipeline_template(
+                model.vision_encoder, vision_pp_size
+            ),
         )
         language_plugin = ModalParallelPlugin(
             tp_size=tp_size,
-            pipeline_template=pipeline_template_dict[
-                (model.language_model.config.model_type, language_pp_size)
-            ],
+            pipeline_template=CornstarchMultimodalParallelBase.get_pipeline_template(
+                model.language_model, language_pp_size
+            ),
         )
         plugin = MultimodalParallelPlugin(
             encoder_plugins={"vision": vision_plugin},

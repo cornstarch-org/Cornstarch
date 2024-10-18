@@ -1,24 +1,31 @@
 import copy
-from abc import ABC, abstractmethod
-from typing import Any, Callable, Type
+import re
+from contextlib import nullcontext
+from typing import Any, Callable
+from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
+from colossalai.lazy import LazyInitContext
 from torch import nn
 from torch.optim import Adam, Optimizer
 from transformers import PretrainedConfig, PreTrainedModel
-from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
-from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
-from transformers.models.dinov2 import Dinov2Config, Dinov2Model
-from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+)
+from transformers.models.clip import CLIPVisionConfig
+from transformers.models.dinov2 import Dinov2Config
+from transformers.models.gemma import GemmaConfig
 from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
-from transformers.models.gemma2.modeling_gemma2 import Gemma2ForCausalLM
-from transformers.models.llama import LlamaConfig, LlamaForCausalLM
-from transformers.models.mistral import MistralConfig, MistralForCausalLM
-from transformers.models.phi3 import Phi3Config, Phi3ForCausalLM
-from transformers.models.qwen2 import Qwen2Config, Qwen2ForCausalLM
-from transformers.models.siglip import SiglipVisionConfig, SiglipVisionModel
+from transformers.models.llama import LlamaConfig
+from transformers.models.mistral import MistralConfig
+from transformers.models.mixtral import MixtralConfig
+from transformers.models.phi3 import Phi3Config
+from transformers.models.qwen2 import Qwen2Config
+from transformers.models.siglip import SiglipVisionConfig
 
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
@@ -33,327 +40,53 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
 
 from .._utils import PolicyTestBase
 
-llama_config = LlamaConfig()
-gemma_config = GemmaConfig()
-gemma2_config = Gemma2Config()
-mistral_config = MistralConfig()
-phi3_config = Phi3Config()
-qwen2_config = Qwen2Config()
 
-for language_config in [
-    llama_config,
-    gemma_config,
-    gemma2_config,
-    mistral_config,
-    phi3_config,
-    qwen2_config,
-]:
-    language_config.hidden_size = 256
-    language_config.intermediate_size = 256
-    language_config.num_attention_heads = 8
-    language_config.num_hidden_layers = 4
-    language_config.use_cache = False
-    language_config._attn_implementation = "eager"
-    language_config.num_key_value_heads = 8
-    # TODO: Gemma uses tie_word_embeddings True, in which case the tests fail.
-    # Implement automatic gradient synchronization between tied weights.
-    # Existing explicit synchronization is not enough as there are encoders
-    # that need to have gradients propagated "after" the weights are synchronized.
-    language_config.tie_word_embeddings = False
-
-clip_config = CLIPVisionConfig()
-siglip_config = SiglipVisionConfig()
-dinov2_config = Dinov2Config()
-
-for vision_config in [clip_config, siglip_config, dinov2_config]:
-    vision_config.hidden_size = 256
-    vision_config.intermediate_size = 256
-    vision_config.num_attention_heads = 8
-    vision_config.num_hidden_layers = 3
-    vision_config.use_cache = False
-    vision_config._attn_implementation = "eager"
-
-config_class_dict: dict[str, PretrainedConfig] = {
-    "llama": llama_config,
-    "gemma": gemma_config,
-    "gemma2": gemma2_config,
-    "mistral": mistral_config,
-    "phi3": phi3_config,
-    "qwen2": qwen2_config,
-    "clip_vision_model": clip_config,
-    "siglip_vision_model": siglip_config,
-    "dinov2": dinov2_config,
-}
-
-model_class_dict: dict[str, Type[PreTrainedModel]] = {
-    "llama": LlamaForCausalLM,
-    "gemma": GemmaForCausalLM,
-    "gemma2": Gemma2ForCausalLM,
-    "mistral": MistralForCausalLM,
-    "phi3": Phi3ForCausalLM,
-    "qwen2": Qwen2ForCausalLM,
-    "clip_vision_model": CLIPVisionModel,
-    "siglip_vision_model": SiglipVisionModel,
-    "dinov2": Dinov2Model,
-}
-
-llama_gemma_mistral_qwen_modules = [
-    "module.embed_tokens",
-    "module.layers.0",
-    "module.layers.1",
-    "module.layers.2",
-    "module.layers.3",
-    "module.norm",
-    "lm_head",
-]
-phi3_modules = [
-    "module.embed_tokens",
-    "module.embed_dropout",
-    "module.layers.0",
-    "module.layers.1",
-    "module.layers.2",
-    "module.layers.3",
-    "module.norm",
-    "lm_head",
-]
-clip_vision_model_modules = [
-    "vision_model.embeddings",
-    "vision_model.pre_layrnorm",
-    "vision_model.encoder.layers.0",
-    "vision_model.encoder.layers.1",
-    "vision_model.encoder.layers.2",
-    "vision_model.post_layernorm",
-]
-siglip_vision_model_modules = [
-    "vision_model.embeddings",
-    "vision_model.encoder.layers.0",
-    "vision_model.encoder.layers.1",
-    "vision_model.encoder.layers.2",
-    "vision_model.post_layernorm",
-    "vision_model.head",
-]
-dinov2_modules = [
-    "dinov2.embeddings",
-    "dinov2.encoder.layers.0",
-    "dinov2.encoder.layers.1",
-    "dinov2.encoder.layers.2",
-    "dinov2.layernorm",
-]
-
-pipeline_template_dict: dict[tuple[str, int], PipelineTemplate] = {
-    ("llama", 1): PipelineTemplate("llama", [llama_gemma_mistral_qwen_modules]),
-    ("llama", 2): PipelineTemplate(
-        "llama",
-        [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
-    ),
-    ("llama", 3): PipelineTemplate(
-        "llama",
-        [
-            llama_gemma_mistral_qwen_modules[:2],
-            llama_gemma_mistral_qwen_modules[2:4],
-            llama_gemma_mistral_qwen_modules[4:],
-        ],
-    ),
-    ("gemma", 1): PipelineTemplate("gemma", [llama_gemma_mistral_qwen_modules]),
-    ("gemma", 2): PipelineTemplate(
-        "gemma",
-        [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
-    ),
-    ("gemma2", 1): PipelineTemplate("gemma2", [llama_gemma_mistral_qwen_modules]),
-    ("gemma2", 2): PipelineTemplate(
-        "gemma2",
-        [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
-    ),
-    ("mistral", 1): PipelineTemplate("mistral", [llama_gemma_mistral_qwen_modules]),
-    ("mistral", 2): PipelineTemplate(
-        "mistral",
-        [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
-    ),
-    ("qwen2", 1): PipelineTemplate("qwen2", [llama_gemma_mistral_qwen_modules]),
-    ("qwen2", 2): PipelineTemplate(
-        "qwen2",
-        [llama_gemma_mistral_qwen_modules[:2], llama_gemma_mistral_qwen_modules[2:]],
-    ),
-    ("phi3", 1): PipelineTemplate("phi3", [phi3_modules]),
-    ("phi3", 2): PipelineTemplate("phi3", [phi3_modules[:3], phi3_modules[2:]]),
-    ("clip_vision_model", 1): PipelineTemplate("clip", [clip_vision_model_modules]),
-    ("clip_vision_model", 2): PipelineTemplate(
-        "clip",
-        [clip_vision_model_modules[:3], clip_vision_model_modules[3:]],
-    ),
-    ("siglip_vision_model", 1): PipelineTemplate(
-        "siglip", [siglip_vision_model_modules]
-    ),
-    ("siglip_vision_model", 2): PipelineTemplate(
-        "siglip",
-        [siglip_vision_model_modules[:2], siglip_vision_model_modules[2:]],
-    ),
-    ("dinov2", 1): PipelineTemplate("dinov2", [dinov2_modules]),
-    ("dinov2", 2): PipelineTemplate("dinov2", [dinov2_modules[:2], dinov2_modules[2:]]),
-}
-
-
-def build_model_from_muiltimodal_plugin(
-    model_fn: Callable[[], MultimodalModel],
-    loss_fn: Callable,
-    test_config: dict[str, Any],
-) -> tuple[
-    MultimodalModel,
-    Adam,
-    MultimodalParallelModule,
-    OptimizerWrapper,
-    Callable,
-    Booster,
-]:
-    org_model = model_fn()
-    sharded_model = copy.deepcopy(org_model)
-
-    org_optimizer = Adam(org_model.parameters(), lr=1e-3)
-    sharded_optimizer = Adam(sharded_model.parameters(), lr=1e-3)
-
-    vision_pp_size = test_config.pop("vision_pp_size")
-    language_pp_size = test_config.pop("language_pp_size")
-    vision_plugin = ModalParallelPlugin(
-        tp_size=test_config.pop("vision_tp_size"),
-        pipeline_template=pipeline_template_dict[
-            (org_model.vision_encoder.config[0].model_type, vision_pp_size)
-        ],
-    )
-    language_plugin = ModalParallelPlugin(
-        tp_size=test_config.pop("language_tp_size"),
-        pipeline_template=pipeline_template_dict[
-            (org_model.language_model.config.model_type, language_pp_size)
-        ],
-    )
-    plugin = MultimodalParallelPlugin(
-        encoder_plugins={"vision": vision_plugin},
-        language_model_plugin=language_plugin,
-        **test_config,
-    )
-    booster = Booster(plugin=plugin)
-
-    sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
-        sharded_model, sharded_optimizer, loss_fn
-    )
-
-    return (
-        org_model,
-        org_optimizer,
-        sharded_model,
-        sharded_optimizer,
-        criterion,
-        booster,
-    )
-
-
-def run_forward_backward_with_multimodal_plugin(
-    org_model: nn.Module,
-    sharded_model: nn.Module,
-    sharded_optimizer: OptimizerWrapper,
-    data_gen_fn: Callable[[], dict[str, torch.Tensor]],
-    criterion: Callable[[torch.Tensor], torch.Tensor],
-    output_transform_fn: Callable,
-    booster: Booster,
-) -> tuple[
-    torch.Tensor, BaseModelOutputWithPast, torch.Tensor, BaseModelOutputWithPast
-]:
-    org_model.to("cuda")
-    sharded_model.to("cuda")
-
-    def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
-        outputs = output_transform_fn(outputs)
-        loss = criterion(outputs)
-        return loss
-
-    data = data_gen_fn()
-
-    shard_test_data = {}
-    for k, v in data.items():
-        shard_test_data[k] = v.clone().to("cuda")
-    unshard_test_data = {}
-    for k, v in data.items():
-        unshard_test_data[k] = v.clone().to("cuda")
-
-    data_iter = iter([shard_test_data])
-    sharded_output = booster.execute_pipeline(
-        data_iter,
-        sharded_model,
-        _criterion,
-        sharded_optimizer,
-        return_loss=True,
-        return_outputs=True,
-    )
-    sharded_loss = sharded_output["loss"]
-
-    org_output = org_model(**unshard_test_data)
-    org_loss = criterion(org_output)
-    org_loss.backward()
-
-    return org_loss, org_output, sharded_loss, sharded_output
-
-
-class VisionLanguagePolicyTestClassBase(PolicyTestBase, ABC):
-    vision_model_class: Type[PreTrainedModel]
-    language_model_class: Type[PreTrainedModel]
-    vision_config: PretrainedConfig
-    language_config: PretrainedConfig
+class CornstarchMultimodalParallelBase(PolicyTestBase):
+    model_class: dict[str, PreTrainedModel]
+    config: dict[str, PretrainedConfig]
 
     @staticmethod
-    @abstractmethod
-    def data_gen_fn() -> dict: ...
+    def loss_fn(outputs: CausalLMOutputWithPast) -> torch.Tensor:
+        return outputs.loss
 
-    @staticmethod
-    @abstractmethod
-    def loss_fn(x: ModelOutput) -> torch.Tensor: ...
+    def model_fn(self, fa: bool) -> MultimodalModel:
+        config = copy.deepcopy(self.config)
+        modals: dict[str, PreTrainedModel] = {}
 
-    @abstractmethod
-    def check_fn(
-        self,
-        booster: Booster,
-        org_model: MultimodalModel,
-        sharded_model: MultimodalParallelModule,
-        org_optim: Optimizer,
-        sharded_optim: OptimizerWrapper,
-        org_output: ModelOutput,
-        sharded_output: dict,
-        org_loss: torch.Tensor,
-        sharded_loss: torch.Tensor,
-    ): ...
+        for modal_name, modal_config in config.items():
+            modal_config.pad_token_id = modal_config.eos_token_id
+            modal_config._attn_implementation = "flash_attention_2" if fa else "eager"
+            modal_model = self.model_class[modal_name](modal_config)
+            modals[modal_name] = modal_model
 
-    def model_fn(self) -> MultimodalModel:
-        vision_config = copy.deepcopy(self.vision_config)
-        vision_config.pad_token_id = vision_config.eos_token_id
-        language_config = copy.deepcopy(self.language_config)
-        language_config.pad_token_id = language_config.eos_token_id
-
-        vision_module = self.vision_model_class(vision_config)
-        language_module = self.language_model_class(language_config)
+        llm = modals.pop("llm")
 
         return MultimodalModel(
-            encoders={"vision": ModalEncoderModule(vision_module)},
-            language_model=language_module,
+            encoders={
+                modal_name: ModalEncoderModule(modal)
+                for modal_name, modal in modals.items()
+            },
+            language_model=llm,
         )
 
     def run_multimodal_parallel(
         self,
-        vision_tp_size: int,
-        vision_pp_size: int,
-        language_tp_size: int,
-        language_pp_size: int,
+        tp_size: int,
+        modal_pp_size: dict[str, int],
+        llm_sp_mode: str | None,
         fa: bool,
         precision: str,
     ):
-        test_config = {
-            "vision_tp_size": vision_tp_size,
-            "language_tp_size": language_tp_size,
-            "vision_pp_size": vision_pp_size,
-            "language_pp_size": language_pp_size,
-            "precision": precision,
-            "num_microbatches": 4,
-            "microbatch_size": 1,
-            "initial_scale": 1,
-            "enable_flash_attention": fa,
-        }
+        assert precision in ["bf16", "fp16"]
+        precision = torch.bfloat16 if precision == "bf16" else torch.float16
+
+        test_config = dict(
+            num_microbatches=self.num_microbatches,
+            microbatch_size=self.microbatch_size,
+            initial_scale=1,
+            enable_flash_attention=fa,
+            precision=precision,
+        )
 
         (
             org_model,
@@ -362,26 +95,49 @@ class VisionLanguagePolicyTestClassBase(PolicyTestBase, ABC):
             sharded_optimizer,
             criterion,
             booster,
-        ) = build_model_from_muiltimodal_plugin(
-            model_fn=self.model_fn,
-            loss_fn=self.loss_fn,
+        ) = self.build_model_from_multimodal_plugin(
+            tp_size=tp_size,
+            modal_pp_size=modal_pp_size,
+            llm_sp_mode=llm_sp_mode,
             test_config=test_config,
+            precision=precision,
         )
 
         org_model.gradient_checkpointing_enable()
         sharded_model.unwrap().gradient_checkpointing_enable()
 
-        org_loss, org_output, sharded_loss, sharded_output = (
-            run_forward_backward_with_multimodal_plugin(
-                org_model,
-                sharded_model,
-                sharded_optimizer,
-                self.data_gen_fn,
-                criterion,
-                lambda x: x,  # output_transform_fn,
-                booster,
+        with (
+            patch.object(
+                dist,
+                "batch_isend_irecv",
+                new=PolicyTestBase.batch_isend_irecv_gloo,
+            ),
+            patch.object(
+                dist,
+                "all_to_all",
+                new=PolicyTestBase.all_to_all_gloo,
+            ),
+            patch.object(
+                dist,
+                "all_to_all_single",
+                new=PolicyTestBase.all_to_all_single_gloo,
+            ),
+            patch(
+                "colossalai.pipeline.p2p._check_device",
+                return_value=(torch.device("cuda"), False),
+            ),
+        ):
+            org_loss, org_output, sharded_loss, sharded_output = (
+                self.run_forward_backward_with_multimodal_plugin(
+                    org_model=org_model,
+                    sharded_model=sharded_model,
+                    sharded_optimizer=sharded_optimizer,
+                    criterion=criterion,
+                    output_transform_fn=lambda x: x,
+                    booster=booster,
+                    precision=precision,
+                )
             )
-        )
 
         self.check_fn(
             booster,
@@ -394,3 +150,228 @@ class VisionLanguagePolicyTestClassBase(PolicyTestBase, ABC):
             org_loss,
             sharded_loss,
         )
+
+    @staticmethod
+    def get_pipeline_template(model: nn.Module, num_stages: int) -> PipelineTemplate:
+        modules = PipelineTemplate.get_modules(model)
+        num_layers = sum(bool(re.search(r"\.\d", s)) for s in modules)
+
+        # Get the number of layers per stage
+        base_size = num_layers // num_stages
+        remainder = num_layers % num_stages
+        num_layers_per_stage = [
+            base_size + 1 if i < remainder else base_size for i in range(num_stages)
+        ]
+        assert sum(num_layers_per_stage) == num_layers
+
+        first_layer_index = next(
+            i for i, layer in enumerate(modules) if re.search("\.0", layer)
+        )
+        last_layer_index = next(
+            i
+            for i, layer in enumerate(modules)
+            if re.search(f"\.{num_layers - 1}", layer)
+        )
+
+        modules_per_stages = [[] for _ in range(num_stages)]
+        modules_per_stages[0].extend(modules[:first_layer_index])
+        layer_idx = 0
+        for stage_idx, num_layers in enumerate(num_layers_per_stage):
+            idx = first_layer_index + layer_idx
+            modules_per_stages[stage_idx].extend(modules[idx : idx + num_layers])
+            layer_idx += num_layers
+        modules_per_stages[-1].extend(modules[last_layer_index + 1 :])
+
+        return PipelineTemplate(
+            (
+                model.config[0].model_type
+                if isinstance(model, ModalEncoderModule)
+                else model.config.model_type
+            ),
+            modules_per_stages,
+        )
+
+    def build_model_from_multimodal_plugin(
+        self,
+        tp_size: int,
+        modal_pp_size: dict[str, int],
+        llm_sp_mode: str | None,
+        test_config: dict[str, Any],
+        precision: torch.dtype,
+    ) -> tuple[
+        PreTrainedModel,
+        Optimizer,
+        MultimodalParallelModule,
+        OptimizerWrapper,
+        Callable,
+        Booster,
+    ]:
+        use_lazy_init: bool = test_config.pop("use_lazy_init", False)
+        use_flash_attention: bool = test_config["enable_flash_attention"]
+
+        ctx = LazyInitContext() if use_lazy_init else nullcontext()
+        with ctx:
+            org_model = self.model_fn(use_flash_attention).to(device="cuda")
+            sharded_model = copy.deepcopy(org_model)
+        if use_lazy_init:
+            ctx.materialize(org_model)
+
+        org_optimizer = Adam(org_model.parameters(), lr=1e-3)
+        sharded_optimizer = Adam(sharded_model.parameters(), lr=1e-3)
+
+        plugins: dict[str, ModalParallelPlugin] = {}
+        for modal_name, pp_size in modal_pp_size.items():
+            if modal_name == "llm":
+                llm_plugin = ModalParallelPlugin(
+                    tp_size=tp_size,
+                    pipeline_template=self.get_pipeline_template(
+                        org_model.language_model, pp_size
+                    ),
+                )
+            else:
+                plugins[modal_name] = ModalParallelPlugin(
+                    tp_size=tp_size,
+                    pipeline_template=self.get_pipeline_template(
+                        org_model.get_submodule(f"{modal_name}_encoder"), pp_size
+                    ),
+                )
+
+        plugin = MultimodalParallelPlugin(
+            encoder_plugins=plugins,
+            language_model_plugin=llm_plugin,
+            **test_config,
+        )
+        if precision == torch.bfloat16:
+            org_model.to(dtype=precision)
+            sharded_model.to(dtype=precision)
+            plugin.precision = None
+        else:
+            # Do not cast org_model for fp16 here, as it will be casted in
+            # torch.autocast amp
+            plugin.precision = "fp16"
+        booster = Booster(plugin=plugin)
+
+        sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
+            sharded_model, sharded_optimizer, self.loss_fn
+        )
+
+        return (
+            org_model,
+            org_optimizer,
+            sharded_model,
+            sharded_optimizer,
+            criterion,
+            booster,
+        )
+
+    def run_forward_backward_with_multimodal_plugin(
+        self,
+        org_model: nn.Module,
+        sharded_model: nn.Module,
+        sharded_optimizer: Optimizer,
+        criterion: Callable[[torch.Tensor], torch.Tensor],
+        output_transform_fn: Callable,
+        booster: Booster,
+        precision: torch.dtype,
+    ):
+        def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
+            outputs = output_transform_fn(outputs)
+            loss = criterion(outputs)
+            return loss
+
+        data = self.data_gen_fn()
+
+        shard_test_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            shard_test_data[k] = v.clone().to("cuda")
+        unshard_test_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            unshard_test_data[k] = v.clone().to("cuda")
+
+        org_model.train()
+        with torch.autocast(
+            device_type="cuda", enabled=precision == torch.float16, dtype=torch.float16
+        ):
+            org_output = org_model(**unshard_test_data)
+            org_loss = criterion(org_output).to(precision)
+        org_loss.backward()
+
+        sharded_model.train()
+        if booster.plugin.stage_manager is not None:
+            data_iter = iter([shard_test_data])
+            sharded_output = booster.execute_pipeline(
+                data_iter,
+                sharded_model,
+                _criterion,
+                sharded_optimizer,
+                return_loss=True,
+                return_outputs=False,
+            )
+            sharded_loss = sharded_output["loss"]
+        else:
+            sharded_output = sharded_model(**shard_test_data)
+            sharded_loss = criterion(sharded_output).to(precision)
+            sharded_optimizer.backward(sharded_loss)
+
+        return org_loss, org_output, sharded_loss, sharded_output
+
+
+llama_config = LlamaConfig()
+gemma_config = GemmaConfig()
+gemma2_config = Gemma2Config()
+mistral_config = MistralConfig()
+mixtral_config = MixtralConfig()
+phi3_config = Phi3Config()
+qwen2_config = Qwen2Config()
+
+for language_config in [
+    llama_config,
+    gemma_config,
+    gemma2_config,
+    mistral_config,
+    mixtral_config,
+    phi3_config,
+    qwen2_config,
+]:
+    language_config.hidden_size = 256
+    language_config.intermediate_size = 256
+    language_config.num_attention_heads = 16
+    language_config.num_key_value_heads = 16
+    language_config.num_hidden_layers = 4
+    language_config.use_cache = False
+    language_config._attn_implementation = "eager"
+    # TODO: Gemma uses tie_word_embeddings True, in which case the tests fail.
+    # Implement automatic gradient synchronization between tied weights.
+    # Existing explicit synchronization is not enough as there are encoders
+    # that need to have gradients propagated "after" the weights are synchronized.
+    language_config.tie_word_embeddings = False
+
+# GQA adjustment. Models not in this list use MHA.
+for language_config in [
+    gemma2_config,
+    mistral_config,
+    mixtral_config,
+    qwen2_config,
+]:
+    language_config.num_key_value_heads = 8
+
+# MoE adjustment
+for language_config in [mixtral_config]:
+    language_config.num_local_experts = 4
+    language_config.num_experts_per_tok = 1
+
+clip_config = CLIPVisionConfig()
+siglip_config = SiglipVisionConfig()
+dinov2_config = Dinov2Config()
+
+for vision_config in [clip_config, siglip_config, dinov2_config]:
+    vision_config.hidden_size = 256
+    vision_config.intermediate_size = 256
+    vision_config.num_attention_heads = 8
+    vision_config.num_hidden_layers = 4
+    vision_config._attn_implementation = "eager"
+    vision_config.use_cache = False
