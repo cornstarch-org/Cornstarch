@@ -121,6 +121,153 @@ def destroy_process_group():
                 {"prev": [71], "next": [11]},
             ],
         ),
+        (
+            40,  # 20 ranks * 2 dp
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 2),
+            [
+                {"prev": [24, 25, 28, 29], "next": [4]},
+                {"prev": [26, 27, 30, 31], "next": [5]},
+                {"prev": [32, 33, 36, 37], "next": [6]},
+                {"prev": [34, 35, 38, 39], "next": [7]},
+                {"prev": [0], "next": [8, 9, 12, 13]},  # rank = 4
+                {"prev": [1], "next": [10, 11, 14, 15]},
+                {"prev": [2], "next": [16, 17, 20, 21]},
+                {"prev": [3], "next": [18, 19, 22, 23]},
+                {"prev": [4], "next": [24]},  # rank = 8
+                {"prev": [4], "next": [25]},
+                {"prev": [5], "next": [26]},
+                {"prev": [5], "next": [27]},
+                {"prev": [4], "next": [28]},  # rank = 12
+                {"prev": [4], "next": [29]},
+                {"prev": [5], "next": [30]},
+                {"prev": [5], "next": [31]},
+                {"prev": [6], "next": [32]},  # rank = 16
+                {"prev": [6], "next": [33]},
+                {"prev": [7], "next": [34]},
+                {"prev": [7], "next": [35]},
+                {"prev": [6], "next": [36]},  # rank = 20
+                {"prev": [6], "next": [37]},
+                {"prev": [7], "next": [38]},
+                {"prev": [7], "next": [39]},
+                {"prev": [8], "next": [0]},  # rank = 24
+                {"prev": [9], "next": [0]},
+                {"prev": [10], "next": [1]},
+                {"prev": [11], "next": [1]},
+                {"prev": [12], "next": [0]},  # rank = 28
+                {"prev": [13], "next": [0]},
+                {"prev": [14], "next": [1]},
+                {"prev": [15], "next": [1]},
+                {"prev": [16], "next": [2]},  # rank = 32
+                {"prev": [17], "next": [2]},
+                {"prev": [18], "next": [3]},
+                {"prev": [19], "next": [3]},
+                {"prev": [20], "next": [2]},  # rank = 36
+                {"prev": [21], "next": [2]},
+                {"prev": [22], "next": [3]},
+                {"prev": [23], "next": [3]},
+            ],
+        ),
+        (
+            42,
+            {encoder1_template: 2, encoder2_template: 2},
+            (llm_template_2stages, 4, 4),
+            [
+                {"prev": [26, 27, 30, 31, 34, 35, 38, 39], "next": [2]},
+                {"prev": [28, 29, 32, 33, 36, 37, 40, 41], "next": [3]},
+                {"prev": [0], "next": [10, 11, 14, 15, 18, 19, 22, 23]},
+                {"prev": [1], "next": [12, 13, 16, 17, 20, 21, 24, 25]},
+                {"prev": [26, 27, 30, 31, 34, 35, 38, 39], "next": [6]},  # rank = 4
+                {"prev": [28, 29, 32, 33, 36, 37, 40, 41], "next": [7]},
+                {"prev": [4], "next": [8]},
+                {"prev": [5], "next": [9]},
+                {"prev": [6], "next": [10, 11, 14, 15, 18, 19, 22, 23]},
+                {"prev": [7], "next": [12, 13, 16, 17, 20, 21, 24, 25]},
+                {"prev": [2, 8], "next": [26]},  # rank = 10, LLM
+                {"prev": [2, 8], "next": [27]},
+                {"prev": [3, 9], "next": [28]},
+                {"prev": [3, 9], "next": [29]},
+                {"prev": [2, 8], "next": [30]},  # rank = 14
+                {"prev": [2, 8], "next": [31]},
+                {"prev": [3, 9], "next": [32]},
+                {"prev": [3, 9], "next": [33]},
+                {"prev": [2, 8], "next": [34]},  # rank = 18
+                {"prev": [2, 8], "next": [35]},
+                {"prev": [3, 9], "next": [36]},
+                {"prev": [3, 9], "next": [37]},
+                {"prev": [2, 8], "next": [38]},  # rank = 22
+                {"prev": [2, 8], "next": [39]},
+                {"prev": [3, 9], "next": [40]},
+                {"prev": [3, 9], "next": [41]},
+                {"prev": [10], "next": [0, 4]},  # rank = 26
+                {"prev": [11], "next": [0, 4]},
+                {"prev": [12], "next": [1, 5]},
+                {"prev": [13], "next": [1, 5]},
+                {"prev": [14], "next": [0, 4]},  # rank = 30
+                {"prev": [15], "next": [0, 4]},
+                {"prev": [16], "next": [1, 5]},
+                {"prev": [17], "next": [1, 5]},
+                {"prev": [18], "next": [0, 4]},  # rank = 34
+                {"prev": [19], "next": [0, 4]},
+                {"prev": [20], "next": [1, 5]},
+                {"prev": [21], "next": [1, 5]},
+                {"prev": [22], "next": [0, 4]},  # rank = 38
+                {"prev": [23], "next": [0, 4]},
+                {"prev": [24], "next": [1, 5]},
+                {"prev": [25], "next": [1, 5]},
+            ],
+        ),
+        (
+            44,
+            {encoder2_template: 4},
+            (llm_template_4stages, 2, 4),
+            [
+                {"prev": [36, 38, 40, 42], "next": [4]},
+                {"prev": [36, 38, 40, 42], "next": [5]},
+                {"prev": [37, 39, 41, 43], "next": [6]},
+                {"prev": [37, 39, 41, 43], "next": [7]},
+                {"prev": [0], "next": [8]},  # rank = 4
+                {"prev": [1], "next": [9]},
+                {"prev": [2], "next": [10]},
+                {"prev": [3], "next": [11]},
+                {"prev": [4], "next": [12, 14, 16, 18]},  # rank = 8
+                {"prev": [5], "next": [12, 14, 16, 18]},
+                {"prev": [6], "next": [13, 15, 17, 19]},
+                {"prev": [7], "next": [13, 15, 17, 19]},
+                {"prev": [8, 9], "next": [20]},  # rank = 12, LLM
+                {"prev": [10, 11], "next": [21]},
+                {"prev": [8, 9], "next": [22]},
+                {"prev": [10, 11], "next": [23]},
+                {"prev": [8, 9], "next": [24]},  # rank = 16
+                {"prev": [10, 11], "next": [25]},
+                {"prev": [8, 9], "next": [26]},
+                {"prev": [10, 11], "next": [27]},
+                {"prev": [12], "next": [28]},  # rank = 20
+                {"prev": [13], "next": [29]},
+                {"prev": [14], "next": [30]},
+                {"prev": [15], "next": [31]},
+                {"prev": [16], "next": [32]},  # rank = 24
+                {"prev": [17], "next": [33]},
+                {"prev": [18], "next": [34]},
+                {"prev": [19], "next": [35]},
+                {"prev": [20], "next": [36]},  # rank = 28
+                {"prev": [21], "next": [37]},
+                {"prev": [22], "next": [38]},
+                {"prev": [23], "next": [39]},
+                {"prev": [24], "next": [40]},  # rank = 32
+                {"prev": [25], "next": [41]},
+                {"prev": [26], "next": [42]},
+                {"prev": [27], "next": [43]},
+                {"prev": [28], "next": [0, 1]},  # rank = 36
+                {"prev": [29], "next": [2, 3]},
+                {"prev": [30], "next": [0, 1]},
+                {"prev": [31], "next": [2, 3]},
+                {"prev": [32], "next": [0, 1]},  # rank = 40
+                {"prev": [33], "next": [2, 3]},
+                {"prev": [34], "next": [0, 1]},
+                {"prev": [35], "next": [2, 3]},
+            ],
+        ),
     ],
 )
 def test_multimodal_pipeline_stage_manager(
@@ -136,8 +283,14 @@ def test_multimodal_pipeline_stage_manager(
         mesh = MultiModalProcessGroupMesh(encoder_templates, llm_template)
         stage_manager = MultiModalPipelineStageManager(mesh, mesh.pp_axis)
 
-        assert stage_manager.prev_ranks == expected_prev_next_ranks[rank]["prev"]
-        assert stage_manager.next_ranks == expected_prev_next_ranks[rank]["next"]
+        assert stage_manager.prev_ranks == expected_prev_next_ranks[rank]["prev"], (
+            f"rank {rank} expected to have {expected_prev_next_ranks[rank]['prev']} as previous ranks, "
+            f"but got {stage_manager.prev_ranks}."
+        )
+        assert stage_manager.next_ranks == expected_prev_next_ranks[rank]["next"], (
+            f"rank {rank} expected to have {expected_prev_next_ranks[rank]['next']} as next ranks, "
+            f"but got {stage_manager.next_ranks}."
+        )
 
         dist.destroy_process_group()
 
@@ -194,6 +347,57 @@ def test_multimodal_pipeline_stage_manager(
                 tuple(range(36, 48)): (True, False),
                 tuple(range(48, 72)): (False, False),
                 tuple(range(72, 84)): (False, True),
+            },
+        ),
+        (
+            40,  # 20 ranks * 2 dp
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 2),
+            {
+                tuple(range(0, 4)): (True, False),
+                tuple(range(4, 24)): (False, False),
+                tuple(range(24, 40)): (False, True),
+            },
+            {
+                tuple(range(0, 4)): (True, False),
+                tuple(range(4, 8)): (False, True),
+                tuple(range(8, 24)): (True, False),
+                tuple(range(24, 40)): (False, True),
+            },
+        ),
+        (
+            42,
+            {encoder1_template: 2, encoder2_template: 2},
+            (llm_template_2stages, 4, 4),
+            {
+                (0, 1, 4, 5): (True, False),
+                (2, 3, 6, 7, 8, 9) + tuple(range(10, 26)): (False, False),
+                tuple(range(26, 42)): (False, True),
+            },
+            {
+                (0, 1, 4, 5): (True, False),
+                (6, 7): (False, False),
+                (2, 3, 8, 9): (False, True),
+                tuple(range(10, 26)): (True, False),
+                tuple(range(26, 42)): (False, True),
+            },
+        ),
+        (
+            44,
+            {encoder2_template: 4},
+            (llm_template_4stages, 2, 4),
+            {
+                tuple(range(0, 4)): (True, False),
+                tuple(range(4, 36)): (False, False),
+                tuple(range(36, 44)): (False, True),
+            },
+            {
+                tuple(range(0, 4)): (True, False),
+                tuple(range(4, 8)): (False, False),
+                tuple(range(8, 12)): (False, True),
+                tuple(range(12, 20)): (True, False),
+                tuple(range(20, 36)): (False, False),
+                tuple(range(36, 44)): (False, True),
             },
         ),
     ],
@@ -380,6 +584,89 @@ def test_first_last_stage(
                     [57, 69, 81],
                     [58, 70, 82],
                     [59, 71, 83],
+                ],
+            },
+        ),
+        (
+            40,  # 20 ranks * 2 dp
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 2),
+            {
+                (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
+                (1, 2): [
+                    [4, 8],
+                    [4, 9],
+                    [4, 12],
+                    [4, 13],
+                    [5, 10],
+                    [5, 11],
+                    [5, 14],
+                    [5, 15],
+                    [6, 16],
+                    [6, 17],
+                    [6, 20],
+                    [6, 21],
+                    [7, 18],
+                    [7, 19],
+                    [7, 22],
+                    [7, 23],
+                ],
+                (2, 3): [[i, i + 16] for i in range(8, 24)],
+            },
+        ),
+        (
+            42,
+            {encoder1_template: 2, encoder2_template: 2},
+            (llm_template_2stages, 4, 4),
+            {
+                (0, 1): [
+                    [0, 2],
+                    [1, 3],
+                ],
+                (1, 4, 5): [
+                    [2, 8, 10],
+                    [2, 8, 11],
+                    [2, 8, 14],
+                    [2, 8, 15],
+                    [2, 8, 18],
+                    [2, 8, 19],
+                    [2, 8, 22],
+                    [2, 8, 23],
+                    [3, 9, 12],
+                    [3, 9, 13],
+                    [3, 9, 16],
+                    [3, 9, 17],
+                    [3, 9, 20],
+                    [3, 9, 21],
+                    [3, 9, 24],
+                    [3, 9, 25],
+                ],
+                (5, 6): [[i, i + 16] for i in range(10, 26)],
+            },
+        ),
+        (
+            44,
+            {encoder2_template: 4},
+            (llm_template_4stages, 2, 4),
+            {
+                (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
+                (2, 3): [
+                    [8, 12],
+                    [8, 14],
+                    [8, 16],
+                    [8, 18],
+                    [9, 12],
+                    [9, 14],
+                    [9, 16],
+                    [9, 18],
+                    [10, 13],
+                    [10, 15],
+                    [10, 17],
+                    [10, 19],
+                    [11, 13],
+                    [11, 15],
+                    [11, 17],
+                    [11, 19],
                 ],
             },
         ),
