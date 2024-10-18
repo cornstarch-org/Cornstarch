@@ -3,6 +3,7 @@ import torch
 from cornstarch.kernel.interface import _flash_attn_anymask_forward, _flash_attn_anymask_backward
 from cornstarch.kernel.interface import FlashAttnAnyMask
 
+from torch.testing import assert_close
 
 def set_seed(rank):
     torch.manual_seed(rank)
@@ -14,7 +15,8 @@ def set_seed(rank):
 def refer_attn_with_mask(q, k, v, mask, sm_scale):
     qk = q @ k.transpose(-2, -1)
     if mask is not None:
-        qk = qk * mask + (1 - mask) * -1e9
+        # qk = qk * mask + (1 - mask) * -1e9
+        qk = qk * mask
     
     qk = qk * sm_scale
     
@@ -41,31 +43,29 @@ def refer_attn_with_mask(q, k, v, mask, sm_scale):
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seq_len", [256])
 @pytest.mark.parametrize("num_heads", [5])
-@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("head_dim", [64])
 # @pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
 # @pytest.mark.parametrize("seq_len", [1024, 256])
 # @pytest.mark.parametrize("num_heads", [5, 8])
 # @pytest.mark.parametrize("head_dim", [128, 64])
 def test_run(batch_size, seq_len, num_heads, head_dim):
     dtype = torch.float16
-    dtype = torch.float32
+    # dtype = torch.float32
     device = torch.device("cuda")
-    set_seed(1)
-    q = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype)
-    k = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype)
-    v = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype)
+    set_seed(2)
+    q = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.5).requires_grad_()
+    k = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.5).requires_grad_()
+    v = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.5).requires_grad_()
     q.requires_grad = True
     k.requires_grad = True
     v.requires_grad = True
 
-    # Create a binary mask (0 and 1) with dtype=int
-    mask = torch.randint(0, 2, (batch_size, 1, seq_len, seq_len), dtype=torch.int, device=device)
+    # Create a binary mask (0 and 1) with dtype=int8
+    M = mask = torch.randint(1, 2, (seq_len, seq_len), dtype=torch.int8, device=device)
     mask = torch.broadcast_to(mask, (batch_size, num_heads, seq_len, seq_len))
     sm_scale = 1.0 / (head_dim ** 0.5)
 
-    
     # forward
-    # out, softmax_lse, _, _ = _flash_attn_anymask_forward(q, k, v, mask, 0.0, sm_scale, 0, 0, 0, None, False)
     out, softmax_lse = FlashAttnAnyMask.apply(q, k, v, mask, sm_scale, 0.0)
 
     ref_q = q.clone().detach()
@@ -75,29 +75,45 @@ def test_run(batch_size, seq_len, num_heads, head_dim):
     ref_k.requires_grad = True
     ref_v.requires_grad = True
 
-    refer_out, refer_lse = refer_attn_with_mask(ref_q, ref_k, ref_v, mask, sm_scale)
+    # reference implementation
+    p = torch.matmul(ref_q, ref_k.transpose(2, 3))
+    p[:, :, M == 0] = float("-inf")
+    # p = p * sm_scale
+    # compute lse
+    ref_lse = torch.max(p, dim=-1, keepdim=True)[0].squeeze(-1) + torch.log(torch.sum(torch.exp(p.float() - torch.max(p.float(), dim=-1, keepdim=True)[0]), dim=-1, keepdim=True)).squeeze(-1)
+    p = p * sm_scale
+    p = torch.softmax(p.float(), dim=-1).to(ref_v.dtype)
+    ref_out = torch.matmul(p, ref_v)
 
-    atol, rtol = 7e-3, 7e-3
-    assert torch.allclose(out, refer_out, atol=atol, rtol=rtol)
+    # from flash_attn.flash_attn_interface import flash_attn_func
+    # ref_out, ref_lse, _ = flash_attn_func(ref_q.transpose(1, 2), ref_k.transpose(1, 2), ref_v.transpose(1, 2), sm_scale, causal=False, window_size=(-1, -1), softcap=0.0, alibi_slopes=None, deterministic=False, return_attn_probs=True)
+    # ref_out = ref_out.transpose(1, 2)
+    # ref_lse = ref_lse.transpose(1, 2)
+
+    atol = rtol = 7e-3
+    assert torch.allclose(out, ref_out, atol=atol, rtol=rtol)
 
     # TODO(runyu): Although lse and bwd are not correct, but there are some multiple relationships between the values.
-    # assert torch.allclose(softmax_lse, refer_lse, atol=atol, rtol=rtol) # TODO(runyu): fix this
+    assert softmax_lse.shape == ref_lse.shape, f"softmax_lse.shape: {softmax_lse.shape}, ref_lse.shape: {ref_lse.shape}"
+    assert torch.allclose(softmax_lse, ref_lse, atol=atol, rtol=rtol) # TODO(runyu): fix this
 
-    # # backward # TODO(runyu): fix this
-    # dout = torch.randn_like(out)
-    # refer_out.backward(dout)
-    # out.backward(dout)
+    # backward # TODO(runyu): fix this, it is strange that even mask is filled with 1, the gradients are not the same, and some values are same, some are not.
+    dout = torch.randn_like(out)
 
-    # atol, rtol = 7e-3, 7e-3
-    # dq, dk, dv = q.grad.clone(), k.grad.clone(), v.grad.clone()
-    # ref_dq, ref_dk, ref_dv = ref_q.grad.clone(), ref_k.grad.clone(), ref_v.grad.clone()
+    ref_out.backward(dout)
 
-    # assert isinstance(dq, torch.Tensor)
-    # assert isinstance(ref_dq, torch.Tensor)
+    out.backward(dout)
 
-    # assert torch.allclose(dq, ref_dq, atol=atol, rtol=rtol)
-    # assert torch.allclose(dk, ref_dk, atol=atol, rtol=rtol)
-    # assert torch.allclose(dv, ref_dv, atol=atol, rtol=rtol)
+    atol, rtol = 7e-3, 7e-3
+    dq, dk, dv = q.grad.clone(), k.grad.clone(), v.grad.clone()
+    ref_dv, ref_dk, ref_dq = ref_v.grad.clone(), ref_k.grad.clone(), ref_q.grad.clone()
+
+    assert isinstance(dq, torch.Tensor)
+    assert isinstance(ref_dq, torch.Tensor)
+
+    assert_close(dq, ref_dq, atol=atol, rtol=rtol)
+    assert_close(dk, ref_dk, atol=atol, rtol=rtol)
+    assert_close(dv, ref_dv, atol=atol, rtol=rtol)
 
 if __name__ == "__main__":
     pytest.main([__file__])

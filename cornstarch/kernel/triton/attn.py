@@ -96,6 +96,7 @@ def _attn_any_mask_fwd_inner(
             p = p.to(tl.float8e5)
         else:
             p = p.to(v.dtype)
+            # p = p.to(tl.float16)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
         m_i = m_ij
@@ -343,7 +344,8 @@ def _attn_any_mask_bwd_dq(dq, q, K, V,  #
         # Compute dP and dS.
         dp = tl.dot(do, vT).to(tl.float32)
         ds = p * (dp - Di[:, None])
-        ds = ds.to(tl.float16)
+        # ds = ds.to(tl.float16)
+        ds = ds.to(kT.dtype)
         # Compute dQ.
         # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
         dq += tl.dot(ds, tl.trans(kT))
