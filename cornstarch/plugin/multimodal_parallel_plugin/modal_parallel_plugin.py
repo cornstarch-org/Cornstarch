@@ -72,6 +72,8 @@ class ModalParallelPlugin(PipelinePluginBase):
     def __init__(
         self,
         tp_size: int,
+        sp_size: int = 1,
+        sequence_parallelism_mode: str = None,
         pipeline_template: PipelineTemplate = None,
         cpu_offload: bool = False,
         custom_policy: Policy = None,
@@ -79,9 +81,21 @@ class ModalParallelPlugin(PipelinePluginBase):
         super().__init__()
 
         self.tp_size = tp_size
+        self.sp_size = sp_size
+        self.sequence_parallelism_mode = sequence_parallelism_mode
         self.pipeline_template = pipeline_template
         self.cpu_offload = cpu_offload
         self.custom_policy = custom_policy
+
+        if self.sp_size > 1:
+            if self.sequence_parallelism_mode is None:
+                raise ValueError(
+                    "Sequence parallelism mode must be specified when sequence parallelism is enabled."
+                )
+            assert self.sequence_parallelism_mode in [
+                "all_to_all",
+                "ring_attn",
+            ], f"Currently only support ['all_to_all', 'ring_attn'] sequence parallelism, got {self.sequence_parallelism_mode}."
 
         if self.cpu_offload:
             raise NotImplementedError("CPU offload is not supported yet.")

@@ -525,6 +525,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             llm_template=(
                 self.language_model_plugin.pipeline_template,
                 self.language_model_plugin.tp_size,
+                self.language_model_plugin.sp_size,
             ),
         )
         self.stage_manager = MultiModalPipelineStageManager(
@@ -532,6 +533,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         )
         self.dp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.dp_axis)
         self.tp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.tp_axis)
+        self.sp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.sp_axis)
         self.pp_groups = self.pg_mesh.get_group_along_axis(self.pg_mesh.pp_axis)
 
         self.dp_size = dist.get_world_size(group=self.dp_group)
@@ -546,6 +548,15 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.shard_config.pipeline_stage_manager = self.stage_manager
         self.shard_config.enable_tensor_parallelism = (
             dist.get_world_size(self.tp_group) > 1
+        )
+        self.shard_config.sequence_parallel_process_group = self.sp_group
+        self.shard_config.enable_sequence_parallelism = (
+            dist.get_world_size(self.sp_group) > 1
+        )
+        self.shard_config.sequence_parallelism_mode = (
+            self.language_model_plugin.sequence_parallelism_mode
+            if self.shard_config.enable_sequence_parallelism
+            else None
         )
         self.shard_config.__post_init__()
         self.distributed_initialized = True
@@ -592,7 +603,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 precision=self.precision,
                 dp_group=self.dp_group,
                 tp_group=self.tp_group,
-                sp_group=None,
+                sp_group=self.sp_group,
                 encoder_shard_configs=encoder_shard_configs,
                 llm_shard_config=llm_shard_config,
             )
