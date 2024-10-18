@@ -66,7 +66,6 @@ class MixtralPolicyTestCaseBase(ColossalaiHybridParallelBase):
     ):
         stage_manager = booster.plugin.stage_manager
         tp_group = booster.plugin.tp_group
-        precision = org_loss.dtype
 
         # unwrap model
         mixtral_model = unwrap_model(org_model, "MixtralModel", "model")
