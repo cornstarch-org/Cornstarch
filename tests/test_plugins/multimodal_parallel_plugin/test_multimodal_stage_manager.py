@@ -34,7 +34,7 @@ def destroy_process_group():
         (
             24,
             {encoder1_template: 2},
-            (llm_template_2stages, 4),
+            (llm_template_2stages, 4, 1),
             [
                 {"prev": [16, 17], "next": [4]},
                 {"prev": [18, 19], "next": [5]},
@@ -65,7 +65,7 @@ def destroy_process_group():
         (
             18,
             {encoder1_template: 2, encoder2_template: 2},
-            (llm_template_2stages, 4),
+            (llm_template_2stages, 4, 1),
             [
                 {"prev": [14, 15], "next": [2]},  # rank = 0. encoder1
                 {"prev": [16, 17], "next": [3]},
@@ -90,7 +90,7 @@ def destroy_process_group():
         (
             84,
             {encoder2_template: 4},
-            (llm_template_4stages, 4),
+            (llm_template_4stages, 4, 1),
             [
                 {"prev": [72], "next": [12]},
                 {"prev": [73], "next": [13]},
@@ -148,7 +148,7 @@ def test_multimodal_pipeline_stage_manager(
         (
             24,
             {encoder1_template: 2},
-            (llm_template_2stages, 4),
+            (llm_template_2stages, 4, 1),
             {
                 (0, 1, 2, 3): (True, False),
                 tuple(range(4, 16)): (False, False),
@@ -164,7 +164,7 @@ def test_multimodal_pipeline_stage_manager(
         (
             18,
             {encoder1_template: 2, encoder2_template: 2},
-            (llm_template_2stages, 4),
+            (llm_template_2stages, 4, 1),
             {
                 (0, 1, 4, 5): (True, False),
                 (2, 3, 6, 7) + tuple(range(8, 14)): (False, False),
@@ -181,7 +181,7 @@ def test_multimodal_pipeline_stage_manager(
         (
             84,
             {encoder2_template: 4},
-            (llm_template_4stages, 4),
+            (llm_template_4stages, 4, 1),
             {
                 tuple(range(0, 12)): (True, False),
                 tuple(range(12, 72)): (False, False),
@@ -259,7 +259,7 @@ def test_first_last_stage(
         (
             24,
             {encoder1_template: 2},
-            (llm_template_2stages, 4),
+            (llm_template_2stages, 4, 1),
             {
                 (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
                 (0, 2): [
@@ -307,7 +307,7 @@ def test_first_last_stage(
         (
             18,
             {encoder1_template: 2, encoder2_template: 2},
-            (llm_template_2stages, 4),
+            (llm_template_2stages, 4, 1),
             {
                 (0, 1): [[0, 2], [1, 3]],
                 (0, 2): [[0, 4], [1, 5]],
@@ -323,7 +323,7 @@ def test_first_last_stage(
         (
             84,
             {encoder2_template: 4},
-            (llm_template_4stages, 4),
+            (llm_template_4stages, 4, 1),
             {
                 (0, 1): [
                     [0, 12],
@@ -449,7 +449,7 @@ def test_process_group_by_stages(
         (
             24,
             {encoder1_template: 2},
-            (llm_template_2stages, 4),
+            (llm_template_2stages, 4, 1),
             {
                 (0, 1, 2, 3): (0, 0),
                 (4, 5, 6, 7): (1, 1),
@@ -460,7 +460,7 @@ def test_process_group_by_stages(
         (
             18,
             {encoder1_template: 2, encoder2_template: 2},
-            (llm_template_2stages, 4),
+            (llm_template_2stages, 4, 1),
             {
                 (0, 1): (0, 0),
                 (2, 3): (1, 1),
@@ -474,7 +474,7 @@ def test_process_group_by_stages(
         (
             84,
             {encoder2_template: 4},
-            (llm_template_4stages, 4),
+            (llm_template_4stages, 4, 1),
             {
                 tuple(range(0, 12)): (0, 0),
                 tuple(range(12, 24)): (1, 1),
