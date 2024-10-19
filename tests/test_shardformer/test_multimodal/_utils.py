@@ -38,7 +38,7 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultimodalParallelPlugin,
 )
 
-from .._utils import PolicyTestBase
+from ..utils import PolicyTestBase
 
 
 class CornstarchMultimodalParallelBase(PolicyTestBase):

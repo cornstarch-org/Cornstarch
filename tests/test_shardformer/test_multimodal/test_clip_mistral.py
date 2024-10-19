@@ -16,7 +16,7 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultiModalPipelineStageManager,
 )
 
-from .._utils import (
+from ..utils import (
     check_all_grad_tensors,
     check_loss,
     check_weight,
@@ -211,7 +211,7 @@ class ClipMistralForCausalLMPolicyTestClass(CornstarchMultimodalParallelBase):
     )
     @parametrize("fa", [True, False])
     @parametrize("precision", ["bf16", "fp16"])
-    def test_clip_gemma2(
+    def test_multimodal_parallel(
         self,
         tp_size: int,
         vision_pp_size: int,
@@ -224,5 +224,33 @@ class ClipMistralForCausalLMPolicyTestClass(CornstarchMultimodalParallelBase):
             {"vision": vision_pp_size, "llm": language_pp_size},
             None,
             fa,
+            precision,
+        )
+
+    @parametrize(
+        "tp_size, vision_pp_size, language_pp_size",
+        [
+            (1, 1, 1),
+            (1, 2, 2),
+            (2, 1, 1),
+            (2, 2, 2),
+        ],
+        name_fn=lambda tp, vpp, lpp: f"tp={tp}, pp={vpp},{lpp}",
+    )
+    @parametrize("sp", ["all_to_all", "ring_attn"], name_fn=lambda sp: sp)
+    @parametrize("precision", ["bf16", "fp16"], name_fn=lambda p: p)
+    def test_context_parallel(
+        self,
+        tp_size: int,
+        vision_pp_size: int,
+        language_pp_size: int,
+        sp: str,
+        precision: str,
+    ):
+        self.run_multimodal_parallel(
+            tp_size,
+            {"vision": vision_pp_size, "llm": language_pp_size},
+            sp,
+            True,
             precision,
         )
