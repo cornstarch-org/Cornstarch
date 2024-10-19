@@ -1,6 +1,7 @@
 import copy
 import os
 import random
+import re
 import sys
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -34,6 +35,17 @@ from torch.testing._internal.common_utils import FILE_SCHEMA
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 
+from cornstarch.models.multimodal_language_model import (
+    ModalEncoderModule,
+    MultimodalModel,
+)
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.multimodal_parallel_plugin import (
+    ModalParallelPlugin,
+    MultimodalParallelModule,
+    MultimodalParallelPlugin,
+    MultiModalPipelineStageManager,
+)
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
 
 
@@ -282,21 +294,9 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         sharded_model.unwrap().gradient_checkpointing_enable()
 
         with (
-            patch.object(
-                dist,
-                "batch_isend_irecv",
-                new=batch_isend_irecv_gloo,
-            ),
-            patch.object(
-                dist,
-                "all_to_all",
-                new=all_to_all_gloo,
-            ),
-            patch.object(
-                dist,
-                "all_to_all_single",
-                new=all_to_all_single_gloo,
-            ),
+            patch.object(dist, "batch_isend_irecv", new=batch_isend_irecv_gloo),
+            patch.object(dist, "all_to_all", new=all_to_all_gloo),
+            patch.object(dist, "all_to_all_single", new=all_to_all_single_gloo),
             patch(
                 "colossalai.pipeline.p2p._check_device",
                 return_value=(torch.device("cuda"), False),
@@ -432,6 +432,421 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             sharded_output = sharded_model(**shard_test_data)
             sharded_loss = criterion(sharded_output)
             sharded_optimizer.backward(sharded_loss)
+
+        return org_loss, org_output, sharded_loss, sharded_output
+
+
+class CornstarchMultimodalParallelBase(PolicyTestBase):
+    def set_model(self, encoders: dict[str, ModelClassBase], llm: ModelClassBase):
+        self.encoders = encoders
+        self.llm = llm
+
+    def check_fn(
+        self,
+        booster: Booster,
+        org_model: MultimodalModel,
+        sharded_model: MultimodalParallelModule,
+        org_optim: Optimizer,
+        sharded_optim: OptimizerWrapper,
+        org_output: ModelOutput,
+        sharded_output: dict,
+        org_loss: torch.Tensor,
+        sharded_loss: torch.Tensor,
+    ):
+        my_modal_name = sharded_model.my_modal_name
+        plugin: MultimodalParallelPlugin = booster.plugin
+        stage_manager: MultiModalPipelineStageManager = plugin.stage_manager
+
+        # Loss check
+        if stage_manager.is_last_stage(check_only_in_modal=False):
+            check_loss(org_loss, sharded_loss, atol=self.llm.atol, rtol=self.llm.rtol)
+
+        tp_group: dist.ProcessGroup = plugin.tp_group
+        sharded_model: MultimodalModel = sharded_model.unwrap()
+
+        # Gradient check
+        grads_to_check = {}
+
+        if stage_manager.is_first_stage(check_only_in_modal=True):
+            if my_modal_name == "language_model":
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_model.language_model,
+                        sharded_model.language_model,
+                        self.llm.row_layers_to_check,
+                        tp_group,
+                        atol=self.llm.atol,
+                        rtol=self.llm.rtol,
+                        dim=0,
+                        verbose=False,
+                    )
+                )
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_model.language_model,
+                        sharded_model.language_model,
+                        self.llm.col_layers_to_check,
+                        tp_group,
+                        atol=self.llm.atol,
+                        rtol=self.llm.rtol,
+                        dim=1,
+                        verbose=False,
+                    )
+                )
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_model.language_model,
+                        sharded_model.language_model,
+                        self.llm.norm_layers_to_check,
+                        tp_group,
+                        atol=self.llm.atol,
+                        rtol=self.llm.rtol,
+                        dim=1,
+                        verbose=False,
+                    )
+                )
+            else:
+                encoder_name = my_modal_name.split("_")[0]
+                org_encoder = org_model.get_submodule(my_modal_name).module
+                sharded_encoder = sharded_model.get_submodule(my_modal_name).module
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_encoder,
+                        sharded_encoder,
+                        self.encoders[encoder_name].row_layers_to_check,
+                        tp_group,
+                        atol=self.encoders[encoder_name].atol,
+                        rtol=self.encoders[encoder_name].rtol,
+                        dim=0,
+                        verbose=False,
+                    )
+                )
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_encoder,
+                        sharded_encoder,
+                        self.encoders[encoder_name].col_layers_to_check,
+                        tp_group,
+                        atol=self.encoders[encoder_name].atol,
+                        rtol=self.encoders[encoder_name].rtol,
+                        dim=1,
+                        verbose=False,
+                    )
+                )
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_encoder,
+                        sharded_encoder,
+                        self.encoders[encoder_name].norm_layers_to_check,
+                        tp_group,
+                        atol=self.encoders[encoder_name].atol,
+                        rtol=self.encoders[encoder_name].rtol,
+                        dim=1,
+                        verbose=False,
+                    )
+                )
+
+            # Update parameters
+            org_optim.step()
+            sharded_optim.step()
+
+            # New parameter check
+            if stage_manager.is_first_stage(check_only_in_modal=True):
+                if my_modal_name == "language_model":
+                    check_weight(
+                        org_model.language_model,
+                        sharded_model.language_model,
+                        self.llm.row_layers_to_check,
+                        tp_group,
+                        dim=0,
+                        atol=self.llm.atol,
+                        rtol=self.llm.rtol,
+                    )
+                    check_weight(
+                        org_model.language_model,
+                        sharded_model.language_model,
+                        self.llm.col_layers_to_check,
+                        tp_group,
+                        dim=1,
+                        atol=self.llm.atol,
+                        rtol=self.llm.rtol,
+                    )
+                else:
+                    encoder_name = my_modal_name.split("_")[0]
+                    org_encoder = org_model.get_submodule(my_modal_name).module
+                    sharded_encoder = sharded_model.get_submodule(my_modal_name).module
+                    check_weight(
+                        org_encoder,
+                        sharded_encoder,
+                        self.encoders[encoder_name].row_layers_to_check,
+                        tp_group,
+                        dim=0,
+                        atol=self.encoders[encoder_name].atol,
+                        rtol=self.encoders[encoder_name].rtol,
+                    )
+                    check_weight(
+                        org_encoder,
+                        sharded_encoder,
+                        self.encoders[encoder_name].col_layers_to_check,
+                        tp_group,
+                        dim=1,
+                        atol=self.encoders[encoder_name].atol,
+                        rtol=self.encoders[encoder_name].rtol,
+                    )
+
+            check_all_grad_tensors(grads_to_check)
+
+    def run_multimodal_parallel(
+        self,
+        tp_size: int,
+        modal_pp_size: dict[str, int],
+        llm_sp_mode: str | None,
+        fa: bool,
+        precision: str,
+    ):
+        assert precision in ["bf16", "fp16"]
+        precision = torch.bfloat16 if precision == "bf16" else torch.float16
+
+        test_config = dict(
+            num_microbatches=self.num_microbatches,
+            microbatch_size=self.microbatch_size,
+            initial_scale=1,
+            enable_flash_attention=fa,
+            precision=precision,
+        )
+
+        (
+            org_model,
+            org_optimizer,
+            sharded_model,
+            sharded_optimizer,
+            criterion,
+            booster,
+        ) = self.build_model_from_multimodal_plugin(
+            tp_size=tp_size,
+            module_pp_size=modal_pp_size,
+            llm_sp_mode=llm_sp_mode,
+            test_config=test_config,
+            precision=precision,
+        )
+
+        org_model.gradient_checkpointing_enable()
+        sharded_model.unwrap().gradient_checkpointing_enable()
+
+        with (
+            patch.object(dist, "batch_isend_irecv", new=batch_isend_irecv_gloo),
+            patch.object(dist, "all_to_all", new=all_to_all_gloo),
+            patch.object(dist, "all_to_all_single", new=all_to_all_single_gloo),
+            patch(
+                "colossalai.pipeline.p2p._check_device",
+                return_value=(torch.device("cuda"), False),
+            ),
+        ):
+            org_loss, org_output, sharded_loss, sharded_output = (
+                self.run_forward_backward_with_multimodal_plugin(
+                    org_model=org_model,
+                    sharded_model=sharded_model,
+                    sharded_optimizer=sharded_optimizer,
+                    criterion=criterion,
+                    output_transform_fn=lambda x: x,
+                    booster=booster,
+                    precision=precision,
+                )
+            )
+
+        self.check_fn(
+            booster=booster,
+            org_model=org_model,
+            sharded_model=sharded_model,
+            org_optim=org_optimizer,
+            sharded_optim=sharded_optimizer,
+            org_output=org_output,
+            sharded_output=sharded_output,
+            org_loss=org_loss,
+            sharded_loss=sharded_loss,
+        )
+
+    def build_model_from_multimodal_plugin(
+        self,
+        tp_size: int,
+        module_pp_size: dict[str, int],
+        llm_sp_mode: str | None,
+        test_config: dict[str, Any],
+        precision: torch.dtype,
+    ) -> tuple[
+        MultimodalModel,
+        Optimizer,
+        MultimodalParallelModule,
+        OptimizerWrapper,
+        Callable,
+        Booster,
+    ]:
+        use_lazy_init: bool = test_config.pop("use_lazy_init", False)
+        use_flash_attention: bool = test_config["enable_flash_attention"]
+
+        encoders: dict[str, PreTrainedModel] = {}
+
+        for encoder_name, model_base in self.encoders.items():
+            encoders[encoder_name] = model_base.model_fn(use_flash_attention).to(
+                device="cuda"
+            )
+
+        llm = self.llm.model_fn(use_flash_attention).to(device="cuda")
+
+        ctx = LazyInitContext() if use_lazy_init else nullcontext()
+        with ctx:
+            org_model = MultimodalModel(
+                encoders={
+                    encoder_name: ModalEncoderModule(module)
+                    for encoder_name, module in encoders.items()
+                },
+                language_model=llm,
+            )
+            sharded_model = copy.deepcopy(org_model)
+        if use_lazy_init:
+            ctx.materialize(org_model)
+
+        org_optimizer = Adam(org_model.parameters(), lr=1e-3)
+        sharded_optimizer = Adam(sharded_model.parameters(), lr=1e-3)
+
+        plugins: dict[str, ModalParallelPlugin] = {}
+        for modal_name, pp_size in module_pp_size.items():
+            if modal_name == "llm":
+                llm_plugin = ModalParallelPlugin(
+                    tp_size=tp_size,
+                    sp_size=2 if llm_sp_mode is not None else 1,
+                    sequence_parallelism_mode=llm_sp_mode,
+                    pipeline_template=self.get_pipeline_template(
+                        org_model.language_model, pp_size
+                    ),
+                )
+            else:
+                plugins[modal_name] = ModalParallelPlugin(
+                    tp_size=tp_size,
+                    pipeline_template=self.get_pipeline_template(
+                        org_model.get_submodule(f"{modal_name}_encoder"), pp_size
+                    ),
+                )
+
+        plugin = MultimodalParallelPlugin(
+            encoder_plugins=plugins,
+            language_model_plugin=llm_plugin,
+            **test_config,
+        )
+        if precision == torch.bfloat16:
+            org_model.to(dtype=precision)
+            sharded_model.to(dtype=precision)
+            plugin.precision = None
+        else:
+            # Do not cast org_model for fp16 here, as it will be casted in
+            # torch.autocast amp
+            plugin.precision = "fp16"
+        booster = Booster(plugin=plugin)
+
+        sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
+            sharded_model, sharded_optimizer, self.llm.loss_fn
+        )
+
+        return (
+            org_model,
+            org_optimizer,
+            sharded_model,
+            sharded_optimizer,
+            criterion,
+            booster,
+        )
+
+    @staticmethod
+    def get_pipeline_template(model: nn.Module, num_stages: int) -> PipelineTemplate:
+        modules = PipelineTemplate.get_modules(model)
+        num_layers = sum(bool(re.search(r"\.\d", s)) for s in modules)
+
+        # Get the number of layers per stage
+        base_size = num_layers // num_stages
+        remainder = num_layers % num_stages
+        num_layers_per_stage = [
+            base_size + 1 if i < remainder else base_size for i in range(num_stages)
+        ]
+        assert sum(num_layers_per_stage) == num_layers
+
+        first_layer_index = next(
+            i for i, layer in enumerate(modules) if re.search("\.0", layer)
+        )
+        last_layer_index = next(
+            i
+            for i, layer in enumerate(modules)
+            if re.search(f"\.{num_layers - 1}", layer)
+        )
+
+        modules_per_stages = [[] for _ in range(num_stages)]
+        modules_per_stages[0].extend(modules[:first_layer_index])
+        layer_idx = 0
+        for stage_idx, num_layers in enumerate(num_layers_per_stage):
+            idx = first_layer_index + layer_idx
+            modules_per_stages[stage_idx].extend(modules[idx : idx + num_layers])
+            layer_idx += num_layers
+        modules_per_stages[-1].extend(modules[last_layer_index + 1 :])
+
+        return PipelineTemplate(
+            (
+                model.config[0].model_type
+                if isinstance(model, ModalEncoderModule)
+                else model.config.model_type
+            ),
+            modules_per_stages,
+        )
+
+    def run_forward_backward_with_multimodal_plugin(
+        self,
+        org_model: nn.Module,
+        sharded_model: nn.Module,
+        sharded_optimizer: Optimizer,
+        criterion: Callable[[torch.Tensor], torch.Tensor],
+        output_transform_fn: Callable,
+        booster: Booster,
+        precision: torch.dtype,
+    ):
+        def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
+            outputs = output_transform_fn(outputs)
+            loss = criterion(outputs)
+            return loss
+
+        data = {}
+        batch_size = self.microbatch_size * self.num_microbatches
+        for model_base in self.encoders.values():
+            data.update(model_base.data_gen_fn(batch_size))
+        data.update(self.llm.data_gen_fn(batch_size))
+
+        shard_test_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            shard_test_data[k] = v.clone().to("cuda")
+        unshard_test_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            unshard_test_data[k] = v.clone().to("cuda")
+
+        org_model.train()
+        with torch.autocast(
+            device_type="cuda", enabled=precision == torch.float16, dtype=torch.float16
+        ):
+            org_output = org_model(**unshard_test_data)
+            org_loss = criterion(org_output).to(precision)
+        org_loss.backward()
+
+        sharded_model.train()
+        data_iter = iter([shard_test_data])
+        sharded_output = booster.execute_pipeline(
+            data_iter,
+            sharded_model,
+            _criterion,
+            sharded_optimizer,
+            return_loss=True,
+            return_outputs=False,
+        )
+        sharded_loss = sharded_output["loss"]
 
         return org_loss, org_output, sharded_loss, sharded_output
 
