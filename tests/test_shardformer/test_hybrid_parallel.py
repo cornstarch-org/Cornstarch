@@ -9,21 +9,21 @@ from .model_zoo import (
     EvaCLIPModelBase,
     Gemma2ForCausalLMBase,
     Gemma2ModelBase,
-    GemmaForCausalLM,
+    GemmaForCausalLMBase,
     GemmaModelBase,
     InternLM2ForCausalLMBase,
     InternLM2ModelBase,
     InternVisonModelBase,
-    LlamaForCausalLM,
+    LlamaForCausalLMBase,
     LlamaModelBase,
-    MistralForCausalLM,
+    MistralForCausalLMBase,
     MistralModelBase,
-    MixtralForCausalLM,
+    MixtralForCausalLMBase,
     MixtralModelBase,
-    Phi3ForCausalLM,
+    Phi3ForCausalLMBase,
     Phi3ModelBase,
     Qwen2AudioEncoderBase,
-    Qwen2ForCausalLM,
+    Qwen2ForCausalLMBase,
     Qwen2ModelBase,
     SiglipModelBase,
     WhisperEncoderBase,
@@ -50,14 +50,14 @@ language_models = dict(
 )
 
 causal_lms = dict(
-    gemma=GemmaForCausalLM,
+    gemma=GemmaForCausalLMBase,
     gemma2=Gemma2ForCausalLMBase,
     internlm2=InternLM2ForCausalLMBase,
-    llama=LlamaForCausalLM,
-    mistral=MistralForCausalLM,
-    mixtral=MixtralForCausalLM,
-    phi3=Phi3ForCausalLM,
-    qwen2=Qwen2ForCausalLM,
+    llama=LlamaForCausalLMBase,
+    mistral=MistralForCausalLMBase,
+    mixtral=MixtralForCausalLMBase,
+    phi3=Phi3ForCausalLMBase,
+    qwen2=Qwen2ForCausalLMBase,
 )
 
 audio_models = dict(
@@ -110,7 +110,7 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
     def test_causal(
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
-        self.set_model(language_models[model_name]())
+        self.set_model(causal_lms[model_name]())
         self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
 
 
@@ -134,7 +134,7 @@ class LanguageContextParallel(ColossalaiHybridParallelBase):
     )
     @parametrize("sp_mode", ["all_to_all", "ring_attn"], name_fn=lambda x: x)
     def test_causal(self, model_name: str, tp_size: int, pp_size: int, sp_mode: str):
-        self.set_model(language_models[model_name]())
+        self.set_model(causal_lms[model_name]())
         self.run_hybrid_parallel(tp_size, pp_size, sp_mode, True, "bf16")
 
 
@@ -152,4 +152,4 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
         self.set_model(audio_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, 1, fa, precision)
