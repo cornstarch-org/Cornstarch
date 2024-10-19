@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from cornstarch.shardformer.layers.attn import RingAttentionBase
+from cornstarch.shardformer.layers.attn import RingAttentionBase, RingAttentionAnyMask
 from colossalai.shardformer.layer import (
     RingAttention,
     dist_cross_entropy,
@@ -138,14 +138,11 @@ class LlamaModelForwards:
         sp_size = shard_config.sequence_parallel_size
 
         if sp_mode == "ring_attn":
-            # _, causal_mask, _ = RingAttention.prepare_varlen_batch(
-            #     attention_mask, sp_group
-            # )
-            causal_mask = RingAttentionBase.prepare_batch(
-                attention_mask, sp_group
-            )
+            # shape of attention_mask is [B, L]
+            attn_mask = split_batch_uniform(attention_mask, sp_group, seq_dim=1)
         else:
-            causal_mask = self._update_causal_mask(
+            # NOTE(Runyu): it is essential to update causal mask here for anymask eager implementation
+            attn_mask = self._update_causal_mask(
                 attention_mask,
                 hidden_states,
                 cache_position,
@@ -157,23 +154,13 @@ class LlamaModelForwards:
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
             # Ring Attention zigzag batch processing
+            # NOTE(Runyu): ColossalAI uses  attention_mask.bool().all() to judge if the input is var len version, which is a hack way. But in multi-modal model training, it is not good to use this way.
+            # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
+            # TODO(Runyu): We should use a better way to judge if the input is var len version.
+            # TODO(Runyu): support var len version
             if sp_mode == "ring_attn":
-                assert (
-                    self.config._attn_implementation == "flash_attention_2"
-                ), "Ring Attention inherently requires Flash Attention."
-                if not attention_mask.bool().all():
-                    raise NotImplementedError("Var len version not implemented for ring attention")
-                    hidden_states, causal_mask, position_ids = (
-                        RingAttention.prepare_varlen_batch(
-                            attention_mask, sp_group, hidden_states, position_ids
-                        )
-                    )
-                else:
-                    # hidden_states, position_ids = split_batch_zigzag(
-                    #     [hidden_states, position_ids], sp_group
-                    # )
-                    hidden_states = split_batch_uniform(hidden_states, sp_group)
-                    position_ids = split_batch_uniform(position_ids, sp_group)
+                hidden_states = split_batch_uniform(hidden_states, sp_group)
+                position_ids = split_batch_uniform(position_ids, sp_group)
 
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
@@ -200,7 +187,7 @@ class LlamaModelForwards:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    causal_mask,
+                    attn_mask,
                     position_ids,
                     past_key_values,
                     output_attentions,
@@ -211,7 +198,7 @@ class LlamaModelForwards:
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=causal_mask,
+                    attention_mask=attn_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
@@ -329,17 +316,12 @@ class LlamaModelForwards:
         ):
             # Split labels in a zigzag fashion too
             sp_group = shard_config.sequence_parallel_process_group
-            if attention_mask.bool().all(): # non var len version
-                # labels = split_batch_zigzag(labels, sp_group, seq_dim=1, is_label=True)
-                labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
-                logger.info(f"non var len version")
-            else:
-                # [B, max_seqlen // sp_size]
-                logger.info(f"var len version")
-                raise NotImplementedError("Var len version not implemented for ring attention")
-                labels, _, _ = RingAttention.prepare_varlen_batch(
-                    attention_mask, sp_group, labels, is_label=True
-                )
+
+            # NOTE(Runyu): ColossalAI uses attention_mask.bool().all() to judge if the input is var len version, which is a hack way. But in multi-modal model training, it is not good to use this way.
+            # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
+            # TODO(Runyu): We should use a better way to judge if the input is var len version.
+            # TODO(Runyu): support var len version
+            labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = LlamaModelForwards.llama_model_forward(
@@ -519,6 +501,42 @@ class LlamaModelForwards:
             attentions=outputs.attentions,
         )
 
+def run_naive_attn(self, bsz, q_len, query_states, key_states, value_states, attention_mask):
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+    # print(f"attn_mask: {attention_mask}")
+
+    attn_weights = torch.matmul(
+        query_states, key_states.transpose(2, 3)
+    ) / math.sqrt(self.head_dim)
+
+    if attention_mask is not None:  # no matter the length, we just slice it
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    # upcast attention to fp32
+    attn_weights = nn.functional.softmax(
+        attn_weights, dim=-1, dtype=torch.float32
+    ).to(query_states.dtype)
+    attn_weights = nn.functional.dropout(
+        attn_weights, p=self.attention_dropout, training=self.training
+    )
+    attn_output = torch.matmul(attn_weights, value_states)
+
+    if attn_output.size() != (
+        bsz,
+        self.num_heads,
+        q_len,
+        self.head_dim,
+    ):
+        raise ValueError(
+            f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+            f" {attn_output.size()}"
+        )
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    return attn_output
 
 class LlamaAttentionForwards:
     @staticmethod
@@ -621,17 +639,35 @@ class LlamaAttentionForwards:
             # )
             # attn_output = attn_output.transpose(1, 2).contiguous()
 
-            # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
-            attn_output = RingAttentionBase.attention(
-                query_states,
-                key_states,
-                value_states,
-                sp_group,
-                causal=self.is_causal,
-                return_softmax=False,
-                dropout_p=self.attention_dropout if self.training else 0.0,
-            )
-
+            if attention_mask.bool().all():
+                # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
+                # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
+                attn_output = RingAttentionBase.attention(
+                    query_states,
+                    key_states,
+                    value_states,
+                    sp_group,
+                    causal=self.is_causal,
+                    return_softmax=False,
+                    dropout_p=self.attention_dropout if self.training else 0.0,
+                )
+            else:
+                # use anymask version
+                attn_output = RingAttentionAnyMask.attention(
+                    query_states,
+                    key_states,
+                    value_states,
+                    sp_group,
+                    causal=self.is_causal,
+                    return_softmax=False,
+                    dropout_p=self.attention_dropout if self.training else 0.0,
+                )
+        
+        elif not attention_mask.bool().all():
+            # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
+            # NOTE(@runyu): anymask, we use eager implementation only
+            attn_output = run_naive_attn(bsz, q_len, query_states, key_states, value_states, attention_mask)
+        
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
             # to be able to avoid many of these transpose/reshape/view.
@@ -684,38 +720,7 @@ class LlamaAttentionForwards:
 
             attn_output = attn_output.transpose(1, 2).contiguous()
         else:
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-            attn_weights = torch.matmul(
-                query_states, key_states.transpose(2, 3)
-            ) / math.sqrt(self.head_dim)
-
-            if attention_mask is not None:  # no matter the length, we just slice it
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-                attn_weights = attn_weights + causal_mask
-
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(
-                attn_weights, dim=-1, dtype=torch.float32
-            ).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(
-                attn_weights, p=self.attention_dropout, training=self.training
-            )
-            attn_output = torch.matmul(attn_weights, value_states)
-
-            if attn_output.size() != (
-                bsz,
-                self.num_heads,
-                q_len,
-                self.head_dim,
-            ):
-                raise ValueError(
-                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                    f" {attn_output.size()}"
-                )
-
-            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = run_naive_attn(bsz, q_len, query_states, key_states, value_states, attention_mask)
 
         # sp: all-to-all communication when introducing ulysses context parallelism
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()

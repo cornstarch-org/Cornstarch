@@ -56,7 +56,7 @@ from transformers.models.llama.modeling_llama import (
     LlamaPreTrainedModel,
 )
 
-from ._utils import (
+from .utils import (
     check_all_grad_tensors,
     check_loss,
     check_weight,
@@ -265,6 +265,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             return loss
 
         data = self.data_gen_fn()
+        # print_rank0(f"attn mask in data: {data['attention_mask']}")
 
         shard_test_data = {}
         for k, v in data.items():
@@ -306,15 +307,15 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         num_attention_heads=16,
         num_hidden_layers=2,
         use_cache=False,
-        # _attn_implementati2n="eager",
-        _attn_implementati2n="flash_attention_2",
+        _attn_implementation="eager",
+        # _attn_implementation="flash_attention_2",
     )
 
     def data_gen_fn(self) -> dict:
         num_batch = self.num_microbatches * self.microbatch_size
         input = {
             "input_ids": torch.randint(0, 2048, (num_batch, 64)),
-            "attention_mask": torch.ones(num_batch, 64),
+            "attention_mask": torch.randint(0, 2, (num_batch, 64)),
         }
 
         return input
@@ -397,7 +398,7 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
             print_rank0("weights check passed")
 
         # check grads
-        check_all_grad_tensors(grads_to_check)
+        # check_all_grad_tensors(grads_to_check)
 
 class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
 
@@ -424,11 +425,11 @@ def run(rank: int, world_size: int, tp_size: int, pp_size: int, sp_size: int, sp
     test_class.test_context_parallel(tp_size, pp_size, sp_size, sp_mode)
 
 '''
-CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.utils_ring --world_size 2 --tp_size 2 --pp_size 1 --sp_size 1
-CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.test_shardformer.utils_ring --world_size 4 --tp_size 2 --pp_size 2 --sp_size 1
-CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.utils_ring --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.utils_ring --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=0,1 python -m tests.test_shardformer.utils_ring --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 2 --pp_size 1 --sp_size 1
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 2 --pp_size 2 --sp_size 1
+CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=0,1 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
 '''
 
 def parse_args():

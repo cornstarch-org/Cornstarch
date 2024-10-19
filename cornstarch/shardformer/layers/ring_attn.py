@@ -99,13 +99,14 @@ def ring_flash_attn_forward(
                     "dropout_p": dropout_p,
                     "softmax_scale": softmax_scale,
                     "causal": causal and step == 0,
-                    "window_size_left": window_size_left,
-                    "window_size_right": window_size_right,
+                    # "window_size_left": window_size_left,
+                    # "window_size_right": window_size_right,
+                    "window_size": (window_size_left, window_size_right),
                     "alibi_slopes": alibi_slopes,
                     "return_softmax": True and dropout_p > 0,
                 }
             )
-            block_out, block_lse, _, _ = ATTN_IMPL(**params)
+            block_out, _q, _k, _v, _out_padded, block_lse, _S_dmask, _rng_state= ATTN_IMPL(**params)
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
@@ -168,8 +169,9 @@ def ring_flash_attn_backward(
                     "dropout_p": dropout_p,
                     "softmax_scale": softmax_scale,
                     "causal": bwd_causal,
-                    "window_size_left": window_size_left,
-                    "window_size_right": window_size_right,
+                    # "window_size_left": window_size_left,
+                    # "window_size_right": window_size_right,
+                    "window_size": (window_size_left, window_size_right),
                     "alibi_slopes": alibi_slopes,
                     "deterministic": deterministic,
                 }

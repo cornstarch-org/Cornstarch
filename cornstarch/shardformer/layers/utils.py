@@ -80,6 +80,10 @@ def split_batch_uniform(
     batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False
 ) -> torch.Tensor:
 
+    """
+    split them evenly by seq_dim
+    """
+
     sp_size = dist.get_world_size(sp_group)
     sp_rank = dist.get_rank(sp_group)
     if sp_size == 1:
@@ -88,12 +92,21 @@ def split_batch_uniform(
     seq_dim = seq_dim if seq_dim != -1 else batch[0].dim() - 1
 
     seq_len = batch.shape[seq_dim]
-    split_len = seq_len // sp_size
 
     assert seq_len % sp_size == 0, f"Sequence length {seq_len} must be divisible by {sp_size}!"
     split_batch = batch.chunk(sp_size, dim=seq_dim)[sp_rank].contiguous()
 
     return split_batch
+
+
+def split_batch_anymask(
+    batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False
+) -> torch.Tensor:
+    """
+    split them using some strategy
+    TODO(@insu) implement this
+    """
+    return NotImplementedError("Not implemented yet for anymask automatically split")
 
 
 @cache
