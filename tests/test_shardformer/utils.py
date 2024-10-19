@@ -32,7 +32,11 @@ from torch.optim import Adam, Optimizer
 from torch.testing import assert_close
 from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
 from torch.testing._internal.common_utils import FILE_SCHEMA
-from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
+from transformers.modeling_outputs import (
+    BaseModelOutput,
+    BaseModelOutputWithPast,
+    ModelOutput,
+)
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import (
@@ -666,6 +670,12 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
             sharded_loss=sharded_loss,
         )
 
+    @staticmethod
+    def postprocess_callback(inputs: dict, output: BaseModelOutput) -> BaseModelOutput:
+        # Cut number of tokens to make ring attention happy
+        output.last_hidden_state = output.last_hidden_state[:, :32, :]
+        return output
+
     def build_model_from_multimodal_plugin(
         self,
         tp_size: int,
@@ -697,7 +707,9 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
         with ctx:
             org_model = MultimodalModel(
                 encoders={
-                    encoder_name: ModalEncoderModule(module)
+                    encoder_name: ModalEncoderModule(
+                        module, postprocess_module_callback=self.postprocess_callback
+                    )
                     for encoder_name, module in encoders.items()
                 },
                 language_model=llm,
