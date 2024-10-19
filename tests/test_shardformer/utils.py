@@ -546,55 +546,55 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
                     )
                 )
 
-            # Update parameters
-            org_optim.step()
-            sharded_optim.step()
+        # Update parameters
+        org_optim.step()
+        sharded_optim.step()
 
-            # New parameter check
-            if stage_manager.is_first_stage(check_only_in_modal=True):
-                if my_modal_name == "language_model":
-                    check_weight(
-                        org_model.language_model,
-                        sharded_model.language_model,
-                        self.llm.row_layers_to_check,
-                        tp_group,
-                        dim=0,
-                        atol=self.llm.atol,
-                        rtol=self.llm.rtol,
-                    )
-                    check_weight(
-                        org_model.language_model,
-                        sharded_model.language_model,
-                        self.llm.col_layers_to_check,
-                        tp_group,
-                        dim=1,
-                        atol=self.llm.atol,
-                        rtol=self.llm.rtol,
-                    )
-                else:
-                    encoder_name = my_modal_name.split("_")[0]
-                    org_encoder = org_model.get_submodule(my_modal_name).module
-                    sharded_encoder = sharded_model.get_submodule(my_modal_name).module
-                    check_weight(
-                        org_encoder,
-                        sharded_encoder,
-                        self.encoders[encoder_name].row_layers_to_check,
-                        tp_group,
-                        dim=0,
-                        atol=self.encoders[encoder_name].atol,
-                        rtol=self.encoders[encoder_name].rtol,
-                    )
-                    check_weight(
-                        org_encoder,
-                        sharded_encoder,
-                        self.encoders[encoder_name].col_layers_to_check,
-                        tp_group,
-                        dim=1,
-                        atol=self.encoders[encoder_name].atol,
-                        rtol=self.encoders[encoder_name].rtol,
-                    )
+        # New parameter check
+        if stage_manager.is_first_stage(check_only_in_modal=True):
+            if my_modal_name == "language_model":
+                check_weight(
+                    org_model.language_model,
+                    sharded_model.language_model,
+                    self.llm.row_layers_to_check,
+                    tp_group,
+                    dim=0,
+                    atol=self.llm.atol,
+                    rtol=self.llm.rtol,
+                )
+                check_weight(
+                    org_model.language_model,
+                    sharded_model.language_model,
+                    self.llm.col_layers_to_check,
+                    tp_group,
+                    dim=1,
+                    atol=self.llm.atol,
+                    rtol=self.llm.rtol,
+                )
+            else:
+                encoder_name = my_modal_name.split("_")[0]
+                org_encoder = org_model.get_submodule(my_modal_name).module
+                sharded_encoder = sharded_model.get_submodule(my_modal_name).module
+                check_weight(
+                    org_encoder,
+                    sharded_encoder,
+                    self.encoders[encoder_name].row_layers_to_check,
+                    tp_group,
+                    dim=0,
+                    atol=self.encoders[encoder_name].atol,
+                    rtol=self.encoders[encoder_name].rtol,
+                )
+                check_weight(
+                    org_encoder,
+                    sharded_encoder,
+                    self.encoders[encoder_name].col_layers_to_check,
+                    tp_group,
+                    dim=1,
+                    atol=self.encoders[encoder_name].atol,
+                    rtol=self.encoders[encoder_name].rtol,
+                )
 
-            check_all_grad_tensors(grads_to_check)
+        check_all_grad_tensors(grads_to_check)
 
     def run_multimodal_parallel(
         self,
@@ -770,12 +770,12 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
         assert sum(num_layers_per_stage) == num_layers
 
         first_layer_index = next(
-            i for i, layer in enumerate(modules) if re.search("\.0", layer)
+            i for i, layer in enumerate(modules) if re.search(r"\.0", layer)
         )
         last_layer_index = next(
             i
             for i, layer in enumerate(modules)
-            if re.search(f"\.{num_layers - 1}", layer)
+            if re.search(rf"\.{num_layers - 1}", layer)
         )
 
         modules_per_stages = [[] for _ in range(num_stages)]
