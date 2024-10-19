@@ -5,7 +5,7 @@ from transformers.models.qwen2_audio.modeling_qwen2_audio import (
     Qwen2AudioEncoderConfig,
 )
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 
 class Qwen2AudioEncoderBase(ModelClassBase):

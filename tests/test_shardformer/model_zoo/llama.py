@@ -3,25 +3,23 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.models.mixtral import MixtralConfig, MixtralForCausalLM, MixtralModel
+from transformers.models.llama import LlamaConfig, LlamaForCausalLM, LlamaModel
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
-mixtral_config = MixtralConfig(
+llama_config = LlamaConfig(
     hidden_size=256,
     intermediate_size=256,
     num_attention_heads=16,
     num_key_value_heads=8,
     num_hidden_layers=4,
     use_cache=False,
-    num_local_experts=4,
-    num_experts_per_tok=1,
 )
 
 
-class MixtralModelBase(ModelClassBase):
+class LlamaModelBase(ModelClassBase):
     def __init__(self):
-        super().__init__(MixtralModel, mixtral_config)
+        super().__init__(LlamaModel, llama_config)
         self.row_layers_to_check = ["layers[0].self_attn.q_proj", "embed_tokens"]
         self.col_layers_to_check = ["layers[0].self_attn.o_proj"]
 
@@ -39,9 +37,9 @@ class MixtralModelBase(ModelClassBase):
         return input
 
 
-class MixtralForCausalLMBase(ModelClassBase):
+class LlamaForCausalLMBase(ModelClassBase):
     def __init__(self):
-        super().__init__(MixtralForCausalLM, mixtral_config)
+        super().__init__(LlamaForCausalLM, llama_config)
         self.row_layers_to_check = [
             "model.layers[0].self_attn.q_proj",
             "model.embed_tokens",
@@ -57,4 +55,5 @@ class MixtralForCausalLMBase(ModelClassBase):
             "attention_mask": torch.ones(num_batch, 64),
         }
         input["labels"] = input["input_ids"]
+
         return input

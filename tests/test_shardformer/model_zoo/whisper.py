@@ -2,7 +2,7 @@ import torch
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 
 class WhisperEncoderBase(ModelClassBase):

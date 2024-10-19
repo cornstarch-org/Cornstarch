@@ -5,7 +5,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.models.gemma import GemmaConfig, GemmaForCausalLM, GemmaModel
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 gemma_config = GemmaConfig(
     hidden_size=256,

@@ -13,7 +13,7 @@ from cornstarch.models.internlm2 import (
     InternLM2Model,
 )
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 internlm2_config = InternLM2Config(
     hidden_size=256,

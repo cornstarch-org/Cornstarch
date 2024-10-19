@@ -5,7 +5,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.models.phi3 import Phi3Config, Phi3ForCausalLM, Phi3Model
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 phi3_config = Phi3Config(
     hidden_size=256,

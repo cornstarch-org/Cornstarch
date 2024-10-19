@@ -5,7 +5,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.models.mistral import MistralConfig, MistralForCausalLM, MistralModel
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 mistral_config = MistralConfig(
     hidden_size=256,

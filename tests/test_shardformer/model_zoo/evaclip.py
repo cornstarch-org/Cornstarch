@@ -1,15 +1,18 @@
+import copy
+
 import torch
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 
-from .utils import ModelClassBase
+from cornstarch.models.evaclip import EvaCLIPVisionConfig, EvaCLIPVisionModel
+
+from ..utils import ModelClassBase
 
 
-class CLIPModelBase(ModelClassBase):
+class EvaCLIPModelBase(ModelClassBase):
     def __init__(self):
         super().__init__(
-            CLIPVisionModel,
-            CLIPVisionConfig(
+            EvaCLIPVisionModel,
+            EvaCLIPVisionConfig(
                 hidden_size=256,
                 intermediate_size=256,
                 num_attention_heads=8,
@@ -28,11 +31,18 @@ class CLIPModelBase(ModelClassBase):
         self.norm_layers_to_check = [
             "vision_model.encoder.layers[0].layer_norm1",
             "vision_model.encoder.layers[0].layer_norm2",
-            "vision_model.pre_layrnorm",
         ]
 
     def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:
         return x.pooler_output.mean()
+
+    # HF does not provide EvaCLIP flash attention yet.
+    # Use eager implementation and compare against ColoAttention.
+    def model_fn(self, fa: bool) -> EvaCLIPVisionModel:
+        config = copy.deepcopy(self.config)
+        config.pad_token_id = config.eos_token_id
+        config._attn_implementation = "eager"
+        return self.model_class(config)
 
     def data_gen_fn(self, num_batch: int) -> dict:
         image_size = self.config.image_size

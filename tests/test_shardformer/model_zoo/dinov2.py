@@ -5,7 +5,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 
 class Dinov2ModelBase(ModelClassBase):

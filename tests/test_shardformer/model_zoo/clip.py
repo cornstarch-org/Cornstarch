@@ -1,15 +1,15 @@
 import torch
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.models.siglip import SiglipVisionConfig, SiglipVisionModel
+from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 
-class SiglipModelBase(ModelClassBase):
+class CLIPModelBase(ModelClassBase):
     def __init__(self):
         super().__init__(
-            SiglipVisionModel,
-            SiglipVisionConfig(
+            CLIPVisionModel,
+            CLIPVisionConfig(
                 hidden_size=256,
                 intermediate_size=256,
                 num_attention_heads=8,
@@ -28,6 +28,7 @@ class SiglipModelBase(ModelClassBase):
         self.norm_layers_to_check = [
             "vision_model.encoder.layers[0].layer_norm1",
             "vision_model.encoder.layers[0].layer_norm2",
+            "vision_model.pre_layrnorm",
         ]
 
     def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:

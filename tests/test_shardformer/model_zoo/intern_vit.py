@@ -5,7 +5,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 from cornstarch.models.intern_vit import InternVisionConfig, InternVisionModel
 
-from .utils import ModelClassBase
+from ..utils import ModelClassBase
 
 
 class InternVisonModelBase(ModelClassBase):
