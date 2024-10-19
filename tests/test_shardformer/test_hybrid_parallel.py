@@ -152,4 +152,4 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
         self.set_model(audio_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, None, 1, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
