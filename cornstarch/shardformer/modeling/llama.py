@@ -153,7 +153,6 @@ class LlamaModelForwards:
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
-            # Ring Attention zigzag batch processing
             # NOTE(Runyu): ColossalAI uses  attention_mask.bool().all() to judge if the input is var len version, which is a hack way. But in multi-modal model training, it is not good to use this way.
             # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
@@ -642,6 +641,7 @@ class LlamaAttentionForwards:
             if attention_mask.bool().all():
                 # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
                 # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
+                logger.info(f"use causal attn version")
                 attn_output = RingAttentionBase.attention(
                     query_states,
                     key_states,
@@ -653,6 +653,7 @@ class LlamaAttentionForwards:
                 )
             else:
                 # use anymask version
+                logger.info(f"use anymask version")
                 attn_output = RingAttentionAnyMask.attention(
                     query_states,
                     key_states,
