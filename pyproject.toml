@@ -45,6 +45,11 @@ dev = [
 # Never enforce `E501` (line length violations).
 ignore = ["E501"]
 
+[tool.pytest.ini_options]
+env = [
+    "TORCHDYNAMO_DISABLE=1",
+]
+
 [build-system]
 requires = ["setuptools>=63.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
