@@ -2,21 +2,14 @@ from __future__ import annotations
 
 import copy
 import functools
-import os
-import random
-import sys
 from typing import Any
-from unittest.mock import patch
 
-import numpy as np
 import torch
 import torch.distributed as dist
-from colossalai.accelerator import CudaAccelerator, get_accelerator
+from colossalai.accelerator import get_accelerator
 from colossalai.interface import OptimizerWrapper
 from torch import nn
-from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
 from torch.testing._internal.common_utils import (
-    FILE_SCHEMA,
     instantiate_parametrized_tests,
     parametrize,
 )
@@ -28,72 +21,17 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultiModalProcessGroupMesh,
 )
 
+from ...distributed_base import GlooDistributedTestBase
 
-# TODO (insujang): add tests for the cases without modal parallelism (modalities are colocated)
-class ScheduleTestClassBase(MultiProcessTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
-            self._spawn_processes()
 
-    def tearDown(self) -> None:
-        return super().tearDown()
-
-    def create_data(self) -> list[Any]:
-        tensor = torch.ones(1, device=get_accelerator().get_current_device())
-        return [
-            "tensor",
-            tensor,
-            [tensor],
-            {"tensor": tensor},
-        ]
-
-    @classmethod
-    def _run(cls, rank: int, test_name: str, file_name: str, pipe) -> None:
-        # Copy from: torch/testing/_internal/common_fsdp.py FSDPTest._run
-        self = cls(test_name)
-        self.rank = rank
-        self.file_name = file_name
-
-        print(f"dist init r={self.rank}, world={self.world_size}")
-        backend = "gloo"
-
-        try:
-            dist.init_process_group(
-                init_method=f"{FILE_SCHEMA}{self.file_name}",
-                backend=backend,
-                world_size=self.world_size,
-                rank=self.rank,
-            )
-        except RuntimeError as e:
-            if "recompile" in e.args[0]:
-                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
-
-            raise
-
-        torch.manual_seed(0)
-        torch.cuda.manual_seed(0)
-        random.seed(0)
-        np.random.seed(0)
-
-        # Execute barrier prior to running test to ensure that every process
-        # has finished initialization and that the following test
-        # immediately exiting due to a skip doesn't cause flakiness.
-        dist.barrier()
-
-        with (
-            torch.backends.cudnn.flags(
-                enabled=True, deterministic=True, benchmark=True
-            ),
-            patch.object(
-                CudaAccelerator, "get_current_device", return_value=torch.device("cpu")
-            ),
-        ):
-            self.run_test(test_name, pipe)
-
-        dist.barrier()
-
-        dist.destroy_process_group()
+def create_data() -> list[Any]:
+    tensor = torch.ones(1, device=get_accelerator().get_current_device())
+    return [
+        "tensor",
+        tensor,
+        [tensor],
+        {"tensor": tensor},
+    ]
 
 
 class SingleEncoderModelTestCaseBase:
@@ -112,7 +50,8 @@ class SingleEncoderModelTestCaseBase:
             return [
                 PipelineTemplate("encoder", [["encoder.0", "encoder.1", "encoder.2"]]),
                 PipelineTemplate(
-                    "llm", [["llm.0", "llm.1"], ["llm.2", "llm.3"], ["llm.4", "llm.5"]]
+                    "llm",
+                    [["llm.0", "llm.1"], ["llm.2", "llm.3"], ["llm.4", "llm.5"]],
                 ),
             ]
 
@@ -156,7 +95,7 @@ class SingleEncoderModelTestCaseBase:
         encoder_template, llm_template = model.get_templates()
         pg_mesh = MultiModalProcessGroupMesh(
             encoder_templates={encoder_template: 1},
-            llm_template=(llm_template, 1),
+            llm_template=(llm_template, 1, 1),
         )
         return MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
 
@@ -181,7 +120,8 @@ class MultipleEncoderModelTestCaseBase:
                 ),
                 PipelineTemplate("encoder2", [["encoder2.0"], ["encoder2.1"]]),
                 PipelineTemplate(
-                    "llm", [["llm.0", "llm.1"], ["llm.2", "llm.3"], ["llm.4", "llm.5"]]
+                    "llm",
+                    [["llm.0", "llm.1"], ["llm.2", "llm.3"], ["llm.4", "llm.5"]],
                 ),
             ]
 
@@ -234,7 +174,7 @@ class MultipleEncoderModelTestCaseBase:
         encoder1_template, encoder2_template, llm_template = model.get_templates()
         pg_mesh = MultiModalProcessGroupMesh(
             encoder_templates={encoder1_template: 1, encoder2_template: 1},
-            llm_template=(llm_template, 1),
+            llm_template=(llm_template, 1, 1),
         )
         return MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
 
@@ -243,125 +183,45 @@ def criterion(x, *args, **kwargs):
     return (x * x).mean()
 
 
-class ForwardBackwardOrderClassBase(MultiProcessTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        self.manager = torch.multiprocessing.Manager()
-        self.order_dict = self.manager.dict()
-        for rank in range(self.world_size):
-            self.order_dict[rank] = self.manager.list()
-        with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
-            self._spawn_processes()
-
-    def tearDown(self) -> None:
-        self.manager.shutdown()
-        return super().tearDown()
-
-    def _start_processes(self, proc) -> None:
-        from torch.testing._internal.common_distributed import logger
-
-        self.processes = []
-        for rank in range(self.world_size):
-            parent_conn, child_conn = torch.multiprocessing.Pipe()
-            process = proc(
-                target=self.__class__._run,
-                name="process " + str(rank),
-                args=(rank, self._current_test_name(), self.file_name, child_conn),
-                kwargs={"order_dict": self.order_dict},
-            )
-            process.start()
-            logger.info("Started process %s with pid %s", rank, process.pid)
-            self.pid_to_pipe[process.pid] = parent_conn
-            self.processes.append(process)
-
-    @classmethod
-    def _run(
-        cls,
-        rank: int,
-        test_name: str,
-        file_name: str,
-        pipe,
-        order_dict: dict[int, list[str]],
-    ) -> None:
-        # Copy from: torch/testing/_internal/common_fsdp.py FSDPTest._run
-        self = cls(test_name)
-        self.rank = rank
-        self.file_name = file_name
-        self.order_dict = order_dict
-
-        print(f"dist init r={self.rank}, world={self.world_size}")
-        backend = "gloo"
-
-        try:
-            dist.init_process_group(
-                init_method=f"{FILE_SCHEMA}{self.file_name}",
-                backend=backend,
-                world_size=self.world_size,
-                rank=self.rank,
-            )
-        except RuntimeError as e:
-            if "recompile" in e.args[0]:
-                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
-
-            raise
-
-        torch.manual_seed(0)
-        torch.cuda.manual_seed(0)
-        random.seed(0)
-        np.random.seed(0)
-
-        # Execute barrier prior to running test to ensure that every process
-        # has finished initialization and that the following test
-        # immediately exiting due to a skip doesn't cause flakiness.
-        dist.barrier()
-
-        with (
-            torch.backends.cudnn.flags(
-                enabled=True, deterministic=True, benchmark=True
-            ),
-            patch.object(
-                CudaAccelerator, "get_current_device", return_value=torch.device("cpu")
-            ),
-        ):
-            self.run_test(test_name, pipe)
-
-        dist.barrier()
-
-        dist.destroy_process_group()
-
+class ForwardBackwardOrderClassBase(GlooDistributedTestBase):
     @staticmethod
-    def forward_pre_hook(
-        module: nn.Module, input: torch.Tensor, order_dict: dict[int, list[str]]
-    ):
-        order_dict[dist.get_rank()].append("forward")
+    def forward_pre_hook(module: nn.Module, input: torch.Tensor, call_list: list[str]):
+        call_list.append("forward")
 
     @staticmethod
     def backward_pre_hook(
-        module: nn.Module, grad_input: torch.Tensor, order_dict: dict[int, list[str]]
+        module: nn.Module, grad_input: torch.Tensor, call_list: list[str]
     ):
-        order_dict[dist.get_rank()].append("backward")
+        call_list.append("backward")
 
-    def register_hooks(self, module: nn.Module):
+    def register_hooks(self, module: nn.Module, call_list: list[str]):
         module.register_forward_pre_hook(
             functools.partial(
                 ForwardBackwardOrderClassBase.forward_pre_hook,
-                order_dict=self.order_dict,
+                call_list=call_list,
             )
         )
         module.register_full_backward_pre_hook(
             functools.partial(
                 ForwardBackwardOrderClassBase.backward_pre_hook,
-                order_dict=self.order_dict,
+                call_list=call_list,
             )
         )
 
 
+@instantiate_parametrized_tests
 class TestSingleEncoderForwardBackwardOrderClass(
     ForwardBackwardOrderClassBase, SingleEncoderModelTestCaseBase
 ):
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
     @parametrize("num_microbatches", [4, 8, 12], name_fn=lambda x: f"mb={x}")
     def test_forward_backward_order(self, num_microbatches: int):
         microbatch_size = 1
+        call_list: list[str] = []
 
         model = self.SingleEncoderModel()
         model.train(mode=True)
@@ -383,9 +243,12 @@ class TestSingleEncoderForwardBackwardOrderClass(
         )
         assert my_modal.model_name in ["encoder", "llm"]
         self.register_hooks(
-            model.encoder[start_idx]
-            if my_modal.model_name == "encoder"
-            else model.llm[start_idx]
+            (
+                model.encoder[start_idx]
+                if my_modal.model_name == "encoder"
+                else model.llm[start_idx]
+            ),
+            call_list,
         )
 
         model.pp_config = {
@@ -406,26 +269,30 @@ class TestSingleEncoderForwardBackwardOrderClass(
         dist.barrier()
         torch.cuda.synchronize()
 
-        for rank in range(self.world_size):
-            call_order = list(self.order_dict[rank])
-            assert len(call_order) == num_microbatches * 2
-            expected_order = (
-                ["forward"] * (4 - rank)
-                + ["backward", "forward"] * (num_microbatches - 4 + rank)
-                + ["backward"] * (4 - rank)
-            )
+        assert len(call_list) == num_microbatches * 2
+        expected_order = (
+            ["forward"] * (4 - self.rank)
+            + ["backward", "forward"] * (num_microbatches - 4 + self.rank)
+            + ["backward"] * (4 - self.rank)
+        )
 
-            assert call_order == expected_order
+        assert call_list == expected_order
 
 
+@instantiate_parametrized_tests
 class TestMultipleEncoderForwardBackwardOrderClass(
     MultipleEncoderModelTestCaseBase, ForwardBackwardOrderClassBase
 ):
+    @property
+    def world_size(self) -> int:
+        return 6
+
     @parametrize("num_microbatches", [6, 12, 24], name_fn=lambda x: f"mb={x}")
     def test_forward_backward_order(self, num_microbatches: int):
         microbatch_size = 1
+        call_list: list[str] = []
 
-        model = self.DoubleEncoderModel()
+        model = self.DoubleEncoderModel().to("cuda")
         model.train(mode=True)
         optimizer = OptimizerWrapper(torch.optim.SGD(model.parameters(), lr=1))
 
@@ -445,11 +312,11 @@ class TestMultipleEncoderForwardBackwardOrderClass(
         )
         assert my_modal.model_name in ["encoder1", "encoder2", "llm"]
         if my_modal.model_name == "encoder1":
-            self.register_hooks(model.encoder1[start_idx])
+            self.register_hooks(model.encoder1[start_idx], call_list)
         elif my_modal.model_name == "encoder2":
-            self.register_hooks(model.encoder2[start_idx])
+            self.register_hooks(model.encoder2[start_idx], call_list)
         else:
-            self.register_hooks(model.llm[start_idx])
+            self.register_hooks(model.llm[start_idx], call_list)
 
         model.pp_config = {
             "modal_name": my_modal.model_name,
@@ -457,7 +324,7 @@ class TestMultipleEncoderForwardBackwardOrderClass(
             "stage_manager": stage_manager,
         }
 
-        input_list = [torch.rand(num_microbatches * microbatch_size, 4, 8)]
+        input_list = [torch.rand(num_microbatches * microbatch_size, 4, 8).to("cuda")]
 
         schedule.forward_backward_step(
             model,
@@ -470,42 +337,45 @@ class TestMultipleEncoderForwardBackwardOrderClass(
         torch.cuda.synchronize()
 
         # TODO: add assertions for the order of forward and backward calls
-        for rank in range(self.world_size):
-            call_order = list(self.order_dict[rank])
-            assert len(call_order) == num_microbatches * 2
+        assert len(call_list) == num_microbatches * 2
 
-            # Encoder 1 has 1 stage, encoder 2 has 2 stages, llm has 3 stages
-            # Maximum pipeline has 5 stages
-            if rank == 0:
-                expected_order = (
-                    ["forward"] * 4
-                    + ["backward", "forward"] * (num_microbatches - 4)
-                    + ["backward"] * 4
-                )
-            elif rank in [1, 2]:
-                warmup = 5 - (rank - 1)
-                expected_order = (
-                    ["forward"] * warmup
-                    + ["backward", "forward"] * (num_microbatches - warmup)
-                    + ["backward"] * warmup
-                )
-            else:
-                warmup = 3 - (rank - 3)
-                expected_order = (
-                    ["forward"] * warmup
-                    + ["backward", "forward"] * (num_microbatches - warmup)
-                    + ["backward"] * warmup
-                )
-            assert call_order == expected_order
+        # Encoder 1 has 1 stage, encoder 2 has 2 stages, llm has 3 stages
+        # Maximum pipeline has 5 stages
+        if self.rank == 0:
+            expected_order = (
+                ["forward"] * 4
+                + ["backward", "forward"] * (num_microbatches - 4)
+                + ["backward"] * 4
+            )
+        elif self.rank in [1, 2]:
+            warmup = 5 - (self.rank - 1)
+            expected_order = (
+                ["forward"] * warmup
+                + ["backward", "forward"] * (num_microbatches - warmup)
+                + ["backward"] * warmup
+            )
+        else:
+            warmup = 3 - (self.rank - 3)
+            expected_order = (
+                ["forward"] * warmup
+                + ["backward", "forward"] * (num_microbatches - warmup)
+                + ["backward"] * warmup
+            )
+        assert call_list == expected_order
 
 
+@instantiate_parametrized_tests
 class TestScheduleSingleEncoderClass(
-    SingleEncoderModelTestCaseBase, ScheduleTestClassBase
+    SingleEncoderModelTestCaseBase, GlooDistributedTestBase
 ):
+    @property
+    def world_size(self) -> int:
+        return 4
+
     @parametrize("num_microbatches", [4, 8, 12], name_fn=lambda x: f"mb={x}")
     @parametrize("microbatch_size", [1, 2, 4], name_fn=lambda x: f"mbs={x}")
     def test_schedule(self, num_microbatches: int, microbatch_size: int):
-        model = self.SingleEncoderModel()
+        model = self.SingleEncoderModel().to("cuda")
         pp_model = copy.deepcopy(model)
 
         stage_manager = self.create_stage_manager(model=model)
@@ -533,7 +403,7 @@ class TestScheduleSingleEncoderClass(
         model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
         pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
 
-        input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
+        input_list = [torch.rand(num_microbatches * microbatch_size, 8).to("cuda")]
         dist.all_reduce(input_list[0])
 
         # forward and backward
@@ -604,13 +474,18 @@ class TestScheduleSingleEncoderClass(
                 )
 
 
+@instantiate_parametrized_tests
 class TestScheduleMultipleEncoderClass(
-    MultipleEncoderModelTestCaseBase, ScheduleTestClassBase
+    MultipleEncoderModelTestCaseBase, GlooDistributedTestBase
 ):
+    @property
+    def world_size(self) -> int:
+        return 6
+
     @parametrize("num_microbatches", [6, 12, 24], name_fn=lambda x: f"mb={x}")
     @parametrize("microbatch_size", [1, 2, 4], name_fn=lambda x: f"mbs={x}")
     def test_schedule(self, num_microbatches: int, microbatch_size: int):
-        model = self.DoubleEncoderModel()
+        model = self.DoubleEncoderModel().to("cuda")
         pp_model = copy.deepcopy(model)
 
         stage_manager = self.create_stage_manager(model=model)
@@ -638,7 +513,9 @@ class TestScheduleMultipleEncoderClass(
         model_optimizer = torch.optim.SGD(model.parameters(), lr=1)
         pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=1))
 
-        input_list = [torch.rand(num_microbatches * microbatch_size, 4, 8)]
+        input_list = [
+            torch.rand(num_microbatches * microbatch_size, 4, 8).to("cuda").to("cuda")
+        ]
         dist.all_reduce(input_list[0])
 
         # forward and backward
@@ -727,9 +604,3 @@ class TestScheduleMultipleEncoderClass(
                     model.llm[i].bias,
                     pp_model.llm[i].bias,
                 )
-
-
-instantiate_parametrized_tests(TestSingleEncoderForwardBackwardOrderClass)
-instantiate_parametrized_tests(TestMultipleEncoderForwardBackwardOrderClass)
-instantiate_parametrized_tests(TestScheduleSingleEncoderClass)
-instantiate_parametrized_tests(TestScheduleMultipleEncoderClass)
