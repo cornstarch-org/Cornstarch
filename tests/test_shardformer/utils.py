@@ -1,14 +1,10 @@
 import copy
-import os
-import random
 import re
-import sys
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 from unittest.mock import patch
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from colossalai.booster import Booster
@@ -30,8 +26,6 @@ from colossalai.tensor.d_tensor.api import (
 from torch import Tensor, nn
 from torch.optim import Adam, Optimizer
 from torch.testing import assert_close
-from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
-from torch.testing._internal.common_utils import FILE_SCHEMA
 from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPast,
@@ -51,6 +45,8 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultiModalPipelineStageManager,
 )
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+
+from ..distributed_base import GlooDistributedTestBase
 
 
 class ModelClassBase(ABC):
@@ -76,91 +72,11 @@ class ModelClassBase(ABC):
         return self.model_class(config)
 
 
-class PolicyTestBase(MultiProcessTestCase, ABC):
-
-    microbatch_size: int = 1
-    num_microbatches: int = 4
-
-    @abstractmethod
-    def check_fn(
-        self,
-        booster: Booster,
-        org_model: PreTrainedModel,
-        sharded_model: ModelWrapper,
-        org_optim: Optimizer,
-        sharded_optim: OptimizerWrapper,
-        org_output: ModelOutput,
-        sharded_output: dict,
-        org_loss: torch.Tensor,
-        sharded_loss: torch.Tensor,
-    ):
-        """Each ParallelBase class should implement this method"""
-        ...
-
+class ColossalaiHybridParallelBase(GlooDistributedTestBase):
     @property
     def world_size(self) -> int:
         return 16
 
-    def setUp(self) -> None:
-        super().setUp()
-        with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
-            self._spawn_processes()
-
-    def tearDown(self) -> None:
-        return super().tearDown()
-
-    @classmethod
-    def _run(cls, rank: int, test_name: str, file_name: str, pipe, **kwargs) -> None:
-        # Copy from: torch/testing/_internal/common_fsdp.py FSDPTest._run
-        self = cls(test_name)
-        self.rank = rank
-        self.file_name = file_name
-
-        print(f"dist init r={self.rank}, world={self.world_size}")
-
-        backend = "gloo"
-
-        try:
-            dist.init_process_group(
-                init_method=f"{FILE_SCHEMA}{self.file_name}",
-                backend=backend,
-                world_size=int(self.world_size),
-                rank=self.rank,
-            )
-        except RuntimeError as e:
-            if "recompile" in e.args[0]:
-                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
-
-            raise
-
-        if torch.cuda.is_available() and torch.cuda.device_count():
-            device_id = self.rank % torch.cuda.device_count()
-            torch.cuda.set_device(device_id)
-
-        self.reset_seed()
-
-        # Execute barrier prior to running test to ensure that every process
-        # has finished initialization and that the following test
-        # immediately exiting due to a skip doesn't cause flakiness.
-        dist.barrier()
-
-        with torch.backends.cudnn.flags(
-            enabled=True, deterministic=True, benchmark=True
-        ):
-            self.run_test(test_name, pipe)
-
-        dist.barrier()
-
-        dist.destroy_process_group()
-
-    def reset_seed(self):
-        torch.manual_seed(0)
-        torch.cuda.manual_seed(0)
-        random.seed(0)
-        np.random.seed(0)
-
-
-class ColossalaiHybridParallelBase(PolicyTestBase):
     def set_model(self, model: ModelClassBase):
         self.model = model
 
@@ -297,26 +213,17 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         org_model.gradient_checkpointing_enable()
         sharded_model.unwrap().gradient_checkpointing_enable()
 
-        with (
-            patch.object(dist, "batch_isend_irecv", new=batch_isend_irecv_gloo),
-            patch.object(dist, "all_to_all", new=all_to_all_gloo),
-            patch.object(dist, "all_to_all_single", new=all_to_all_single_gloo),
-            patch(
-                "colossalai.pipeline.p2p._check_device",
-                return_value=(torch.device("cuda"), False),
-            ),
-        ):
-            org_loss, org_output, sharded_loss, sharded_output = (
-                self.run_forward_backward_with_hybrid_plugin(
-                    org_model=org_model,
-                    sharded_model=sharded_model,
-                    sharded_optimizer=sharded_optimizer,
-                    criterion=criterion,
-                    output_transform_fn=lambda x: x,
-                    booster=booster,
-                    precision=precision,
-                )
+        org_loss, org_output, sharded_loss, sharded_output = (
+            self.run_forward_backward_with_hybrid_plugin(
+                org_model=org_model,
+                sharded_model=sharded_model,
+                sharded_optimizer=sharded_optimizer,
+                criterion=criterion,
+                output_transform_fn=lambda x: x,
+                booster=booster,
+                precision=precision,
             )
+        )
 
         self.check_fn(
             booster=booster,
@@ -440,7 +347,11 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         return org_loss, org_output, sharded_loss, sharded_output
 
 
-class CornstarchMultimodalParallelBase(PolicyTestBase):
+class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
+    @property
+    def world_size(self) -> int:
+        return 16
+
     def set_model(self, encoders: dict[str, ModelClassBase], llm: ModelClassBase):
         self.encoders = encoders
         self.llm = llm
@@ -637,26 +548,17 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
         org_model.gradient_checkpointing_enable()
         sharded_model.unwrap().gradient_checkpointing_enable()
 
-        with (
-            patch.object(dist, "batch_isend_irecv", new=batch_isend_irecv_gloo),
-            patch.object(dist, "all_to_all", new=all_to_all_gloo),
-            patch.object(dist, "all_to_all_single", new=all_to_all_single_gloo),
-            patch(
-                "colossalai.pipeline.p2p._check_device",
-                return_value=(torch.device("cuda"), False),
-            ),
-        ):
-            org_loss, org_output, sharded_loss, sharded_output = (
-                self.run_forward_backward_with_multimodal_plugin(
-                    org_model=org_model,
-                    sharded_model=sharded_model,
-                    sharded_optimizer=sharded_optimizer,
-                    criterion=criterion,
-                    output_transform_fn=lambda x: x,
-                    booster=booster,
-                    precision=precision,
-                )
+        org_loss, org_output, sharded_loss, sharded_output = (
+            self.run_forward_backward_with_multimodal_plugin(
+                org_model=org_model,
+                sharded_model=sharded_model,
+                sharded_optimizer=sharded_optimizer,
+                criterion=criterion,
+                output_transform_fn=lambda x: x,
+                booster=booster,
+                precision=precision,
             )
+        )
 
         self.check_fn(
             booster=booster,
@@ -694,26 +596,25 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
         use_lazy_init: bool = test_config.pop("use_lazy_init", False)
         use_flash_attention: bool = test_config["enable_flash_attention"]
 
-        encoders: dict[str, PreTrainedModel] = {}
-
-        for encoder_name, model_base in self.encoders.items():
-            encoders[encoder_name] = model_base.model_fn(use_flash_attention).to(
-                device="cuda"
-            )
-
-        llm = self.llm.model_fn(use_flash_attention).to(device="cuda")
-
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
+            encoders: dict[str, PreTrainedModel] = {}
+
+            for encoder_name, model_base in self.encoders.items():
+                encoders[encoder_name] = model_base.model_fn(use_flash_attention)
+
+            llm = self.llm.model_fn(use_flash_attention)
+
             org_model = MultimodalModel(
                 encoders={
                     encoder_name: ModalEncoderModule(
-                        module, postprocess_module_callback=self.postprocess_callback
+                        module,
+                        # postprocess_module_callback=self.postprocess_callback,
                     )
                     for encoder_name, module in encoders.items()
                 },
                 language_model=llm,
-            )
+            ).to("cuda")
             sharded_model = copy.deepcopy(org_model)
         if use_lazy_init:
             ctx.materialize(org_model)
@@ -861,85 +762,6 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
         sharded_loss = sharded_output["loss"]
 
         return org_loss, org_output, sharded_loss, sharded_output
-
-
-def batch_isend_irecv_gloo(p2p_op_list: list[dist.P2POp]) -> list[dist.Work]:
-    reqs: list[tuple[dist.Work, torch.Tensor]] = []
-    for p2p_op in p2p_op_list:
-        if p2p_op.op == dist.isend:
-            tensor = p2p_op.tensor.to("cpu")
-            work = p2p_op.op(tensor, p2p_op.peer, p2p_op.group, p2p_op.tag)
-        else:
-            tensor = torch.empty_like(p2p_op.tensor, device="cpu")
-            work = p2p_op.op(tensor, p2p_op.peer, p2p_op.group, p2p_op.tag)
-
-        reqs.append((work, tensor))
-
-    send_reqs = []
-    with torch.no_grad():
-        for (req, tensor), p2p_op in zip(reqs, p2p_op_list):
-            if req is None:
-                continue
-
-            if p2p_op.op == dist.irecv:
-                req.wait()
-                p2p_op.tensor.copy_(tensor)
-            else:
-                send_reqs.append(req)
-
-    return send_reqs
-
-
-def all_to_all_gloo(
-    output_tensor_list: list[torch.Tensor],
-    input_tensor_list: list[torch.Tensor],
-    group: Optional[dist.ProcessGroup] = None,
-    async_op: Optional[bool] = False,
-):
-    """Backend gloo doesn't support all_to_all, so we simulate it here."""
-    world_size = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-
-    # Each rank gathers the "i-th" input from all ranks
-    for i in range(world_size):
-        chunk = input_tensor_list[i].to("cpu")  # Each rank's i-th input tensor
-        gathered_tensors = [
-            torch.empty_like(chunk) for _ in range(world_size)
-        ]  # Buffers for allgather
-
-        # Perform all_gather to collect the i-th tensor from all ranks
-        dist.all_gather(gathered_tensors, chunk, group)
-
-        if i == rank:
-            assert len(output_tensor_list) == len(gathered_tensors)
-            for output_tensor, gathered_tensor in zip(
-                output_tensor_list, gathered_tensors
-            ):
-                output_tensor.copy_(gathered_tensor)
-
-
-def all_to_all_single_gloo(
-    output: torch.Tensor,
-    input: torch.Tensor,
-    group: Optional[dist.ProcessGroup] = None,
-    async_op: Optional[bool] = False,
-):
-    world_size = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-
-    chunk_size = input.size(0) // world_size
-    gathered_tensors = [torch.empty_like(input) for _ in range(world_size)]
-
-    dist.all_gather(gathered_tensors, input, group)
-
-    output_tensor = torch.cat(
-        [
-            gathered_tensors[i][rank * chunk_size : (rank + 1) * chunk_size]
-            for i in range(world_size)
-        ],
-        dim=0,
-    )
-    output.copy_(output_tensor)
 
 
 def check_output_hidden_state(
