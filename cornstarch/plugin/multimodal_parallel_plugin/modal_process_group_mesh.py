@@ -178,7 +178,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         indices = np.where(mesh == rank)
         return list(zip(*indices))
 
-    def create_group_along_axis(
+    def create_or_get_group_along_axis(
         self,
         axis: int,
         indices_at_axis: list[int],
@@ -247,13 +247,12 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
 
         process_group_list: list[dist.ProcessGroup] = []
         for ranks in ranks_in_group:
-            if ranks not in self._ranks_to_group:
-                group = self.create_group_along_axis(
-                    axis, indices_at_axis, ranks, backend
-                )
-                process_group_list.append(group)
-            else:
-                process_group_list.append(self._ranks_to_group[ranks])
+            group = self.create_or_get_group_along_axis(
+                axis, indices_at_axis, ranks, backend
+            )
+            process_group_list.append(group)
+
+        process_group_list = list(set(process_group_list))
 
         if len(process_group_list) == 1 and axis != MultiModalProcessGroupMesh.pp_axis:
             return process_group_list[0]
