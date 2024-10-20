@@ -11,24 +11,11 @@ from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh impor
     MultiModalProcessGroupMesh,
 )
 
-encoder1_template = PipelineTemplate(
-    "encoder1", [["layer.0", "layer.1"], ["layer.2", "layer.3"]]
-)
-encoder2_template = PipelineTemplate(
-    "encoder2", [["layer.0", "layer.1"], ["layer.2", "layer.3"], ["layer.4", "layer.5"]]
-)
-
-llm_template_2stages = PipelineTemplate(
-    "llm", [["layer.0", "layer.1", "layer.2"], ["layer.3", "layer.4", "layer.5"]]
-)
-llm_template_4stages = PipelineTemplate(
-    "llm",
-    [
-        ["layer.0", "layer.1"],
-        ["layer.2", "layer.3"],
-        ["layer.4", "layer.5"],
-        ["layer.6", "layer.7"],
-    ],
+from .common import (
+    encoder1_template,
+    encoder2_template,
+    llm_template_2stages,
+    llm_template_4stages,
 )
 
 

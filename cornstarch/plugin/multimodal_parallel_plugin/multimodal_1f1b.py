@@ -26,7 +26,6 @@ from colossalai.pipeline.schedule.one_f_one_b import (
     OneForwardOneBackwardSchedule,
     PipelineSchedule,
 )
-from packaging.version import Version
 from torch import distributed as dist
 from torch import nn
 from torch.distributed import distributed_c10d as c10d
@@ -54,14 +53,9 @@ class MultimodalPipelineP2PCommunication(PipelineP2PCommunication):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         send_object_tensor: torch.Tensor
         send_object_size_tensor: torch.Tensor
-        if Version(torch.__version__) >= Version("1.13.0"):
-            send_object_tensor, send_object_size_tensor = c10d._object_to_tensor(
-                object_metadata, device=current_device, group=dist.GroupMember.WORLD
-            )
-        else:
-            send_object_tensor, send_object_size_tensor = c10d._object_to_tensor(
-                object_metadata, group=dist.GroupMember.WORLD
-            )
+        send_object_tensor, send_object_size_tensor = c10d._object_to_tensor(
+            object_metadata, device=current_device, group=dist.GroupMember.WORLD
+        )
 
         send_object_tensor = send_object_tensor.to(device=current_device)
         send_object_size_tensor = send_object_size_tensor.to(device=current_device)

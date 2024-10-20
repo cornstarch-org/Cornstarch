@@ -80,7 +80,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         )
         assert (
             dist.get_world_size() % num_ranks_in_model == 0
-        ), "The world size must be divisible by sp_size * tp_size * pp_size."
+        ), f"The world size {dist.get_world_size()} must be divisible by num_ranks per replica {num_ranks_in_model}."
         dp_size = dist.get_world_size() // num_ranks_in_model
 
         max_tp_size = max(
