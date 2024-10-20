@@ -73,9 +73,8 @@ class ModelClassBase(ABC):
 
 
 class ColossalaiHybridParallelBase(GlooDistributedTestBase):
-    @property
-    def world_size(self) -> int:
-        return 16
+    num_microbatches: int = 4
+    microbatch_size: int = 1
 
     def set_model(self, model: ModelClassBase):
         self.model = model
@@ -348,9 +347,8 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
 
 class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
-    @property
-    def world_size(self) -> int:
-        return 16
+    num_microbatches: int = 4
+    microbatch_size: int = 1
 
     def set_model(self, encoders: dict[str, ModelClassBase], llm: ModelClassBase):
         self.encoders = encoders
