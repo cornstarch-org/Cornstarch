@@ -119,6 +119,15 @@ def get_default_args(func):
         args["softcap"] = 0.0
     return args
 
+def update_attention_mask(attention_mask, head_num, head_dim=1):
+    """
+    transform attention mask 3d(B, L, L) to 4d(B, H, L, L)
+    An example:
+    attention_mask = torch.tensor([[1, 0, 0], [1, 0, 1], [0, 1, 1]])
+    update_attention_mask(attention_mask, head_num=2, head_dim=1)
+    >>> torch.tensor([[[1, 0, 0], [1, 0, 1], [0, 1, 1]], [[1, 0, 0], [1, 0, 1], [0, 1, 1]]])
+    """
+    return attention_mask.unsqueeze(dim=head_dim).expand(-1, head_num, -1, -1)
 
 @torch.jit.script
 def _update_out_and_lse(

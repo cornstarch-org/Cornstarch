@@ -1,5 +1,6 @@
 import math
 from typing import List, Optional, Tuple, Union
+import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -15,7 +16,7 @@ from colossalai.shardformer.layer._operation import (
     split_forward_gather_backward,
 )
 # from colossalai.shardformer.layer.utils import split_batch_zigzag
-from cornstarch.shardformer.layers.utils import split_batch_uniform
+from cornstarch.shardformer.layers.utils import split_batch_uniform, update_attention_mask
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch.nn.modules.loss import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.cache_utils import Cache, DynamicCache
@@ -138,8 +139,11 @@ class LlamaModelForwards:
         sp_size = shard_config.sequence_parallel_size
 
         if sp_mode == "ring_attn":
-            # shape of attention_mask is [B, L]
-            attn_mask = split_batch_uniform(attention_mask, sp_group, seq_dim=1)
+            # shape of attention_mask is [B, L, L]
+            # TODO(Runyu): check if this is correct, attention mask is not very right, see the api to set a right mask for ring any mask flash attention
+            num_heads = self.config.num_attention_heads
+            attn_mask = update_attention_mask(attention_mask, num_heads) # shape: [B, H, L, L]
+            attn_mask = split_batch_uniform(attn_mask, sp_group, seq_dim=2) # shape: [B, H, L // sp_size, L]
         else:
             # NOTE(Runyu): it is essential to update causal mask here for anymask eager implementation
             attn_mask = self._update_causal_mask(
@@ -667,6 +671,9 @@ class LlamaAttentionForwards:
         elif not attention_mask.bool().all():
             # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
             # NOTE(@runyu): anymask, we use eager implementation only
+            causal_mask = attention_mask.unsqueeze(dim=1).expand(-1, self.config.num_attention_heads, -1, -1)
+            # set zero part to -inf
+            causal_mask = torch.where(causal_mask == 0, torch.tensor(-np.inf), causal_mask)
             attn_output = run_naive_attn(bsz, q_len, query_states, key_states, value_states, attention_mask)
         
         elif self.config._attn_implementation == "flash_attention_2":
