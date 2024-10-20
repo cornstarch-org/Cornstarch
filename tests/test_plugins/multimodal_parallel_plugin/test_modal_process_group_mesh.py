@@ -345,7 +345,7 @@ def destroy_process_group():
 def test_init_process_group_mesh(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
-    llm_template: tuple[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
     expected_mesh: list[list[list[list[int]]]],
     expected_ranks: dict[PipelineTemplate, list[int]],
 ):
@@ -709,7 +709,7 @@ def test_init_process_group_mesh(
 def test_get_group_along_axis(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
-    llm_template: tuple[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
     expected_group_ranks: dict[int, list[tuple[int, ...]]],
     axis: int,
     mocker: MockerFixture,
