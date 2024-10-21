@@ -14,6 +14,7 @@ class Qwen2AudioEncoderBase(ModelClassBase):
             Qwen2AudioEncoder,
             Qwen2AudioEncoderConfig(
                 d_model=384,
+                encoder_ffn_dim=128,
                 encoder_attention_heads=16,
                 encoder_layers=4,
                 is_encoder_decoder=False,
