@@ -10,8 +10,10 @@ class WhisperEncoderBase(ModelClassBase):
         super().__init__(
             WhisperEncoder,
             WhisperConfig(
-                d_model=384,
-                encoder_ffn_dim=128,
+                max_source_positions=64,
+                max_target_positions=64,
+                d_model=64,
+                encoder_ffn_dim=64,
                 encoder_attention_heads=16,
                 encoder_layers=4,
                 is_encoder_decoder=False,
@@ -27,6 +29,4 @@ class WhisperEncoderBase(ModelClassBase):
         )
 
     def data_gen_fn(self, num_batch: int) -> dict:
-        return dict(
-            input_features=torch.rand(num_batch, self.config.num_mel_bins, 3000)
-        )
+        return dict(input_features=torch.rand(num_batch, self.config.num_mel_bins, 128))
