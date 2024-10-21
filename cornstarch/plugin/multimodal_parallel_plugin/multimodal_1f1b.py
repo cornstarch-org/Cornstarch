@@ -548,47 +548,43 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                     )
                 else:
                     output_tensors[key].append(data)
-                    output_tensors_shape[f"{key}_shape"].append(
-                        torch.tensor(
-                            [data.shape[1]],
-                            device=get_accelerator().get_current_device(),
-                        )
-                    )
+                    output_tensors_shape[f"{key}_shape"].append(data.shape[1])
 
-        # 4. Convert the lists to tensors
+        # 4. Convert the list to a tensor
         for key in all_keys:
             output_tensors[key] = torch.cat(output_tensors[key], dim=1)
-            shape = torch.cat(output_tensors_shape[f"{key}_shape"]).to(dtype=torch.long)
-            shape.requires_grad = False
-            output_tensors_shape[f"{key}_shape"] = shape
 
         if out_shapes:
-            output_tensors.update(output_tensors_shape)
+            for key, tensor in output_tensors.items():
+                setattr(
+                    tensor, "_cornstarch_shape", output_tensors_shape[f"{key}_shape"]
+                )
 
         return output_tensors
 
-    def _split_tensor(self, object: Any, num_splits: int) -> list[Any]:
-        assert num_splits > 0
+    def _split_tensor(self, object: Any, split_shape: list[int]) -> list[Any]:
+        assert len(split_shape) > 0
 
         if isinstance(object, torch.Tensor):
-            objects = torch.split(object, object.size(1) // num_splits, dim=1)
+            objects = torch.split(object, split_shape, dim=1)
         elif isinstance(object, list):
             assert all(isinstance(obj, torch.Tensor) for obj in object)
             object: list[torch.Tensor] = object
             objects = [
-                torch.split(obj, obj.size(1) // num_splits, dim=1) for obj in object
+                torch.split(obj, shape, dim=1)
+                for obj, shape in zip(object, split_shape)
             ]
-            objects = [objects[:, i] for i in range(num_splits)]
+            objects = [objects[:, i] for i in range(len(objects))]
         elif isinstance(object, dict):
             assert all(isinstance(obj, torch.Tensor) for obj in object.values())
             object: dict[str, torch.Tensor] = object
             objects = {
-                key: torch.split(value, value.size(1) // num_splits, dim=1)
-                for key, value in object.items()
+                key: torch.split(tensor, split_shape[key], dim=1)
+                for key, tensor in object.items()
             }
             objects = [
-                {key: value[i] for key, value in objects.items()}
-                for i in range(num_splits)
+                {key: value for key, value in zip(objects.keys(), values)}
+                for values in zip(*objects.values())
             ]
         else:
             raise ValueError(f"Unsupported type of object: {type(object)}")
@@ -630,12 +626,27 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         if not self.stage_manager.is_last_stage(check_only_in_modal=False):
             self.comm.send_forward(output_tensor, is_broadcast=True)
 
-    def send_backward(self, input_tensor_grad: Any) -> None:
+    def send_backward(self, input_tensor: Any, input_tensor_grad: Any) -> None:
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
             if num_ranks_to_send > 1:
+                if isinstance(input_tensor, torch.Tensor):
+                    input_tensor_shapes = getattr(input_tensor, "_cornstarch_shape")
+                elif isinstance(input_tensor, list):
+                    input_tensor_shapes = [
+                        getattr(obj, "_cornstarch_shape") for obj in input_tensor
+                    ]
+                elif isinstance(input_tensor, dict):
+                    input_tensor_shapes = {
+                        key: getattr(value, "_cornstarch_shape")
+                        for key, value in input_tensor.items()
+                    }
+                else:
+                    raise ValueError(
+                        f"Unsupported type of input_tensor: {type(input_tensor)}"
+                    )
                 self.comm.send_backward(
-                    self._split_tensor(input_tensor_grad, num_ranks_to_send),
+                    self._split_tensor(input_tensor_grad, input_tensor_shapes),
                     is_broadcast=False,
                 )
             else:
@@ -664,14 +675,32 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         return output_tensor_grads
 
     def send_backward_recv_forward(
-        self, input_tensor_grad: Any, send_first: Optional[bool] = None
+        self,
+        input_tensor: Any,
+        input_tensor_grad: Any,
+        send_first: Optional[bool] = None,
     ) -> Any:
         input_tensors = None
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
             if num_ranks_to_send > 1:
+                if isinstance(input_tensor, torch.Tensor):
+                    input_tensor_shapes = getattr(input_tensor, "_cornstarch_shape")
+                elif isinstance(input_tensor, list):
+                    input_tensor_shapes = [
+                        getattr(obj, "_cornstarch_shape") for obj in input_tensor
+                    ]
+                elif isinstance(input_tensor, dict):
+                    input_tensor_shapes = {
+                        key: getattr(value, "_cornstarch_shape")
+                        for key, value in input_tensor.items()
+                    }
+                else:
+                    raise ValueError(
+                        f"Unsupported type of input_tensor: {type(input_tensor)}"
+                    )
                 input_tensors = self.comm.send_backward_recv_forward(
-                    self._split_tensor(input_tensor_grad, num_ranks_to_send),
+                    self._split_tensor(input_tensor_grad, input_tensor_shapes),
                     send_first=send_first,
                     is_broadcast=False,
                 )
@@ -819,10 +848,12 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             )
 
             if last_iteration:
-                self.send_backward(input_obj_grad)
+                self.send_backward(input_obj, input_obj_grad)
             else:
                 input_obj = self.send_backward_recv_forward(
-                    input_obj_grad, send_first=self.stage_manager.stage % 2 == 0
+                    input_obj,
+                    input_obj_grad,
+                    send_first=self.stage_manager.stage % 2 == 0,
                 )
 
         # Run cooldown backward passes.
@@ -834,7 +865,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             input_obj_grad = self.backward_step(
                 optimizer, input_obj, output_obj, output_obj_grad
             )
-            self.send_backward(input_obj_grad)
+            self.send_backward(input_obj, input_obj_grad)
 
         assert all(len(v) == 0 for v in input_objs) and all(
             len(v) == 0 for v in output_objs
