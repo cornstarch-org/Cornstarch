@@ -139,11 +139,17 @@ class LlamaModelForwards:
         sp_size = shard_config.sequence_parallel_size
 
         if sp_mode == "ring_attn":
-            # shape of attention_mask is [B, L, L]
             # TODO(Runyu): check if this is correct, attention mask is not very right, see the api to set a right mask for ring any mask flash attention
             num_heads = self.config.num_attention_heads
-            attn_mask = update_attention_mask(attention_mask, num_heads) # shape: [B, H, L, L]
-            attn_mask = split_batch_uniform(attn_mask, sp_group, seq_dim=2) # shape: [B, H, L // sp_size, L]
+            if not attention_mask.bool().all():
+                # shape of attention_mask is [B, L, L]
+                attn_mask = update_attention_mask(attention_mask, num_heads) # shape: [B, H, L, L]
+                seq_dim = 2
+            else:
+                # shape of attention_mask is [B, L], casual mask for huggingface llama
+                attn_mask = attention_mask
+                seq_dim = 1
+            attn_mask = split_batch_uniform(attn_mask, sp_group, seq_dim=seq_dim) # shape: [B, H, L // sp_size, L] or [B, L // sp_size]
         else:
             # NOTE(Runyu): it is essential to update causal mask here for anymask eager implementation
             attn_mask = self._update_causal_mask(

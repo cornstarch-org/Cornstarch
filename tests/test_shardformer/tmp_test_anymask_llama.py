@@ -315,7 +315,7 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         num_batch = self.num_microbatches * self.microbatch_size
         input = {
             "input_ids": torch.randint(0, 2048, (num_batch, 64)),
-            # "attention_mask": torch.randint(0, 2, (num_batch, 64)),
+            # "attention_mask": torch.randint(1, 2, (num_batch, 64)),
             "attention_mask": torch.randint(0, 2, (num_batch, 64, 64)), # B, L, L
             # NOTE(runyu): this is for testing anymask, and you could change the internal hugginface transformer code to make it work, like:
             # if attention_mask.bool().all():
@@ -410,7 +410,7 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
             print_rank0("weights check passed")
 
         # check grads
-        # check_all_grad_tensors(grads_to_check)
+        check_all_grad_tensors(grads_to_check)
 
 class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
 

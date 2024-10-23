@@ -117,13 +117,13 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim):
 
     # Compare gradients
     assert torch.allclose(local_dq, ring_dq, rtol=rtol, atol=atol), \
-        f"ring_flash_attn_qkvpacked_func gradient does not match flash_attn_qkvpacked_func gradient on rank {rank}"
+        f"ring_flash_attn_func gradient does not match flash_attn_qkvpacked_func gradient on rank {rank}"
     assert torch.allclose(local_dk, ring_dk, rtol=rtol, atol=atol), \
-        f"ring_flash_attn_qkvpacked_func gradient does not match flash_attn_qkvpacked_func gradient on rank {rank}"
+        f"ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
     assert torch.allclose(local_dv, ring_dv, rtol=rtol, atol=atol), \
-        f"ring_flash_attn_qkvpacked_func gradient does not match flash_attn_qkvpacked_func gradient on rank {rank}"
+        f"ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
 
-    print(f"Test passed on rank {rank}: ring_flash_attn_qkvpacked_func matches flash_attn_qkvpacked_func")
+    print(f"Test passed on rank {rank}: ring_flash_attn_func matches flash_attn_func")
 
     # Clean up
     dist.destroy_process_group()
