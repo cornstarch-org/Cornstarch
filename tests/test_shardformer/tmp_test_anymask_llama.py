@@ -135,7 +135,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         fa: bool,
         precision: str,
     ):
-        assert precision in ["bf16", "fp32"]
+        assert precision in ["bf16", "fp32", "fp16"]
         # if fa and precision == "fp32":
         #     raise unittest.SkipTest("Flash Attention does not support fp32")
 
@@ -184,11 +184,11 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
         )
 
         org_loss = org_loss.to(
-            dtype=torch.bfloat16 if precision == "bf16" else torch.float32
+            dtype=torch.bfloat16 if precision == "bf16" else torch.float32 if precision == "fp32" else torch.float16
         )
         if sharded_loss is not None:
             sharded_loss = sharded_loss.to(
-                dtype=torch.bfloat16 if precision == "bf16" else torch.float32
+                dtype=torch.bfloat16 if precision == "bf16" else torch.float32 if precision == "fp32" else torch.float16
             )
 
         self.check_fn(
@@ -213,7 +213,7 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
     ]:
         use_lazy_init = test_config.pop("use_lazy_init", False)
         precision = test_config.pop("precision")
-        precision = torch.bfloat16 if precision == "bf16" else torch.float32
+        precision = torch.bfloat16 if precision == "bf16" else torch.float32 if precision == "fp32" else torch.float16
 
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
@@ -302,21 +302,25 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
 class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
     model_class: LlamaPreTrainedModel
     config = LlamaConfig(
-        hidden_size=128,
+        # hidden_size=512,
+        hidden_size=256,
         intermediate_size=64,
-        num_attention_heads=16,
-        num_hidden_layers=2,
+        # num_attention_heads=16,
+        num_attention_heads=8,
+        num_hidden_layers=1,
         use_cache=False,
         _attn_implementation="eager",
         # _attn_implementation="flash_attention_2",
     )
+    # config = LlamaConfig(max_position_embeddings=4096, use_cache=False, _attn_implementation="eager", num_hidden_layers=4)
 
     def data_gen_fn(self) -> dict:
         num_batch = self.num_microbatches * self.microbatch_size
+        seq_len = 512
         input = {
-            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
-            # "attention_mask": torch.randint(1, 2, (num_batch, 64)),
-            "attention_mask": torch.randint(0, 2, (num_batch, 64, 64)), # B, L, L
+            "input_ids": torch.randint(0, 2048, (num_batch, seq_len)),
+            "attention_mask": torch.randint(1, 2, (num_batch, seq_len)),
+            # "attention_mask": torch.randint(0, 2, (num_batch, seq_len, seq_len)), # B, L, L
             # NOTE(runyu): this is for testing anymask, and you could change the internal hugginface transformer code to make it work, like:
             # if attention_mask.bool().all():
             #     causal_mask = self._update_causal_mask(
@@ -390,8 +394,8 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         # check last hidden state & loss
         if stage_manager is None or stage_manager.is_last_stage():
             atol, rtol = (1e-5, 1e-3) if precision == "fp32" else (5e-3, 5e-3)
-            check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
             print_rank0(f"org_loss: {org_loss}, sharded_loss: {sharded_loss}")
+            check_loss(org_loss, sharded_loss, atol=atol, rtol=rtol)
 
         # check weights
         if stage_manager is None or stage_manager.is_first_stage(ignore_chunk=True):
@@ -429,7 +433,8 @@ class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
         return input
 
     def test_context_parallel(self, tp_size: int, pp_size: int, sp_size: int, sp_mode: str):
-        self.run_hybrid_parallel(tp_size, pp_size, sp_size, sp_mode, True, "bf16")
+        # self.run_hybrid_parallel(tp_size, pp_size, sp_size, sp_mode, True, "bf16")
+        self.run_hybrid_parallel(tp_size, pp_size, sp_size, sp_mode, True, "fp16")
 
 def run(rank: int, world_size: int, tp_size: int, pp_size: int, sp_size: int, sp_mode: str):
     test_class = TestLlamaForCausalLMPolicy(rank, world_size)
@@ -442,6 +447,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.test_shardformer.tmp_test_anymask_l
 CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
 CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
 CUDA_VISIBLE_DEVICES=0,1 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
 '''
 
 def parse_args():

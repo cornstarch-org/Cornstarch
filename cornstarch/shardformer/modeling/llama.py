@@ -652,6 +652,7 @@ class LlamaAttentionForwards:
                 # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
                 # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
                 logger.info(f"use causal attn version")
+                logger.info(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}, shape of value_states: {value_states.shape}")
                 attn_output = RingAttentionBase.attention(
                     query_states,
                     key_states,
@@ -660,6 +661,7 @@ class LlamaAttentionForwards:
                     causal=self.is_causal,
                     return_softmax=False,
                     dropout_p=self.attention_dropout if self.training else 0.0,
+                    kernel_impl="triton",
                 )
             else:
                 # use anymask version

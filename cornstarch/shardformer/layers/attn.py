@@ -5,6 +5,9 @@ from cornstarch.shardformer.layers.utils import split_batch_uniform
 from cornstarch.shardformer.layers.ring_attn import ring_flash_attn_forward, ring_flash_attn_backward, ring_flash_attn_anymask_forward, ring_flash_attn_anymask_backward
 from cornstarch.kernel.interface import _flash_attn_anymask_forward
 
+from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
+from cornstarch.kernel.interface import _flash_attn_casualmask_forward, _flash_attn_casualmask_backward
+
 
 class RingAttentionBase(torch.autograd.Function):
     """
@@ -26,7 +29,11 @@ class RingAttentionBase(torch.autograd.Function):
         window_size_left=-1,
         window_size_right=-1,
         alibi_slopes=None,
+        kernel_impl: str = "cuda", # flash attn of tri for cuda, triton flash attn for triton
     ):
+
+        assert kernel_impl in ["cuda", "triton"]
+
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -45,6 +52,7 @@ class RingAttentionBase(torch.autograd.Function):
             window_size_right=window_size_right,
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
+            ATTN_IMPL= _flash_attn_forward if kernel_impl == "cuda" else _flash_attn_casualmask_forward,
         )
         # this should be out_padded
         ctx.save_for_backward(q, k, v, out, softmax_lse)
@@ -56,11 +64,15 @@ class RingAttentionBase(torch.autograd.Function):
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
         ctx.group = sp_group
+        ctx.kernel_impl = kernel_impl
         return out if not return_softmax else (out, softmax_lse)
 
     @staticmethod
     def backward(ctx, dout, *args):
         q, k, v, out, softmax_lse = ctx.saved_tensors
+
+        assert ctx.kernel_impl in ["cuda", "triton"]
+
         dq, dk, dv = ring_flash_attn_backward(
             ctx.group,
             dout,
@@ -76,8 +88,9 @@ class RingAttentionBase(torch.autograd.Function):
             window_size_right=ctx.window_size_right,
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
+            ATTN_IMPL= _flash_attn_backward if ctx.kernel_impl == "cuda" else _flash_attn_casualmask_backward,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
     
     @staticmethod
     def prepare_batch(
@@ -107,6 +120,7 @@ class RingAttentionBase(torch.autograd.Function):
         softmax_scale=None,
         deterministic=False,
         return_softmax=False,
+        kernel_impl: str = "cuda", # flash attn of tri for cuda, triton flash attn for triton
         **kwargs,):
         """
         Ring Attention forward pass supporting variable-length sequences. When using varlen mode,
@@ -129,9 +143,9 @@ class RingAttentionBase(torch.autograd.Function):
                 Shape should be [total_q_seqlen, nHeads]
         """
 
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
+        q = q.transpose(1, 2).contiguous() if kernel_impl == "cuda" else q
+        k = k.transpose(1, 2).contiguous() if kernel_impl == "cuda" else k
+        v = v.transpose(1, 2).contiguous() if kernel_impl == "cuda" else v
 
         out, softmax_lse = RingAttentionBase.apply(
             q,
@@ -143,6 +157,10 @@ class RingAttentionBase(torch.autograd.Function):
             dropout_p,
             softmax_scale,
             deterministic,
+            -1, # window_size_left
+            -1, # window_size_right
+            None, # alibi_slopes
+            kernel_impl,
         )
 
         out = out.contiguous()

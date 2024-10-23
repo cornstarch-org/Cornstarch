@@ -138,7 +138,15 @@ def _update_out_and_lse(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
     block_out = block_out.to(torch.float32)
-    block_lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+
+    if block_lse.shape[:3] != block_out.shape[:3]:
+        # NOTE(@runyu): flash attn by tridao need transpose the last two dims
+        block_lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+    else:
+        block_lse = block_lse.unsqueeze(dim=-1)
+
+    print(f"shape of block_out: {block_out.shape}, shape of block_lse: {block_lse.shape}")
+    print(f"shape of out: {out.shape}, shape of lse: {lse.shape}")
 
     # new_lse = lse + torch.log(1 + torch.exp(block_lse - lse))
     # torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out
@@ -161,7 +169,10 @@ def update_out_and_lse(
         if slice_ is not None:
             raise RuntimeError("first update_out_and_lse should not pass slice_ args")
         out = block_out.to(torch.float32)
-        lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+        if block_lse.shape[:3] != block_out.shape[:3]:
+            lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+        else:
+            lse = block_lse.unsqueeze(dim=-1)
     elif slice_ is not None:
         slice_out, slice_lse = out[slice_], lse[slice_]
         slice_out, slice_lse = _update_out_and_lse(
