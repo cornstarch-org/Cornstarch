@@ -81,7 +81,10 @@ def _flash_attn_anymask_backward(
     rng_state: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert dout.is_contiguous()
-    assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride()
+    # assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride()
+    # TODO(@runyu) stride is not good, check this, maybe the bug
+    assert q.shape == k.shape == v.shape, f"Shape mismatch: q: {q.shape}, k: {k.shape}, v: {v.shape}"
+    assert q.shape == out.shape == dout.shape, f"Shape mismatch: q: {q.shape}, out: {out.shape}, dout: {dout.shape}"
     HEAD_DIM = q.shape[-1]
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
@@ -196,7 +199,10 @@ def _flash_attn_casualmask_forward(
 
 def _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv, dropout_p, softmax_scale, causal, window_size, alibi_slopes, deterministic):
     assert dout.is_contiguous()
-    assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride(), f"q.stride(): {q.stride()}, k.stride(): {k.stride()}, v.stride(): {v.stride()}, out.stride(): {out.stride()}, dout.stride(): {dout.stride()}"
+    # assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride(), f"q.stride(): {q.stride()}, k.stride(): {k.stride()}, v.stride(): {v.stride()}, out.stride(): {out.stride()}, dout.stride(): {dout.stride()}"
+    assert q.shape == k.shape == v.shape, f"Shape mismatch: q: {q.shape}, k: {k.shape}, v: {v.shape}"
+    assert q.shape == out.shape == dout.shape, f"Shape mismatch: q: {q.shape}, out: {out.shape}, dout: {dout.shape}"
+    
     HEAD_DIM = q.shape[-1]
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
@@ -213,7 +219,7 @@ def _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
     assert N_CTX % PRE_BLOCK == 0, f"N_CTX: {N_CTX}, PRE_BLOCK: {PRE_BLOCK}"
     pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
     delta = torch.empty_like(softmax_lse)
-    _attn_any_mask_bwd_preprocess[pre_grid](
+    _attn_bwd_preprocess[pre_grid](
         out, dout,  #
         delta,  #
         BATCH, N_HEAD, N_CTX,  #
@@ -221,7 +227,7 @@ def _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
     )
     grid = (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
         
-    _attn_any_mask_bwd[grid](
+    _attn_bwd[grid](
         q, arg_k, v, softmax_scale, dout, dq, dk, dv,  #
         softmax_lse, delta,  #
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #

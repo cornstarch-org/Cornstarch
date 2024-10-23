@@ -662,15 +662,18 @@ class LlamaAttentionForwards:
                     return_softmax=False,
                     dropout_p=self.attention_dropout if self.training else 0.0,
                     kernel_impl="triton",
+                    # kernel_impl="cuda",
                 )
             else:
                 # use anymask version
                 logger.info(f"use anymask version")
+                logger.info(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}, shape of value_states: {value_states.shape}")
                 attn_output = RingAttentionAnyMask.attention(
                     query_states,
                     key_states,
                     value_states,
                     sp_group,
+                    attention_mask,
                     causal=self.is_causal,
                     return_softmax=False,
                     dropout_p=self.attention_dropout if self.training else 0.0,

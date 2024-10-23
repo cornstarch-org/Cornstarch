@@ -303,10 +303,10 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
     model_class: LlamaPreTrainedModel
     config = LlamaConfig(
         # hidden_size=512,
-        hidden_size=256,
+        hidden_size=128,
         intermediate_size=64,
         # num_attention_heads=16,
-        num_attention_heads=8,
+        num_attention_heads=4,
         num_hidden_layers=1,
         use_cache=False,
         _attn_implementation="eager",
@@ -317,10 +317,11 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
     def data_gen_fn(self) -> dict:
         num_batch = self.num_microbatches * self.microbatch_size
         seq_len = 512
+        # seq_len = 64
         input = {
             "input_ids": torch.randint(0, 2048, (num_batch, seq_len)),
-            "attention_mask": torch.randint(1, 2, (num_batch, seq_len)),
-            # "attention_mask": torch.randint(0, 2, (num_batch, seq_len, seq_len)), # B, L, L
+            # "attention_mask": torch.randint(1, 2, (num_batch, seq_len)),
+            "attention_mask": torch.randint(0, 2, (num_batch, seq_len, seq_len)), # B, L, L
             # NOTE(runyu): this is for testing anymask, and you could change the internal hugginface transformer code to make it work, like:
             # if attention_mask.bool().all():
             #     causal_mask = self._update_causal_mask(
@@ -433,8 +434,8 @@ class TestLlamaForCausalLMPolicy(LlamaPolicyTestClassBase):
         return input
 
     def test_context_parallel(self, tp_size: int, pp_size: int, sp_size: int, sp_mode: str):
-        # self.run_hybrid_parallel(tp_size, pp_size, sp_size, sp_mode, True, "bf16")
-        self.run_hybrid_parallel(tp_size, pp_size, sp_size, sp_mode, True, "fp16")
+        self.run_hybrid_parallel(tp_size, pp_size, sp_size, sp_mode, True, "bf16")
+        # self.run_hybrid_parallel(tp_size, pp_size, sp_size, sp_mode, True, "fp16")
 
 def run(rank: int, world_size: int, tp_size: int, pp_size: int, sp_size: int, sp_mode: str):
     test_class = TestLlamaForCausalLMPolicy(rank, world_size)

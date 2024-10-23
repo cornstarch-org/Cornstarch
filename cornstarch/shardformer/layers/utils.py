@@ -142,6 +142,7 @@ def _update_out_and_lse(
     if block_lse.shape[:3] != block_out.shape[:3]:
         # NOTE(@runyu): flash attn by tridao need transpose the last two dims
         block_lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+        print("tridao's flash attn")
     else:
         block_lse = block_lse.unsqueeze(dim=-1)
 
@@ -171,6 +172,7 @@ def update_out_and_lse(
         out = block_out.to(torch.float32)
         if block_lse.shape[:3] != block_out.shape[:3]:
             lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+            print("tridao's flash attn")
         else:
             lse = block_lse.unsqueeze(dim=-1)
     elif slice_ is not None:
