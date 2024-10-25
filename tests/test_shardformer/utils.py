@@ -76,6 +76,10 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
     num_microbatches: int = 4
     microbatch_size: int = 1
 
+    @property
+    def world_size(self) -> int:
+        return 16
+
     def set_model(self, model: ModelClassBase):
         self.model = model
 
@@ -607,7 +611,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 encoders={
                     encoder_name: ModalEncoderModule(
                         module,
-                        # postprocess_module_callback=self.postprocess_callback,
+                        postprocess_module_callback=self.postprocess_callback,
                     )
                     for encoder_name, module in encoders.items()
                 },
