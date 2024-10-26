@@ -321,9 +321,9 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         # seq_len = 64
         # attn_mask_rand = torch.randint(1, 2, (num_batch, seq_len)) # B, L
         # attn_mask_rand = torch.randint(1, 2, (num_batch, seq_len, seq_len)) # B, L, L
-        # attn_mask_rand = torch.randint(0, 2, (num_batch, seq_len, seq_len)) # B, L, L
-        attn_mask_rand = torch.randint(1, 2, (num_batch, seq_len, seq_len)) # B, L, L
-        attn_mask_rand[0, 0, 0] = 0
+        attn_mask_rand = torch.randint(0, 2, (num_batch, seq_len, seq_len)) # B, L, L
+        # attn_mask_rand = torch.randint(1, 2, (num_batch, seq_len, seq_len)) # B, L, L
+        # attn_mask_rand[0, 0, 0] = 0
         input = {
             "input_ids": torch.randint(0, 2048, (num_batch, seq_len)),
             "attention_mask": attn_mask_rand,
@@ -448,14 +448,14 @@ def run(rank: int, world_size: int, tp_size: int, pp_size: int, sp_size: int, sp
     test_class.test_context_parallel(tp_size, pp_size, sp_size, sp_mode)
 
 '''
-CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 2 --pp_size 1 --sp_size 1
-CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 2 --pp_size 2 --sp_size 1
-CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=0,1 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn_zig_zag
-CUDA_VISIBLE_DEVICES=2,3,4,5 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5 python -m tests.tmp_test.tmp_test_anymask_llama --world_size 2 --tp_size 2 --pp_size 1 --sp_size 1
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.tmp_test.tmp_test_anymask_llama --world_size 4 --tp_size 2 --pp_size 2 --sp_size 1
+CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.tmp_test.tmp_test_anymask_llama --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5 python -m tests.tmp_test.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=0,1 python -m tests.tmp_test.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.tmp_test.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.tmp_test.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn_zig_zag
+CUDA_VISIBLE_DEVICES=2,3,4,5 python -m tests.tmp_test.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
 '''
 
 def parse_args():

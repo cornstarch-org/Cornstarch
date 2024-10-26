@@ -128,7 +128,7 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim):
     # Clean up
     dist.destroy_process_group()
 
-@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seq_len", [1024])
 @pytest.mark.parametrize("num_heads", [5])
 @pytest.mark.parametrize("head_dim", [128])
