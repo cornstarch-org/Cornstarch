@@ -20,11 +20,6 @@ from torch import nn
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from torch.distributed import ProcessGroup, get_world_size
 
-class SplitMode(Enum):
-    ZIGZAG = auto()
-    UNIFORM = auto()
-
-
 def split_batch(
     batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False, sp_mode: str = "ring_attn"
 ) -> torch.Tensor:
@@ -243,19 +238,3 @@ class RingComm:
             req.wait()
         self._reqs = None
         self._ops = []
-
-
-
-def split_attn_mask(
-    batch: Union[torch.Tensor, List[torch.Tensor]], 
-    sp_group: ProcessGroup, 
-    seq_dim: int = 1, 
-    is_label: bool = False, 
-    split_mode: SplitMode = SplitMode.ZIGZAG
-) -> Union[torch.Tensor, List[torch.Tensor]]:
-    if split_mode == SplitMode.ZIGZAG:
-        return split_batch_zigzag(batch, sp_group, seq_dim, is_label)
-    elif split_mode == SplitMode.UNIFORM:
-        return split_batch_uniform(batch, sp_group, seq_dim, is_label)
-    else:
-        raise ValueError(f"Unknown split mode: {split_mode}")
