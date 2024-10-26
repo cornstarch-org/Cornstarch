@@ -129,12 +129,12 @@ def _update_out_and_lse(
     if block_lse.shape[:3] != block_out.shape[:3]:
         # NOTE(@runyu): flash attn by tridao need transpose the last two dims
         block_lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
-        print("tridao's flash attn")
+        # print("tridao's flash attn")
     else:
         block_lse = block_lse.unsqueeze(dim=-1)
 
-    print(f"shape of block_out: {block_out.shape}, shape of block_lse: {block_lse.shape}")
-    print(f"shape of out: {out.shape}, shape of lse: {lse.shape}")
+    # print(f"shape of block_out: {block_out.shape}, shape of block_lse: {block_lse.shape}")
+    # print(f"shape of out: {out.shape}, shape of lse: {lse.shape}")
 
     # new_lse = lse + torch.log(1 + torch.exp(block_lse - lse))
     # torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out

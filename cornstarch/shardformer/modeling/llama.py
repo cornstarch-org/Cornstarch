@@ -139,12 +139,12 @@ class LlamaModelForwards:
         sp_size = shard_config.sequence_parallel_size
 
 
+        num_heads = self.config.num_attention_heads
         # NOTE(runyu): sp_mode can be "ring_attn", "ring_attn_uniform", "ring_attn_zig_zag", "ring_attn_optimal"
-        if "ring_attn" in sp_mode:
+        if sp_mode is not None and "ring_attn" in sp_mode:
 
             # NOTE(runyu): update the attention mask for ring attention
             # TODO(Runyu): check if this is correct, attention mask is not very right, see the api to set a right mask for ring any mask flash attention
-            num_heads = self.config.num_attention_heads
             if not attention_mask.bool().all():
                 # shape of attention_mask is [B, L, L]
                 attn_mask = update_attention_mask(attention_mask, num_heads) # shape: [B, H, L, L]
@@ -155,7 +155,7 @@ class LlamaModelForwards:
                 seq_dim = 1
 
             attn_mask = split_batch(attn_mask, sp_group, seq_dim=seq_dim, sp_mode=sp_mode) # shape: [B, H, L // sp_size, L] or [B, L // sp_size]
-        else:
+        elif attention_mask.ndim == 2: # causal mask for llama
             # NOTE(Runyu): it is essential to update causal mask here for anymask eager implementation
             attn_mask = self._update_causal_mask(
                 attention_mask,
@@ -164,6 +164,12 @@ class LlamaModelForwards:
                 past_key_values,
                 output_attentions,
             )
+        elif attention_mask.ndim == 3: # anymask for llama
+            attn_mask = update_attention_mask(attention_mask, num_heads)
+            # set zero part to -inf
+            attn_mask = torch.where(attn_mask == 0, torch.tensor(-np.inf), attn_mask)
+        else:
+            raise ValueError(f"Unsupported attention mask dimension: {attention_mask.ndim}")
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
@@ -176,7 +182,7 @@ class LlamaModelForwards:
                 # hidden_states = split_batch_uniform(hidden_states, sp_group)
                 # position_ids = split_batch_uniform(position_ids, sp_group)
 
-            if "ring_attn" in sp_mode:
+            if sp_mode is not None and "ring_attn" in sp_mode:
                 hidden_states = split_batch(hidden_states, sp_group, seq_dim=1, sp_mode=sp_mode) # shape: [B, L // sp_size, ...]
                 position_ids = split_batch(position_ids, sp_group, seq_dim=1, sp_mode=sp_mode) # shape: [B, L // sp_size]
 
@@ -330,7 +336,8 @@ class LlamaModelForwards:
 
         if (
             # shard_config.sequence_parallelism_mode == "ring_attn"
-            "ring_attn" in shard_config.sequence_parallelism_mode
+            shard_config.enable_sequence_parallelism
+            and "ring_attn" in shard_config.sequence_parallelism_mode
             and shard_config.parallel_output
         ):
             # Split labels in a zigzag fashion too
@@ -521,43 +528,6 @@ class LlamaModelForwards:
             attentions=outputs.attentions,
         )
 
-def run_naive_attn(self, bsz, q_len, query_states, key_states, value_states, attention_mask):
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-    # print(f"attn_mask: {attention_mask}")
-
-    attn_weights = torch.matmul(
-        query_states, key_states.transpose(2, 3)
-    ) / math.sqrt(self.head_dim)
-
-    if attention_mask is not None:  # no matter the length, we just slice it
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-        attn_weights = attn_weights + causal_mask
-
-    # upcast attention to fp32
-    attn_weights = nn.functional.softmax(
-        attn_weights, dim=-1, dtype=torch.float32
-    ).to(query_states.dtype)
-    attn_weights = nn.functional.dropout(
-        attn_weights, p=self.attention_dropout, training=self.training
-    )
-    attn_output = torch.matmul(attn_weights, value_states)
-
-    if attn_output.size() != (
-        bsz,
-        self.num_heads,
-        q_len,
-        self.head_dim,
-    ):
-        raise ValueError(
-            f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-            f" {attn_output.size()}"
-        )
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
-    return attn_output
-
 class LlamaAttentionForwards:
     @staticmethod
     def forward(
@@ -645,7 +615,7 @@ class LlamaAttentionForwards:
         # ==========
 
         attn_weights = None
-        if "ring_attn" in sp_mode:
+        if sp_mode is not None and "ring_attn" in sp_mode:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
@@ -659,11 +629,13 @@ class LlamaAttentionForwards:
             # )
             # attn_output = attn_output.transpose(1, 2).contiguous()
 
-            logger.info(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}, shape of value_states: {value_states.shape}")
+            # logger.info(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}, shape of value_states: {value_states.shape}")
             if attention_mask.bool().all():
                 # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
                 # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
                 logger.info(f"use causal attn version")
+                if dist.get_rank(sp_group) == 0:
+                    print(f"query_states: {query_states}")
                 attn_output = RingAttentionBase.attention(
                     query_states,
                     key_states,
@@ -672,9 +644,13 @@ class LlamaAttentionForwards:
                     causal=self.is_causal,
                     return_softmax=False,
                     dropout_p=self.attention_dropout if self.training else 0.0,
-                    kernel_impl="triton",
-                    # kernel_impl="cuda",
+                    # kernel_impl="triton",
+                    kernel_impl="cuda",
                 )
+                if dist.get_rank(sp_group) == 0:
+                    print(f"attn_output: {attn_output}")
+                    # check if attn_output is nan
+                    assert not torch.isnan(attn_output).any(), "attn_output contains NaN"
             else:
                 # use anymask version
                 logger.info(f"use anymask version")
@@ -692,10 +668,11 @@ class LlamaAttentionForwards:
         elif not attention_mask.bool().all():
             # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
             # NOTE(@runyu): anymask, we use eager implementation only
-            causal_mask = attention_mask.unsqueeze(dim=1).expand(-1, self.config.num_attention_heads, -1, -1)
+            # logger.info(f"attention_mask shape: {attention_mask.shape}")
+            # causal_mask = attention_mask.unsqueeze(dim=1).expand(-1, self.config.num_attention_heads, -1, -1)
             # set zero part to -inf
-            causal_mask = torch.where(causal_mask == 0, torch.tensor(-np.inf), causal_mask)
-            attn_output = run_naive_attn(bsz, q_len, query_states, key_states, value_states, attention_mask)
+            # causal_mask = torch.where(causal_mask == 0, torch.tensor(-np.inf), causal_mask)
+            attn_output = run_naive_attn(self, bsz, q_len, query_states, key_states, value_states, attention_mask)
         
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
@@ -749,7 +726,7 @@ class LlamaAttentionForwards:
 
             attn_output = attn_output.transpose(1, 2).contiguous()
         else:
-            attn_output = run_naive_attn(bsz, q_len, query_states, key_states, value_states, attention_mask)
+            attn_output = run_naive_attn(self, bsz, q_len, query_states, key_states, value_states, attention_mask)
 
         # sp: all-to-all communication when introducing ulysses context parallelism
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
@@ -764,3 +741,39 @@ class LlamaAttentionForwards:
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+
+def run_naive_attn(self, bsz, q_len, query_states, key_states, value_states, attention_mask):
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+    # print(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}")
+    attn_weights = torch.matmul(
+        query_states, key_states.transpose(2, 3)
+    ) / math.sqrt(self.head_dim)
+
+    if attention_mask is not None:  # no matter the length, we just slice it
+        causal_mask = attention_mask[:, :self.num_heads, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    # upcast attention to fp32
+    attn_weights = nn.functional.softmax(
+        attn_weights, dim=-1, dtype=torch.float32
+    ).to(query_states.dtype)
+    attn_weights = nn.functional.dropout(
+        attn_weights, p=self.attention_dropout, training=self.training
+    )
+    attn_output = torch.matmul(attn_weights, value_states)
+
+    if attn_output.size() != (
+        bsz,
+        self.num_heads,
+        q_len,
+        self.head_dim,
+    ):
+        raise ValueError(
+            f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+            f" {attn_output.size()}"
+        )
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    return attn_output

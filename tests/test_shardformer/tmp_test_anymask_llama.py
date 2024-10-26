@@ -96,7 +96,8 @@ class PolicyTestBase(ABC):
     model_class: PreTrainedModel
     config: PretrainedConfig
     microbatch_size: int = 1
-    num_microbatches: int = 4
+    # num_microbatches: int = 4
+    num_microbatches: int = 1
 
     @property
     def world_size(self) -> int:
@@ -302,8 +303,8 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
 class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
     model_class: LlamaPreTrainedModel
     config = LlamaConfig(
-        # hidden_size=512,
-        hidden_size=128,
+        hidden_size=512,
+        # hidden_size=128,
         intermediate_size=64,
         # num_attention_heads=16,
         num_attention_heads=4,
@@ -318,10 +319,14 @@ class LlamaPolicyTestClassBase(ColossalaiHybridParallelBase):
         num_batch = self.num_microbatches * self.microbatch_size
         seq_len = 512
         # seq_len = 64
+        # attn_mask_rand = torch.randint(1, 2, (num_batch, seq_len)) # B, L
+        # attn_mask_rand = torch.randint(1, 2, (num_batch, seq_len, seq_len)) # B, L, L
+        # attn_mask_rand = torch.randint(0, 2, (num_batch, seq_len, seq_len)) # B, L, L
+        attn_mask_rand = torch.randint(1, 2, (num_batch, seq_len, seq_len)) # B, L, L
+        attn_mask_rand[0, 0, 0] = 0
         input = {
             "input_ids": torch.randint(0, 2048, (num_batch, seq_len)),
-            # "attention_mask": torch.randint(1, 2, (num_batch, seq_len)),
-            "attention_mask": torch.randint(0, 2, (num_batch, seq_len, seq_len)), # B, L, L
+            "attention_mask": attn_mask_rand,
             # NOTE(runyu): this is for testing anymask, and you could change the internal hugginface transformer code to make it work, like:
             # if attention_mask.bool().all():
             #     causal_mask = self._update_causal_mask(
@@ -448,7 +453,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.test_shardformer.tmp_test_anymask_l
 CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
 CUDA_VISIBLE_DEVICES=4,5 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
 CUDA_VISIBLE_DEVICES=0,1 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 2 --tp_size 1 --pp_size 1 --sp_size 2 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=0,1,2,3 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=4,5,6,7 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn_zig_zag
+CUDA_VISIBLE_DEVICES=2,3,4,5 python -m tests.test_shardformer.tmp_test_anymask_llama --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
 '''
 
 def parse_args():
