@@ -24,55 +24,47 @@ class SplitMode(Enum):
     ZIGZAG = auto()
     UNIFORM = auto()
 
-# code adapted from: https://github.com/hpcaitech/ColossalAI/blob/dcd41d09730854f2f7d58f6b5cc5096617a6c2f3/colossalai/shardformer/layer/utils.py#L294
-def split_batch_zigzag(
-    batch: Union[torch.Tensor, List[torch.Tensor]], sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False
-) -> Union[torch.Tensor, List[torch.Tensor]]:
+
+def split_batch(
+    batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False, sp_mode: str = "ring_attn"
+) -> torch.Tensor:
+    if sp_mode == "ring_attn" or sp_mode == "ring_attn_uniform":
+        return split_batch_uniform(batch, sp_group, seq_dim, is_label)
+    elif sp_mode == "ring_attn_zig_zag":
+        return split_batch_zig_zag(batch, sp_group, seq_dim, is_label)
+    elif sp_mode == "ring_attn_optimal":
+        return split_batch_optimal(batch, sp_group, seq_dim, is_label)
+    else:
+        raise ValueError(f"Unknown split mode: {sp_mode}")
+
+def split_batch_zig_zag(
+    batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False
+) -> torch.Tensor:
     """
-    Split the input along the sequence dimension for Ring Attention. Naively spliting the attention mask
-    in the causal setting will result in the preceding ranks having much less workload.
-    We split after "folding" the 2D attention mask in half (https://github.com/zhuzilin/ring-flash-attention/issues/2).
-    For example, for sp_size = 4 and seq_len = 8, we get | s0, s7 | s1, s6 | s2, s5 | s3, s4 |.
-
-    Args:
-        batch (List[torch.Tensor] or Tensor): The input tensor(s) to split.
-        sp_group (ProcessGroup): The process group for sequence parallelism.
-        seq_dim (int): The sequence dimension to split.
-        is_label (bool): If True, mask and shift the tensor for next token prediction.
-
+    split them using zigzag strategy
     """
     sp_size = dist.get_world_size(sp_group)
     sp_rank = dist.get_rank(sp_group)
     if sp_size == 1:
         return batch
 
-    if isinstance(batch, torch.Tensor):
-        batch = [batch]
     seq_dim = seq_dim if seq_dim != -1 else batch[0].dim() - 1
 
-    if sp_size > 1:
-        for idx, tensor in enumerate(batch):
-            assert (
-                tensor.shape[seq_dim] // (sp_size * 2) > 1 and tensor.shape[seq_dim] % (sp_size * 2) == 0
-            ), f"Bro, the seq length {tensor.shape[seq_dim]} for tensor {idx} can't be split by {sp_size * 2}!"
-            if is_label:
-                assert tensor.dim() == 2, "Label shape should be (B, Seqlen)"
-                tensor = torch.cat([tensor[:, 1:], torch.full_like(tensor[:, :1], -100)], dim=1)
-                # @runyu, what is the meaning of set the first token to -100?
+    seq_len = batch.shape[seq_dim]
 
-            tensor = tensor.view(
-                *tensor.shape[:seq_dim],
-                2 * sp_size,
-                tensor.shape[seq_dim] // (2 * sp_size),
-                *tensor.shape[seq_dim + 1 :],
-            )
-            indices = torch.tensor([sp_rank, 2 * sp_size - 1 - sp_rank], device=tensor.device)
-            tensor = tensor.index_select(seq_dim, indices).contiguous()
-            # (B, 2, Sq // (2 * sp_size), ...) -> (B, Sq // sp_size, ...)
-            batch[idx] = tensor.view(*tensor.shape[:seq_dim], -1, *tensor.shape[seq_dim + 2 :])
+    assert seq_len % (sp_size * 2) == 0, f"Sequence length {seq_len} must be divisible by {sp_size * 2}!"
 
-    if len(batch) == 1:
-        return batch[0]
+    tensor = batch.view(
+        *batch.shape[:seq_dim],
+        2 * sp_size,
+        batch.shape[seq_dim] // (2 * sp_size),
+        *batch.shape[seq_dim + 1 :],
+    )
+    indices = torch.tensor([sp_rank, 2 * sp_size - 1 - sp_rank], device=tensor.device)
+    tensor = tensor.index_select(seq_dim, indices).contiguous()
+    # (B, 2, Sq // (2 * sp_size), ...) -> (B, Sq // sp_size, ...)
+    batch = tensor.view(*tensor.shape[:seq_dim], -1, *tensor.shape[seq_dim + 2 :])
+
     return batch
 
 
@@ -99,14 +91,14 @@ def split_batch_uniform(
     return split_batch
 
 
-def split_batch_anymask(
+def split_batch_optimal(
     batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False
 ) -> torch.Tensor:
     """
     split them using some strategy
     TODO(@insu) implement this
     """
-    return NotImplementedError("Not implemented yet for anymask automatically split")
+    raise NotImplementedError("Not implemented yet for anymask automatically split")
 
 
 @cache

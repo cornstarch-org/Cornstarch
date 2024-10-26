@@ -16,7 +16,7 @@ from colossalai.shardformer.layer._operation import (
     split_forward_gather_backward,
 )
 # from colossalai.shardformer.layer.utils import split_batch_zigzag
-from cornstarch.shardformer.layers.utils import split_batch_uniform, update_attention_mask
+from cornstarch.shardformer.layers.utils import split_batch_uniform, update_attention_mask, split_batch
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch.nn.modules.loss import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.cache_utils import Cache, DynamicCache
@@ -43,7 +43,7 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-_SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
+_SUPPORTED_CP_MODE = ["all_to_all", "ring_attn", "ring_attn_uniform", "ring_attn_zig_zag", "ring_attn_optimal"]
 
 
 class LlamaModelForwards:
@@ -138,7 +138,11 @@ class LlamaModelForwards:
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
 
-        if sp_mode == "ring_attn":
+
+        # NOTE(runyu): sp_mode can be "ring_attn", "ring_attn_uniform", "ring_attn_zig_zag", "ring_attn_optimal"
+        if "ring_attn" in sp_mode:
+
+            # NOTE(runyu): update the attention mask for ring attention
             # TODO(Runyu): check if this is correct, attention mask is not very right, see the api to set a right mask for ring any mask flash attention
             num_heads = self.config.num_attention_heads
             if not attention_mask.bool().all():
@@ -149,7 +153,8 @@ class LlamaModelForwards:
                 # shape of attention_mask is [B, L], casual mask for huggingface llama
                 attn_mask = attention_mask
                 seq_dim = 1
-            attn_mask = split_batch_uniform(attn_mask, sp_group, seq_dim=seq_dim) # shape: [B, H, L // sp_size, L] or [B, L // sp_size]
+
+            attn_mask = split_batch(attn_mask, sp_group, seq_dim=seq_dim, sp_mode=sp_mode) # shape: [B, H, L // sp_size, L] or [B, L // sp_size]
         else:
             # NOTE(Runyu): it is essential to update causal mask here for anymask eager implementation
             attn_mask = self._update_causal_mask(
@@ -167,9 +172,13 @@ class LlamaModelForwards:
             # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
-            if sp_mode == "ring_attn":
-                hidden_states = split_batch_uniform(hidden_states, sp_group)
-                position_ids = split_batch_uniform(position_ids, sp_group)
+            # if sp_mode == "ring_attn" or sp_mode == "ring_attn_uniform":
+                # hidden_states = split_batch_uniform(hidden_states, sp_group)
+                # position_ids = split_batch_uniform(position_ids, sp_group)
+
+            if "ring_attn" in sp_mode:
+                hidden_states = split_batch(hidden_states, sp_group, seq_dim=1, sp_mode=sp_mode) # shape: [B, L // sp_size, ...]
+                position_ids = split_batch(position_ids, sp_group, seq_dim=1, sp_mode=sp_mode) # shape: [B, L // sp_size]
 
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
@@ -320,7 +329,8 @@ class LlamaModelForwards:
                 output_hidden_states = False
 
         if (
-            shard_config.sequence_parallelism_mode == "ring_attn"
+            # shard_config.sequence_parallelism_mode == "ring_attn"
+            "ring_attn" in shard_config.sequence_parallelism_mode
             and shard_config.parallel_output
         ):
             # Split labels in a zigzag fashion too
@@ -330,7 +340,8 @@ class LlamaModelForwards:
             # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
-            labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
+            # labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
+            labels = split_batch(labels, sp_group, seq_dim=1, sp_mode=shard_config.sequence_parallelism_mode)
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = LlamaModelForwards.llama_model_forward(
@@ -634,7 +645,7 @@ class LlamaAttentionForwards:
         # ==========
 
         attn_weights = None
-        if sp_mode == "ring_attn":
+        if "ring_attn" in sp_mode:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
@@ -648,11 +659,11 @@ class LlamaAttentionForwards:
             # )
             # attn_output = attn_output.transpose(1, 2).contiguous()
 
+            logger.info(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}, shape of value_states: {value_states.shape}")
             if attention_mask.bool().all():
                 # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
                 # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
                 logger.info(f"use causal attn version")
-                logger.info(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}, shape of value_states: {value_states.shape}")
                 attn_output = RingAttentionBase.attention(
                     query_states,
                     key_states,
@@ -667,7 +678,6 @@ class LlamaAttentionForwards:
             else:
                 # use anymask version
                 logger.info(f"use anymask version")
-                logger.info(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}, shape of value_states: {value_states.shape}")
                 attn_output = RingAttentionAnyMask.attention(
                     query_states,
                     key_states,
@@ -678,7 +688,7 @@ class LlamaAttentionForwards:
                     return_softmax=False,
                     dropout_p=self.attention_dropout if self.training else 0.0,
                 )
-        
+
         elif not attention_mask.bool().all():
             # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
             # NOTE(@runyu): anymask, we use eager implementation only
