@@ -124,7 +124,11 @@ class PipelineTemplate:
         return len(self.modules_per_stage)
 
     def __eq__(self, template: PipelineTemplate) -> bool:
-        return self.model_name == template.model_name and hash(self) == hash(template)
+        return (
+            isinstance(template, PipelineTemplate)
+            and self.model_name == template.model_name
+            and hash(self) == hash(template)
+        )
 
     def __hash__(self) -> int:
         return hash(tuple(tuple(modules) for modules in self.modules_per_stage))

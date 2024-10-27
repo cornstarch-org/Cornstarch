@@ -273,7 +273,7 @@ def destroy_process_group():
 def test_multimodal_pipeline_stage_manager(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
-    llm_template: tuple[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
     expected_prev_next_ranks: list[dict[str, list[int]]],
 ):
     for rank in range(world_size):
@@ -406,7 +406,7 @@ def test_multimodal_pipeline_stage_manager(
 def test_first_last_stage(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
-    llm_template: tuple[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
     expected_first_last_stages: dict[tuple[int], tuple[bool, bool]],
     expected_first_last_stages_in_modal: dict[tuple[int], tuple[bool, bool]],
 ):
@@ -676,7 +676,7 @@ def test_first_last_stage(
 def test_process_group_by_stages(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
-    llm_template: tuple[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
     expected_ranks_in_stage: dict[tuple[int], list[list[int]]],
     mocker: MockerFixture,
 ):
@@ -777,7 +777,7 @@ def test_process_group_by_stages(
 def test_stage_index(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
-    llm_template: tuple[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
     expected_stage_index: dict[tuple[int, ...], tuple[int, int]],
 ):
     for rank in range(world_size):

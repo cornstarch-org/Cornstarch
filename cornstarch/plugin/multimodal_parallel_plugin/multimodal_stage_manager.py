@@ -169,8 +169,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         Returns:
             bool: Whether the current stage is the first stage.
         """
-        coords = self.pg_mesh.coords
-        my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
+        my_modal = self.stage_index_to_modal[self.stage]
         stage_indices_of_modal = [
             index
             for index, modal in enumerate(self.stage_index_to_modal)
@@ -179,7 +178,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
 
         if check_only_in_modal:
             # If `check_only_in_modal` is set True, check only if the rank is the first in the modal
-            if coords[0][self.pipeline_axis] == stage_indices_of_modal[0]:
+            if self.stage == stage_indices_of_modal[0]:
                 return True
             else:
                 return False
@@ -192,7 +191,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                     len(self.pg_mesh.encoder_templates) == 0
                     and my_modal == self.pg_mesh.llm_template[0]
                 )
-            ) and coords[0][self.pipeline_axis] == stage_indices_of_modal[0]:
+            ) and self.stage == stage_indices_of_modal[0]:
                 return True
             else:
                 return False
@@ -209,8 +208,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         Returns:
             bool: Whether the current stage is the last stage.
         """
-        coords = self.pg_mesh.coords
-        my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
+        my_modal = self.stage_index_to_modal[self.stage]
         stage_indices_of_modal = [
             index
             for index, modal in enumerate(self.stage_index_to_modal)
@@ -219,7 +217,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
 
         if check_only_in_modal:
             # If `check_only_in_modal` is set True, check only if the rank is the last in the modal
-            if coords[0][self.pipeline_axis] == stage_indices_of_modal[-1]:
+            if self.stage == stage_indices_of_modal[-1]:
                 return True
             else:
                 return False
@@ -232,7 +230,7 @@ class MultiModalPipelineStageManager(PipelineStageManager):
                     len(self.pg_mesh.decoder_templates) == 0
                     and my_modal == self.pg_mesh.llm_template[0]
                 )
-            ) and coords[0][self.pipeline_axis] == stage_indices_of_modal[-1]:
+            ) and self.stage == stage_indices_of_modal[-1]:
                 return True
             else:
                 return False

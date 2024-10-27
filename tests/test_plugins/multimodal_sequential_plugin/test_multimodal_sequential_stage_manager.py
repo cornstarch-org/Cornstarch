@@ -12,8 +12,10 @@ from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
 
 from .common import (
     encoder1_template,
+    encoder2_template,
     encoder3_template,
     llm_template_2stages,
+    llm_template_4stages,
 )
 
 
@@ -156,6 +158,136 @@ def test_multimodal_sequential_pipeline_stage_manager(
         assert stage_manager.next_ranks == expected_prev_next_ranks[rank]["next"], (
             f"rank {rank} expected to have {expected_prev_next_ranks[rank]['next']} as next ranks, "
             f"but got {stage_manager.next_ranks}."
+        )
+
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size, encoder_templates, llm_template, expected_first_last_stages, expected_first_last_stages_in_modal",
+    [
+        (
+            24,
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (0, 1, 2, 3): (True, False),
+                tuple(range(4, 16)): (False, False),
+                tuple(range(16, 24)): (False, True),
+            },
+            {
+                (0, 1, 2, 3): (True, False),
+                (4, 5, 6, 7): (False, True),
+                tuple(range(8, 16)): (True, False),
+                tuple(range(16, 24)): (False, True),
+            },
+        ),
+        (
+            12,  # encoders are colocated, thus 2*2 + 2*4 = 12
+            {encoder1_template: 2, encoder3_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (0, 1): (True, False),
+                (2, 3): (False, False),
+                (4, 5, 6, 7): (False, False),
+                (8, 9, 10, 11): (False, True),
+            },
+            {
+                (0, 1): (True, False),
+                (2, 3): (False, True),
+                (4, 5, 6, 7): (True, False),
+                (8, 9, 10, 11): (False, True),
+            },
+        ),
+        (
+            72,  # 36 ranks * 2 dp
+            {encoder1_template: 2},
+            (llm_template_4stages, 4, 2),
+            {
+                (0, 1, 2, 3): (True, False),  # encoder stage 0
+                (4, 5, 6, 7): (False, False),  # encoder stage 1
+                tuple(range(8, 24)): (False, False),  # llm stage 0
+                tuple(range(24, 56)): (False, False),  # llm stages 1~2
+                tuple(range(56, 72)): (False, True),  # llm stage 3
+            },
+            {
+                (0, 1, 2, 3): (True, False),  # encoder stage 0
+                (4, 5, 6, 7): (False, True),  # encoder stage 1
+                tuple(range(8, 24)): (True, False),  # llm stage 0
+                tuple(range(24, 56)): (False, False),  # llm stages 1~2
+                tuple(range(56, 72)): (False, True),  # llm stage 3
+            },
+        ),
+        (
+            80,  # 40 ranks * 2 dp
+            {encoder2_template: 4},
+            (llm_template_2stages, 4, 1),
+            {
+                tuple(range(0, 16)): (True, False),  # encoder stage 0
+                tuple(range(16, 32)): (False, False),  # encoder stage 1
+                tuple(range(32, 48)): (False, False),  # encoder stage 2
+                tuple(range(48, 64)): (False, False),  # llm stage 0
+                tuple(range(64, 80)): (False, True),  # llm stage 1
+            },
+            {
+                tuple(range(0, 16)): (True, False),  # encoder stage 0
+                tuple(range(16, 32)): (False, False),  # encoder stage 1
+                tuple(range(32, 48)): (False, True),  # encoder stage 2
+                tuple(range(48, 64)): (True, False),  # llm stage 0
+                tuple(range(64, 80)): (False, True),  # llm stage 1
+            },
+        ),
+    ],
+)
+def test_first_last_stage(
+    world_size: int,
+    encoder_templates: dict[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
+    expected_first_last_stages: dict[tuple[int], tuple[bool, bool]],
+    expected_first_last_stages_in_modal: dict[tuple[int], tuple[bool, bool]],
+):
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
+        stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+
+        # check modal-local stage
+        expected_first_last_stage = next(
+            value
+            for ranks, value in expected_first_last_stages.items()
+            if rank in ranks
+        )
+        assert expected_first_last_stage == (
+            stage_manager.is_first_stage(check_only_in_modal=False),
+            stage_manager.is_last_stage(check_only_in_modal=False),
+        ), (
+            f"rank {rank} expected to have {expected_first_last_stage} as first and last stage, "
+            f"but got ({stage_manager.is_first_stage(check_only_in_modal=False), stage_manager.is_last_stage(check_only_in_modal=False)})."
+        )
+
+        # check global stage
+        expected_first_last_stage_in_modal = next(
+            value
+            for ranks, value in expected_first_last_stages_in_modal.items()
+            if rank in ranks
+        )
+        assert expected_first_last_stage_in_modal == (
+            stage_manager.is_first_stage(check_only_in_modal=True),
+            stage_manager.is_last_stage(check_only_in_modal=True),
+        ), (
+            f"rank {rank} expected to have {expected_first_last_stage_in_modal} as first and last stage in modal, "
+            f"but got ({stage_manager.is_first_stage(check_only_in_modal=True), stage_manager.is_last_stage(check_only_in_modal=True)})."
+        )
+
+        # check automatic behavior, which should be the same with check_only_in_modal=True
+        assert expected_first_last_stage_in_modal == (
+            stage_manager.is_first_stage(),
+            stage_manager.is_last_stage(),
+        ), (
+            f"rank {rank} expected to have {expected_first_last_stage_in_modal} as first and last stage in modal, "
+            f"but got ({stage_manager.is_first_stage(), stage_manager.is_last_stage()})."
         )
 
         dist.destroy_process_group()
