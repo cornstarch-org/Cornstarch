@@ -14,7 +14,7 @@ from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager impor
     MultiModalPipelineStageManager,
 )
 
-from .test_modal_process_group_mesh import (
+from .common import (
     encoder1_template,
     encoder2_template,
     llm_template_2stages,
