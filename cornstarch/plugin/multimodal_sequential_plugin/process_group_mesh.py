@@ -7,18 +7,18 @@ from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh impor
 )
 
 
-class MultimodalMegatronProcessGroupMesh(MultiModalProcessGroupMesh):
+class MultimodalSequentialProcessGroupMesh(MultiModalProcessGroupMesh):
     """
     A helper class to manage the process group mesh.
 
     We use a ND-tuple to represent the process group mesh,
     and a ND-coordinate is to represent a process.
 
-    MultimodalMegatronProcessGroupMesh is a hybrid of ColossalAI ProcessGroupMesh
+    MultimodalSequentialProcessGroupMesh is a hybrid of ColossalAI ProcessGroupMesh
     and Cornstarch MultimodalProcessGroupMesh.
     Similar to ColossalAI ProcessGroupMesh, each stage is represented by a rank
     (ColossalAI MultimodalProcessGroupMesh assigns a rank per layer).
-    Similar to Cornstarch MultimodalProcessGroupMesh, MultimodalMegatronProcessGroupMesh
+    Similar to Cornstarch MultimodalProcessGroupMesh, MultimodalSequentialProcessGroupMesh
     supports heterogeneous ranks between encoder and LLM: LLM and encoder may have different
     tensor parallel degree or sequence parallel degree.
 

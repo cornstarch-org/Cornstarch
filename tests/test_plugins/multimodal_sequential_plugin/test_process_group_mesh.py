@@ -8,7 +8,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
-    MultimodalMegatronProcessGroupMesh,
+    MultimodalSequentialProcessGroupMesh,
 )
 
 from .common import (
@@ -136,7 +136,7 @@ def test_init_process_group_mesh_single_encoder(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
 
-        mesh = MultimodalMegatronProcessGroupMesh(
+        mesh = MultimodalSequentialProcessGroupMesh(
             encoder_templates=encoder_template,
             llm_template=llm_template,
         )
@@ -184,7 +184,7 @@ def test_create_group_along_axis_order(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
 
-        mesh = MultimodalMegatronProcessGroupMesh(
+        mesh = MultimodalSequentialProcessGroupMesh(
             encoder_templates=encoder_template,
             llm_template=llm_template,
         )
@@ -207,19 +207,19 @@ def test_create_group_along_axis_order(
             {encoder1_template: 1},
             (llm_template_2stages, 1, 1),
             {
-                MultimodalMegatronProcessGroupMesh.pp_axis: [
+                MultimodalSequentialProcessGroupMesh.pp_axis: [
                     (0, 3, 6, 9),
                     (1, 4, 7, 10),
                     (2, 5, 8, 11),
                 ],
-                MultimodalMegatronProcessGroupMesh.dp_axis: [
+                MultimodalSequentialProcessGroupMesh.dp_axis: [
                     (0, 1, 2),
                     (3, 4, 5),
                     (6, 7, 8),
                     (9, 10, 11),
                 ],
-                MultimodalMegatronProcessGroupMesh.sp_axis: [(i,) for i in range(12)],
-                MultimodalMegatronProcessGroupMesh.tp_axis: [(i,) for i in range(12)],
+                MultimodalSequentialProcessGroupMesh.sp_axis: [(i,) for i in range(12)],
+                MultimodalSequentialProcessGroupMesh.tp_axis: [(i,) for i in range(12)],
             },
         ),
         (
@@ -227,13 +227,13 @@ def test_create_group_along_axis_order(
             {encoder1_template: 2},
             (llm_template_2stages, 2, 1),
             {
-                MultimodalMegatronProcessGroupMesh.pp_axis: [
+                MultimodalSequentialProcessGroupMesh.pp_axis: [
                     (0, 2, 4, 6),
                     (1, 3, 5, 7),
                 ],
-                MultimodalMegatronProcessGroupMesh.dp_axis: [(i,) for i in range(8)],
-                MultimodalMegatronProcessGroupMesh.sp_axis: [(i,) for i in range(8)],
-                MultimodalMegatronProcessGroupMesh.tp_axis: [
+                MultimodalSequentialProcessGroupMesh.dp_axis: [(i,) for i in range(8)],
+                MultimodalSequentialProcessGroupMesh.sp_axis: [(i,) for i in range(8)],
+                MultimodalSequentialProcessGroupMesh.tp_axis: [
                     (i, i + 1) for i in range(0, 8, 2)
                 ],
             },
@@ -243,13 +243,13 @@ def test_create_group_along_axis_order(
             {encoder1_template: 1},
             (llm_template_4stages, 2, 1),
             {
-                MultimodalMegatronProcessGroupMesh.pp_axis: [
+                MultimodalSequentialProcessGroupMesh.pp_axis: [
                     (0, 2, 4, 8, 12, 16),
                     (0, 2, 5, 9, 13, 17),
                     (1, 3, 6, 10, 14, 18),
                     (1, 3, 7, 11, 15, 19),
                 ],
-                MultimodalMegatronProcessGroupMesh.dp_axis: [
+                MultimodalSequentialProcessGroupMesh.dp_axis: [
                     (0, 1),
                     (2, 3),
                     (4, 6),
@@ -261,8 +261,8 @@ def test_create_group_along_axis_order(
                     (16, 18),
                     (17, 19),
                 ],
-                MultimodalMegatronProcessGroupMesh.sp_axis: [(i,) for i in range(20)],
-                MultimodalMegatronProcessGroupMesh.tp_axis: [
+                MultimodalSequentialProcessGroupMesh.sp_axis: [(i,) for i in range(20)],
+                MultimodalSequentialProcessGroupMesh.tp_axis: [
                     (0,),
                     (1,),
                     (2,),
@@ -283,12 +283,12 @@ def test_create_group_along_axis_order(
             {encoder2_template: 1},
             (llm_template_4stages, 1, 2),
             {
-                MultimodalMegatronProcessGroupMesh.pp_axis: [
+                MultimodalSequentialProcessGroupMesh.pp_axis: [
                     (0, 1, 2, 3, 5, 7, 9),
                     (0, 1, 2, 4, 6, 8, 10),
                 ],
-                MultimodalMegatronProcessGroupMesh.dp_axis: [(i,) for i in range(11)],
-                MultimodalMegatronProcessGroupMesh.sp_axis: [
+                MultimodalSequentialProcessGroupMesh.dp_axis: [(i,) for i in range(11)],
+                MultimodalSequentialProcessGroupMesh.sp_axis: [
                     (0,),
                     (1,),
                     (2,),
@@ -297,7 +297,7 @@ def test_create_group_along_axis_order(
                     (7, 8),
                     (9, 10),
                 ],
-                MultimodalMegatronProcessGroupMesh.tp_axis: [(i,) for i in range(11)],
+                MultimodalSequentialProcessGroupMesh.tp_axis: [(i,) for i in range(11)],
             },
         ),
         (
@@ -305,14 +305,14 @@ def test_create_group_along_axis_order(
             {encoder2_template: 1},
             (llm_template_4stages, 2, 2),
             {
-                MultimodalMegatronProcessGroupMesh.pp_axis: [
+                MultimodalSequentialProcessGroupMesh.pp_axis: [
                     (0, 1, 2, 3, 7, 11, 15),
                     (0, 1, 2, 4, 8, 12, 16),
                     (0, 1, 2, 5, 9, 13, 17),
                     (0, 1, 2, 6, 10, 14, 18),
                 ],
-                MultimodalMegatronProcessGroupMesh.dp_axis: [(i,) for i in range(19)],
-                MultimodalMegatronProcessGroupMesh.sp_axis: [
+                MultimodalSequentialProcessGroupMesh.dp_axis: [(i,) for i in range(19)],
+                MultimodalSequentialProcessGroupMesh.sp_axis: [
                     (0,),
                     (1,),
                     (2,),
@@ -325,7 +325,7 @@ def test_create_group_along_axis_order(
                     (15, 17),
                     (16, 18),
                 ],
-                MultimodalMegatronProcessGroupMesh.tp_axis: [
+                MultimodalSequentialProcessGroupMesh.tp_axis: [
                     (0,),
                     (1,),
                     (2,),
@@ -345,14 +345,14 @@ def test_create_group_along_axis_order(
             {encoder2_template: 2},
             (llm_template_4stages, 2, 2),
             {
-                MultimodalMegatronProcessGroupMesh.pp_axis: [
+                MultimodalSequentialProcessGroupMesh.pp_axis: [
                     (0, 2, 4, 6, 10, 14, 18),
                     (1, 3, 5, 7, 11, 15, 19),
                     (0, 2, 4, 8, 12, 16, 20),
                     (1, 3, 5, 9, 13, 17, 21),
                 ],
-                MultimodalMegatronProcessGroupMesh.dp_axis: [(i,) for i in range(22)],
-                MultimodalMegatronProcessGroupMesh.sp_axis: [
+                MultimodalSequentialProcessGroupMesh.dp_axis: [(i,) for i in range(22)],
+                MultimodalSequentialProcessGroupMesh.sp_axis: [
                     (0,),
                     (1,),
                     (2,),
@@ -368,7 +368,7 @@ def test_create_group_along_axis_order(
                     (18, 20),
                     (19, 21),
                 ],
-                MultimodalMegatronProcessGroupMesh.tp_axis: [
+                MultimodalSequentialProcessGroupMesh.tp_axis: [
                     (0, 1),
                     (2, 3),
                     (4, 5),
@@ -388,7 +388,7 @@ def test_create_group_along_axis_order(
             {encoder1_template: 2},
             (llm_template_2stages, 2, 2),
             {
-                MultimodalMegatronProcessGroupMesh.pp_axis: [
+                MultimodalSequentialProcessGroupMesh.pp_axis: [
                     (0, 4, 8, 16),
                     (1, 5, 9, 17),
                     (0, 4, 10, 18),
@@ -398,7 +398,7 @@ def test_create_group_along_axis_order(
                     (2, 6, 14, 22),
                     (3, 7, 15, 23),
                 ],
-                MultimodalMegatronProcessGroupMesh.dp_axis: [
+                MultimodalSequentialProcessGroupMesh.dp_axis: [
                     (0, 2),
                     (1, 3),
                     (4, 6),
@@ -412,7 +412,7 @@ def test_create_group_along_axis_order(
                     (18, 22),
                     (19, 23),
                 ],
-                MultimodalMegatronProcessGroupMesh.sp_axis: [
+                MultimodalSequentialProcessGroupMesh.sp_axis: [
                     (0,),
                     (1,),
                     (2,),
@@ -430,7 +430,7 @@ def test_create_group_along_axis_order(
                     (20, 22),
                     (21, 23),
                 ],
-                MultimodalMegatronProcessGroupMesh.tp_axis: [
+                MultimodalSequentialProcessGroupMesh.tp_axis: [
                     (i, i + 1) for i in range(0, 24, 2)
                 ],
             },
@@ -440,10 +440,10 @@ def test_create_group_along_axis_order(
 @pytest.mark.parametrize(
     "axis",
     [
-        MultimodalMegatronProcessGroupMesh.pp_axis,
-        MultimodalMegatronProcessGroupMesh.dp_axis,
-        MultimodalMegatronProcessGroupMesh.tp_axis,
-        MultimodalMegatronProcessGroupMesh.sp_axis,
+        MultimodalSequentialProcessGroupMesh.pp_axis,
+        MultimodalSequentialProcessGroupMesh.dp_axis,
+        MultimodalSequentialProcessGroupMesh.tp_axis,
+        MultimodalSequentialProcessGroupMesh.sp_axis,
     ],
     ids=["pp", "dp", "tp", "sp"],
 )
@@ -479,7 +479,7 @@ def test_get_group_along_axis(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
 
-        mesh = MultimodalMegatronProcessGroupMesh(
+        mesh = MultimodalSequentialProcessGroupMesh(
             encoder_templates=encoder_template,
             llm_template=llm_template,
         )
