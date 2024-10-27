@@ -722,6 +722,7 @@ def test_init_process_group_mesh(
         MultiModalProcessGroupMesh.tp_axis,
         MultiModalProcessGroupMesh.sp_axis,
     ],
+    ids=["pp", "dp", "tp", "sp"],
 )
 def test_get_group_along_axis(
     world_size: int,
