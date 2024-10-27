@@ -1,9 +1,5 @@
-import functools
-from collections import defaultdict
-
 import pytest
 import torch.distributed as dist
-from pytest_mock import MockerFixture
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.pipeline_template import PipelineTemplate
@@ -16,10 +12,8 @@ from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
 
 from .common import (
     encoder1_template,
-    encoder2_template,
     encoder3_template,
     llm_template_2stages,
-    llm_template_4stages,
 )
 
 

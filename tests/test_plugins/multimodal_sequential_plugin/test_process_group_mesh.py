@@ -14,6 +14,7 @@ from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
 from .common import (
     encoder1_template,
     encoder2_template,
+    encoder3_template,
     llm_template_2stages,
     llm_template_4stages,
 )
@@ -486,4 +487,45 @@ def test_get_group_along_axis(
         mesh.get_group_along_axis(axis)
 
         assert list(mesh._ranks_to_group.keys()) == expected_group_ranks[axis]
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size, encoder_templates, expected_error_type, expected_error_message",
+    [
+        (
+            5,
+            {encoder1_template: 1},
+            AssertionError,
+            "World size 5 is not divisible by num_ranks per replica 4.",
+        ),
+        (
+            7,
+            {encoder1_template: 1, encoder2_template: 1},
+            AssertionError,
+            "All encoder templates must have the same number of stages.",
+        ),
+        (
+            8,
+            {encoder1_template: 1, encoder3_template: 2},
+            AssertionError,
+            "All encoder templates must have the same tensor parallel degree.",
+        ),
+    ],
+)
+def test_process_group_mesh_errors(
+    world_size: int,
+    encoder_templates: dict[PipelineTemplate, int],
+    expected_error_type: type,
+    expected_error_message: str,
+):
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        with pytest.raises(expected_error_type, match=expected_error_message):
+            MultimodalSequentialProcessGroupMesh(
+                encoder_templates, (llm_template_2stages, 1, 1)
+            )
+
         dist.destroy_process_group()
