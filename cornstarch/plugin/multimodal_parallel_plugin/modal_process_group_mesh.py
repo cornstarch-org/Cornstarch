@@ -152,7 +152,7 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
         return self._coords
 
     @property
-    def mesh(self) -> dict[PipelineTemplate, np.ndarray]:
+    def mesh(self) -> np.ndarray:
         """The process rank mesh.
 
         Returns:

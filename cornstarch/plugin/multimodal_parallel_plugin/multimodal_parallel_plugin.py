@@ -24,7 +24,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
 
 from cornstarch.models.multimodal_language_model import (
@@ -81,7 +81,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         self.dp_group = dp_group
         self.tp_group = tp_group
         self.sp_group = sp_group
-        self.use_dpp = False
+        self.use_ddp = False
         self.require_grad_sync = True
         self.shared_params = []  # TODO: add shared params
         self.shared_param_process_groups = []
@@ -129,6 +129,56 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
         super().__init__(module)
 
+    def prepare_inputs_for_llm_first_stage(
+        self,
+        input_ids: torch.LongTensor,
+        hidden_states: torch.FloatTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> tuple[torch.FloatTensor, torch.Tensor, torch.LongTensor]:
+        module: MultimodalModel = self.module
+        # Forward in the first stage of the language model
+        num_tokens_per_encoder_outputs = getattr(hidden_states, "_cornstarch_shape")
+        assert len(num_tokens_per_encoder_outputs) == len(module.encoders), (
+            f"Expected to have {len(module.encoders)} hidden states, "
+            f"got {len(hidden_states)}."
+        )
+
+        # Split merged encoder outputs into separate modal features
+        encoders_outputs = hidden_states.split(num_tokens_per_encoder_outputs, dim=1)
+
+        inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
+
+        # merge encoded multimodal features into text embeddings
+        for modal_key, encoder_outputs in reversed(
+            list(zip(module.encoders.keys(), encoders_outputs))
+        ):
+            encoder_module: ModalEncoderModule = getattr(module, f"{modal_key}_encoder")
+            encoder_inputs = {
+                arg: kwargs[arg]
+                for arg in module.encoders_args[modal_key]
+                if arg in kwargs
+            }
+
+            for additional_arg in encoder_module.additional_args:
+                if additional_arg in kwargs:
+                    encoder_inputs[additional_arg] = kwargs[additional_arg]
+
+            inputs_embeds, attention_mask, position_ids, labels = (
+                encoder_module.postprocess_projector_callback(
+                    encoder_inputs,
+                    (encoder_outputs,),
+                    input_ids,
+                    inputs_embeds,
+                    attention_mask,
+                    labels,
+                    pad_token_id=module.language_model.config.pad_token_id,
+                )
+            )
+
+        return inputs_embeds, attention_mask, labels
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -139,12 +189,11 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = True,
         hidden_states: Optional[torch.FloatTensor] = None,
-        hidden_states_shape: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         **kwargs,
-    ) -> CausalLMOutputWithPast:
+    ) -> BaseModelOutputWithPast:
         """
         Pipeline parallelism aware forward of `MultimodalModel.forward()`.
         """
@@ -171,16 +220,6 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             else module.language_model.config.return_dict
         )
 
-        if output_attentions:
-            logger.warning_once(
-                "output_attentions=True is not supported for pipeline models at the moment."
-            )
-            output_attentions = False
-        if output_hidden_states:
-            logger.warning_once(
-                "output_hidden_states=True is not supported for pipeline models at the moment."
-            )
-            output_hidden_states = False
         if use_cache:
             logger.warning_once(
                 "use_cache=True is not supported for pipeline models at the moment."
@@ -189,53 +228,17 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
         assert "decoder" not in self.my_modal_name, "TODO: decoder forward"
 
-        module: MultimodalModel = self.module
         if self.my_modal_name == "language_model":
             if stage_manager.is_first_stage(check_only_in_modal=True):
-                # Forward in the first stage of the language model
-                num_tokens_per_encoder_outputs = getattr(
-                    hidden_states, "_cornstarch_shape"
-                )
-                assert len(num_tokens_per_encoder_outputs) == len(module.encoders), (
-                    f"Expected to have {len(module.encoders)} hidden states, "
-                    f"got {len(hidden_states)}."
-                )
-
-                # Split merged encoder outputs into separate modal features
-                encoders_outputs = hidden_states.split(
-                    num_tokens_per_encoder_outputs, dim=1
-                )
-
-                # step 2. merge encoded multimodal features into text embeddings
-                inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
-
-                for modal_key, encoder_outputs in reversed(
-                    list(zip(module.encoders.keys(), encoders_outputs))
-                ):
-                    encoder_module: ModalEncoderModule = getattr(
-                        module, f"{modal_key}_encoder"
+                inputs_embeds, attention_mask, labels = (
+                    self.prepare_inputs_for_llm_first_stage(
+                        input_ids=input_ids,
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        **kwargs,
                     )
-                    encoder_inputs = {
-                        arg: kwargs[arg]
-                        for arg in module.encoders_args[modal_key]
-                        if arg in kwargs
-                    }
-
-                    for additional_arg in encoder_module.additional_args:
-                        if additional_arg in kwargs:
-                            encoder_inputs[additional_arg] = kwargs[additional_arg]
-
-                    inputs_embeds, attention_mask, position_ids, labels = (
-                        encoder_module.postprocess_projector_callback(
-                            encoder_inputs,
-                            (encoder_outputs,),
-                            input_ids,
-                            inputs_embeds,
-                            attention_mask,
-                            labels,
-                            pad_token_id=module.language_model.config.pad_token_id,
-                        )
-                    )
+                )
 
                 language_model_inputs = dict(
                     input_ids=None,
@@ -355,8 +358,8 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         # Disable automatic gradient synchronization.
         self.require_grad_sync = False
         try:
-            if self.use_dpp:
-                # If using data parallel processing (use_dpp), disable synchronization too.
+            if self.use_ddp:
+                # If using data parallel processing (use_ddp), disable synchronization too.
                 with self.module.no_sync():
                     yield
             else:
