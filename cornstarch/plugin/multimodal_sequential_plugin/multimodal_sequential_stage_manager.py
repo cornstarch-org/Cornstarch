@@ -1,5 +1,6 @@
 from typing import Optional
 
+import numpy as np
 import torch.distributed as dist
 
 from cornstarch.pipeline_template import PipelineTemplate
@@ -191,7 +192,27 @@ class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
         num_stages: Optional[int] = None,
         num_model_chunks: Optional[int] = None,
     ) -> list[int]:
-        raise NotImplementedError
+        first_encoder_template = next(iter(self.pg_mesh.encoder_templates.keys()))
+        num_layers_per_encoder_stage = [0] * first_encoder_template.num_stages
+        for encoder_template in self.pg_mesh.encoder_templates.keys():
+            num_layers_per_encoder_stage = [
+                existing_num_layers + additional_num_layers
+                for existing_num_layers, additional_num_layers in zip(
+                    num_layers_per_encoder_stage,
+                    encoder_template.get_num_layers_per_stage(),
+                )
+            ]
+
+        return (
+            num_layers_per_encoder_stage
+            + self.pg_mesh.llm_template[0].get_num_layers_per_stage()
+        )
+
+    def _check_my_rank_in_the_stage(self, stage_index: int) -> bool:
+        return (
+            self.stage_index_to_modal[self.stage]
+            == self.stage_index_to_modal[stage_index]
+        )
 
     def get_stage_index(
         self,
@@ -200,4 +221,25 @@ class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
         num_model_chunks: Optional[int] = None,
         num_stages: Optional[int] = None,
     ) -> tuple[int, int]:
-        raise NotImplementedError
+
+        stage = self.stage if stage is None else stage
+        num_stages = self.num_stages if num_stages is None else num_stages
+
+        if not self._check_my_rank_in_the_stage(stage):
+            return (0, 0)
+
+        first_llm_stage_index = next(
+            iter(self.pg_mesh.encoder_templates.keys())
+        ).num_stages
+        first_stage_index = (
+            0 if self.stage < first_llm_stage_index else first_llm_stage_index
+        )
+
+        num_layers_per_stage_accumulated = np.insert(np.cumsum(layers_per_stage), 0, 0)
+
+        return (
+            num_layers_per_stage_accumulated[stage]
+            - num_layers_per_stage_accumulated[first_stage_index],
+            num_layers_per_stage_accumulated[stage + 1]
+            - num_layers_per_stage_accumulated[first_stage_index],
+        )

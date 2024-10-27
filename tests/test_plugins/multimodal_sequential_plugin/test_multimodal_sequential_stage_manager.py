@@ -1,5 +1,9 @@
+import functools
+from collections import defaultdict
+
 import pytest
 import torch.distributed as dist
+from pytest_mock import MockerFixture
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.pipeline_template import PipelineTemplate
@@ -289,5 +293,359 @@ def test_first_last_stage(
             f"rank {rank} expected to have {expected_first_last_stage_in_modal} as first and last stage in modal, "
             f"but got ({stage_manager.is_first_stage(), stage_manager.is_last_stage()})."
         )
+
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size, encoder_templates, llm_template, expected_ranks_in_stage",
+    [
+        (
+            24,
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
+                (0, 2): [
+                    [0, 8],
+                    [0, 9],
+                    [1, 10],
+                    [1, 11],
+                    [2, 12],
+                    [2, 13],
+                    [3, 14],
+                    [3, 15],
+                ],
+                (0, 3): [
+                    [0, 16],
+                    [0, 17],
+                    [1, 18],
+                    [1, 19],
+                    [2, 20],
+                    [2, 21],
+                    [3, 22],
+                    [3, 23],
+                ],
+                (1, 2): [
+                    [4, 8],
+                    [4, 9],
+                    [5, 10],
+                    [5, 11],
+                    [6, 12],
+                    [6, 13],
+                    [7, 14],
+                    [7, 15],
+                ],
+                (0, 1, 3): [
+                    [0, 4, 16],
+                    [0, 4, 17],
+                    [1, 5, 18],
+                    [1, 5, 19],
+                    [2, 6, 20],
+                    [2, 6, 21],
+                    [3, 7, 22],
+                    [3, 7, 23],
+                ],
+            },
+        ),
+        (
+            12,  # encoders are colocated, thus 2*2 + 2*4 = 12
+            {encoder1_template: 2, encoder3_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (0, 1): [[0, 2], [1, 3]],
+                (0, 2): [[0, 4], [0, 5], [1, 6], [1, 7]],
+                (1, 2): [[2, 4], [2, 5], [3, 6], [3, 7]],
+                (0, 1, 3): [[0, 2, 8], [0, 2, 9], [1, 3, 10], [1, 3, 11]],
+            },
+        ),
+        (
+            72,  # 36 ranks * 2 dp
+            {encoder1_template: 2},
+            (llm_template_4stages, 4, 2),
+            {
+                (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
+                (0, 3): [
+                    [0, 24],
+                    [0, 25],
+                    [1, 26],
+                    [1, 27],
+                    [0, 28],
+                    [0, 29],
+                    [1, 30],
+                    [1, 31],
+                    [2, 32],
+                    [2, 33],
+                    [3, 34],
+                    [3, 35],
+                    [2, 36],
+                    [2, 37],
+                    [3, 38],
+                    [3, 39],
+                ],
+                (1, 2): [
+                    [4, 8],
+                    [4, 9],
+                    [5, 10],
+                    [5, 11],
+                    [4, 12],
+                    [4, 13],
+                    [5, 14],
+                    [5, 15],
+                    [6, 16],
+                    [6, 17],
+                    [7, 18],
+                    [7, 19],
+                    [6, 20],
+                    [6, 21],
+                    [7, 22],
+                    [7, 23],
+                ],
+                (0, 2, 3): [
+                    [0, 8, 24],
+                    [0, 9, 25],
+                    [1, 10, 26],
+                    [1, 11, 27],
+                    [0, 12, 28],
+                    [0, 13, 29],
+                    [1, 14, 30],
+                    [1, 15, 31],
+                    [2, 16, 32],
+                    [2, 17, 33],
+                    [3, 18, 34],
+                    [3, 19, 35],
+                    [2, 20, 36],
+                    [2, 21, 37],
+                    [3, 22, 38],
+                    [3, 23, 39],
+                ],
+            },
+        ),
+    ],
+)
+def test_process_group_by_stages(
+    world_size: int,
+    encoder_templates: dict[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
+    expected_ranks_in_stage: dict[tuple[int], list[list[int]]],
+    mocker: MockerFixture,
+):
+    recorded_new_group_calls: dict[int, list] = defaultdict(list)
+    group_by_stages: dict[int, set[tuple[int]]] = defaultdict(set)
+
+    def record_new_group_call_decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            recorded_new_group_calls[dist.get_rank()].append(args[0])
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    mocker.patch.object(
+        dist,
+        "new_group",
+        wraps=record_new_group_call_decorator(dist.new_group),
+    )
+
+    for stage_indices, expected_ranks in expected_ranks_in_stage.items():
+        for rank in range(world_size):
+            dist.init_process_group(
+                backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+            )
+            mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
+            stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+            groups = stage_manager.init_process_group_by_stages(stage_indices)
+
+            if not isinstance(groups, list):
+                groups = [groups]
+
+            for group in groups:
+                if group == dist.GroupMember.NON_GROUP_MEMBER or group is None:
+                    continue
+
+                group_by_stages[rank].add(tuple(dist.get_process_group_ranks(group)))
+
+            # check the ranks in the group are as expected
+            expected_ranks_with_rank = set(
+                tuple(ranks) for ranks in expected_ranks if rank in ranks
+            )
+            assert group_by_stages[rank] == expected_ranks_with_rank
+
+            dist.destroy_process_group()
+
+        # check new_group call order is all the same across all ranks
+        for rank, calls in recorded_new_group_calls.items():
+            assert calls == recorded_new_group_calls[0]
+
+        group_by_stages.clear()
+
+
+@pytest.mark.parametrize(
+    "world_size, encoder_templates, llm_template, expected_stage_index",
+    [
+        (
+            24,
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (0, 1, 2, 3): (0, 0),
+                (4, 5, 6, 7): (1, 1),
+                (8, 9, 10, 11, 12, 13, 14, 15): (2, 0),
+                (16, 17, 18, 19, 20, 21, 22, 23): (3, 1),
+            },
+        ),
+        (
+            12,  # encoders are colocated, thus 2*2 + 2*4 = 12
+            {encoder1_template: 2, encoder3_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (0, 1): (0, 0),
+                (2, 3): (1, 1),
+                (4, 5, 6, 7): (2, 0),
+                (8, 9, 10, 11): (3, 1),
+            },
+        ),
+        (
+            72,  # 36 ranks * 2 dp
+            {encoder1_template: 2},
+            (llm_template_4stages, 4, 2),
+            {
+                (0, 1, 2, 3): (0, 0),
+                (4, 5, 6, 7): (1, 1),
+                tuple(range(8, 24)): (2, 0),
+                tuple(range(24, 40)): (3, 1),
+                tuple(range(40, 56)): (4, 2),
+                tuple(range(56, 72)): (5, 3),
+            },
+        ),
+    ],
+)
+def test_stage(
+    world_size: int,
+    encoder_templates: dict[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
+    expected_stage_index: dict[tuple[int, ...], tuple[int, int]],
+):
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
+        stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+        expected_stage_index_for_rank = next(
+            value for ranks, value in expected_stage_index.items() if rank in ranks
+        )
+        assert (
+            stage_manager.stage,
+            stage_manager.stage_in_modal,
+        ) == expected_stage_index_for_rank, (
+            f"rank {rank} expected: {expected_stage_index_for_rank}, "
+            f"got: {stage_manager.stage, stage_manager.stage_in_modal}."
+        )
+
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size, encoder_templates, llm_template, expected_layer_distribution, expected_stage_index_per_modal",
+    [
+        (
+            24,
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 1),
+            [2, 2, 3, 2],
+            {
+                (0, 1, 2, 3, 4, 5, 6, 7): {  # encoder1
+                    (0,): (0, 2),
+                    (1,): (2, 4),
+                    (2, 3): (0, 0),
+                },
+                tuple(range(8, 24)): {  # llm
+                    (0, 1): (0, 0),
+                    (2,): (0, 3),
+                    (3,): (3, 5),
+                },
+            },
+        ),
+        (
+            12,  # encoders are colocated, thus 2*2 + 2*4 = 12
+            {encoder1_template: 2, encoder3_template: 2},
+            (llm_template_2stages, 4, 1),
+            [5, 4, 3, 2],  # stage 0, 1 has both encoder1 and encoder2.
+            {
+                (0, 1, 2, 3): {  # ranks in encoder1/3 (colocated)
+                    (0,): (0, 5),
+                    (1,): (5, 9),
+                    (2, 3): (0, 0),
+                },
+                tuple(range(4, 12)): {  # ranks in llm
+                    (0, 1): (0, 0),
+                    (2,): (0, 3),
+                    (3,): (3, 5),
+                },
+            },
+        ),
+        (
+            44,
+            {encoder2_template: 4},
+            (llm_template_4stages, 2, 4),
+            [2, 2, 2, 3, 1, 4, 2],
+            {
+                tuple(range(0, 12)): {  # ranks in encoder2
+                    (0,): (0, 2),
+                    (1,): (2, 4),
+                    (2,): (4, 6),
+                    (3, 4, 5, 6): (0, 0),
+                },
+                tuple(range(12, 44)): {  # ranks in llm
+                    (0, 1, 2): (0, 0),
+                    (3,): (0, 3),
+                    (4,): (3, 4),
+                    (5,): (4, 8),
+                    (6,): (8, 10),
+                },
+            },
+        ),
+    ],
+)
+def test_layer_distribution(
+    world_size: int,
+    encoder_templates: dict[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
+    expected_layer_distribution: list[list[str]],
+    # dict of list of ranks -> dict of stage indices -> tuple of start and end layer index
+    expected_stage_index_per_modal: dict[
+        tuple[int, ...], dict[tuple[int, ...], tuple[int, int]]
+    ],
+):
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
+        stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+
+        layers = stage_manager.distribute_layers()
+        assert (
+            layers == expected_layer_distribution
+        ), f"layer distribution expected: {expected_layer_distribution}, got: {layers}."
+
+        stage_index = stage_manager.get_stage_index(layers)
+        expected_stage_indices_for_rank = next(
+            value
+            for ranks, value in expected_stage_index_per_modal.items()
+            if rank in ranks
+        )
+
+        for stage_index in range(len(layers)):
+            expected_layer_indices = next(
+                value
+                for stage_indices, value in expected_stage_indices_for_rank.items()
+                if stage_index in stage_indices
+            )
+            layer_indices = stage_manager.get_stage_index(layers, stage=stage_index)
+            assert (
+                layer_indices == expected_layer_indices
+            ), f"rank {rank} expected stage index: {expected_layer_indices}, got: {layer_indices}."
 
         dist.destroy_process_group()

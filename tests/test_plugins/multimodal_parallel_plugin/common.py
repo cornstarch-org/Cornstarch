@@ -23,14 +23,14 @@ encoder2_template = PipelineTemplate(
 )
 
 llm_template_2stages = PipelineTemplate(
-    "llm", [["layer.0", "layer.1", "layer.2"], ["layer.3", "layer.4", "layer.5"]]
+    "llm", [["layer.0", "layer.1", "layer.2"], ["layer.3", "layer.4"]]
 )
 llm_template_4stages = PipelineTemplate(
     "llm",
     [
-        ["layer.0", "layer.1"],
-        ["layer.2", "layer.3"],
-        ["layer.4", "layer.5"],
-        ["layer.6", "layer.7"],
+        ["layer.0", "layer.1", "layer.2"],
+        ["layer.3"],
+        ["layer.4", "layer.5", "layer.6", "layer.7"],
+        ["layer.8", "layer.9"],
     ],
 )
