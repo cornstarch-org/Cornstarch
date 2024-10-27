@@ -57,6 +57,8 @@ def _flash_attn_anymask_forward(
     
     out, softmax_lse = out, M
 
+    softmax_lse = softmax_lse / 1.44269504 # equal to lse * log2
+
     # TODO(@runyu) flashattn by tridao will return S_dmask, rng_state, but ringattn only need softmax_lse and out
     return out, softmax_lse, None, None
 
@@ -193,6 +195,7 @@ def _flash_attn_casualmask_forward(
         **extra_kern_args)
 
     out, softmax_lse = o, M
+    softmax_lse = softmax_lse / 1.44269504 # equal to lse * log2
 
     # TODO(@runyu) flashattn by tridao will return S_dmask, rng_state, but ringattn only need softmax_lse and out
     return out, None, None, None, None, softmax_lse, None, None
@@ -243,20 +246,51 @@ def _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
     return dq, dk, dv
 
 
-
 class FlashAttnCasualMask(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, causal, softmax_scale, dropout_p):
-        out, softmax_lse, _, _ = _flash_attn_casualmask_forward(q, k, v, causal, softmax_scale, dropout_p)
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size,
+        softcap,
+        alibi_slopes,
+        deterministic,
+        return_softmax,
+    ):
+
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+
+        out, _, _, _, _, softmax_lse, _, _ = _flash_attn_casualmask_forward(q, k, v, causal, softmax_scale, dropout_p)
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
         ctx.dropout_p = dropout_p
-        return out, softmax_lse
+        return out if not return_softmax else (out, softmax_lse, None)
     
     @staticmethod
     def backward(ctx, dout, *args):
         q, k, v, out, softmax_lse = ctx.saved_tensors
         dq, dk, dv = None, None, None
         _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv, ctx.dropout_p, ctx.softmax_scale)
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+
+def flash_attn_triton_func(
+    q,
+    k,
+    v,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),  # -1 means infinite context window
+    softcap=0.0, # 0.0 means deactivated
+    alibi_slopes=None,
+    deterministic=False,
+    return_attn_probs=False,
+):
+    return FlashAttnCasualMask.apply(q, k, v, dropout_p, softmax_scale, causal, window_size, softcap, alibi_slopes, deterministic, return_attn_probs)

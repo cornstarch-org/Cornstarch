@@ -1,6 +1,5 @@
 import torch
 from .utils import RingComm, get_default_args, update_out_and_lse
-from flash_attn import flash_attn_qkvpacked_func
 from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
 from cornstarch.kernel.interface import _flash_attn_anymask_forward, _flash_attn_anymask_backward
 from typing import Callable
@@ -59,7 +58,11 @@ def ring_flash_attn_forward(
             v = next_v
 
     out = out.to(q.dtype)
-    lse = lse.squeeze(dim=-1).transpose(1, 2)
+    if out.shape[:3] != lse.shape[:3]:
+        # NOTE(@runyu): flash attn by tridao need transpose the last two dims
+        lse = lse.squeeze(dim=-1).transpose(1, 2)
+    else:
+        lse = lse.squeeze(dim=-1)
     return out, lse
 
 

@@ -634,8 +634,6 @@ class LlamaAttentionForwards:
                 # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
                 # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
                 logger.info(f"use causal attn version")
-                if dist.get_rank(sp_group) == 0:
-                    print(f"query_states: {query_states}")
                 attn_output = RingAttentionBase.attention(
                     query_states,
                     key_states,
@@ -647,9 +645,8 @@ class LlamaAttentionForwards:
                     # kernel_impl="triton",
                     kernel_impl="cuda",
                 )
+                # check if attn_output is nan
                 if dist.get_rank(sp_group) == 0:
-                    print(f"attn_output: {attn_output}")
-                    # check if attn_output is nan
                     assert not torch.isnan(attn_output).any(), "attn_output contains NaN"
             else:
                 # use anymask version
@@ -664,6 +661,9 @@ class LlamaAttentionForwards:
                     return_softmax=False,
                     dropout_p=self.attention_dropout if self.training else 0.0,
                 )
+                # check if attn_output is nan
+                if dist.get_rank(sp_group) == 0:
+                    assert not torch.isnan(attn_output).any(), "attn_output contains NaN"
 
         elif not attention_mask.bool().all():
             # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
