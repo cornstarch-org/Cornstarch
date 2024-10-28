@@ -553,17 +553,18 @@ def test_stage(
             24,
             {encoder1_template: 2},
             (llm_template_2stages, 4, 1),
-            [2, 2, 3, 2],
             {
-                (0, 1, 2, 3, 4, 5, 6, 7): {  # encoder1
-                    (0,): (0, 2),
-                    (1,): (2, 4),
-                    (2, 3): (0, 0),
+                encoder1_template: [2, 2],
+                llm_template_2stages: [0, 0, 3, 2],
+            },
+            {
+                tuple(range(0, 8)): {  # encoder1
+                    encoder1_template: [(0, 2), (2, 4)],
+                    llm_template_2stages: [(0, 0), (0, 0)],
                 },
                 tuple(range(8, 24)): {  # llm
-                    (0, 1): (0, 0),
-                    (2,): (0, 3),
-                    (3,): (3, 5),
+                    encoder1_template: [(0, 0), (0, 0)],
+                    llm_template_2stages: [(0, 3), (3, 5)],
                 },
             },
         ),
@@ -571,17 +572,21 @@ def test_stage(
             12,  # encoders are colocated, thus 2*2 + 2*4 = 12
             {encoder1_template: 2, encoder3_template: 2},
             (llm_template_2stages, 4, 1),
-            [5, 4, 3, 2],  # stage 0, 1 has both encoder1 and encoder2.
+            {
+                encoder1_template: [2, 2],
+                encoder3_template: [3, 2],
+                llm_template_2stages: [0, 0, 3, 2],
+            },
             {
                 (0, 1, 2, 3): {  # ranks in encoder1/3 (colocated)
-                    (0,): (0, 5),
-                    (1,): (5, 9),
-                    (2, 3): (0, 0),
+                    encoder1_template: [(0, 2), (2, 4)],
+                    encoder3_template: [(0, 3), (3, 5)],
+                    llm_template_2stages: [(0, 0), (0, 0)],
                 },
                 tuple(range(4, 12)): {  # ranks in llm
-                    (0, 1): (0, 0),
-                    (2,): (0, 3),
-                    (3,): (3, 5),
+                    encoder1_template: [(0, 0), (0, 0)],
+                    encoder3_template: [(0, 0), (0, 0)],
+                    llm_template_2stages: [(0, 3), (3, 5)],
                 },
             },
         ),
@@ -589,20 +594,18 @@ def test_stage(
             44,
             {encoder2_template: 4},
             (llm_template_4stages, 2, 4),
-            [2, 2, 2, 3, 1, 4, 2],
+            {
+                encoder2_template: [2, 2, 2],
+                llm_template_4stages: [0, 0, 0, 3, 1, 4, 2],
+            },
             {
                 tuple(range(0, 12)): {  # ranks in encoder2
-                    (0,): (0, 2),
-                    (1,): (2, 4),
-                    (2,): (4, 6),
-                    (3, 4, 5, 6): (0, 0),
+                    encoder2_template: [(0, 2), (2, 4), (4, 6)],
+                    llm_template_4stages: [(0, 0), (0, 0), (0, 0), (0, 0)],
                 },
                 tuple(range(12, 44)): {  # ranks in llm
-                    (0, 1, 2): (0, 0),
-                    (3,): (0, 3),
-                    (4,): (3, 4),
-                    (5,): (4, 8),
-                    (6,): (8, 10),
+                    encoder2_template: [(0, 0), (0, 0), (0, 0)],
+                    llm_template_4stages: [(0, 3), (3, 4), (4, 8), (8, 10)],
                 },
             },
         ),
@@ -612,10 +615,11 @@ def test_layer_distribution(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
     llm_template: tuple[PipelineTemplate, int, int],
-    expected_layer_distribution: list[list[str]],
-    # dict of list of ranks -> dict of stage indices -> tuple of start and end layer index
+    expected_layer_distribution: dict[PipelineTemplate, list[str]],
+    # dict of list of ranks -> dict of stage indices ->
+    # (dict of pipeline template -> tuple of start and end layer index)
     expected_stage_index_per_modal: dict[
-        tuple[int, ...], dict[tuple[int, ...], tuple[int, int]]
+        tuple[int, ...], dict[PipelineTemplate, list[tuple[int, int]]]
     ],
 ):
     for rank in range(world_size):
@@ -625,27 +629,54 @@ def test_layer_distribution(
         mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
         stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
 
-        layers = stage_manager.distribute_layers()
-        assert (
-            layers == expected_layer_distribution
-        ), f"layer distribution expected: {expected_layer_distribution}, got: {layers}."
+        # Encoders have its own stage manager and layer distribution.
+        for encoder in encoder_templates.keys():
+            encoder_layers = stage_manager.encoder_stage_managers[
+                encoder
+            ].distribute_layers()
+            assert (
+                encoder_layers == expected_layer_distribution[encoder]
+            ), f"layer distribution expected: {expected_layer_distribution[encoder]}, got: {encoder_layers}."
 
-        stage_index = stage_manager.get_stage_index(layers)
+        llm_layers = stage_manager.distribute_layers()
+        assert (
+            llm_layers == expected_layer_distribution[llm_template[0]]
+        ), f"layer distribution expected: {expected_layer_distribution[llm_template[0]]}, got: {llm_layers}."
+
+        # Layer indices per stage check
+        stage_index = stage_manager.get_stage_index(llm_layers)
         expected_stage_indices_for_rank = next(
             value
             for ranks, value in expected_stage_index_per_modal.items()
             if rank in ranks
         )
 
-        for stage_index in range(len(layers)):
-            expected_layer_indices = next(
-                value
-                for stage_indices, value in expected_stage_indices_for_rank.items()
-                if stage_index in stage_indices
-            )
-            layer_indices = stage_manager.get_stage_index(layers, stage=stage_index)
-            assert (
-                layer_indices == expected_layer_indices
-            ), f"rank {rank} expected stage index: {expected_layer_indices}, got: {layer_indices}."
+        for template, expected_stage_indices in expected_stage_indices_for_rank.items():
+            if template in encoder_templates:
+                for index, expected_stage_index in enumerate(expected_stage_indices):
+                    # if rank is not for encoders, skip
+                    if not stage_manager._check_my_rank_in_the_stage(index):
+                        continue
+
+                    encoder_stage_manager = stage_manager.encoder_stage_managers[
+                        template
+                    ]
+                    encoder_layers = encoder_stage_manager.distribute_layers()
+                    stage_index = encoder_stage_manager.get_stage_index(
+                        encoder_layers, stage=index
+                    )
+                    assert (
+                        stage_index == expected_stage_index
+                    ), f"rank {rank} expected stage index: {expected_stage_index}, got: {stage_index}."
+            else:
+                assert template == llm_template[0]
+                llm_stage_stage_index = next(iter(encoder_templates.keys())).num_stages
+                for index, expected_stage_index in enumerate(expected_stage_indices):
+                    stage_index = stage_manager.get_stage_index(
+                        llm_layers, stage=llm_stage_stage_index + index
+                    )
+                    assert (
+                        stage_index == expected_stage_index
+                    ), f"rank {rank} expected stage index: {expected_stage_index}, got: {stage_index}."
 
         dist.destroy_process_group()

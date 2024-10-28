@@ -2,6 +2,7 @@ from typing import Optional
 
 import numpy as np
 import torch.distributed as dist
+from colossalai.pipeline.stage_manager import PipelineStageManager
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
@@ -10,6 +11,42 @@ from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager impor
 from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
     MultimodalSequentialProcessGroupMesh,
 )
+
+
+class CoalescedEncoderStageManager(PipelineStageManager):
+    def __init__(self, encoder_template: PipelineTemplate):
+        self.encoder_template = encoder_template
+
+    @property
+    def num_stages(self) -> int:
+        return self.encoder_template.num_stages
+
+    def distribute_layers(
+        self,
+        num_layers: Optional[int] = None,
+        num_stages: Optional[int] = None,
+        num_model_chunks: Optional[int] = None,
+    ) -> list[int]:
+        return self.encoder_template.get_num_layers_per_stage()
+
+    def get_stage_index(
+        self,
+        layers_per_stage: list[int],
+        stage: Optional[int] = None,
+        num_model_chunks: Optional[int] = None,
+        num_stages: Optional[int] = None,
+    ) -> tuple[int, int]:
+        stage = self.stage if stage is None else stage
+        num_stages = self.num_stages if num_stages is None else num_stages
+
+        if stage >= self.encoder_template.num_stages:
+            return (0, 0)
+
+        num_layers_per_stage_accumulated = np.insert(np.cumsum(layers_per_stage), 0, 0)
+        return (
+            num_layers_per_stage_accumulated[stage],
+            num_layers_per_stage_accumulated[stage + 1],
+        )
 
 
 class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
@@ -119,6 +156,11 @@ class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
             sorted(set([self.pg_mesh.mesh[next_coord] for next_coord in next_coords]))
         )
 
+        self.encoder_stage_managers = {
+            encoder_template: CoalescedEncoderStageManager(encoder_template)
+            for encoder_template in pg_mesh.encoder_templates.keys()
+        }
+
     @property
     def num_stages(self) -> int:
         return len(self.stage_index_to_modal)
@@ -192,17 +234,11 @@ class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
         num_stages: Optional[int] = None,
         num_model_chunks: Optional[int] = None,
     ) -> list[int]:
+
         first_encoder_template = next(iter(self.pg_mesh.encoder_templates.keys()))
         num_layers_per_encoder_stage = [0] * first_encoder_template.num_stages
-        for encoder_template in self.pg_mesh.encoder_templates.keys():
-            num_layers_per_encoder_stage = [
-                existing_num_layers + additional_num_layers
-                for existing_num_layers, additional_num_layers in zip(
-                    num_layers_per_encoder_stage,
-                    encoder_template.get_num_layers_per_stage(),
-                )
-            ]
 
+        # encoder stages are not managed by this stage manager, thus return 0.
         return (
             num_layers_per_encoder_stage
             + self.pg_mesh.llm_template[0].get_num_layers_per_stage()
