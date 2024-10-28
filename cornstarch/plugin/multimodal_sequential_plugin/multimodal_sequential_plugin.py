@@ -14,6 +14,7 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
     get_param_info,
 )
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
+from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
 from colossalai.pipeline.schedule.one_f_one_b import OneForwardOneBackwardSchedule
 from torch.optim import Optimizer
@@ -516,3 +517,10 @@ class EncoderCoalescedMultimodalParallelPlugin(HybridParallelPlugin):
                 )
 
         return model, optimizer, criterion, dataloader, lr_scheduler
+
+    def get_checkpoint_io(self) -> CheckpointIO:
+        from cornstarch.plugin.multimodal_parallel_plugin.multimodal_parallel_checkpoint_io import (
+            MultimodalParallelCheckpointIO,
+        )
+
+        return MultimodalParallelCheckpointIO(self)
