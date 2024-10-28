@@ -10,7 +10,7 @@ from cornstarch.kernel.triton.casual_mask_attn import attention
 from torch.testing import assert_close
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 1024, 64), (1, 4, 1024, 128), (1, 8, 1024, 128)])
-@pytest.mark.parametrize("causal", [True])
+@pytest.mark.parametrize("causal", [True]) # TODO(@runyu): add False, it is werid that bwd of triton flash attention don't support causal=False
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_op_casual(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     torch.manual_seed(20)
@@ -49,7 +49,9 @@ def test_op_casual(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     assert_close(ref_dq, tri_dq, atol=atol, rtol=rtol)
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 128, 64), (1, 4, 128, 128), (1, 8, 1024, 128), (4, 7, 512, 128)])
-def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype=torch.float16):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mask_type", ["random", "causal", "full"])
+def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype=torch.float16, mask_type="random"):
     torch.manual_seed(20)
     q = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
     k = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
@@ -58,10 +60,20 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype=torch.float16):
     dout = torch.randn_like(q)
     # reference implementation
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-    
-    # create random mask
-    M = mask = torch.randint(0, 2, (N_CTX, N_CTX), dtype=torch.uint8, device="cuda", requires_grad=False)
-    mask = torch.broadcast_to(mask, (Z, H, N_CTX, N_CTX))
+
+    print(f"Batch size: {Z}, Head size: {H}, Context size: {N_CTX}, Head dim: {HEAD_DIM}, mask type: {mask_type}, dtype: {dtype}")
+
+    if mask_type == "random":
+        # create random mask
+        M = torch.randint(0, 2, (N_CTX, N_CTX), dtype=torch.uint8, device="cuda", requires_grad=False)
+    elif mask_type == "causal":
+        # M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
+        M = torch.ones((N_CTX, N_CTX), device="cuda", dtype=torch.uint8)
+        for i in range(N_CTX):
+            M[i, i+1:] = 0
+    elif mask_type == "full":
+        M = torch.ones((N_CTX, N_CTX), device="cuda", dtype=torch.uint8)
+    mask = torch.broadcast_to(M, (Z, H, N_CTX, N_CTX))
     p[:, :, M == 0] = float("-inf")
     p = torch.softmax(p.float(), dim=-1).to(dtype)
     ref_out = torch.matmul(p, v)
@@ -89,5 +101,8 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype=torch.float16):
 if __name__ == "__main__":
     pytest.main([__file__])
     # test_op_casual(1, 2, 1024, 64, causal=True, dtype=torch.bfloat16)
+    # test_op_casual(1, 2, 1024, 64, causal=False, dtype=torch.bfloat16)
     # test_op_casual(1, 2, 1024, 64, causal=True, dtype=torch.float16)
-    # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16)
+    # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16, mask_type="causal")
+    # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16, mask_type="random")
+    # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16, mask_type="full")
