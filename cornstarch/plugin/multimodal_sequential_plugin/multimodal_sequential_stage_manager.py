@@ -1,8 +1,8 @@
+import copy
 from typing import Optional
 
 import numpy as np
 import torch.distributed as dist
-from colossalai.pipeline.stage_manager import PipelineStageManager
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
@@ -20,7 +20,12 @@ class CoalescedEncoderStageManager(MultiModalPipelineStageManager):
         pg_mesh: MultimodalSequentialProcessGroupMesh,
     ):
         self.encoder_template = encoder_template
-        self.pg_mesh = pg_mesh
+        self.pg_mesh = copy.deepcopy(pg_mesh)
+        self.pg_mesh._mesh = np.take(
+            pg_mesh.mesh,
+            indices=range(encoder_template.num_stages),
+            axis=pg_mesh.pp_axis,
+        )
         self.pipeline_axis = pg_mesh.pp_axis
 
     @property
