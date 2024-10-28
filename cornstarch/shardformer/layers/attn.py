@@ -36,6 +36,10 @@ class RingAttentionBase(torch.autograd.Function):
 
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
+        
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
 
         assert alibi_slopes is None
         out, softmax_lse = ring_flash_attn_forward(
@@ -138,9 +142,9 @@ class RingAttentionBase(torch.autograd.Function):
                 Shape should be [total_q_seqlen, nHeads]
         """
 
-        q = q.transpose(1, 2).contiguous() if kernel_impl == "cuda" else q
-        k = k.transpose(1, 2).contiguous() if kernel_impl == "cuda" else k
-        v = v.transpose(1, 2).contiguous() if kernel_impl == "cuda" else v
+        q = q.transpose(1, 2).contiguous() if kernel_impl == "cuda" else q.contiguous()
+        k = k.transpose(1, 2).contiguous() if kernel_impl == "cuda" else k.contiguous()
+        v = v.transpose(1, 2).contiguous() if kernel_impl == "cuda" else v.contiguous()
 
         out, softmax_lse = RingAttentionBase.apply(
             q,

@@ -202,14 +202,20 @@ def _flash_attn_casualmask_forward(
 
 def _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv, dropout_p, softmax_scale, causal, window_size, alibi_slopes, deterministic):
     assert dout.is_contiguous()
-    # assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride(), f"q.stride(): {q.stride()}, k.stride(): {k.stride()}, v.stride(): {v.stride()}, out.stride(): {out.stride()}, dout.stride(): {dout.stride()}"
-    assert q.shape == k.shape == v.shape, f"Shape mismatch: q: {q.shape}, k: {k.shape}, v: {v.shape}"
-    assert q.shape == out.shape == dout.shape, f"Shape mismatch: q: {q.shape}, out: {out.shape}, dout: {dout.shape}"
+    assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride(), f"q.stride(): {q.stride()}, k.stride(): {k.stride()}, v.stride(): {v.stride()}, out.stride(): {out.stride()}, dout.stride(): {dout.stride()}"
+    # assert q.shape == k.shape == v.shape, f"Shape mismatch: q: {q.shape}, k: {k.shape}, v: {v.shape}"
+    # assert q.shape == out.shape == dout.shape, f"Shape mismatch: q: {q.shape}, out: {out.shape}, dout: {dout.shape}"
     
-    HEAD_DIM = q.shape[-1]
-    dq = torch.empty_like(q)
-    dk = torch.empty_like(k)
-    dv = torch.empty_like(v)
+    HEAD_DIM = k.shape[-1]
+    if dq is None:
+        dq = torch.empty_like(q)
+    if dk is None:
+        dk = torch.empty_like(k)
+    if dv is None:
+        dv = torch.empty_like(v)
+    assert dq.shape == q.shape, f"Shape mismatch: dq: {dq.shape}, q: {q.shape}"
+    assert dk.shape == k.shape, f"Shape mismatch: dk: {dk.shape}, k: {k.shape}"
+    assert dv.shape == v.shape, f"Shape mismatch: dv: {dv.shape}, v: {v.shape}"
     BATCH, N_HEAD, N_CTX = q.shape[:3]
     PRE_BLOCK = 128
     NUM_WARPS, NUM_STAGES = 4, 5
@@ -217,6 +223,7 @@ def _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
     BLK_SLICE_FACTOR = 2
     RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
     arg_k = k
+    softmax_lse = softmax_lse * RCP_LN2
     arg_k = arg_k * (softmax_scale * RCP_LN2)
     PRE_BLOCK = 128
     assert N_CTX % PRE_BLOCK == 0, f"N_CTX: {N_CTX}, PRE_BLOCK: {PRE_BLOCK}"
@@ -271,13 +278,17 @@ class FlashAttnCasualMask(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
         ctx.dropout_p = dropout_p
+        ctx.causal = causal
+        ctx.window_size = window_size
+        ctx.alibi_slopes = alibi_slopes
+        ctx.deterministic = deterministic
         return out if not return_softmax else (out, softmax_lse, None)
     
     @staticmethod
     def backward(ctx, dout, *args):
         q, k, v, out, softmax_lse = ctx.saved_tensors
         dq, dk, dv = None, None, None
-        _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv, ctx.dropout_p, ctx.softmax_scale)
+        dq, dk, dv = _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv, ctx.dropout_p, ctx.softmax_scale, ctx.causal, ctx.window_size, ctx.alibi_slopes, ctx.deterministic)
         return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
 def flash_attn_triton_func(
