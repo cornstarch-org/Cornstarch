@@ -17,7 +17,7 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
 )
 
 from ...distributed_base import GlooDistributedTestBase
-from .common import encoder1_template, encoder2_template, llm_template_2stages
+from ..common import encoder1_template, encoder2_template, llm_template_2stages
 
 
 def create_data() -> list[Any]:

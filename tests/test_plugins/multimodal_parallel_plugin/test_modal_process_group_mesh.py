@@ -11,7 +11,7 @@ from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh impor
     MultiModalProcessGroupMesh,
 )
 
-from .common import (
+from ..common import (
     encoder1_template,
     encoder2_template,
     llm_template_2stages,
