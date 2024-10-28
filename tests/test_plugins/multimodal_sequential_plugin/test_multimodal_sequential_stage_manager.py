@@ -14,7 +14,7 @@ from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
     MultimodalSequentialProcessGroupMesh,
 )
 
-from .common import (
+from ..common import (
     encoder1_template,
     encoder2_template,
     encoder3_template,
