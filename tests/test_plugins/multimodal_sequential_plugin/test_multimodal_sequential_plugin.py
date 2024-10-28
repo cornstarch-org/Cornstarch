@@ -202,3 +202,115 @@ class TestMultiEncoderCoalescedModelInitializationClass(
             assert isinstance(module.module.language_model, language_model_config[2])
 
             dist.destroy_process_group()
+
+    @pytest.mark.parametrize("vision_model_config", vision_configs, ids=["clip"])
+    @pytest.mark.parametrize("audio_model_config", audio_configs, ids=["whisper"])
+    @pytest.mark.parametrize(
+        "language_model_config", language_configs, ids=["mistral", "llama", "opt"]
+    )
+    @pytest.mark.parametrize(
+        "world_size, tp_size, stage_indices",
+        [
+            (
+                20,
+                (2, 2, 2),
+                {
+                    (0, 1, 2, 3): 0,
+                    (4, 5, 6, 7): 1,
+                    (8, 9, 10, 11): 2,
+                    (12, 13, 14, 15): 3,
+                    (16, 17, 18, 19): 4,
+                },
+            ),
+            (
+                16,
+                (2, 2, 4),
+                {
+                    (0, 1): 0,
+                    (2, 3): 1,
+                    (4, 5, 6, 7): 2,
+                    (8, 9, 10, 11): 3,
+                    (12, 13, 14, 15): 4,
+                },
+            ),
+        ],
+        ids=["tp=(2, 2, 2)", "tp=(2, 2, 4)"],
+    )
+    def test_modal_parallelization(
+        self,
+        vision_model_config: tuple[str, PretrainedConfig, Type[PreTrainedModel]],
+        audio_model_config: tuple[str, PretrainedConfig, Type[PreTrainedModel]],
+        language_model_config: tuple[str, PretrainedConfig, Type[PreTrainedModel]],
+        world_size: int,
+        tp_size: tuple[int, int, int],
+        stage_indices: dict[tuple[int], int],
+    ):
+        vision_model_name = vision_model_config[0]
+        audio_model_name = audio_model_config[0]
+        language_model_name = language_model_config[0]
+        encoder_modules, language_module, model = self.generate_multimodal_model(
+            [vision_model_config[1], audio_model_config[1]],
+            [vision_model_config[2], audio_model_config[2]],
+            language_model_config[1],
+            language_model_config[2],
+        )
+
+        vision_tp_size, audio_tp_size, language_tp_size = tp_size
+        for rank in range(world_size):
+            plugin = self.generate_multimodal_plugin(
+                [vision_model_name, audio_model_name],
+                language_model_name,
+                [vision_tp_size, audio_tp_size],
+                language_tp_size,
+            )
+            per_rank_model = copy.deepcopy(model)
+            dist.init_process_group(
+                backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+            )
+            module = plugin.configure(per_rank_model)[0]
+
+            stage_index = next(
+                stage_index
+                for ranks, stage_index in stage_indices.items()
+                if rank in ranks
+            )
+
+            if stage_index < 2:
+                # must only have BOTH encoders
+                assert len(list(module.module.encoder0_encoder.named_parameters())) > 0
+                assert len(list(module.module.encoder1_encoder.named_parameters())) > 0
+                assert len(list(module.module.language_model.named_parameters())) == 0
+
+                assert self.check_layers_cover_all_params(
+                    expected_vision_module_layers_per_stage[vision_model_name][
+                        stage_index
+                    ],
+                    list(
+                        name
+                        for name, _ in module.module.encoder0_encoder.named_parameters()
+                    ),
+                )
+                assert self.check_layers_cover_all_params(
+                    expected_audio_module_layers_per_stage[audio_model_name][
+                        stage_index
+                    ],
+                    list(
+                        name
+                        for name, _ in module.module.encoder1_encoder.named_parameters()
+                    ),
+                )
+            else:
+                assert len(list(module.module.encoder0_encoder.named_parameters())) == 0
+                assert len(list(module.module.encoder1_encoder.named_parameters())) == 0
+                assert len(list(module.module.language_model.named_parameters())) > 0
+                assert self.check_layers_cover_all_params(
+                    expected_language_module_layers_per_stage[language_model_name][
+                        stage_index - 2
+                    ],
+                    list(
+                        name
+                        for name, _ in module.module.language_model.named_parameters()
+                    ),
+                )
+
+            dist.destroy_process_group()
