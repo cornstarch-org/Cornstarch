@@ -58,11 +58,7 @@ def ring_flash_attn_forward(
             v = next_v
 
     out = out.to(q.dtype)
-    if out.shape[:3] != lse.shape[:3]:
-        # NOTE(@runyu): flash attn by tridao need transpose the last two dims
-        lse = lse.squeeze(dim=-1).transpose(1, 2)
-    else:
-        lse = lse.squeeze(dim=-1)
+    lse = lse.squeeze(dim=-1)
     return out, lse
 
 

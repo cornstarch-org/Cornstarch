@@ -124,9 +124,6 @@ def _update_out_and_lse(
     else:
         block_lse = block_lse.unsqueeze(dim=-1)
 
-    print(f"shape of block_out: {block_out.shape}, shape of block_lse: {block_lse.shape}")
-    print(f"shape of out: {out.shape}, shape of lse: {lse.shape}")
-
     # new_lse = lse + torch.log(1 + torch.exp(block_lse - lse))
     # torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out
     # For additional context and discussion, please refer to:
