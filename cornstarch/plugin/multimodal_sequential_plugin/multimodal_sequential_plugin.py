@@ -1,13 +1,11 @@
 import inspect
-import random
-from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from types import MethodType
 from typing import Any, Callable, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from colossalai.accelerator import get_accelerator
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
     HybridParallelAMPOptimizer,
@@ -16,40 +14,36 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
     get_param_info,
 )
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
-from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
-from colossalai.logging import get_dist_logger
-from torch import nn
+from colossalai.pipeline.schedule.one_f_one_b import OneForwardOneBackwardSchedule
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
-from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
-from transformers.modeling_outputs import BaseModelOutputWithPast
+from torch.optim.lr_scheduler import LRScheduler
+from torch.utils.data import DataLoader
+from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.utils import logging
 
 from cornstarch.models.multimodal_language_model import (
-    ModalEncoderModule,
     MultimodalModel,
 )
-from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.plugin.multimodal_parallel_plugin.modal_parallel_plugin import (
+from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
-)
-from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh import (
-    MultiModalProcessGroupMesh,
-)
-from cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b import (
-    MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
+    MultimodalParallelModule,
 )
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
+)
+from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_stage_manager import (
+    MultimodalSequentialPipelineStageManager,
+)
+from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
+    MultimodalSequentialProcessGroupMesh,
 )
 from cornstarch.shardformer.shard.shard_config import ShardConfig
 
 logger = logging.get_logger(__name__)
 
 
-class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
+class EncoderCoalescedMultimodalParallelModule(MultimodalParallelModule):
     def __init__(
         self,
         module: MultimodalModel,
@@ -57,9 +51,8 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         dp_group: dist.ProcessGroup,
         tp_group: dist.ProcessGroup,
         sp_group: dist.ProcessGroup,
-        encoder_shard_configs: Optional[dict[str, ShardConfig]] = None,
-        llm_shard_config: Optional[ShardConfig] = None,
-        decoder_shard_configs: Optional[dict[str, ShardConfig]] = None,
+        encoder_shard_configs: dict[str, ShardConfig],
+        llm_shard_config: ShardConfig,
     ):
         assert isinstance(
             module, MultimodalModel
@@ -87,33 +80,17 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         self.shared_param_process_groups = []
         self.encoder_shard_configs = encoder_shard_configs
         self.llm_shard_config = llm_shard_config
-        self.decoder_shard_configs = decoder_shard_configs
 
         # Cache my modal so that do forward only on the modal
         stage_manager: MultiModalPipelineStageManager = self.stage_manager
         my_modal_template = stage_manager.stage_index_to_modal[
             stage_manager.pg_mesh.coords[0][stage_manager.pipeline_axis]
         ]
-        my_modal_name: str = None
-        if my_modal_template in stage_manager.pg_mesh.encoder_templates.keys():
-            my_modal_name = next(
-                modal_name
-                for modal_name, shard_config in encoder_shard_configs.items()
-                if shard_config.pipeline_template == my_modal_template
-            )
-            my_modal_name = f"{my_modal_name}_encoder"
-        elif my_modal_template == stage_manager.pg_mesh.llm_template[0]:
+        my_modal_name: list[str] | str = None
+        if my_modal_template == stage_manager.pg_mesh.llm_template[0]:
             my_modal_name = "language_model"
-        elif my_modal_template in stage_manager.pg_mesh.decoder_templates.keys():
-            my_modal_name = next(
-                modal_name
-                for modal_name, shard_config in decoder_shard_configs.items()
-                if shard_config.pipeline_template == my_modal_template
-            )
-            my_modal_name = f"{my_modal_name}_decoder"
-        assert (
-            my_modal_name is not None
-        ), f"Cannot find a modal module that rank {dist.get_rank()} owns."
+        else:
+            my_modal_name = list(module.encoders.keys())
         self.my_modal_name = my_modal_name
 
         # setting mixed_precision
@@ -127,57 +104,8 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
         module = module.to(get_accelerator().get_current_device())
 
-        super().__init__(module)
-
-    def prepare_inputs_for_llm_first_stage(
-        self,
-        input_ids: torch.LongTensor,
-        hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ) -> tuple[torch.FloatTensor, torch.Tensor, torch.LongTensor]:
-        module: MultimodalModel = self.module
-        # Forward in the first stage of the language model
-        num_tokens_per_encoder_outputs = getattr(hidden_states, "_cornstarch_shape")
-        assert len(num_tokens_per_encoder_outputs) == len(module.encoders), (
-            f"Expected to have {len(module.encoders)} hidden states, "
-            f"got {len(hidden_states)}."
-        )
-
-        # Split merged encoder outputs into separate modal features
-        encoders_outputs = hidden_states.split(num_tokens_per_encoder_outputs, dim=1)
-
-        inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
-
-        # merge encoded multimodal features into text embeddings
-        for modal_key, encoder_outputs in reversed(
-            list(zip(module.encoders.keys(), encoders_outputs))
-        ):
-            encoder_module: ModalEncoderModule = getattr(module, f"{modal_key}_encoder")
-            encoder_inputs = {
-                arg: kwargs[arg]
-                for arg in module.encoders_args[modal_key]
-                if arg in kwargs
-            }
-
-            for additional_arg in encoder_module.additional_args:
-                if additional_arg in kwargs:
-                    encoder_inputs[additional_arg] = kwargs[additional_arg]
-
-            inputs_embeds, attention_mask, position_ids, labels = (
-                encoder_module.postprocess_projector_callback(
-                    encoder_inputs,
-                    (encoder_outputs,),
-                    input_ids,
-                    inputs_embeds,
-                    attention_mask,
-                    labels,
-                    pad_token_id=module.language_model.config.pad_token_id,
-                )
-            )
-
-        return inputs_embeds, attention_mask, labels
+        ModelWrapper.__init__(self, module)
+        AMPModelMixin.__init__(self)
 
     def forward(
         self,
@@ -204,22 +132,22 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             # Does not support CLIP-like encoder only multimodal model yet
             raise NotImplementedError
 
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else module.language_model.config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else module.language_model.config.output_hidden_states
-        )
         return_dict = (
             return_dict
             if return_dict is not None
             else module.language_model.config.return_dict
         )
 
+        if output_attentions:
+            logger.warning_once(
+                "output_attentions=True is not supported for pipeline models at the moment."
+            )
+            output_attentions = False
+        if output_hidden_states:
+            logger.warning_once(
+                "output_hidden_states=True is not supported for pipeline models at the moment."
+            )
+            output_hidden_states = False
         if use_cache:
             logger.warning_once(
                 "use_cache=True is not supported for pipeline models at the moment."
@@ -306,103 +234,66 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     language_model_inputs.pop(key)
 
             return module.language_model(**language_model_inputs)
+
         elif "encoder" in self.my_modal_name:
-            # It assumes currently they are parallelized.
-            # For colocated model forward, use MultimodalSequentialPlugin.
-            modal_key = self.my_modal_name.replace("_encoder", "")
-            encoder_module = getattr(module, self.my_modal_name)
-
+            encoder_outputs = {}
             if stage_manager.is_first_stage(check_only_in_modal=True):
-                assert hidden_states is None
-                encoder_inputs = {
-                    arg: kwargs[arg]
-                    for arg in module.encoders_args[modal_key]
-                    if arg in kwargs
-                }
+                for modal_key, encoder_module in module.encoders.items():
+                    assert hidden_states is None
+                    encoder_inputs = {
+                        arg: kwargs[arg]
+                        for arg in module.encoders_args[modal_key]
+                        if arg in kwargs
+                    }
 
-                for additional_arg in encoder_module.additional_args:
-                    if additional_arg in kwargs:
-                        encoder_inputs[additional_arg] = kwargs[additional_arg]
+                    for additional_arg in encoder_module.additional_args:
+                        if additional_arg in kwargs:
+                            encoder_inputs[additional_arg] = kwargs[additional_arg]
+
+                    encoder_outputs[modal_key] = encoder_module(
+                        **encoder_inputs,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict,
+                    )
             else:
-                assert hidden_states is not None
-                encoder_inputs = dict(hidden_states=hidden_states)
+                for modal_key, encoder_module in module.encoders.items():
+                    assert hidden_states is not None
 
-            return encoder_module(
-                **encoder_inputs,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
+                    previous_stage_output: ModelOutput | tuple = kwargs.get(modal_key)
+                    encoder_inputs = dict(hidden_states=previous_stage_output[0])
+
+                    encoder_outputs[modal_key] = encoder_module(
+                        **encoder_inputs,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict,
+                    )
+
+            # Merge multiple encoder output results
+            hidden_states = torch.cat(
+                outputs[0] for outputs in encoder_outputs.values()
             )
-        elif "decoder" in self.my_modal_name:
+            setattr(
+                hidden_states,
+                "_cornstarch_shape",
+                [outputs[0].shape[1] for outputs in encoder_outputs.values()],
+            )
+
+            return ModelOutput(hidden_states=hidden_states)
+        else:
             raise NotImplementedError()
 
-    def sync_shared_params(self):
-        for shared_param, group in zip(
-            self.shared_params, self.shared_param_process_groups
-        ):
-            if self.stage_manager.stage in shared_param:
-                param = shared_param[self.stage_manager.stage]
-                dist.all_reduce(param.grad, group=group)
-            dist.barrier()
 
-    @contextmanager
-    def no_sync(self):
-        r"""
-        A context manager to disable automatic gradient synchronization (all-reduce) and allow manual synchronization
-        when 'no_sync' is active. Alternatively, synchronization will occur in the first forward-backward pass
-        when exiting the context.
-        """
-
-        # Store the current value of 'require_grad_sync' to restore it later.
-        old_require_grad_sync = self.require_grad_sync
-        # Disable automatic gradient synchronization.
-        self.require_grad_sync = False
-        try:
-            if self.use_ddp:
-                # If using data parallel processing (use_ddp), disable synchronization too.
-                with self.module.no_sync():
-                    yield
-            else:
-                yield
-        finally:
-            # Restore the original value of 'require_grad_sync'.
-            self.require_grad_sync = old_require_grad_sync
-
-    def sync_dp_grads(self):
-        r"""
-        Synchronize gradients across data parallelism (DP) if the DP group size is greater than 1.
-        This function performs an all-reduce operation to combine gradients from different devices in the DP group.
-
-        Args:
-            None
-
-        Returns:
-            None
-        """
-
-        # Check if the DP group size is 1, meaning no synchronization is needed.
-        if self.dp_group.size() == 1:
-            return
-
-        # Iterate through the model's parameters and perform gradient synchronization.
-        for p in self.module.parameters():
-            if p.grad is not None:
-                # Perform all-reduce to combine gradients from different devices.
-                dist.all_reduce(p.grad, group=self.dp_group)
-                # Normalize the gradient by dividing it by the DP group size.
-                p.grad.div_(self.dp_group.size())
-
-    def sync_sp_grads(self):
-        pass
-
-    def _hook_context(self):
-        return nullcontext()
-
-
-class MultimodalParallelPlugin(HybridParallelPlugin):
+class EncoderCoalescedMultimodalParallelPlugin(HybridParallelPlugin):
     """Plugin for multimodal language model.
-    Tensor parallel, pipeline parallel, and data parallel are combined in this plugin.
-    Each modal has its own parallel configuration defined in ModalParallelPlugin.
+    Unlike `MultimodalParallelPlugin`, this plugin is designed to mimic
+    existing chain-like Megatron-LM style pipeline parallelism, where
+    pipeline stages are executed sequentailly without DAG-like scheduling.
+
+    Encoders may have different `ModalParallelPlugin` instances, but their
+    parallelization configuration (e.g. tp_size, sp_size, sequence_parallelism_mode,
+    number of pipeline stages, etc) must be the same.
     """
 
     def __init__(
@@ -427,12 +318,29 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         make_vocab_size_divisible_by: int = 64,
     ):
         PipelinePluginBase.__init__(self)
-        self.logger = get_dist_logger()
+
+        first_plugin = next(iter(encoder_plugins.values()))
+        for plugin in encoder_plugins.values():
+            assert (
+                first_plugin.tp_size == plugin.tp_size
+            ), "All encoder plugins must have the same number of tensor parallel degree."
+            assert (
+                first_plugin.sp_size == plugin.sp_size
+            ), "All encoder plugins must have the same number of sequence parallel degree."
+            assert (
+                first_plugin.sequence_parallelism_mode
+                == plugin.sequence_parallelism_mode
+            ), "All encoder plugins must have the same sequence parallelism mode."
+            assert (
+                first_plugin.pipeline_template.num_stages
+                == plugin.pipeline_template.num_stages
+            ), "All encoder plugins must have the same number of stages."
+
         self.encoder_plugins = encoder_plugins
         self.language_model_plugin = language_model_plugin
 
         self.precision = precision
-        self.zero_stage = 0
+        self.zero_config = 0
 
         if microbatch_size is None or num_microbatches is None:
             raise ValueError(
@@ -472,56 +380,11 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
     def __del__(self):
         pass
 
-    def add_encoder_plugins(self, name: str, plugin: ModalParallelPlugin):
-        self.encoder_plugins[name] = plugin
-
-    @property
-    def enable_pipeline_parallelism(self) -> bool:
-        return True
-
-    def supported_devices(self) -> list[str]:
-        return ["cuda"]
-
-    def supported_precisions(self) -> list[str]:
-        return ["fp16", "bf16", "fp32"]
-
-    def control_device(self) -> bool:
-        return True
-
-    def control_precision(self) -> bool:
-        return True
-
-    def support_no_sync(self) -> bool:
-        return True
-
-    def support_lora(self) -> bool:
-        """LoRA must manually be added to each modal before generating the plugin."""
-        return False
-
-    def control_checkpoint_io(self) -> bool:
-        return True
-
     def init_distributed(self):
         if self.distributed_initialized:
             return
 
-        modal_templates: dict[PipelineTemplate, int] = {}
-        execution_order: list[tuple[PipelineTemplate, PipelineTemplate]] = []
-        for plugin in self.encoder_plugins.values():
-            modal_templates[plugin.pipeline_template] = plugin.tp_size
-            execution_order.append(
-                (plugin.pipeline_template, self.language_model_plugin.pipeline_template)
-            )
-        modal_templates[self.language_model_plugin.pipeline_template] = (
-            self.language_model_plugin.tp_size
-        )
-
-        # TODO: add decoders when we support multimodal generation
-        # Note that current schedule is encoder-llm only.
-        # Decoder-llm needs another schedule, and encoder-decoder cannot be trained together.
-        # TODO: implement interleaved parallelism to train encoder and decoder at the same time.
-
-        self.pg_mesh = MultiModalProcessGroupMesh(
+        self.pg_mesh = MultimodalSequentialProcessGroupMesh(
             encoder_templates={
                 plugin.pipeline_template: plugin.tp_size
                 for plugin in self.encoder_plugins.values()
@@ -532,7 +395,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 self.language_model_plugin.sp_size,
             ),
         )
-        self.stage_manager = MultiModalPipelineStageManager(
+        self.stage_manager = MultimodalSequentialPipelineStageManager(
             self.pg_mesh, self.pg_mesh.pp_axis
         )
         self.dp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.dp_axis)
@@ -543,9 +406,11 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
-        # TODO: implement a new one if needed!
-        self.schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
-            self.stage_manager, self.num_microbatches, self.microbatch_size
+        self.schedule = OneForwardOneBackwardSchedule(
+            self.stage_manager,
+            self.num_microbatches,
+            self.microbatch_size,
+            enable_metadata_cache=False,
         )
 
         self.shard_config.tensor_parallel_process_group = self.tp_group
@@ -586,9 +451,18 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 shard_config = replace(
                     self.shard_config,
                     pipeline_template=encoder.pipeline_template,
+                    pipeline_stage_manager=self.stage_manager.encoder_stage_managers[
+                        encoder.pipeline_template
+                    ],
                 )
                 module = model.get_submodule(f"{modal_name}_encoder")
-                module = encoder.configure(module, shard_config, self.stage_manager)
+                module = encoder.configure(
+                    module,
+                    shard_config,
+                    self.stage_manager.encoder_stage_managers[
+                        encoder.pipeline_template
+                    ],
+                )
                 model.add_module(f"{modal_name}_encoder", module)
                 encoder_shard_configs[modal_name] = shard_config
 
@@ -602,7 +476,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             )
             model.add_module("language_model", module)
 
-            model = MultimodalParallelModule(
+            model = EncoderCoalescedMultimodalParallelModule(
                 model,
                 precision=self.precision,
                 dp_group=self.dp_group,
@@ -642,52 +516,3 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 )
 
         return model, optimizer, criterion, dataloader, lr_scheduler
-
-    def prepare_dataloader(
-        self,
-        dataset: Dataset,
-        batch_size: int,
-        shuffle: bool = False,
-        seed: int = 1024,
-        drop_last: bool = False,
-        pin_memory: bool = False,
-        num_workers: int = 0,
-        distributed_sampler_cls=None,
-        **kwargs,
-    ):
-        assert dist.is_initialized(), "torch.distributed is not initialized."
-        self.init_distributed()
-
-        _kwargs = kwargs.copy()
-        distributed_sampler_cls = distributed_sampler_cls or DistributedSampler
-        sampler = distributed_sampler_cls(
-            dataset,
-            num_replicas=self.pg_mesh.size(self.pg_mesh.dp_axis),
-            rank=self.pg_mesh.coords[0][self.pg_mesh.dp_axis],
-            shuffle=shuffle,
-        )
-
-        # Deterministic dataloader
-        def seed_worker(worker_id):
-            worker_seed = seed
-            np.random.seed(worker_seed)
-            torch.manual_seed(worker_seed)
-            random.seed(worker_seed)
-
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            sampler=sampler,
-            worker_init_fn=seed_worker,
-            drop_last=drop_last,
-            pin_memory=pin_memory,
-            num_workers=num_workers,
-            **_kwargs,
-        )
-
-    def get_checkpoint_io(self) -> CheckpointIO:
-        from cornstarch.plugin.multimodal_parallel_plugin.multimodal_parallel_checkpoint_io import (
-            MultimodalParallelCheckpointIO,
-        )
-
-        return MultimodalParallelCheckpointIO(self)

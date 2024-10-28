@@ -13,9 +13,15 @@ from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
 )
 
 
-class CoalescedEncoderStageManager(PipelineStageManager):
-    def __init__(self, encoder_template: PipelineTemplate):
+class CoalescedEncoderStageManager(MultiModalPipelineStageManager):
+    def __init__(
+        self,
+        encoder_template: PipelineTemplate,
+        pg_mesh: MultimodalSequentialProcessGroupMesh,
+    ):
         self.encoder_template = encoder_template
+        self.pg_mesh = pg_mesh
+        self.pipeline_axis = pg_mesh.pp_axis
 
     @property
     def num_stages(self) -> int:
@@ -47,6 +53,16 @@ class CoalescedEncoderStageManager(PipelineStageManager):
             num_layers_per_stage_accumulated[stage],
             num_layers_per_stage_accumulated[stage + 1],
         )
+
+    def is_first_stage(
+        self, ignore_chunk: bool = False, check_only_in_modal: bool = True
+    ) -> bool:
+        return self.stage == 0
+
+    def is_last_stage(
+        self, ignore_chunk: bool = False, check_only_in_modal: bool = True
+    ) -> bool:
+        return self.stage == self.encoder_template.num_stages - 1
 
 
 class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
@@ -157,7 +173,9 @@ class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
         )
 
         self.encoder_stage_managers = {
-            encoder_template: CoalescedEncoderStageManager(encoder_template)
+            encoder_template: CoalescedEncoderStageManager(
+                encoder_template, self.pg_mesh
+            )
             for encoder_template in pg_mesh.encoder_templates.keys()
         }
 

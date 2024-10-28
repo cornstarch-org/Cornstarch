@@ -1,3 +1,6 @@
+import itertools
+from collections import defaultdict
+
 import numpy as np
 import torch.distributed as dist
 
@@ -82,6 +85,7 @@ class MultimodalSequentialProcessGroupMesh(MultiModalProcessGroupMesh):
 
         meshes: list[list[list[int]]] = []
         rank_index = 0
+        modal_to_ranks: dict[PipelineTemplate, list[int]] = defaultdict(list)
 
         # Encoder ranks
         for _ in range(encoder_pp_size):
@@ -95,6 +99,8 @@ class MultimodalSequentialProcessGroupMesh(MultiModalProcessGroupMesh):
                 rank_index += encoder_tp_size
                 tp_mesh = [ranks for _ in range(llm_sp_size)]
                 stage_mesh.append(tp_mesh)
+                for modal in encoder_templates.keys():
+                    modal_to_ranks[modal].extend(list(itertools.chain(*tp_mesh)))
             meshes.append(stage_mesh)
 
         # LLM ranks
@@ -111,6 +117,7 @@ class MultimodalSequentialProcessGroupMesh(MultiModalProcessGroupMesh):
                     rank_index += llm_tp_size
                     tp_mesh.append(ranks)
                 stage_mesh.append(tp_mesh)
+                modal_to_ranks[llm_template[0]].extend(list(itertools.chain(*tp_mesh)))
             meshes.append(stage_mesh)
 
         self._rank = dist.get_rank()
@@ -120,3 +127,7 @@ class MultimodalSequentialProcessGroupMesh(MultiModalProcessGroupMesh):
         self._coords = MultiModalProcessGroupMesh.unravel(self._rank, self._mesh)
         self._ranks_to_group: dict[tuple[int, ...], dist.ProcessGroup] = {}
         self._group_to_ranks: dict[dist.ProcessGroup, tuple[int, ...]] = {}
+
+        self.modal_to_ranks = {
+            modal: list(set(ranks)) for modal, ranks in modal_to_ranks.items()
+        }
