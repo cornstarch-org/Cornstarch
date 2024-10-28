@@ -57,7 +57,7 @@ def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kern
 
     return q, k, v, dout, local_q, local_k, local_v, local_dout
 
-def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl):
+def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, causal=True):
     # Initialize process group
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
@@ -67,6 +67,9 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
     set_seed(rank)
 
     rtol = atol = 7e-3
+
+    if dist.get_rank() == 0:
+        print(f"Running test with batch_size={batch_size}, seq_len={seq_len}, num_heads={num_heads}, head_dim={head_dim}, world_size={world_size}, kernel_impl={kernel_impl}, causal={causal}")
     
     # Set up input tensors
     torch.cuda.set_device(rank)
@@ -92,7 +95,7 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
     local_v.retain_grad()
     assert torch.allclose(q.chunk(world_size, dim=seq_dim)[rank], local_q)
 
-    out, lse, _ = attn_func(q, k, v, dropout_p=0.0, causal=True, window_size=(-1, -1), alibi_slopes=None, deterministic=False, return_attn_probs=True)
+    out, lse, _ = attn_func(q, k, v, dropout_p=0.0, causal=causal, window_size=(-1, -1), alibi_slopes=None, deterministic=False, return_attn_probs=True)
 
     refer_local_out = out.chunk(world_size, dim=seq_dim)[rank] # [batch_size, num_heads, seq_len // world_size, head_dim]
     refer_local_lse = lse.chunk(world_size, dim=-1)[rank] # [batch_size, num_heads, seq_len // world_size]
@@ -102,7 +105,7 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
         local_k,
         local_v,
         dist.group.WORLD,
-        True, # causal
+        causal, # causal
         True, # return_softmax
         0.0, # dropout_p
         None, # softmax_scale
@@ -168,19 +171,20 @@ def test_ring_flash_attn_vs_flash_attn(batch_size, seq_len, num_heads, head_dim,
     )
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    # pytest.main([__file__])
 
-    # batch_size = 4
-    # seq_len = 512
-    # num_heads = 5
-    # head_dim = 128
-    # world_size = 1
+    batch_size = 4
+    seq_len = 512
+    num_heads = 5
+    head_dim = 128
+    world_size = 4
     # kernel_impl = "triton"
-    # # kernel_impl = "cuda"
-    # mp.spawn(
-    #     run_test,
-    #     args=(world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl),
-    #     nprocs=world_size,
-    #     join=True
-    # )
+    kernel_impl = "cuda"
+    causal = False
+    mp.spawn(
+        run_test,
+        args=(world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, causal),
+        nprocs=world_size,
+        join=True
+    )
 

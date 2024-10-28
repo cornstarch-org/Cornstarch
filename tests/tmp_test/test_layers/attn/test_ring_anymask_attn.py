@@ -134,27 +134,27 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
     print(f"Test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func")
 
     # Backward pass
-    # out.backward(dout)
-    # dq = q.grad
-    # dk = k.grad
-    # dv = v.grad
-    # local_dq = dq.chunk(world_size, dim=seq_dim)[rank]
-    # local_dk = dk.chunk(world_size, dim=seq_dim)[rank]
-    # local_dv = dv.chunk(world_size, dim=seq_dim)[rank]
+    out.backward(dout)
+    dq = q.grad
+    dk = k.grad
+    dv = v.grad
+    local_dq = dq.chunk(world_size, dim=seq_dim)[rank]
+    local_dk = dk.chunk(world_size, dim=seq_dim)[rank]
+    local_dv = dv.chunk(world_size, dim=seq_dim)[rank]
 
-    # ring_out.backward(local_dout)
-    # ring_dq = local_q.grad
-    # ring_dk = local_k.grad
-    # ring_dv = local_v.grad
+    ring_out.backward(local_dout)
+    ring_dq = local_q.grad
+    ring_dk = local_k.grad
+    ring_dv = local_v.grad
 
-    # assert_close(local_dq, ring_dq, rtol=rtol, atol=atol), \
-    #     f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
-    # assert_close(local_dk, ring_dk, rtol=rtol, atol=atol), \
-    #     f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
-    # assert_close(local_dv, ring_dv, rtol=rtol, atol=atol), \
-    #     f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
+    assert_close(local_dq, ring_dq, rtol=rtol, atol=atol), \
+        f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
+    assert_close(local_dk, ring_dk, rtol=rtol, atol=atol), \
+        f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
+    assert_close(local_dv, ring_dv, rtol=rtol, atol=atol), \
+        f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
 
-    # print(f"Backward test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func")
+    print(f"Backward test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func")
 
     # Clean up
     dist.destroy_process_group()
@@ -176,8 +176,6 @@ def test_ring_flash_attn_vs_flash_attn(batch_size, seq_len, num_heads, head_dim,
         nprocs=world_size,
         join=True
     )
-
-# CUDA_VISIBLE_DEVICES=6,7 python tests/tmp_test/test_layers/attn/test_ring_anymask_attn.py
 
 if __name__ == "__main__":
     # pytest.main([__file__])
