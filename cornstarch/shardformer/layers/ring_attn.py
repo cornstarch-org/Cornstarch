@@ -177,24 +177,23 @@ def ring_flash_attn_anymask_forward(
             next_v: torch.Tensor = comm.send_recv(v)
             comm.commit()
 
-        if not causal or step <= comm.rank:
-            params = get_default_args(ATTN_IMPL).copy()
-            params.update(
-                {
-                    "q": q,
-                    "k": k,
-                    "v": v,
-                    "mask": mask,
-                    "dropout_p": dropout_p,
-                    "softmax_scale": softmax_scale,
-                    "window_size_left": window_size_left,
-                    "window_size_right": window_size_right,
-                    "alibi_slopes": alibi_slopes,
-                    "return_softmax": True and dropout_p > 0,
-                }
-            )
-            block_out, block_lse, _, _ = ATTN_IMPL(**params)
-            out, lse = update_out_and_lse(out, lse, block_out, block_lse)
+        params = get_default_args(ATTN_IMPL).copy()
+        params.update(
+            {
+                "q": q,
+                "k": k,
+                "v": v,
+                "mask": mask,
+                "dropout_p": dropout_p,
+                "softmax_scale": softmax_scale,
+                "window_size_left": window_size_left,
+                "window_size_right": window_size_right,
+                "alibi_slopes": alibi_slopes,
+                "return_softmax": True and dropout_p > 0,
+            }
+        )
+        block_out, block_lse, _, _ = ATTN_IMPL(**params)
+        out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
             comm.wait()
@@ -202,7 +201,7 @@ def ring_flash_attn_anymask_forward(
             v = next_v
 
     out = out.to(q.dtype)
-    lse = lse.squeeze(dim=-1).transpose(1, 2)
+    lse = lse.squeeze(dim=-1)
     return out, lse
 
 
@@ -241,43 +240,77 @@ def ring_flash_attn_anymask_backward(
             next_k = kv_comm.send_recv(k)
             next_v = kv_comm.send_recv(v)
             kv_comm.commit()
-        if step <= kv_comm.rank:
-            params = get_default_args(ATTN_IMPL).copy()
-            params.update(
-                {
-                    "dout": dout,
-                    "q": q,
-                    "k": k,
-                    "v": v,
-                    "out": out,
-                    "softmax_lse": softmax_lse,
-                    "dq": block_dq_buffer,
-                    "dk": block_dk_buffer,
-                    "dv": block_dv_buffer,
-                    "mask": mask,
-                    "dropout_p": dropout_p,
-                    "softmax_scale": softmax_scale,
-                    "window_size_left": window_size_left,
-                    "window_size_right": window_size_right,
-                    "alibi_slopes": alibi_slopes,
-                    "deterministic": deterministic,
-                }
-            )
-            ATTN_IMPL(**params)
 
-            if dq is None:
-                dq = block_dq_buffer.to(torch.float32)
-                dk = block_dk_buffer.to(torch.float32)
-                dv = block_dv_buffer.to(torch.float32)
-            else:
-                dq += block_dq_buffer
-                d_kv_comm.wait()
-                dk = block_dk_buffer + next_dk
-                dv = block_dv_buffer + next_dv
-        elif step != 0:
+        params = get_default_args(ATTN_IMPL).copy()
+        params.update(
+            {
+                "dout": dout,
+                "q": q,
+                "k": k,
+                "v": v,
+                "out": out,
+                "softmax_lse": softmax_lse,
+                "dq": block_dq_buffer,
+                "dk": block_dk_buffer,
+                "dv": block_dv_buffer,
+                "mask": mask,
+                "dropout_p": dropout_p,
+                "softmax_scale": softmax_scale,
+                "window_size_left": window_size_left,
+                "window_size_right": window_size_right,
+                "alibi_slopes": alibi_slopes,
+                "deterministic": deterministic,
+            }
+        )
+        ATTN_IMPL(**params)
+
+        if dq is None:
+            dq = block_dq_buffer.to(torch.float32)
+            dk = block_dk_buffer.to(torch.float32)
+            dv = block_dv_buffer.to(torch.float32)
+        else:
+            dq += block_dq_buffer
             d_kv_comm.wait()
-            dk = next_dk
-            dv = next_dv
+            dk = block_dk_buffer + next_dk
+            dv = block_dv_buffer + next_dv
+
+        # if step <= kv_comm.world_size:
+        #     params = get_default_args(ATTN_IMPL).copy()
+        #     params.update(
+        #         {
+        #             "dout": dout,
+        #             "q": q,
+        #             "k": k,
+        #             "v": v,
+        #             "out": out,
+        #             "softmax_lse": softmax_lse,
+        #             "dq": block_dq_buffer,
+        #             "dk": block_dk_buffer,
+        #             "dv": block_dv_buffer,
+        #             "mask": mask,
+        #             "dropout_p": dropout_p,
+        #             "softmax_scale": softmax_scale,
+        #             "window_size_left": window_size_left,
+        #             "window_size_right": window_size_right,
+        #             "alibi_slopes": alibi_slopes,
+        #             "deterministic": deterministic,
+        #         }
+        #     )
+        #     ATTN_IMPL(**params)
+
+        #     if dq is None:
+        #         dq = block_dq_buffer.to(torch.float32)
+        #         dk = block_dk_buffer.to(torch.float32)
+        #         dv = block_dv_buffer.to(torch.float32)
+        #     else:
+        #         dq += block_dq_buffer
+        #         d_kv_comm.wait()
+        #         dk = block_dk_buffer + next_dk
+        #         dv = block_dv_buffer + next_dv
+        # elif step != 0:
+        #     d_kv_comm.wait()
+        #     dk = next_dk
+        #     dv = next_dv
 
         if step + 1 != kv_comm.world_size:
             kv_comm.wait()

@@ -83,20 +83,24 @@ def _flash_attn_anymask_backward(
     rng_state: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert dout.is_contiguous()
-    # assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride()
+    assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride()
     # TODO(@runyu) stride is not good, check this, maybe the bug
     assert q.shape == k.shape == v.shape, f"Shape mismatch: q: {q.shape}, k: {k.shape}, v: {v.shape}"
     assert q.shape == out.shape == dout.shape, f"Shape mismatch: q: {q.shape}, out: {out.shape}, dout: {dout.shape}"
     HEAD_DIM = q.shape[-1]
-    dq = torch.empty_like(q)
-    dk = torch.empty_like(k)
-    dv = torch.empty_like(v)
+    if dq is None:
+        dq = torch.empty_like(q)
+    if dk is None:
+        dk = torch.empty_like(k)
+    if dv is None:
+        dv = torch.empty_like(v)
     BATCH, N_HEAD, N_CTX = q.shape[:3]
     PRE_BLOCK = 128
     NUM_WARPS, NUM_STAGES = 4, 5
     BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
     BLK_SLICE_FACTOR = 2
     RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
+    softmax_lse = softmax_lse * RCP_LN2
     arg_k = k
     arg_k = arg_k * (softmax_scale * RCP_LN2)
     PRE_BLOCK = 128

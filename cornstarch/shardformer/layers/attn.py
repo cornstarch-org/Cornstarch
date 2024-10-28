@@ -185,8 +185,8 @@ class RingAttentionAnyMask(RingAttentionBase):
         q,
         k,
         v,
-        sp_group,
         mask,
+        sp_group,
         return_softmax,
         dropout_p=0.0,
         softmax_scale=None,
@@ -198,10 +198,7 @@ class RingAttentionAnyMask(RingAttentionBase):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         sm_scale = softmax_scale
-
         assert alibi_slopes is None
-        k = k.contiguous()
-        v = v.contiguous()
 
         out, softmax_lse = ring_flash_attn_anymask_forward(
             sp_group,
@@ -277,8 +274,8 @@ class RingAttentionAnyMask(RingAttentionBase):
             q,
             k,
             v,
-            sp_group,
             mask,
+            sp_group,
             True, # return_softmax
             dropout_p,
             softmax_scale,

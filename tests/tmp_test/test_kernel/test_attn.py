@@ -63,8 +63,7 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype=torch.float16):
     M = mask = torch.randint(0, 2, (N_CTX, N_CTX), dtype=torch.uint8, device="cuda", requires_grad=False)
     mask = torch.broadcast_to(mask, (Z, H, N_CTX, N_CTX))
     p[:, :, M == 0] = float("-inf")
-    _, ref_softmax_lse = softmax_base2_to_e_with_scale(p, scale=sm_scale)
-    p = torch.softmax(p.float(), dim=-1).half()
+    p = torch.softmax(p.float(), dim=-1).to(dtype)
     ref_out = torch.matmul(p, v)
     ref_out.backward(dout)
     ref_dv, v.grad = v.grad.clone(), None
@@ -91,3 +90,4 @@ if __name__ == "__main__":
     pytest.main([__file__])
     # test_op_casual(1, 2, 1024, 64, causal=True, dtype=torch.bfloat16)
     # test_op_casual(1, 2, 1024, 64, causal=True, dtype=torch.float16)
+    # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16)
