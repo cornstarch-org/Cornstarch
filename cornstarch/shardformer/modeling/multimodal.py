@@ -44,7 +44,7 @@ class ModalModulePipelineForwards:
         args_dict = {param_name: arg for param_name, arg in zip(module_params, args)}
         kwargs.update(args_dict)
 
-        if stage_manager.is_first_stage():
+        if stage_manager.is_first_stage(check_only_in_modal=True):
             # Call preprocess callback
             kwargs = self.preprocess_callback(kwargs)
 
@@ -58,7 +58,7 @@ class ModalModulePipelineForwards:
             **kwargs,
         )
 
-        if stage_manager.is_last_stage():
+        if stage_manager.is_last_stage(check_only_in_modal=True):
             outputs = self.postprocess_module_callback(kwargs, outputs)
 
             assert isinstance(outputs, (tuple, ModelOutput)), (

@@ -16,7 +16,6 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
-from colossalai.pipeline.schedule.one_f_one_b import OneForwardOneBackwardSchedule
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
@@ -35,6 +34,9 @@ from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager impor
 )
 from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_stage_manager import (
     MultimodalSequentialPipelineStageManager,
+)
+from cornstarch.plugin.multimodal_sequential_plugin.one_f_one_b import (
+    OneForwardOneBackwardSchedule,
 )
 from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
     MultimodalSequentialProcessGroupMesh,
@@ -159,6 +161,24 @@ class EncoderCoalescedMultimodalParallelModule(MultimodalParallelModule):
 
         if self.my_modal_name == "language_model":
             if stage_manager.is_first_stage(check_only_in_modal=True):
+                # There may be multiple hidden_states_{modal_key}s here.
+                # Merge them so that we can pass them to the language model.
+                hidden_states = torch.cat(
+                    [
+                        kwargs[f"hidden_states_{modal_key}"]
+                        for modal_key in module.encoders.keys()
+                    ],
+                    dim=1,
+                )
+                setattr(
+                    hidden_states,
+                    "_cornstarch_shape",
+                    [
+                        kwargs[f"hidden_states_{modal_key}"].shape[1]
+                        for modal_key in module.encoders.keys()
+                    ],
+                )
+
                 inputs_embeds, attention_mask, labels = (
                     self.prepare_inputs_for_llm_first_stage(
                         input_ids=input_ids,
@@ -236,7 +256,8 @@ class EncoderCoalescedMultimodalParallelModule(MultimodalParallelModule):
 
             return module.language_model(**language_model_inputs)
 
-        elif "encoder" in self.my_modal_name:
+        else:
+            assert isinstance(self.my_modal_name, list)
             encoder_outputs = {}
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 for modal_key, encoder_module in module.encoders.items():
@@ -271,19 +292,17 @@ class EncoderCoalescedMultimodalParallelModule(MultimodalParallelModule):
                         return_dict=return_dict,
                     )
 
-            # Merge multiple encoder output results
-            hidden_states = torch.cat(
-                outputs[0] for outputs in encoder_outputs.values()
-            )
-            setattr(
-                hidden_states,
-                "_cornstarch_shape",
-                [outputs[0].shape[1] for outputs in encoder_outputs.values()],
-            )
+            # Different from multimodal_parallel_plugin, where all encoder outputs
+            # are merged at the end of encoder modules after going through the projector
+            # and thus have the same dimension, here hidden_states from encoders
+            # might have different dimension, thus `torch.cat`() is not applicable.
+            # Thus, instead of merging encoder outputs, we return them as is,
+            # but just with the prefix `hidden_states`.
 
-            return ModelOutput(hidden_states=hidden_states)
-        else:
-            raise NotImplementedError()
+            return {
+                f"hidden_states_{modal_key}": encoder_output[0]
+                for modal_key, encoder_output in encoder_outputs.items()
+            }
 
 
 class EncoderCoalescedMultimodalParallelPlugin(HybridParallelPlugin):
@@ -403,6 +422,7 @@ class EncoderCoalescedMultimodalParallelPlugin(HybridParallelPlugin):
         self.tp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.tp_axis)
         self.sp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.sp_axis)
         self.pp_groups = self.pg_mesh.get_group_along_axis(self.pg_mesh.pp_axis)
+        self.p2p_group = self.pp_groups[0]
 
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])

@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from typing import Any, Callable
 
 import torch
+import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
 from colossalai.lazy import LazyInitContext
@@ -11,6 +12,7 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
+from transformers.modeling_outputs import ModelOutput
 from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import (
@@ -24,16 +26,184 @@ from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_plugin
     EncoderCoalescedMultimodalParallelModule,
     EncoderCoalescedMultimodalParallelPlugin,
 )
+from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_stage_manager import (
+    MultimodalSequentialPipelineStageManager,
+)
 
 from .test_multimodal_parallel import audio_models, causal_lms, vision_models
-from .utils import CornstarchMultimodalParallelBase
+from .utils import (
+    CornstarchMultimodalParallelBase,
+    check_all_grad_tensors,
+    check_loss,
+    check_weight,
+    get_grad_tensors_for_check,
+)
 
 
 @instantiate_parametrized_tests
 class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 12
+        return 3
+
+    def check_fn(
+        self,
+        booster: Booster,
+        org_model: MultimodalModel,
+        sharded_model: EncoderCoalescedMultimodalParallelModule,
+        org_optim: Optimizer,
+        sharded_optim: OptimizerWrapper,
+        org_output: ModelOutput,
+        sharded_output: dict,
+        org_loss: torch.Tensor,
+        sharded_loss: torch.Tensor,
+    ):
+        my_modal_name = sharded_model.my_modal_name
+        plugin: EncoderCoalescedMultimodalParallelPlugin = booster.plugin
+        stage_manager: MultimodalSequentialPipelineStageManager = plugin.stage_manager
+
+        # Loss check
+        if stage_manager.is_last_stage(check_only_in_modal=False):
+            check_loss(org_loss, sharded_loss, atol=self.llm.atol, rtol=self.llm.rtol)
+
+        tp_group: dist.ProcessGroup = plugin.tp_group
+        sharded_model: MultimodalModel = sharded_model.unwrap()
+
+        # Gradient check
+        grads_to_check = {}
+
+        if stage_manager.is_first_stage(check_only_in_modal=True):
+            if my_modal_name == "language_model":
+
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_model.language_model,
+                        sharded_model.language_model,
+                        self.llm.row_layers_to_check,
+                        tp_group,
+                        atol=self.llm.atol,
+                        rtol=self.llm.rtol,
+                        dim=0,
+                        verbose=False,
+                    )
+                )
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_model.language_model,
+                        sharded_model.language_model,
+                        self.llm.col_layers_to_check,
+                        tp_group,
+                        atol=self.llm.atol,
+                        rtol=self.llm.rtol,
+                        dim=1,
+                        verbose=False,
+                    )
+                )
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_model.language_model,
+                        sharded_model.language_model,
+                        self.llm.norm_layers_to_check,
+                        tp_group,
+                        atol=self.llm.atol,
+                        rtol=self.llm.rtol,
+                        dim=1,
+                        verbose=False,
+                    )
+                )
+            else:
+                assert isinstance(my_modal_name, list)
+                for encoder_name in my_modal_name:
+                    modal_name = f"{encoder_name}_encoder"
+                    org_encoder = org_model.get_submodule(modal_name).module
+                    sharded_encoder = sharded_model.get_submodule(modal_name).module
+                    grads_to_check.update(
+                        get_grad_tensors_for_check(
+                            org_encoder,
+                            sharded_encoder,
+                            self.encoders[encoder_name].row_layers_to_check,
+                            tp_group,
+                            atol=self.encoders[encoder_name].atol,
+                            rtol=self.encoders[encoder_name].rtol,
+                            dim=0,
+                            verbose=False,
+                        )
+                    )
+                    grads_to_check.update(
+                        get_grad_tensors_for_check(
+                            org_encoder,
+                            sharded_encoder,
+                            self.encoders[encoder_name].col_layers_to_check,
+                            tp_group,
+                            atol=self.encoders[encoder_name].atol,
+                            rtol=self.encoders[encoder_name].rtol,
+                            dim=1,
+                            verbose=False,
+                        )
+                    )
+                    grads_to_check.update(
+                        get_grad_tensors_for_check(
+                            org_encoder,
+                            sharded_encoder,
+                            self.encoders[encoder_name].norm_layers_to_check,
+                            tp_group,
+                            atol=self.encoders[encoder_name].atol,
+                            rtol=self.encoders[encoder_name].rtol,
+                            dim=1,
+                            verbose=False,
+                        )
+                    )
+
+        # Update parameters
+        org_optim.step()
+        sharded_optim.step()
+
+        # New parameter check
+        if stage_manager.is_first_stage(check_only_in_modal=True):
+            if my_modal_name == "language_model":
+                check_weight(
+                    org_model.language_model,
+                    sharded_model.language_model,
+                    self.llm.row_layers_to_check,
+                    tp_group,
+                    dim=0,
+                    atol=self.llm.atol,
+                    rtol=self.llm.rtol,
+                )
+                check_weight(
+                    org_model.language_model,
+                    sharded_model.language_model,
+                    self.llm.col_layers_to_check,
+                    tp_group,
+                    dim=1,
+                    atol=self.llm.atol,
+                    rtol=self.llm.rtol,
+                )
+            else:
+                for encoder_name in my_modal_name:
+                    modal_name = f"{encoder_name}_encoder"
+                    org_encoder = org_model.get_submodule(modal_name).module
+                    sharded_encoder = sharded_model.get_submodule(modal_name).module
+                    check_weight(
+                        org_encoder,
+                        sharded_encoder,
+                        self.encoders[encoder_name].row_layers_to_check,
+                        tp_group,
+                        dim=0,
+                        atol=self.encoders[encoder_name].atol,
+                        rtol=self.encoders[encoder_name].rtol,
+                    )
+                    check_weight(
+                        org_encoder,
+                        sharded_encoder,
+                        self.encoders[encoder_name].col_layers_to_check,
+                        tp_group,
+                        dim=1,
+                        atol=self.encoders[encoder_name].atol,
+                        rtol=self.encoders[encoder_name].rtol,
+                    )
+
+        check_all_grad_tensors(grads_to_check)
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")

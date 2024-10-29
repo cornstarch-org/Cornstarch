@@ -183,6 +183,7 @@ class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
             )
             for encoder_template in pg_mesh.encoder_templates.keys()
         }
+        self.p2p_group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)[0]
 
     @property
     def num_stages(self) -> int:
@@ -302,3 +303,9 @@ class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
             num_layers_per_stage_accumulated[stage + 1]
             - num_layers_per_stage_accumulated[first_stage_index],
         )
+
+    def get_prev_rank(self) -> int:
+        return self.prev_ranks[0]
+
+    def get_next_rank(self) -> int:
+        return self.next_ranks[0]
