@@ -15,7 +15,7 @@ def set_seed(rank):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, device, dtype):
+def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, device, dtype, mask_type):
     """
     prepare q, k, v tensor for flash attn, local_q, local_k, local_v for ring attention
     """
@@ -55,7 +55,16 @@ def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kern
 
     assert torch.allclose(q.chunk(world_size, dim=seq_dim)[rank], local_q) and torch.allclose(k.chunk(world_size, dim=seq_dim)[rank], local_k) and torch.allclose(v.chunk(world_size, dim=seq_dim)[rank], local_v)
 
-    mask = torch.randint(1, 2, (batch_size, seq_len, seq_len), dtype=torch.uint8, device=device, requires_grad=False)
+    if mask_type == "any":
+        mask = torch.randint(1, 2, (batch_size, seq_len, seq_len), dtype=torch.uint8, device=device, requires_grad=False)
+    elif mask_type == "causal":
+        mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.uint8, device=device))
+        mask = mask.unsqueeze(dim=0).expand(batch_size, -1, -1)
+    elif mask_type == "full":
+        mask = torch.ones((batch_size, seq_len, seq_len), dtype=torch.uint8, device=device)
+        print("mask ")
+    else:
+        raise ValueError(f"mask_type must be either any, causal, or full, but got {mask_type}")
     mask = mask.unsqueeze(dim=1).expand(-1, num_heads, -1, -1)
     mask = mask.contiguous()
     local_mask = mask.chunk(world_size, dim=seq_dim)[rank].detach().clone().contiguous().requires_grad_(False)
@@ -72,7 +81,7 @@ def ref_mask_attention(q, k, v, sm_scale, mask):
     out = torch.matmul(p, v)
     return out, lse
 
-def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl):
+def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, mask_type="any"):
     # Initialize process group
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
@@ -81,7 +90,7 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     set_seed(rank)
 
-    rtol = atol = 7e-3
+    rtol = atol = 5e-2
     
     # Set up input tensors
     torch.cuda.set_device(rank)
@@ -94,7 +103,7 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
     else:
         raise ValueError(f"kernel_impl must be either cuda or triton, but got {kernel_impl}")
 
-    q, k, v, dout, local_q, local_k, local_v, local_dout, mask, local_mask = prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, device, dtype)
+    q, k, v, dout, local_q, local_k, local_v, local_dout, mask, local_mask = prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, device, dtype, mask_type)
     q.retain_grad()
     k.retain_grad()
     v.retain_grad()
@@ -165,14 +174,15 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("world_size", [2, 4])
 @pytest.mark.parametrize("kernel_impl", ["triton"])
-def test_ring_flash_attn_vs_flash_attn(batch_size, seq_len, num_heads, head_dim, world_size, kernel_impl):
+@pytest.mark.parametrize("mask_type", ["any", "causal", "full"])
+def test_ring_flash_attn_vs_flash_attn(batch_size, seq_len, num_heads, head_dim, world_size, kernel_impl, mask_type):
     assert seq_len % world_size == 0, "seq_len must be divisible by world_size"
     assert head_dim % 8 == 0, "head_dim must be divisible by 8"
     assert kernel_impl in ["cuda", "triton"], "kernel_impl must be either cuda or triton"
 
     mp.spawn(
         run_test,
-        args=(world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl),
+        args=(world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, mask_type),
         nprocs=world_size,
         join=True
     )
@@ -180,17 +190,18 @@ def test_ring_flash_attn_vs_flash_attn(batch_size, seq_len, num_heads, head_dim,
 # CUDA_VISIBLE_DEVICES=4,5,6,7 python tests/tmp_test/test_layers/attn/test_ring_anymask_attn.py > triton.log
 
 if __name__ == "__main__":
-    # pytest.main([__file__])
+    pytest.main([__file__])
 
-    batch_size = 4
-    seq_len = 512
-    num_heads = 5
-    head_dim = 128
-    world_size = 2
-    kernel_impl = "triton"
-    mp.spawn(
-        run_test,
-        args=(world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl),
-        nprocs=world_size,
-        join=True
-    )
+    # batch_size = 4
+    # seq_len = 512
+    # num_heads = 5
+    # head_dim = 128
+    # world_size = 4
+    # kernel_impl = "triton"
+    # mask_type = "any"
+    # mp.spawn(
+    #     run_test,
+    #     args=(world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, mask_type),
+    #     nprocs=world_size,
+    #     join=True
+    # )

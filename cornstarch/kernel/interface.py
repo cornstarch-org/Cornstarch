@@ -59,6 +59,21 @@ def _flash_attn_anymask_forward(
 
     softmax_lse = softmax_lse / 1.44269504 # equal to lse * log2
 
+    # import torch.distributed as dist
+    # if dist.get_rank() == 0:
+    #     print(f"q.shape: {q.shape}, q: {q}")
+    #     print(f"k.shape: {k.shape}, k: {k}")
+    #     print(f"v.shape: {v.shape}, v: {v}")
+    #     print(f"mask.shape: {mask.shape}, mask: {mask}")
+    #     print(f"after rescaling softmax_lse: {softmax_lse}")
+
+    # naive implementation:
+    # scores = torch.matmul(q, k.transpose(-2, -1)) * softmax_scale
+    # scores[mask == 0] = -1e4 if scores.dtype == torch.float16 else -1e9
+    # softmax_lse = torch.logsumexp(scores.float(), dim=-1)
+    # attn_probs = torch.exp(scores.float() - softmax_lse.unsqueeze(-1)).to(scores.dtype)
+    # out = torch.matmul(attn_probs, v)
+
     # TODO(@runyu) flashattn by tridao will return S_dmask, rng_state, but ringattn only need softmax_lse and out
     return out, softmax_lse, None, None
 
@@ -255,8 +270,6 @@ def _flash_attn_casualmask_forward(
         mask = torch.ones((q.shape[2], q.shape[2]), device=q.device, dtype=torch.uint8)
         mask = torch.broadcast_to(mask, q.shape[:2] + (q.shape[2], q.shape[2]))
     
-    print(f"fwd causal: {causal}, mask.shape: {mask.shape}")
-    
     window_size_left, window_size_right = window_size
 
     out, softmax_lse, _, _ = _flash_attn_anymask_forward(q, k, v, mask, softmax_scale=softmax_scale, dropout_p=dropout_p, window_size_left=window_size_left, window_size_right=window_size_right, alibi_slopes=alibi_slopes, return_softmax=return_softmax)
@@ -273,8 +286,6 @@ def _flash_attn_casualmask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv,
         mask = torch.ones((q.shape[2], q.shape[2]), device=q.device, dtype=torch.uint8)
         mask = torch.broadcast_to(mask, q.shape[:2] + (q.shape[2], q.shape[2]))
 
-    print(f"bwd causal: {causal}, mask.shape: {mask.shape}")
-    
     window_size_left, window_size_right = window_size
     
     dq, dk, dv = _flash_attn_anymask_backward(dout, q, k, v, out, softmax_lse, dq, dk, dv, mask, dropout_p=dropout_p, softmax_scale=softmax_scale, window_size_left=window_size_left, window_size_right=window_size_right, alibi_slopes=alibi_slopes, deterministic=deterministic)

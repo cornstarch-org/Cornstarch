@@ -4,6 +4,9 @@ from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_bac
 from cornstarch.kernel.interface import _flash_attn_anymask_forward, _flash_attn_anymask_backward
 from typing import Callable
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 def ring_flash_attn_forward(
     process_group,
@@ -123,18 +126,19 @@ def ring_flash_attn_backward(
             )
             ATTN_IMPL(**params)
 
-            # import torch.distributed as dist
-            # if dist.get_rank() == 0:
-            #     print(f"Step {step} of {kv_comm.world_size}")
-            #     print(f"Rank {kv_comm.rank} of {kv_comm.world_size}")
-            #     print(f"Causal: {causal}")
-            #     print("current dout: ", dout)
-            #     print("current q: ", q)
-            #     print("current k: ", k)
-            #     print("current v: ", v)
-            #     print(f"current dq: {block_dq_buffer}")
-            #     print(f"current dk: {block_dk_buffer}")
-            #     print(f"current dv: {block_dv_buffer}")
+            import torch.distributed as dist
+            if dist.get_rank() == 0:
+                print(f"Backward Ring Step {step} of {kv_comm.world_size}")
+                print(f"Rank {kv_comm.rank} of {kv_comm.world_size}")
+                print(f"Causal: {causal}")
+                print(f"current softmax_lse: {softmax_lse}")
+                print(f"current dout: {dout}")
+                print(f"current q: {q}")
+                print(f"current k: {k}")
+                print(f"current v: {v}")
+                print(f"current dq: {block_dq_buffer}")
+                print(f"current dk: {block_dk_buffer}")
+                print(f"current dv: {block_dv_buffer}")
 
             if dq is None:
                 dq = block_dq_buffer.to(torch.float32)
@@ -197,7 +201,7 @@ def ring_flash_attn_anymask_forward(
                 "q": q,
                 "k": k,
                 "v": v,
-                "mask": mask.chunk(comm.world_size, dim=-1)[comm.rank], # NOTE(runyu) we need to pass the right mask to the kernel
+                "mask": mask.chunk(comm.world_size, dim=-1)[(comm.rank - step + comm.world_size) % comm.world_size], # NOTE(runyu) we need to pass the right mask to the kernel
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
@@ -267,7 +271,7 @@ def ring_flash_attn_anymask_backward(
                 "dq": block_dq_buffer,
                 "dk": block_dk_buffer,
                 "dv": block_dv_buffer,
-                "mask": mask.chunk(kv_comm.world_size, dim=-1)[kv_comm.rank], # NOTE(runyu) we need to pass the right mask to the kernel
+                "mask": mask.chunk(kv_comm.world_size, dim=-1)[(kv_comm.rank - step + kv_comm.world_size) % kv_comm.world_size], # NOTE(runyu) we need to pass the right mask to the kernel
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
@@ -278,6 +282,20 @@ def ring_flash_attn_anymask_backward(
         )
         ATTN_IMPL(**params)
 
+        # import torch.distributed as dist
+        # if dist.get_rank() == 0:
+        #     print(f"Backward Ring Step {step} of {kv_comm.world_size}")
+        #     print(f"Rank {kv_comm.rank} of {kv_comm.world_size}")
+        #     print(f"mask: {mask}")
+        #     print(f"current softmax_lse: {softmax_lse}")
+        #     print(f"current dout: {dout}")
+        #     print(f"current q: {q}")
+        #     print(f"current k: {k}")
+        #     print(f"current v: {v}")
+        #     print(f"current dq: {block_dq_buffer}")
+        #     print(f"current dk: {block_dk_buffer}")
+        #     print(f"current dv: {block_dv_buffer}")
+
         if dq is None:
             dq = block_dq_buffer.to(torch.float32)
             dk = block_dk_buffer.to(torch.float32)
@@ -287,44 +305,6 @@ def ring_flash_attn_anymask_backward(
             d_kv_comm.wait()
             dk = block_dk_buffer + next_dk
             dv = block_dv_buffer + next_dv
-
-        # if step <= kv_comm.world_size:
-        #     params = get_default_args(ATTN_IMPL).copy()
-        #     params.update(
-        #         {
-        #             "dout": dout,
-        #             "q": q,
-        #             "k": k,
-        #             "v": v,
-        #             "out": out,
-        #             "softmax_lse": softmax_lse,
-        #             "dq": block_dq_buffer,
-        #             "dk": block_dk_buffer,
-        #             "dv": block_dv_buffer,
-        #             "mask": mask,
-        #             "dropout_p": dropout_p,
-        #             "softmax_scale": softmax_scale,
-        #             "window_size_left": window_size_left,
-        #             "window_size_right": window_size_right,
-        #             "alibi_slopes": alibi_slopes,
-        #             "deterministic": deterministic,
-        #         }
-        #     )
-        #     ATTN_IMPL(**params)
-
-        #     if dq is None:
-        #         dq = block_dq_buffer.to(torch.float32)
-        #         dk = block_dk_buffer.to(torch.float32)
-        #         dv = block_dv_buffer.to(torch.float32)
-        #     else:
-        #         dq += block_dq_buffer
-        #         d_kv_comm.wait()
-        #         dk = block_dk_buffer + next_dk
-        #         dv = block_dv_buffer + next_dv
-        # elif step != 0:
-        #     d_kv_comm.wait()
-        #     dk = next_dk
-        #     dv = next_dv
 
         if step + 1 != kv_comm.world_size:
             kv_comm.wait()

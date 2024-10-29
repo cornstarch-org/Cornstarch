@@ -30,7 +30,7 @@ def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kern
     qkv = torch.randn(3, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.5).requires_grad_(True)
     dist.broadcast(qkv, src=0)
 
-    dout = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+    dout = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.5).requires_grad_(True)
     dist.broadcast(dout, src=0) # now each rank has the same qkv tensor and a dout tensor
     
     if kernel_impl == "triton":
@@ -123,6 +123,14 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
         f"{kernel_impl} ring_flash_attn_func output does not match flash_attn_func output on rank {rank}"
     assert_close(refer_local_lse, ring_lse, rtol=rtol, atol=atol), \
         f"{kernel_impl} ring_flash_attn_func LSE does not match flash_attn_func LSE on rank {rank}"
+    
+    # if dist.get_rank() == 0:
+    #     if kernel_impl == "triton":
+    #         print(f"ring_out shape: {ring_out.shape}, ring_out: {ring_out.transpose(1, 2)}")
+    #         print(f"ring_lse shape: {ring_lse.shape}, ring_lse: {ring_lse}")
+    #     else:
+    #         print(f"ring_out shape: {ring_out.shape}, ring_out: {ring_out}")
+    #         print(f"ring_lse shape: {ring_lse.shape}, ring_lse: {ring_lse}")
 
     print(f"Test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func")
 
@@ -148,6 +156,18 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
         f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
 
     print(f"Backward test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func")
+
+
+    # if dist.get_rank() == 0:
+    #     if kernel_impl == "triton":
+    #         print(f"local_q.grad shape: {local_q.grad.shape}, local_q.grad: {local_q.grad.transpose(1, 2)}")
+    #         print(f"local_k.grad shape: {local_k.grad.shape}, local_k.grad: {local_k.grad.transpose(1, 2)}")
+    #         print(f"local_v.grad shape: {local_v.grad.shape}, local_v.grad: {local_v.grad.transpose(1, 2)}")
+    #     else:
+    #         print(f"local_q.grad shape: {local_q.grad.shape}, local_q.grad: {local_q.grad}")
+    #         print(f"local_k.grad shape: {local_k.grad.shape}, local_k.grad: {local_k.grad}")
+    #         print(f"local_v.grad shape: {local_v.grad.shape}, local_v.grad: {local_v.grad}")
+
 
     # Clean up
     dist.destroy_process_group()
@@ -178,13 +198,13 @@ if __name__ == "__main__":
     num_heads = 5
     head_dim = 128
     world_size = 4
-    # kernel_impl = "triton"
-    kernel_impl = "cuda"
+    kernel_impl = "triton"
+    # kernel_impl = "cuda"
     causal = False
+    # causal = True
     mp.spawn(
         run_test,
         args=(world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, causal),
         nprocs=world_size,
         join=True
     )
-

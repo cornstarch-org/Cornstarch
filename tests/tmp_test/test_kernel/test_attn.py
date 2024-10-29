@@ -12,7 +12,7 @@ from torch.testing import assert_close
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 1024, 64), (1, 4, 1024, 128), (1, 8, 1024, 128)])
 @pytest.mark.parametrize("causal", [True]) # TODO(@runyu): add False, it is werid that bwd of triton flash attention don't support causal=False
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_op_casual(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
+def test_op_casual(Z, H, N_CTX, HEAD_DIM, causal, dtype):
     torch.manual_seed(20)
     q = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
     k = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
@@ -56,7 +56,7 @@ def test_op_casual(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 128, 64), (1, 4, 128, 128), (1, 8, 1024, 128), (4, 7, 512, 128)])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("mask_type", ["random", "causal", "full"])
-def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype=torch.float16, mask_type="random"):
+def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     torch.manual_seed(20)
     q = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
     k = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
@@ -103,12 +103,15 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype=torch.float16, mask_type="rand
     assert_close(ref_dk, tri_dk, atol=atol, rtol=rtol)
     assert_close(ref_dq, tri_dq, atol=atol, rtol=rtol)
 
+    print(f"test passed for Z={Z}, H={H}, N_CTX={N_CTX}, HEAD_DIM={HEAD_DIM}, mask_type={mask_type}, dtype={dtype}")
+
 if __name__ == "__main__":
     pytest.main([__file__])
     # test_op_casual(1, 2, 1024, 64, causal=True, dtype=torch.bfloat16)
-    # test_op_casual(1, 2, 1024, 64, causal=True, dtype=torch.float16)
+    # test_op_casual(4, 5, 1024, 128, causal=True, dtype=torch.float16)
     # test_op_casual(1, 2, 1024, 64, causal=False, dtype=torch.bfloat16)
     # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16, mask_type="causal")
+    # test_op_any_mask(4, 5, 512, 128, dtype=torch.bfloat16, mask_type="causal")
     # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16, mask_type="random")
     # test_op_any_mask(1, 2, 1024, 128, dtype=torch.bfloat16, mask_type="random")
     # test_op_any_mask(1, 2, 128, 128, dtype=torch.bfloat16, mask_type="random")
