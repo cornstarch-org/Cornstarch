@@ -44,7 +44,7 @@ from .utils import (
 class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 3
+        return 12
 
     def check_fn(
         self,
@@ -213,7 +213,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
         [
             (2, 1, 2),
             (1, 1, 2),
-            (2, 1, 3),
+            (1, 1, 3),
         ],
         name_fn=lambda tp, epp, lpp: f"tp={tp}, pp={epp},{lpp}",
     )
