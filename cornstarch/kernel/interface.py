@@ -82,55 +82,113 @@ def _flash_attn_anymask_backward(
     deterministic: bool = False,
     rng_state: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    assert dout.is_contiguous()
-    assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride()
-    # TODO(@runyu) stride is not good, check this, maybe the bug
-    assert q.shape == k.shape == v.shape, f"Shape mismatch: q: {q.shape}, k: {k.shape}, v: {v.shape}"
-    assert q.shape == out.shape == dout.shape, f"Shape mismatch: q: {q.shape}, out: {out.shape}, dout: {dout.shape}"
-    HEAD_DIM = q.shape[-1]
-    if dq is None:
-        dq = torch.empty_like(q)
-    if dk is None:
-        dk = torch.empty_like(k)
-    if dv is None:
-        dv = torch.empty_like(v)
-    BATCH, N_HEAD, N_CTX = q.shape[:3]
-    PRE_BLOCK = 128
-    NUM_WARPS, NUM_STAGES = 4, 5
-    BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
-    BLK_SLICE_FACTOR = 2
-    RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
-    softmax_lse = softmax_lse * RCP_LN2
-    arg_k = k
-    arg_k = arg_k * (softmax_scale * RCP_LN2)
-    PRE_BLOCK = 128
-    assert N_CTX % PRE_BLOCK == 0, f"N_CTX: {N_CTX}, PRE_BLOCK: {PRE_BLOCK}"
-    pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
-    delta = torch.empty_like(softmax_lse)
-    _attn_any_mask_bwd_preprocess[pre_grid](
-        out, dout,  #
-        delta,  #
-        BATCH, N_HEAD, N_CTX,  #
-        BLOCK_M=PRE_BLOCK, HEAD_DIM=HEAD_DIM  #
-    )
-    grid = (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
-        
-    _attn_any_mask_bwd[grid](
-        q, arg_k, v, mask, softmax_scale, dout, dq, dk, dv,  #
-        softmax_lse, delta,  #
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-        mask.stride(0), mask.stride(1), mask.stride(2), mask.stride(3),  #
-        N_HEAD, N_CTX,  #
-        BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,  #
-        BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,  #
-        BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,  #
-        HEAD_DIM=HEAD_DIM,
-        USE_MASK=True, #
-        num_warps=NUM_WARPS,  #
-        num_stages=NUM_STAGES,  #
-    )
+    # (grad_output, output, attn_probs, scores, Q_h, K_h, V_h)
 
+    # Step 1: recompute attn_probs
+    grad_attn_output = dout # [batch_size, n_heads, seq_len, d_head]
+    scores = torch.matmul(q, k.transpose(-2, -1)) * softmax_scale
+    # scores[mask == 0] = float("-inf")
+    scores[mask == 0] = -1e8
+    attn_probs = torch.softmax(scores, dim=-1) # [batch_size, n_heads, seq_len, seq_len]
+        
+    # Step 2: Gradient w.r.t. V
+    # [batch_size, n_heads, seq_len, seq_len] x [batch_size, n_heads, seq_len, d_head]
+    grad_V = torch.matmul(attn_probs.transpose(-2, -1), grad_attn_output)
+    dv = grad_V
+        
+    # Step 3: Gradient w.r.t. attention probabilities
+    # [batch_size, n_heads, seq_len, d_head] x [batch_size, n_heads, d_head, seq_len]
+    grad_attn_probs = torch.matmul(grad_attn_output, v.transpose(-2, -1))
+        
+    # Step 4: Gradient w.r.t. scores (before softmax)
+    # Softmax gradient: dL/ds = P * (dL/dP - sum(dL/dP * P))
+    # where P is attention probabilities and s is scores
+    sum_term = torch.sum(grad_attn_probs * attn_probs, dim=-1, keepdim=True)
+    grad_scores = attn_probs * (grad_attn_probs - sum_term)
+    grad_scores[mask == 0] = 0.0
+        
+    # Step 5: Gradient w.r.t. Q
+    # [batch_size, n_heads, seq_len, seq_len] x [batch_size, n_heads, seq_len, d_head]
+    grad_Q = torch.matmul(grad_scores, k) * softmax_scale
+    dq = grad_Q
+        
+    # Step 6: Gradient w.r.t. K
+    # [batch_size, n_heads, seq_len, seq_len] x [batch_size, n_heads, seq_len, d_head]
+    grad_K = torch.matmul(grad_scores.transpose(-2, -1), q) * softmax_scale
+    dk = grad_K
+        
     return dq, dk, dv
+
+# NOTE(runyu): anymask backward flashattn in not correct, so we use the naive manual python implementation now
+# def _flash_attn_anymask_backward(
+#     dout: torch.Tensor,
+#     q: torch.Tensor,
+#     k: torch.Tensor,
+#     v: torch.Tensor,
+#     out: torch.Tensor,
+#     softmax_lse: torch.Tensor,
+#     dq: Optional[torch.Tensor],
+#     dk: Optional[torch.Tensor],
+#     dv: Optional[torch.Tensor],
+#     mask: torch.Tensor,
+#     dropout_p: float = 0.0,
+#     softmax_scale: float = 1.0,
+#     window_size_left: int = -1,
+#     window_size_right: int = -1,
+#     softcap: float = 0.0,
+#     alibi_slopes: Optional[torch.Tensor] = None,
+#     deterministic: bool = False,
+#     rng_state: Optional[torch.Tensor] = None,
+# ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+#     assert dout.is_contiguous()
+#     assert q.stride() == k.stride() == v.stride() == out.stride() == dout.stride()
+#     # TODO(@runyu) stride is not good, check this, maybe the bug
+#     assert q.shape == k.shape == v.shape, f"Shape mismatch: q: {q.shape}, k: {k.shape}, v: {v.shape}"
+#     assert q.shape == out.shape == dout.shape, f"Shape mismatch: q: {q.shape}, out: {out.shape}, dout: {dout.shape}"
+#     HEAD_DIM = q.shape[-1]
+#     if dq is None:
+#         dq = torch.empty_like(q)
+#     if dk is None:
+#         dk = torch.empty_like(k)
+#     if dv is None:
+#         dv = torch.empty_like(v)
+#     BATCH, N_HEAD, N_CTX = q.shape[:3]
+#     PRE_BLOCK = 128
+#     NUM_WARPS, NUM_STAGES = 4, 5
+#     BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
+#     BLK_SLICE_FACTOR = 2
+#     RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
+#     softmax_lse = softmax_lse * RCP_LN2
+#     arg_k = k
+#     arg_k = arg_k * (softmax_scale * RCP_LN2)
+#     PRE_BLOCK = 128
+#     assert N_CTX % PRE_BLOCK == 0, f"N_CTX: {N_CTX}, PRE_BLOCK: {PRE_BLOCK}"
+#     pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
+#     delta = torch.empty_like(softmax_lse)
+#     _attn_any_mask_bwd_preprocess[pre_grid](
+#         out, dout,  #
+#         delta,  #
+#         BATCH, N_HEAD, N_CTX,  #
+#         BLOCK_M=PRE_BLOCK, HEAD_DIM=HEAD_DIM  #
+#     )
+#     grid = (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
+        
+#     _attn_any_mask_bwd[grid](
+#         q, arg_k, v, mask, softmax_scale, dout, dq, dk, dv,  #
+#         softmax_lse, delta,  #
+#         q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
+#         mask.stride(0), mask.stride(1), mask.stride(2), mask.stride(3),  #
+#         N_HEAD, N_CTX,  #
+#         BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,  #
+#         BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,  #
+#         BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,  #
+#         HEAD_DIM=HEAD_DIM,
+#         USE_MASK=True, #
+#         num_warps=NUM_WARPS,  #
+#         num_stages=NUM_STAGES,  #
+#     )
+
+#     return dq, dk, dv
 
 class FlashAttnAnyMask(torch.autograd.Function):
 

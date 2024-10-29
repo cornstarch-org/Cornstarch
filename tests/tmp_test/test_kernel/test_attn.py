@@ -20,7 +20,10 @@ def test_op_casual(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     sm_scale = 0.5
     dout = torch.randn_like(q)
     # reference implementation
-    M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
+    if causal:
+        M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
+    else:
+        M = torch.ones((N_CTX, N_CTX), device="cuda", dtype=torch.uint8)
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
     if causal:
         p[:, :, M == 0] = float("-inf")
@@ -33,7 +36,9 @@ def test_op_casual(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     ref_dq, q.grad = q.grad.clone(), None
 
     # triton implementation
-    tri_out = flash_attn_triton_func(q, k, v, causal=causal, softmax_scale=sm_scale).to(dtype)
+    # tri_out = flash_attn_triton_func(q, k, v, causal=causal, softmax_scale=sm_scale).to(dtype)
+    mask = torch.broadcast_to(M, (Z, H, N_CTX, N_CTX))
+    tri_out, softmax_lse = FlashAttnAnyMask.apply(q, k, v, mask, sm_scale, 0.0)
     tri_out.backward(dout)
     tri_dv, v.grad = v.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -101,8 +106,11 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype=torch.float16, mask_type="rand
 if __name__ == "__main__":
     pytest.main([__file__])
     # test_op_casual(1, 2, 1024, 64, causal=True, dtype=torch.bfloat16)
-    # test_op_casual(1, 2, 1024, 64, causal=False, dtype=torch.bfloat16)
     # test_op_casual(1, 2, 1024, 64, causal=True, dtype=torch.float16)
+    # test_op_casual(1, 2, 1024, 64, causal=False, dtype=torch.bfloat16)
     # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16, mask_type="causal")
     # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16, mask_type="random")
-    # test_op_any_mask(1, 2, 128, 64, dtype=torch.bfloat16, mask_type="full")
+    # test_op_any_mask(1, 2, 1024, 128, dtype=torch.bfloat16, mask_type="random")
+    # test_op_any_mask(1, 2, 128, 128, dtype=torch.bfloat16, mask_type="random")
+    # test_op_any_mask(1, 2, 1024, 128, dtype=torch.bfloat16, mask_type="full")
+    # test_op_any_mask(1, 2, 1024, 128, dtype=torch.bfloat16, mask_type="full")
