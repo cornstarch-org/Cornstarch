@@ -66,7 +66,7 @@ def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kern
 def ref_mask_attention(q, k, v, sm_scale, mask):
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
     # p[:, :, mask == 0] = float("-inf")
-    p[mask == 0] = float("-inf")
+    p[mask == 0] = -1e4 if q.dtype == torch.float16 else -1e9
     lse = torch.logsumexp(p.float(), dim=-1)
     p = torch.softmax(p.float(), dim=-1).to(q.dtype)
     out = torch.matmul(p, v)
@@ -176,6 +176,8 @@ def test_ring_flash_attn_vs_flash_attn(batch_size, seq_len, num_heads, head_dim,
         nprocs=world_size,
         join=True
     )
+
+# CUDA_VISIBLE_DEVICES=4,5,6,7 python tests/tmp_test/test_layers/attn/test_ring_anymask_attn.py > triton.log
 
 if __name__ == "__main__":
     # pytest.main([__file__])

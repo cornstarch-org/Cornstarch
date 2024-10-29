@@ -92,6 +92,7 @@ def ring_flash_attn_backward(
     next_k, next_v = None, None
 
     for step in range(kv_comm.world_size):
+
         if step + 1 != kv_comm.world_size:
             next_k = kv_comm.send_recv(k)
             next_v = kv_comm.send_recv(v)
@@ -121,6 +122,19 @@ def ring_flash_attn_backward(
                 }
             )
             ATTN_IMPL(**params)
+
+            # import torch.distributed as dist
+            # if dist.get_rank() == 0:
+            #     print(f"Step {step} of {kv_comm.world_size}")
+            #     print(f"Rank {kv_comm.rank} of {kv_comm.world_size}")
+            #     print(f"Causal: {causal}")
+            #     print("current dout: ", dout)
+            #     print("current q: ", q)
+            #     print("current k: ", k)
+            #     print("current v: ", v)
+            #     print(f"current dq: {block_dq_buffer}")
+            #     print(f"current dk: {block_dk_buffer}")
+            #     print(f"current dv: {block_dv_buffer}")
 
             if dq is None:
                 dq = block_dq_buffer.to(torch.float32)
@@ -154,7 +168,7 @@ def ring_flash_attn_anymask_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    mask: torch.Tensor,
+    mask: torch.Tensor, # shape: [B, H, N // sp_size, N]
     softmax_scale,
     ATTN_IMPL: Callable = _flash_attn_anymask_forward,
     dropout_p=0,
@@ -183,7 +197,7 @@ def ring_flash_attn_anymask_forward(
                 "q": q,
                 "k": k,
                 "v": v,
-                "mask": mask,
+                "mask": mask.chunk(comm.world_size, dim=-1)[comm.rank], # NOTE(runyu) we need to pass the right mask to the kernel
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
@@ -253,7 +267,7 @@ def ring_flash_attn_anymask_backward(
                 "dq": block_dq_buffer,
                 "dk": block_dk_buffer,
                 "dv": block_dv_buffer,
-                "mask": mask,
+                "mask": mask.chunk(kv_comm.world_size, dim=-1)[kv_comm.rank], # NOTE(runyu) we need to pass the right mask to the kernel
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,

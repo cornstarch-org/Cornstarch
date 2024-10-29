@@ -88,13 +88,20 @@ def _flash_attn_anymask_backward(
     grad_attn_output = dout # [batch_size, n_heads, seq_len, d_head]
     scores = torch.matmul(q, k.transpose(-2, -1)) * softmax_scale
     # scores[mask == 0] = float("-inf")
-    scores[mask == 0] = -1e8
-    attn_probs = torch.softmax(scores, dim=-1) # [batch_size, n_heads, seq_len, seq_len]
+    scores[mask == 0] = -1e4 if scores.dtype == torch.float16 else -1e9
+    # attn_probs = torch.softmax(scores, dim=-1) # [batch_size, n_heads, seq_len, seq_len]
+    if softmax_lse is not None:
+        attn_probs = torch.exp(scores - softmax_lse.unsqueeze(-1)).to(scores.dtype)
+    else:
+        attn_probs = torch.softmax(scores, dim=-1) # [batch_size, n_heads, seq_len, seq_len]
         
     # Step 2: Gradient w.r.t. V
     # [batch_size, n_heads, seq_len, seq_len] x [batch_size, n_heads, seq_len, d_head]
     grad_V = torch.matmul(attn_probs.transpose(-2, -1), grad_attn_output)
-    dv = grad_V
+    if dv is None:
+        dv = grad_V
+    else:
+        dv.copy_(grad_V)
         
     # Step 3: Gradient w.r.t. attention probabilities
     # [batch_size, n_heads, seq_len, d_head] x [batch_size, n_heads, d_head, seq_len]
@@ -110,12 +117,18 @@ def _flash_attn_anymask_backward(
     # Step 5: Gradient w.r.t. Q
     # [batch_size, n_heads, seq_len, seq_len] x [batch_size, n_heads, seq_len, d_head]
     grad_Q = torch.matmul(grad_scores, k) * softmax_scale
-    dq = grad_Q
+    if dq is None:
+        dq = grad_Q
+    else:
+        dq.copy_(grad_Q)
         
     # Step 6: Gradient w.r.t. K
     # [batch_size, n_heads, seq_len, seq_len] x [batch_size, n_heads, seq_len, d_head]
     grad_K = torch.matmul(grad_scores.transpose(-2, -1), q) * softmax_scale
-    dk = grad_K
+    if dk is None:
+        dk = grad_K
+    else:
+        dk.copy_(grad_K)
         
     return dq, dk, dv
 
