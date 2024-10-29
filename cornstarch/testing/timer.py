@@ -31,9 +31,7 @@ class TimerContextManager:
     """
 
     def __init__(self):
-        self.events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = (
-            defaultdict(list)
-        )
+        self.events: list[tuple[str, torch.cuda.Event, torch.cuda.Event]] = []
         self.original_functions: dict[str, tuple[str, str, Callable]] = {}
         self.logger = logging.getLogger(__name__)
 
@@ -52,7 +50,7 @@ class TimerContextManager:
             end_event.record()
 
             # Save the events
-            self.events[full_function_path].append((start_event, end_event))
+            self.events.append((full_function_path, start_event, end_event))
 
             return result
 
@@ -114,11 +112,12 @@ class TimerContextManager:
         """
         torch.cuda.synchronize()
         elasped_times: list[tuple[str, float]] = []
-        for full_function_path, events in self.events.items():
-            for index, event in enumerate(events):
-                start_event, end_event = event
-                elasped_time = start_event.elapsed_time(end_event)
-                key = f"{full_function_path}#{index}"
-                elasped_times.append((key, elasped_time))
+        num_events_per_function: dict[str, int] = defaultdict(int)
+        for event in self.events:
+            full_function_path, start_event, end_event = event
+            elasped_time = start_event.elapsed_time(end_event)
+            key = f"{full_function_path}#{num_events_per_function[full_function_path]}"
+            elasped_times.append((key, elasped_time))
+            num_events_per_function[full_function_path] += 1
 
         return elasped_times
