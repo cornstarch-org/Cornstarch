@@ -19,15 +19,15 @@ from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
 )
-from cornstarch.plugin.multimodal_parallel_plugin import (
-    ModalParallelPlugin,
-)
-from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_plugin import (
+from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (
     EncoderCoalescedMultimodalParallelModule,
     EncoderCoalescedMultimodalParallelPlugin,
 )
-from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_stage_manager import (
-    MultimodalSequentialPipelineStageManager,
+from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
+    EncodersColocatedPipelineStageManager,
+)
+from cornstarch.plugin.multimodal_parallel_plugin import (
+    ModalParallelPlugin,
 )
 
 from .test_multimodal_parallel import audio_models, causal_lms, vision_models
@@ -60,7 +60,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
     ):
         my_modal_name = sharded_model.my_modal_name
         plugin: EncoderCoalescedMultimodalParallelPlugin = booster.plugin
-        stage_manager: MultimodalSequentialPipelineStageManager = plugin.stage_manager
+        stage_manager: EncodersColocatedPipelineStageManager = plugin.stage_manager
 
         # Loss check
         if stage_manager.is_last_stage(check_only_in_modal=False):
