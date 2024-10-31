@@ -14,8 +14,8 @@ from cornstarch.models.multimodal_language_model import (
 )
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (
-    EncoderCoalescedMultimodalParallelModule,
-    EncoderCoalescedMultimodalParallelPlugin,
+    EncodersColocatedMultimodalParallelModule,
+    EncodersColocatedMultimodalParallelPlugin,
 )
 from cornstarch.plugin.multimodal_parallel_plugin import ModalParallelPlugin
 
@@ -67,7 +67,7 @@ class TestMultiEncoderCoalescedModelInitializationClass(
         language_model_name: str,
         encoder_tp_sizes: list[int],
         language_tp_size: int,
-    ) -> EncoderCoalescedMultimodalParallelPlugin:
+    ) -> EncodersColocatedMultimodalParallelPlugin:
         assert len(encoder_model_names) == len(encoder_tp_sizes)
         encoder_plugins = {}
         for index, (encoder_model_name, encoder_tp_size) in enumerate(
@@ -94,7 +94,7 @@ class TestMultiEncoderCoalescedModelInitializationClass(
             ),
         )
 
-        return EncoderCoalescedMultimodalParallelPlugin(
+        return EncodersColocatedMultimodalParallelPlugin(
             encoder_plugins=encoder_plugins,
             language_model_plugin=language_plugin,
             num_microbatches=12,
@@ -182,7 +182,7 @@ class TestMultiEncoderCoalescedModelInitializationClass(
 
             assert (plugin.stage_manager.pg_mesh.mesh == expected_mesh).all()
 
-            assert isinstance(module, EncoderCoalescedMultimodalParallelModule)
+            assert isinstance(module, EncodersColocatedMultimodalParallelModule)
             assert module.module.encoder0_encoder is not None
             assert module.module.encoder1_encoder is not None
             assert module.module.language_model is not None

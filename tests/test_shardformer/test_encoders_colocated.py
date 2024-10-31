@@ -20,8 +20,8 @@ from cornstarch.models.multimodal_language_model import (
     MultimodalModel,
 )
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (
-    EncoderCoalescedMultimodalParallelModule,
-    EncoderCoalescedMultimodalParallelPlugin,
+    EncodersColocatedMultimodalParallelModule,
+    EncodersColocatedMultimodalParallelPlugin,
 )
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
     EncodersColocatedPipelineStageManager,
@@ -50,7 +50,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
         self,
         booster: Booster,
         org_model: MultimodalModel,
-        sharded_model: EncoderCoalescedMultimodalParallelModule,
+        sharded_model: EncodersColocatedMultimodalParallelModule,
         org_optim: Optimizer,
         sharded_optim: OptimizerWrapper,
         org_output: ModelOutput,
@@ -59,7 +59,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
         sharded_loss: torch.Tensor,
     ):
         my_modal_name = sharded_model.my_modal_name
-        plugin: EncoderCoalescedMultimodalParallelPlugin = booster.plugin
+        plugin: EncodersColocatedMultimodalParallelPlugin = booster.plugin
         stage_manager: EncodersColocatedPipelineStageManager = plugin.stage_manager
 
         # Loss check
@@ -256,7 +256,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
     ) -> tuple[
         MultimodalModel,
         Optimizer,
-        EncoderCoalescedMultimodalParallelModule,
+        EncodersColocatedMultimodalParallelModule,
         OptimizerWrapper,
         Callable,
         Booster,
@@ -307,7 +307,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
             ),
         )
 
-        plugin = EncoderCoalescedMultimodalParallelPlugin(
+        plugin = EncodersColocatedMultimodalParallelPlugin(
             encoder_plugins=encoder_plugins,
             language_model_plugin=llm_plugin,
             **test_config,

@@ -46,7 +46,7 @@ from cornstarch.shardformer.shard.shard_config import ShardConfig
 logger = logging.get_logger(__name__)
 
 
-class EncoderCoalescedMultimodalParallelModule(MultimodalParallelModule):
+class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
     def __init__(
         self,
         module: MultimodalModel,
@@ -305,7 +305,7 @@ class EncoderCoalescedMultimodalParallelModule(MultimodalParallelModule):
             }
 
 
-class EncoderCoalescedMultimodalParallelPlugin(HybridParallelPlugin):
+class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
     """Plugin for multimodal language model.
     Unlike `MultimodalParallelPlugin`, this plugin is designed to mimic
     existing chain-like Megatron-LM style pipeline parallelism, where
@@ -497,7 +497,7 @@ class EncoderCoalescedMultimodalParallelPlugin(HybridParallelPlugin):
             )
             model.add_module("language_model", module)
 
-            model = EncoderCoalescedMultimodalParallelModule(
+            model = EncodersColocatedMultimodalParallelModule(
                 model,
                 precision=self.precision,
                 dp_group=self.dp_group,
