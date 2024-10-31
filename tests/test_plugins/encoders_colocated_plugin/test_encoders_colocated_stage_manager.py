@@ -7,11 +7,11 @@ from pytest_mock import MockerFixture
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_stage_manager import (
-    MultimodalSequentialPipelineStageManager,
+from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
+    EncodersColocatedPipelineStageManager,
 )
-from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
-    MultimodalSequentialProcessGroupMesh,
+from cornstarch.plugin.encoders_colocated_plugin.process_group_mesh import (
+    EncodersColocatedProcessGroupMesh,
 )
 
 from ..common import (
@@ -152,8 +152,8 @@ def test_multimodal_sequential_pipeline_stage_manager(
         dist.init_process_group(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
-        mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
-        stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+        mesh = EncodersColocatedProcessGroupMesh(encoder_templates, llm_template)
+        stage_manager = EncodersColocatedPipelineStageManager(mesh, mesh.pp_axis)
 
         assert stage_manager.prev_ranks == expected_prev_next_ranks[rank]["prev"], (
             f"rank {rank} expected to have {expected_prev_next_ranks[rank]['prev']} as previous ranks, "
@@ -254,8 +254,8 @@ def test_first_last_stage(
         dist.init_process_group(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
-        mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
-        stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+        mesh = EncodersColocatedProcessGroupMesh(encoder_templates, llm_template)
+        stage_manager = EncodersColocatedPipelineStageManager(mesh, mesh.pp_axis)
 
         # check modal-local stage
         expected_first_last_stage = next(
@@ -452,8 +452,8 @@ def test_process_group_by_stages(
             dist.init_process_group(
                 backend="fake", store=FakeStore(), rank=rank, world_size=world_size
             )
-            mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
-            stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+            mesh = EncodersColocatedProcessGroupMesh(encoder_templates, llm_template)
+            stage_manager = EncodersColocatedPipelineStageManager(mesh, mesh.pp_axis)
             groups = stage_manager.init_process_group_by_stages(stage_indices)
 
             if not isinstance(groups, list):
@@ -530,8 +530,8 @@ def test_stage(
         dist.init_process_group(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
-        mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
-        stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+        mesh = EncodersColocatedProcessGroupMesh(encoder_templates, llm_template)
+        stage_manager = EncodersColocatedPipelineStageManager(mesh, mesh.pp_axis)
         expected_stage_index_for_rank = next(
             value for ranks, value in expected_stage_index.items() if rank in ranks
         )
@@ -626,8 +626,8 @@ def test_layer_distribution(
         dist.init_process_group(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
-        mesh = MultimodalSequentialProcessGroupMesh(encoder_templates, llm_template)
-        stage_manager = MultimodalSequentialPipelineStageManager(mesh, mesh.pp_axis)
+        mesh = EncodersColocatedProcessGroupMesh(encoder_templates, llm_template)
+        stage_manager = EncodersColocatedPipelineStageManager(mesh, mesh.pp_axis)
 
         # Encoders have its own stage manager and layer distribution.
         for encoder in encoder_templates.keys():

@@ -25,21 +25,21 @@ from transformers.utils import logging
 from cornstarch.models.multimodal_language_model import (
     MultimodalModel,
 )
+from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
+    EncodersColocatedPipelineStageManager,
+)
+from cornstarch.plugin.encoders_colocated_plugin.one_f_one_b import (
+    OneForwardOneBackwardSchedule,
+)
+from cornstarch.plugin.encoders_colocated_plugin.process_group_mesh import (
+    EncodersColocatedProcessGroupMesh,
+)
 from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
     MultimodalParallelModule,
 )
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
-)
-from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_stage_manager import (
-    MultimodalSequentialPipelineStageManager,
-)
-from cornstarch.plugin.multimodal_sequential_plugin.one_f_one_b import (
-    OneForwardOneBackwardSchedule,
-)
-from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
-    MultimodalSequentialProcessGroupMesh,
 )
 from cornstarch.shardformer.shard.shard_config import ShardConfig
 
@@ -404,7 +404,7 @@ class EncoderCoalescedMultimodalParallelPlugin(HybridParallelPlugin):
         if self.distributed_initialized:
             return
 
-        self.pg_mesh = MultimodalSequentialProcessGroupMesh(
+        self.pg_mesh = EncodersColocatedProcessGroupMesh(
             encoder_templates={
                 plugin.pipeline_template: plugin.tp_size
                 for plugin in self.encoder_plugins.values()
@@ -415,7 +415,7 @@ class EncoderCoalescedMultimodalParallelPlugin(HybridParallelPlugin):
                 self.language_model_plugin.sp_size,
             ),
         )
-        self.stage_manager = MultimodalSequentialPipelineStageManager(
+        self.stage_manager = EncodersColocatedPipelineStageManager(
             self.pg_mesh, self.pg_mesh.pp_axis
         )
         self.dp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.dp_axis)

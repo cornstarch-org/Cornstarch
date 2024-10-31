@@ -13,11 +13,11 @@ from cornstarch.models.multimodal_language_model import (
     MultimodalProjector,
 )
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.plugin.multimodal_parallel_plugin import ModalParallelPlugin
-from cornstarch.plugin.multimodal_sequential_plugin.multimodal_sequential_plugin import (
+from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (
     EncoderCoalescedMultimodalParallelModule,
     EncoderCoalescedMultimodalParallelPlugin,
 )
+from cornstarch.plugin.multimodal_parallel_plugin import ModalParallelPlugin
 
 from ..common import (
     TestPluginInitializationWithFakeBackendBase,

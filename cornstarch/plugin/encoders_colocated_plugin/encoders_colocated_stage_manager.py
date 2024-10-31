@@ -5,11 +5,11 @@ import numpy as np
 import torch.distributed as dist
 
 from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.encoders_colocated_plugin.process_group_mesh import (
+    EncodersColocatedProcessGroupMesh,
+)
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
-)
-from cornstarch.plugin.multimodal_sequential_plugin.process_group_mesh import (
-    MultimodalSequentialProcessGroupMesh,
 )
 
 
@@ -17,7 +17,7 @@ class CoalescedEncoderStageManager(MultiModalPipelineStageManager):
     def __init__(
         self,
         encoder_template: PipelineTemplate,
-        pg_mesh: MultimodalSequentialProcessGroupMesh,
+        pg_mesh: EncodersColocatedProcessGroupMesh,
     ):
         self.encoder_template = encoder_template
         self.pg_mesh = copy.deepcopy(pg_mesh)
@@ -70,10 +70,10 @@ class CoalescedEncoderStageManager(MultiModalPipelineStageManager):
         return self.stage == self.encoder_template.num_stages - 1
 
 
-class MultimodalSequentialPipelineStageManager(MultiModalPipelineStageManager):
+class EncodersColocatedPipelineStageManager(MultiModalPipelineStageManager):
     def __init__(
         self,
-        pg_mesh: MultimodalSequentialProcessGroupMesh,
+        pg_mesh: EncodersColocatedProcessGroupMesh,
         pipeline_axis: int,
     ):
         self.pg_mesh = pg_mesh
