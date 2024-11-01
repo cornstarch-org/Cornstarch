@@ -41,7 +41,7 @@ from .utils import (
 
 
 @instantiate_parametrized_tests
-class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
+class EncodersColocatedMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
         return 12
@@ -238,7 +238,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
             llm=causal_lms[language_model_name](),
         )
 
-        self.run_coalesced_multimodal_parallel(
+        self.run_colocated_multimodal_parallel(
             tp_size,
             encoder_pp_size,
             language_pp_size,
@@ -246,7 +246,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
             precision,
         )
 
-    def build_coalesced_model_from_multimodal_plugin(
+    def build_colocated_model_from_multimodal_plugin(
         self,
         tp_size: int,
         encoder_pp_size: int,
@@ -335,7 +335,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
             booster,
         )
 
-    def run_coalesced_multimodal_parallel(
+    def run_colocated_multimodal_parallel(
         self,
         tp_size: int,
         encoder_pp_size: int,
@@ -361,7 +361,7 @@ class EncoderCoalescedMultimodalParallel(CornstarchMultimodalParallelBase):
             sharded_optimizer,
             criterion,
             booster,
-        ) = self.build_coalesced_model_from_multimodal_plugin(
+        ) = self.build_colocated_model_from_multimodal_plugin(
             tp_size=tp_size,
             encoder_pp_size=encoder_pp_size,
             language_pp_size=language_pp_size,

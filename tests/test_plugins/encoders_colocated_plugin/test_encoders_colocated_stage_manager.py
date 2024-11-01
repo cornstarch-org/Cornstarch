@@ -142,7 +142,7 @@ def destroy_process_group():
         ),
     ],
 )
-def test_multimodal_sequential_pipeline_stage_manager(
+def test_encoders_colocated_pipeline_stage_manager(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
     llm_template: tuple[PipelineTemplate, int, int],
@@ -257,7 +257,7 @@ def test_first_last_stage(
         mesh = EncodersColocatedProcessGroupMesh(encoder_templates, llm_template)
         stage_manager = EncodersColocatedPipelineStageManager(mesh, mesh.pp_axis)
 
-        # check modal-local stage
+        # check global stage
         expected_first_last_stage = next(
             value
             for ranks, value in expected_first_last_stages.items()
@@ -271,7 +271,7 @@ def test_first_last_stage(
             f"but got ({stage_manager.is_first_stage(check_only_in_modal=False), stage_manager.is_last_stage(check_only_in_modal=False)})."
         )
 
-        # check global stage
+        # check modal-local stage
         expected_first_last_stage_in_modal = next(
             value
             for ranks, value in expected_first_last_stages_in_modal.items()

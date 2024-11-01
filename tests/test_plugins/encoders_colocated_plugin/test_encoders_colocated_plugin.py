@@ -33,7 +33,7 @@ from ..common import (
 )
 
 
-class TestMultiEncoderCoalescedModelInitializationClass(
+class TestMultiEncoderColocatedModelInitializationClass(
     TestPluginInitializationWithFakeBackendBase
 ):
     def generate_multimodal_model(

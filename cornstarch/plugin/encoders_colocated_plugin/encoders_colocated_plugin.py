@@ -1,7 +1,7 @@
 import inspect
 from dataclasses import replace
 from types import MethodType
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
@@ -458,7 +458,7 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
         criterion: Callable[..., Any] | None = None,
         dataloader: DataLoader | None = None,
         lr_scheduler: LRScheduler | None = None,
-    ) -> Tuple[
+    ) -> tuple[
         nn.Module, OptimizerWrapper, Callable[..., Any], DataLoader, LRScheduler
     ]:
         assert dist.is_initialized(), "torch.distributed is not initialized."
