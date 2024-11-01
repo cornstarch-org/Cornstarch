@@ -210,17 +210,7 @@ def test_encoders_replicated_pipeline_stage_manager(
     ],
     ids=["pp2_tp1_sp1", "pp2_tp2_sp2", "pp4_tp4_sp1", "pp4_tp1_sp4"],
 )
-@pytest.mark.parametrize(
-    "encoder_templates",
-    [
-        ([encoder1_template]),
-        ([encoder3_template]),
-        ([encoder1_template, encoder3_template]),
-    ],
-    ids=["enc0", "enc1", "enc2"],
-)
 def test_first_last_stage(
-    encoder_templates: list[PipelineTemplate],
     llm_template: tuple[PipelineTemplate, int, int],
     expected_first_last_stages: dict[tuple[int], tuple[bool, bool]],
 ):
@@ -230,7 +220,7 @@ def test_first_last_stage(
         dist.init_process_group(
             backend="fake", store=FakeStore(), rank=rank, world_size=world_size
         )
-        mesh = EncodersReplicatedProcessGroupMesh(encoder_templates, llm_template)
+        mesh = EncodersReplicatedProcessGroupMesh(llm_template)
         stage_manager = EncodersReplicatedPipelineStageManager(mesh, mesh.pp_axis)
 
         expected_first_last_stage = next(
