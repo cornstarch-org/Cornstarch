@@ -16,9 +16,7 @@ logger = logging.get_logger(__name__)
 class EncodersReplicatedProcessGroupMesh(MultiModalProcessGroupMesh):
     """
     Args:
-        encoder_parallel_size (tuple[int, int]): The pipeline parallel degree and tensor parallel
-            degree of the encoder.
-        llm_parallel_size (tuple[int, int, int]): The pipeline parallel degree, tensor parallel
+        llm_template (tuple[int, int, int]): The pipeline parallel degree, tensor parallel
             degree and sequence parallel degree of the LLM.
 
     Currently Sequence parallelism for encoders is not supported.
@@ -26,11 +24,9 @@ class EncodersReplicatedProcessGroupMesh(MultiModalProcessGroupMesh):
 
     def __init__(
         self,
-        encoder_templates: list[PipelineTemplate],
         llm_template: tuple[PipelineTemplate, int, int],
     ):
         assert dist.is_initialized(), "Please initialize torch.distributed first."
-        assert isinstance(encoder_templates, list), "encoder_templates must be a list."
         assert llm_template is not None, "llm_template must be provided."
 
         logger.warning_once(
@@ -38,7 +34,6 @@ class EncodersReplicatedProcessGroupMesh(MultiModalProcessGroupMesh):
             "will be ignored in EncodersReplicated."
         )
 
-        self.encoder_templates = encoder_templates
         self.llm_template = llm_template
 
         llm_pp_size, llm_tp_size, llm_sp_size = (
