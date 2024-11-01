@@ -22,6 +22,7 @@ from .model_zoo import (
     MixtralModelBase,
     Phi3ForCausalLMBase,
     Phi3ModelBase,
+    PixtralVisionModelBase,
     Qwen2AudioEncoderBase,
     Qwen2ForCausalLMBase,
     Qwen2ModelBase,
@@ -36,6 +37,7 @@ vision_models = dict(
     evaclip=EvaCLIPModelBase,
     siglip=SiglipModelBase,
     intern_vit=InternVisonModelBase,
+    pixtral=PixtralVisionModelBase,
 )
 
 language_models = dict(

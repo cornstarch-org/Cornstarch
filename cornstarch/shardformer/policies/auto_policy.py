@@ -130,6 +130,10 @@ _POLICY_LIST = {
     "transformers.models.mixtral.modeling_mixtral.MixtralForCausalLM": PolicyLocation(
         file_name="mixtral", class_name="MixtralForCausalLMPolicy"
     ),
+    # Pixtral
+    "transformers.models.pixtral.modeling_pixtral.PixtralVisionModel": PolicyLocation(
+        file_name="pixtral", class_name="PixtralVisionModelPolicy"
+    ),
     # DINOv2
     "transformers.models.dinov2.modeling_dinov2.Dinov2Model": PolicyLocation(
         file_name="dinov2", class_name="Dinov2ModelPolicy"
