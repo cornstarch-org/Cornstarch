@@ -9,7 +9,9 @@ from .llama import LlamaForCausalLMBase, LlamaModelBase
 from .mistral import MistralForCausalLMBase, MistralModelBase
 from .mixtral import MixtralForCausalLMBase, MixtralModelBase
 from .phi3 import Phi3ForCausalLMBase, Phi3ModelBase
+from .pixtral import PixtralVisionModelBase
 from .qwen2 import Qwen2ForCausalLMBase, Qwen2ModelBase
 from .qwen2_audio import Qwen2AudioEncoderBase
+from .qwen2_vision import Qwen2VisionTransformerBase
 from .siglip import SiglipModelBase
 from .whisper import WhisperEncoderBase
