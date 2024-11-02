@@ -106,12 +106,12 @@ def parse_args():
     return parser.parse_args()
 
 """
-CUDA_VISIBLE_DEVICES=0,1,2,3 python tests/tmp_test/train_llama_ring_attn.py --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=0,1,2,3 python tests/tmp_test/train_llama_ring_attn.py --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn_zig_zag
-CUDA_VISIBLE_DEVICES=0,1,2,3 python tests/tmp_test/train_llama_ring_attn.py --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn_optimal
+CUDA_VISIBLE_DEVICES=0,1,2,3 python run_llm_ring.py --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=0,1,2,3 python run_llm_ring.py --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn_zig_zag
+CUDA_VISIBLE_DEVICES=0,1,2,3 python run_llm_ring.py --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn_optimal
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 python tests/tmp_test/train_llama_ring_attn.py --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
-CUDA_VISIBLE_DEVICES=0,1,2,3 python tests/tmp_test/train_llama_ring_attn.py --world_size 4 --tp_size 4 --pp_size 1 --sp_size 1
+CUDA_VISIBLE_DEVICES=0,1,2,3 python run_llm_ring.py --world_size 4 --tp_size 2 --pp_size 1 --sp_size 2 --sp_mode ring_attn
+CUDA_VISIBLE_DEVICES=0,1,2,3 python run_llm_ring.py --world_size 4 --tp_size 4 --pp_size 1 --sp_size 1
 """
 
 if __name__ == "__main__":
