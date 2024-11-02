@@ -213,8 +213,12 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
             test_config=test_config, precision=precision
         )
 
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
+        try:
+            org_model.gradient_checkpointing_enable()
+            sharded_model.unwrap().gradient_checkpointing_enable()
+        except ValueError:
+            # Model does not support gradient checkpointing
+            pass
 
         org_loss, org_output, sharded_loss, sharded_output = (
             self.run_forward_backward_with_hybrid_plugin(
@@ -310,23 +314,38 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
         data = self.model.data_gen_fn(self.microbatch_size * self.num_microbatches)
 
-        shard_test_data = {}
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                v = v.to(dtype=precision)
-            shard_test_data[k] = v.clone().to("cuda")
-        unshard_test_data = {}
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                v = v.to(dtype=precision)
-            unshard_test_data[k] = v.clone().to("cuda")
+        if isinstance(data, list):
+            shard_test_data = []
+            for d in data:
+                if isinstance(d, torch.Tensor) and d.is_floating_point():
+                    d = d.to(dtype=precision)
+                shard_test_data.append(d.clone().to("cuda"))
+            unshard_test_data = []
+            for d in data:
+                if isinstance(d, torch.Tensor) and d.is_floating_point():
+                    d = d.to(dtype=precision)
+                unshard_test_data.append(d.clone().to("cuda"))
+        elif isinstance(data, dict):
+            shard_test_data = {}
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    v = v.to(dtype=precision)
+                shard_test_data[k] = v.clone().to("cuda")
+            unshard_test_data = {}
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    v = v.to(dtype=precision)
+                unshard_test_data[k] = v.clone().to("cuda")
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()
         with torch.autocast(
             device_type="cuda", enabled=precision == torch.float16, dtype=torch.float16
         ):
-            org_output = org_model(**unshard_test_data)
+            if isinstance(unshard_test_data, list):
+                org_output = org_model(*unshard_test_data)
+            else:
+                org_output = org_model(**unshard_test_data)
             org_loss = criterion(org_output).to(precision)
         org_loss.backward()
 
@@ -343,7 +362,10 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
             )
             sharded_loss = sharded_output["loss"]
         else:
-            sharded_output = sharded_model(**shard_test_data)
+            if isinstance(shard_test_data, list):
+                sharded_output = sharded_model(*shard_test_data)
+            else:
+                sharded_output = sharded_model(**shard_test_data)
             sharded_loss = criterion(sharded_output)
             sharded_optimizer.backward(sharded_loss)
 

@@ -26,6 +26,7 @@ from .model_zoo import (
     Qwen2AudioEncoderBase,
     Qwen2ForCausalLMBase,
     Qwen2ModelBase,
+    Qwen2VisionTransformerBase,
     SiglipModelBase,
     WhisperEncoderBase,
 )
@@ -38,6 +39,7 @@ vision_models = dict(
     siglip=SiglipModelBase,
     intern_vit=InternVisonModelBase,
     pixtral=PixtralVisionModelBase,
+    qwen2_vision=Qwen2VisionTransformerBase,
 )
 
 language_models = dict(
