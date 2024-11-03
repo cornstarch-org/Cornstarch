@@ -33,18 +33,16 @@ from transformers.models.llama.modeling_llama import (
     logger,
     repeat_kv,
 )
-from transformers.utils import logging
 from transformers.utils.import_utils import is_torchdynamo_compiling
 
-from cornstarch.shardformer.layers.attn import RingAttentionAnyMask, RingAttentionBase
+from cornstarch.shardformer.layers.ring_attention import RingAttentionFixedlen
+from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
 
 # from colossalai.shardformer.layer.utils import split_batch_zigzag
 from cornstarch.shardformer.layers.utils import (
     split_batch,
     update_attention_mask,
 )
-
-logger = logging.get_logger(__name__)
 
 _SUPPORTED_CP_MODE = [
     "all_to_all",
@@ -658,7 +656,7 @@ class LlamaAttentionForwards:
                 # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
                 # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
                 logger.info("use causal attn version")
-                attn_output = RingAttentionBase.attention(
+                attn_output = RingAttentionFixedlen.attention(
                     query_states,
                     key_states,
                     value_states,

@@ -5,20 +5,18 @@ import torch.distributed as dist
 from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 
 from cornstarch.kernel.interface import (
-    _flash_attn_anymask_forward,
     _flash_attn_casualmask_backward,
     _flash_attn_casualmask_forward,
 )
 from cornstarch.shardformer.layers.ring_attn import (
-    ring_flash_attn_anymask_backward,
-    ring_flash_attn_anymask_forward,
     ring_flash_attn_backward,
     ring_flash_attn_forward,
 )
-from cornstarch.shardformer.layers.utils import split_batch_uniform
+
+from ._base import RingAttentionBase
 
 
-class RingAttentionBase(torch.autograd.Function):
+class RingAttentionFixedlen(RingAttentionBase):
     """
     Base class for ring attention.
     support fixed length input.
@@ -26,20 +24,22 @@ class RingAttentionBase(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx,
-        q,
-        k,
-        v,
-        sp_group,
-        causal,
-        return_softmax,
-        dropout_p=0.0,
-        softmax_scale=None,
-        deterministic=False,
-        window_size_left=-1,
-        window_size_right=-1,
-        alibi_slopes=None,
-        kernel_impl: str = "cuda",  # flash attn of tri for cuda, triton flash attn for triton
+        ctx: torch.autograd.function.FunctionCtx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        causal: bool,
+        return_softmax: bool,
+        dropout_p: Optional[float] = 0.0,
+        softmax_scale: Optional[float] = None,
+        deterministic: Optional[bool] = False,
+        window_size_left: Optional[int] = -1,
+        window_size_right: Optional[int] = -1,
+        alibi_slopes: Optional[torch.Tensor] = None,
+        kernel_impl: Optional[
+            str
+        ] = "cuda",  # flash attn of tri for cuda, triton flash attn for triton
     ):
 
         assert kernel_impl in ["cuda", "triton"]
@@ -114,14 +114,14 @@ class RingAttentionBase(torch.autograd.Function):
 
     @staticmethod
     def attention(
-        q,
-        k,
-        v,
-        sp_group,
-        dropout_p=0.0,
-        softmax_scale=None,
-        deterministic=False,
-        return_softmax=False,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        dropout_p: Optional[float] = 0.0,
+        softmax_scale: Optional[float] = None,
+        deterministic: Optional[bool] = False,
+        return_softmax: Optional[bool] = False,
         kernel_impl: str = "cuda",  # flash attn of tri for cuda, triton flash attn for triton
         **kwargs,
     ):
@@ -130,12 +130,11 @@ class RingAttentionBase(torch.autograd.Function):
             q (torch.Tensor): Query tensor. Shape should be [B, nHeads, Sq, D]
             k (torch.Tensor): Key tensor. Shape should be [B, nHeads, Sq, Sq, D]
             v (torch.Tensor): Value tensor. Shape should be [B, nHeads, Sq, Sq, D]
-            sp_group (Optional[dist.ProcessGroup]): Process group for sequence parallelism
+            sp_group (dist.ProcessGroup): Process group for sequence parallelism
             dropout_p (float, optional): Dropout probability. Defaults to 0.0.
-            softmax_scale (Optional[float], optional): Scaling factor applied prior to softmax.
+            softmax_scale (float, optional): Scaling factor applied prior to softmax.
             deterministic (bool, optional): Whether to force deterministic backward pass. See https://github.com/Dao-AILab/flash-attention/issues/349
             return_softmax (bool, optional): Whether to return the softmax denominator (logsumexp).
-            inner_ring_size (Optional[int], optional): Inner ring size of the 2D ring. By default use a heuristic to decide.
 
         Returns:
             out: Output tensor of shape [B, nHeads, Sq, D] or [T, nHeads, D] if pad_output is False.
@@ -178,124 +177,7 @@ class RingAttentionVarlen(RingAttentionBase):
         raise NotImplementedError
 
 
-class RingAttentionAnyMask(RingAttentionBase):
-    """
-    support any mask.
-    """
-
-    @staticmethod
-    def forward(
-        ctx,
-        q,
-        k,
-        v,
-        mask,
-        sp_group,
-        return_softmax,
-        dropout_p=0.0,
-        softmax_scale=None,
-        deterministic=False,
-        window_size_left=-1,
-        window_size_right=-1,
-        alibi_slopes=None,
-    ):
-        if softmax_scale is None:
-            softmax_scale = q.shape[-1] ** (-0.5)
-        sm_scale = softmax_scale
-        assert alibi_slopes is None
-
-        out, softmax_lse = ring_flash_attn_anymask_forward(
-            sp_group,
-            q,
-            k,
-            v,
-            mask,
-            softmax_scale=softmax_scale,
-            ATTN_IMPL=_flash_attn_anymask_forward,
-            dropout_p=dropout_p,
-            window_size_left=window_size_left,
-            window_size_right=window_size_right,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-        )
-
-        ctx.save_for_backward(q, k, v, out, mask, softmax_lse)
-        # ctx.grid = grid
-        ctx.group = sp_group
-        ctx.sm_scale = sm_scale
-        ctx.HEAD_DIM = q.shape[-1]
-        ctx.USE_MASK = True
-
-        return out if not return_softmax else (out, softmax_lse)
-
-    @staticmethod
-    def backward(ctx, dout, *args):
-        q, k, v, out, mask, softmax_lse = ctx.saved_tensors
-        dq, dk, dv = ring_flash_attn_anymask_backward(
-            ctx.group,
-            dout,
-            q,
-            k,
-            v,
-            out,
-            softmax_lse,
-            ctx.sm_scale,
-            mask,
-        )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
-
-    @staticmethod
-    def attention(
-        q,
-        k,
-        v,
-        sp_group,
-        mask,
-        dropout_p=0.0,
-        softmax_scale=None,
-        deterministic=False,
-        return_softmax=False,
-        **kwargs,
-    ):
-        """
-        Args:
-            q (torch.Tensor): Query tensor. Shape should be [B, nHeads, Sq, D]
-            k (torch.Tensor): Key tensor. Shape should be [B, nHeads, Sq, Sq, D]
-            v (torch.Tensor): Value tensor. Shape should be [B, nHeads, Sq, Sq, D]
-            sp_group (Optional[dist.ProcessGroup]): Process group for sequence parallelism
-            dropout_p (float, optional): Dropout probability. Defaults to 0.0.
-            softmax_scale (Optional[float], optional): Scaling factor applied prior to softmax.
-            deterministic (bool, optional): Whether to force deterministic backward pass. See https://github.com/Dao-AILab/flash-attention/issues/349
-            return_softmax (bool, optional): Whether to return the softmax denominator (logsumexp).
-            inner_ring_size (Optional[int], optional): Inner ring size of the 2D ring. By default use a heuristic to decide.
-
-        Returns:
-            out: Output tensor of shape [B, nHeads, Sq, D] or [T, nHeads, D] if pad_output is False.
-            softmax_lse: (if return_softmax is True) Softmax denominator (logsumexp).
-                Shape should be [total_q_seqlen, nHeads]
-        """
-
-        out, softmax_lse = RingAttentionAnyMask.apply(
-            q,
-            k,
-            v,
-            mask,
-            sp_group,
-            True,  # return_softmax
-            dropout_p,
-            softmax_scale,
-            deterministic,
-            -1,  # window_size_left
-            -1,  # window_size_right
-            None,  # alibi_slopes
-        )
-
-        out = out.contiguous()
-
-        return out if not return_softmax else (out, softmax_lse)
-
-
-class DoubleRingAttention(torch.autograd.Function):
+class DoubleRingAttention(RingAttentionBase):
     @staticmethod
     def forward(ctx, qkv, mask_info, sp_group, sp_size, inner_ring_size):
         raise NotImplementedError

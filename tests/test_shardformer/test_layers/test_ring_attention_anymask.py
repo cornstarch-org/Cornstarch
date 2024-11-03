@@ -5,7 +5,7 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 
-from cornstarch.shardformer.layers.attn import RingAttentionAnyMask
+from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
 
 from .utils import RingAttentionTestBase
 

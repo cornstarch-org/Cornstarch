@@ -9,7 +9,7 @@ from torch.testing._internal.common_utils import (
 )
 
 from cornstarch.kernel.interface import flash_attn_triton_func
-from cornstarch.shardformer.layers.attn import RingAttentionBase
+from cornstarch.shardformer.layers.ring_attention import RingAttentionFixedlen
 
 from .utils import RingAttentionTestBase
 
@@ -79,7 +79,7 @@ class TestRingAttentionBaseClass(RingAttentionTestBase):
         # ring_lse:
         #   with cuda kernel: [batch_size, seq_len // world_size, num_heads]
         #   with triton kernel: [batch_size, num_heads, seq_len // world_size]
-        ring_out, ring_lse = RingAttentionBase.apply(
+        ring_out, ring_lse = RingAttentionFixedlen.apply(
             local_q,
             local_k,
             local_v,
