@@ -193,7 +193,7 @@ class RingAttentionVarlen(RingAttentionBase):
 
     @staticmethod
     def forward(ctx, qkv, mask_info, sp_group, sp_size, inner_ring_size):
-        pass
+        raise NotImplementedError
 
 
 class RingAttentionAnyMask(RingAttentionBase):
@@ -316,4 +316,4 @@ class RingAttentionAnyMask(RingAttentionBase):
 class DoubleRingAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, qkv, mask_info, sp_group, sp_size, inner_ring_size):
-        pass
+        raise NotImplementedError
