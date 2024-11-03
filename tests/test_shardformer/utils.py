@@ -1,14 +1,10 @@
 import copy
-import os
-import random
 import re
-import sys
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 from unittest.mock import patch
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from colossalai.booster import Booster
@@ -35,9 +31,11 @@ from gloo_utils import (
 from torch import Tensor, nn
 from torch.optim import Adam, Optimizer
 from torch.testing import assert_close
-from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessTestCase
-from torch.testing._internal.common_utils import FILE_SCHEMA
-from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
+from transformers.modeling_outputs import (
+    BaseModelOutput,
+    BaseModelOutputWithPast,
+    ModelOutput,
+)
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import (
@@ -52,6 +50,8 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultiModalPipelineStageManager,
 )
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+
+from ..distributed_base import GlooDistributedTestBase
 
 
 class ModelClassBase(ABC):
@@ -77,91 +77,14 @@ class ModelClassBase(ABC):
         return self.model_class(config)
 
 
-class PolicyTestBase(MultiProcessTestCase, ABC):
-
-    microbatch_size: int = 1
+class ColossalaiHybridParallelBase(GlooDistributedTestBase):
     num_microbatches: int = 4
-
-    @abstractmethod
-    def check_fn(
-        self,
-        booster: Booster,
-        org_model: PreTrainedModel,
-        sharded_model: ModelWrapper,
-        org_optim: Optimizer,
-        sharded_optim: OptimizerWrapper,
-        org_output: ModelOutput,
-        sharded_output: dict,
-        org_loss: torch.Tensor,
-        sharded_loss: torch.Tensor,
-    ):
-        """Each ParallelBase class should implement this method"""
-        ...
+    microbatch_size: int = 1
 
     @property
     def world_size(self) -> int:
         return 16
 
-    def setUp(self) -> None:
-        super().setUp()
-        with patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":16:8"}):
-            self._spawn_processes()
-
-    def tearDown(self) -> None:
-        return super().tearDown()
-
-    @classmethod
-    def _run(cls, rank: int, test_name: str, file_name: str, pipe, **kwargs) -> None:
-        # Copy from: torch/testing/_internal/common_fsdp.py FSDPTest._run
-        self = cls(test_name)
-        self.rank = rank
-        self.file_name = file_name
-
-        print(f"dist init r={self.rank}, world={self.world_size}")
-
-        backend = "gloo"
-
-        try:
-            dist.init_process_group(
-                init_method=f"{FILE_SCHEMA}{self.file_name}",
-                backend=backend,
-                world_size=int(self.world_size),
-                rank=self.rank,
-            )
-        except RuntimeError as e:
-            if "recompile" in e.args[0]:
-                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
-
-            raise
-
-        if torch.cuda.is_available() and torch.cuda.device_count():
-            device_id = self.rank % torch.cuda.device_count()
-            torch.cuda.set_device(device_id)
-
-        self.reset_seed()
-
-        # Execute barrier prior to running test to ensure that every process
-        # has finished initialization and that the following test
-        # immediately exiting due to a skip doesn't cause flakiness.
-        dist.barrier()
-
-        with torch.backends.cudnn.flags(
-            enabled=True, deterministic=True, benchmark=True
-        ):
-            self.run_test(test_name, pipe)
-
-        dist.barrier()
-
-        dist.destroy_process_group()
-
-    def reset_seed(self):
-        torch.manual_seed(0)
-        torch.cuda.manual_seed(0)
-        random.seed(0)
-        np.random.seed(0)
-
-
-class ColossalaiHybridParallelBase(PolicyTestBase):
     def set_model(self, model: ModelClassBase):
         self.model = model
 
@@ -295,29 +218,24 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             test_config=test_config, precision=precision
         )
 
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
+        try:
+            org_model.gradient_checkpointing_enable()
+            sharded_model.unwrap().gradient_checkpointing_enable()
+        except ValueError:
+            # Model does not support gradient checkpointing
+            pass
 
-        with (
-            patch.object(dist, "batch_isend_irecv", new=batch_isend_irecv_gloo),
-            patch.object(dist, "all_to_all", new=all_to_all_gloo),
-            patch.object(dist, "all_to_all_single", new=all_to_all_single_gloo),
-            patch(
-                "colossalai.pipeline.p2p._check_device",
-                return_value=(torch.device("cuda"), False),
-            ),
-        ):
-            org_loss, org_output, sharded_loss, sharded_output = (
-                self.run_forward_backward_with_hybrid_plugin(
-                    org_model=org_model,
-                    sharded_model=sharded_model,
-                    sharded_optimizer=sharded_optimizer,
-                    criterion=criterion,
-                    output_transform_fn=lambda x: x,
-                    booster=booster,
-                    precision=precision,
-                )
+        org_loss, org_output, sharded_loss, sharded_output = (
+            self.run_forward_backward_with_hybrid_plugin(
+                org_model=org_model,
+                sharded_model=sharded_model,
+                sharded_optimizer=sharded_optimizer,
+                criterion=criterion,
+                output_transform_fn=lambda x: x,
+                booster=booster,
+                precision=precision,
             )
+        )
 
         self.check_fn(
             booster=booster,
@@ -401,23 +319,38 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
 
         data = self.model.data_gen_fn(self.microbatch_size * self.num_microbatches)
 
-        shard_test_data = {}
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                v = v.to(dtype=precision)
-            shard_test_data[k] = v.clone().to("cuda")
-        unshard_test_data = {}
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                v = v.to(dtype=precision)
-            unshard_test_data[k] = v.clone().to("cuda")
+        if isinstance(data, list):
+            shard_test_data = []
+            for d in data:
+                if isinstance(d, torch.Tensor) and d.is_floating_point():
+                    d = d.to(dtype=precision)
+                shard_test_data.append(d.clone().to("cuda"))
+            unshard_test_data = []
+            for d in data:
+                if isinstance(d, torch.Tensor) and d.is_floating_point():
+                    d = d.to(dtype=precision)
+                unshard_test_data.append(d.clone().to("cuda"))
+        elif isinstance(data, dict):
+            shard_test_data = {}
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    v = v.to(dtype=precision)
+                shard_test_data[k] = v.clone().to("cuda")
+            unshard_test_data = {}
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    v = v.to(dtype=precision)
+                unshard_test_data[k] = v.clone().to("cuda")
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()
         with torch.autocast(
             device_type="cuda", enabled=precision == torch.float16, dtype=torch.float16
         ):
-            org_output = org_model(**unshard_test_data)
+            if isinstance(unshard_test_data, list):
+                org_output = org_model(*unshard_test_data)
+            else:
+                org_output = org_model(**unshard_test_data)
             org_loss = criterion(org_output).to(precision)
         org_loss.backward()
 
@@ -434,14 +367,20 @@ class ColossalaiHybridParallelBase(PolicyTestBase):
             )
             sharded_loss = sharded_output["loss"]
         else:
-            sharded_output = sharded_model(**shard_test_data)
+            if isinstance(shard_test_data, list):
+                sharded_output = sharded_model(*shard_test_data)
+            else:
+                sharded_output = sharded_model(**shard_test_data)
             sharded_loss = criterion(sharded_output)
             sharded_optimizer.backward(sharded_loss)
 
         return org_loss, org_output, sharded_loss, sharded_output
 
 
-class CornstarchMultimodalParallelBase(PolicyTestBase):
+class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
+    num_microbatches: int = 4
+    microbatch_size: int = 1
+
     def set_model(self, encoders: dict[str, ModelClassBase], llm: ModelClassBase):
         self.encoders = encoders
         self.llm = llm
@@ -638,26 +577,17 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
         org_model.gradient_checkpointing_enable()
         sharded_model.unwrap().gradient_checkpointing_enable()
 
-        with (
-            patch.object(dist, "batch_isend_irecv", new=batch_isend_irecv_gloo),
-            patch.object(dist, "all_to_all", new=all_to_all_gloo),
-            patch.object(dist, "all_to_all_single", new=all_to_all_single_gloo),
-            patch(
-                "colossalai.pipeline.p2p._check_device",
-                return_value=(torch.device("cuda"), False),
-            ),
-        ):
-            org_loss, org_output, sharded_loss, sharded_output = (
-                self.run_forward_backward_with_multimodal_plugin(
-                    org_model=org_model,
-                    sharded_model=sharded_model,
-                    sharded_optimizer=sharded_optimizer,
-                    criterion=criterion,
-                    output_transform_fn=lambda x: x,
-                    booster=booster,
-                    precision=precision,
-                )
+        org_loss, org_output, sharded_loss, sharded_output = (
+            self.run_forward_backward_with_multimodal_plugin(
+                org_model=org_model,
+                sharded_model=sharded_model,
+                sharded_optimizer=sharded_optimizer,
+                criterion=criterion,
+                output_transform_fn=lambda x: x,
+                booster=booster,
+                precision=precision,
             )
+        )
 
         self.check_fn(
             booster=booster,
@@ -670,6 +600,12 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
             org_loss=org_loss,
             sharded_loss=sharded_loss,
         )
+
+    @staticmethod
+    def postprocess_callback(inputs: dict, output: BaseModelOutput) -> BaseModelOutput:
+        # Cut number of tokens to make ring attention happy
+        output.last_hidden_state = output.last_hidden_state[:, :32, :]
+        return output
 
     def build_model_from_multimodal_plugin(
         self,
@@ -689,24 +625,25 @@ class CornstarchMultimodalParallelBase(PolicyTestBase):
         use_lazy_init: bool = test_config.pop("use_lazy_init", False)
         use_flash_attention: bool = test_config["enable_flash_attention"]
 
-        encoders: dict[str, PreTrainedModel] = {}
-
-        for encoder_name, model_base in self.encoders.items():
-            encoders[encoder_name] = model_base.model_fn(use_flash_attention).to(
-                device="cuda"
-            )
-
-        llm = self.llm.model_fn(use_flash_attention).to(device="cuda")
-
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
+            encoders: dict[str, PreTrainedModel] = {}
+
+            for encoder_name, model_base in self.encoders.items():
+                encoders[encoder_name] = model_base.model_fn(use_flash_attention)
+
+            llm = self.llm.model_fn(use_flash_attention)
+
             org_model = MultimodalModel(
                 encoders={
-                    encoder_name: ModalEncoderModule(module)
+                    encoder_name: ModalEncoderModule(
+                        module,
+                        postprocess_module_callback=self.postprocess_callback,
+                    )
                     for encoder_name, module in encoders.items()
                 },
                 language_model=llm,
-            )
+            ).to("cuda")
             sharded_model = copy.deepcopy(org_model)
         if use_lazy_init:
             ctx.materialize(org_model)

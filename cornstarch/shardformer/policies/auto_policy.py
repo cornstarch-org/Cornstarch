@@ -130,6 +130,10 @@ _POLICY_LIST = {
     "transformers.models.mixtral.modeling_mixtral.MixtralForCausalLM": PolicyLocation(
         file_name="mixtral", class_name="MixtralForCausalLMPolicy"
     ),
+    # Pixtral
+    "transformers.models.pixtral.modeling_pixtral.PixtralVisionModel": PolicyLocation(
+        file_name="pixtral", class_name="PixtralVisionModelPolicy"
+    ),
     # DINOv2
     "transformers.models.dinov2.modeling_dinov2.Dinov2Model": PolicyLocation(
         file_name="dinov2", class_name="Dinov2ModelPolicy"
@@ -171,6 +175,10 @@ _POLICY_LIST = {
     # Qwen2Audio
     "transformers.models.qwen2_audio.modeling_qwen2_audio.Qwen2AudioEncoder": PolicyLocation(
         file_name="qwen2_audio", class_name="Qwen2AudioEncoderPolicy"
+    ),
+    # Qwen2Vision
+    "transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VisionTransformerPretrainedModel": PolicyLocation(
+        file_name="qwen2_vision", class_name="Qwen2VisionTransformerPolicy"
     ),
     # InternLM2
     "cornstarch.models.internlm2.modeling_internlm2.InternLM2Model": PolicyLocation(

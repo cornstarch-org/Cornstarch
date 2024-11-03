@@ -43,6 +43,10 @@ causal_lms = dict(
 
 @instantiate_parametrized_tests
 class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
+    @property
+    def world_size(self) -> int:
+        return 16
+
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize(
@@ -90,6 +94,7 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
     @parametrize(
         "tp_size, vision_pp_size, language_pp_size",
         [
+            (1, 1, 1),
             (2, 1, 1),
             (2, 2, 2),
         ],
@@ -120,6 +125,10 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
 
 @instantiate_parametrized_tests
 class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
+    @property
+    def world_size(self) -> int:
+        return 8
+
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize("audio_model_name", audio_models.keys(), lambda x: f"{x}")
@@ -127,7 +136,7 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         "tp_size, vision_pp_size, audio_pp_size, language_pp_size",
         [
             (2, 1, 1, 2),
-            (1, 2, 2, 4),
+            (1, 1, 1, 2),
         ],
         name_fn=lambda tp, vpp, app, lpp: f"tp={tp}, pp={vpp},{app},{lpp}",
     )

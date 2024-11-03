@@ -29,3 +29,15 @@ Optionally, install [`apex`](https://github.com/nvidia/apex) to use fused normal
 ## Run
 
 See [how to run](examples/README.md).
+
+## Debug tests without torch.compile
+ColossalAI uses `@torch.compile`, which spawns async compile worker processes (32 workers by default) **per process** you spawn.
+It drastically slows down debugging test cases especially when a test case runs with `torch.multiprocessing` (e.g. tests in `tests/test_shardformer`).
+
+Disable torch.compile with the following environment variable:
+```bash
+export TORCHDYNAMO_DISABLE=1
+```
+
+Or use `pytest-env` package. Install the package via `pip install pytest-env==1.1.3`.
+Cornstarch `pyproject.toml` includes a configuration for `pytest-env` (`[tool.pytest.ini_options]`) and automatically injects the environment variable above to your tests.

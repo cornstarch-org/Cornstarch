@@ -193,14 +193,15 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         if self.my_modal_name == "language_model":
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # Forward in the first stage of the language model
-                assert hidden_states_shape is not None
-                assert len(hidden_states_shape) == len(module.encoders), (
+                num_tokens_per_encoder_outputs = getattr(
+                    hidden_states, "_cornstarch_shape"
+                )
+                assert len(num_tokens_per_encoder_outputs) == len(module.encoders), (
                     f"Expected to have {len(module.encoders)} hidden states, "
                     f"got {len(hidden_states)}."
                 )
 
                 # Split merged encoder outputs into separate modal features
-                num_tokens_per_encoder_outputs = hidden_states_shape.tolist()
                 encoders_outputs = hidden_states.split(
                     num_tokens_per_encoder_outputs, dim=1
                 )

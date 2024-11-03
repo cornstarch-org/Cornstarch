@@ -11,24 +11,11 @@ from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh impor
     MultiModalProcessGroupMesh,
 )
 
-encoder1_template = PipelineTemplate(
-    "encoder1", [["layer.0", "layer.1"], ["layer.2", "layer.3"]]
-)
-encoder2_template = PipelineTemplate(
-    "encoder2", [["layer.0", "layer.1"], ["layer.2", "layer.3"], ["layer.4", "layer.5"]]
-)
-
-llm_template_2stages = PipelineTemplate(
-    "llm", [["layer.0", "layer.1", "layer.2"], ["layer.3", "layer.4", "layer.5"]]
-)
-llm_template_4stages = PipelineTemplate(
-    "llm",
-    [
-        ["layer.0", "layer.1"],
-        ["layer.2", "layer.3"],
-        ["layer.4", "layer.5"],
-        ["layer.6", "layer.7"],
-    ],
+from .common import (
+    encoder1_template,
+    encoder2_template,
+    llm_template_2stages,
+    llm_template_4stages,
 )
 
 
@@ -358,7 +345,7 @@ def destroy_process_group():
 def test_init_process_group_mesh(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
-    llm_template: tuple[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
     expected_mesh: list[list[list[list[int]]]],
     expected_ranks: dict[PipelineTemplate, list[int]],
 ):
@@ -707,6 +694,24 @@ def test_init_process_group_mesh(
                 ],
             },
         ),
+        (
+            6,
+            {PipelineTemplate("encoder1", [["layer.0", "layer.1"]]): 2},
+            (PipelineTemplate("llm", [["layer.0", "layer.1"]]), 2, 2),
+            {
+                MultiModalProcessGroupMesh.pp_axis: [(0, 2), (1, 3), (0, 4), (1, 5)],
+                MultiModalProcessGroupMesh.dp_axis: [
+                    (0,),
+                    (1,),
+                    (2,),
+                    (3,),
+                    (4,),
+                    (5,),
+                ],
+                MultiModalProcessGroupMesh.tp_axis: [(0, 1), (2, 3), (4, 5)],
+                MultiModalProcessGroupMesh.sp_axis: [(0,), (1,), (2, 4), (3, 5)],
+            },
+        ),
     ),
 )
 @pytest.mark.parametrize(
@@ -717,18 +722,17 @@ def test_init_process_group_mesh(
         MultiModalProcessGroupMesh.tp_axis,
         MultiModalProcessGroupMesh.sp_axis,
     ],
-    ids=["pp", "dp", "tp", "sp"],
 )
 def test_get_group_along_axis(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
-    llm_template: tuple[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
     expected_group_ranks: dict[int, list[tuple[int, ...]]],
     axis: int,
     mocker: MockerFixture,
 ):
     if axis not in expected_group_ranks:
-        pytest.skip(f"axis {axis} is not in expected_group_ranks")
+        pytest.skip("Axis not in expected_group_ranks")
 
     recorded_new_group_calls: dict[int, list] = defaultdict(list)
 
@@ -753,7 +757,79 @@ def test_get_group_along_axis(
 
         mesh = MultiModalProcessGroupMesh(encoder_templates, llm_template)
         mesh.get_group_along_axis(axis)
+
         assert list(mesh._ranks_to_group.keys()) == expected_group_ranks[axis]
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "world_size, encoder_templates, llm_template",
+    [
+        (
+            24,
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 1),
+        ),
+        (
+            18,
+            {encoder1_template: 2, encoder2_template: 2},
+            (llm_template_2stages, 4, 1),
+        ),
+        (
+            84,
+            {encoder2_template: 4},
+            (llm_template_4stages, 4, 1),
+        ),
+        (
+            42,
+            {encoder1_template: 2, encoder2_template: 2},
+            (llm_template_2stages, 4, 4),
+        ),
+        (
+            132,
+            {encoder2_template: 4},
+            (llm_template_4stages, 2, 4),
+        ),
+        (
+            6,
+            {PipelineTemplate("encoder1", [["layer.0", "layer.1"]]): 2},
+            (PipelineTemplate("llm", [["layer.0", "layer.1"]]), 2, 2),
+        ),
+    ],
+)
+def test_create_group_along_axis_order(
+    world_size: int,
+    encoder_templates: dict[PipelineTemplate, int],
+    llm_template: tuple[PipelineTemplate, int, int],
+    mocker: MockerFixture,
+):
+    recorded_new_group_calls: dict[int, list] = defaultdict(list)
+
+    def record_new_group_call_decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            recorded_new_group_calls[dist.get_rank()].append(args[0])
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    mocker.patch.object(
+        dist,
+        "new_group",
+        wraps=record_new_group_call_decorator(dist.new_group),
+    )
+
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+
+        mesh = MultiModalProcessGroupMesh(encoder_templates, llm_template)
+        mesh.get_group_along_axis(mesh.pp_axis)
+        mesh.get_group_along_axis(mesh.dp_axis)
+        mesh.get_group_along_axis(mesh.tp_axis)
+        mesh.get_group_along_axis(mesh.sp_axis)
+
         dist.destroy_process_group()
 
     for rank, calls in recorded_new_group_calls.items():
