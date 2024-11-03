@@ -1,13 +1,15 @@
-import torch
-from .utils import RingComm, get_default_args, update_out_and_lse
-from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
-from cornstarch.kernel.interface import (
-    _flash_attn_anymask_forward,
-    _flash_attn_anymask_backward,
-)
+import logging
 from typing import Callable
 
-import logging
+import torch
+from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
+
+from cornstarch.kernel.interface import (
+    _flash_attn_anymask_backward,
+    _flash_attn_anymask_forward,
+)
+
+from .utils import RingComm, get_default_args, update_out_and_lse
 
 logger = logging.getLogger(__name__)
 
@@ -131,21 +133,6 @@ def ring_flash_attn_backward(
                 }
             )
             ATTN_IMPL(**params)
-
-            import torch.distributed as dist
-
-            if dist.get_rank() == 0:
-                print(f"Backward Ring Step {step} of {kv_comm.world_size}")
-                print(f"Rank {kv_comm.rank} of {kv_comm.world_size}")
-                print(f"Causal: {causal}")
-                print(f"current softmax_lse: {softmax_lse}")
-                print(f"current dout: {dout}")
-                print(f"current q: {q}")
-                print(f"current k: {k}")
-                print(f"current v: {v}")
-                print(f"current dq: {block_dq_buffer}")
-                print(f"current dk: {block_dk_buffer}")
-                print(f"current dv: {block_dv_buffer}")
 
             if dq is None:
                 dq = block_dq_buffer.to(torch.float32)
@@ -292,20 +279,6 @@ def ring_flash_attn_anymask_backward(
             }
         )
         ATTN_IMPL(**params)
-
-        # import torch.distributed as dist
-        # if dist.get_rank() == 0:
-        #     print(f"Backward Ring Step {step} of {kv_comm.world_size}")
-        #     print(f"Rank {kv_comm.rank} of {kv_comm.world_size}")
-        #     print(f"mask: {mask}")
-        #     print(f"current softmax_lse: {softmax_lse}")
-        #     print(f"current dout: {dout}")
-        #     print(f"current q: {q}")
-        #     print(f"current k: {k}")
-        #     print(f"current v: {v}")
-        #     print(f"current dq: {block_dq_buffer}")
-        #     print(f"current dk: {block_dk_buffer}")
-        #     print(f"current dv: {block_dv_buffer}")
 
         if dq is None:
             dq = block_dq_buffer.to(torch.float32)
