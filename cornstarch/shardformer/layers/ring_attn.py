@@ -2,6 +2,7 @@ import logging
 from typing import Callable
 
 import torch
+import torch.distributed as dist
 from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 
 from cornstarch.kernel.interface import (
@@ -15,18 +16,18 @@ logger = logging.getLogger(__name__)
 
 
 def ring_flash_attn_forward(
-    process_group,
+    process_group: dist.ProcessGroup,
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    softmax_scale,
+    softmax_scale: float,
     ATTN_IMPL: Callable = _flash_attn_forward,
-    dropout_p=0,
-    causal=True,
-    window_size_left=-1,
-    window_size_right=-1,
-    alibi_slopes=None,
-    deterministic=False,
+    dropout_p: float = 0,
+    causal: bool = True,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    alibi_slopes: torch.Tensor = None,
+    deterministic: bool = False,
 ):
     comm = RingComm(process_group)
 
@@ -74,21 +75,21 @@ def ring_flash_attn_forward(
 
 
 def ring_flash_attn_backward(
-    process_group,
-    dout,
-    q,
-    k,
-    v,
-    out,
-    softmax_lse,
-    softmax_scale,
+    process_group: dist.ProcessGroup,
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    softmax_scale: float,
     ATTN_IMPL: Callable = _flash_attn_backward,
-    dropout_p=0,
-    causal=True,
-    window_size_left=-1,
-    window_size_right=-1,
-    alibi_slopes=None,
-    deterministic=False,
+    dropout_p: float = 0,
+    causal: bool = True,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    alibi_slopes: torch.Tensor = None,
+    deterministic: bool = False,
 ):
     kv_comm = RingComm(process_group)
     d_kv_comm = RingComm(process_group)
@@ -163,19 +164,18 @@ def ring_flash_attn_backward(
 
 
 def ring_flash_attn_anymask_forward(
-    process_group,
+    process_group: dist.ProcessGroup,
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     mask: torch.Tensor,  # shape: [B, H, N // sp_size, N]
-    softmax_scale,
+    softmax_scale: float,
     ATTN_IMPL: Callable = _flash_attn_anymask_forward,
-    dropout_p=0,
-    causal=True,
-    window_size_left=-1,
-    window_size_right=-1,
-    alibi_slopes=None,
-    deterministic=False,
+    dropout_p: float = 0,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    alibi_slopes: torch.Tensor = None,
+    deterministic: bool = False,
 ):
     comm = RingComm(process_group)
 
@@ -221,21 +221,21 @@ def ring_flash_attn_anymask_forward(
 
 
 def ring_flash_attn_anymask_backward(
-    process_group,
-    dout,
-    q,
-    k,
-    v,
-    out,
-    softmax_lse,
-    softmax_scale,
-    mask,
+    process_group: dist.ProcessGroup,
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    softmax_scale: float,
+    mask: torch.Tensor,
     ATTN_IMPL: Callable = _flash_attn_anymask_backward,
-    dropout_p=0,
-    window_size_left=-1,
-    window_size_right=-1,
-    alibi_slopes=None,
-    deterministic=False,
+    dropout_p: float = 0,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    alibi_slopes: torch.Tensor = None,
+    deterministic: bool = False,
 ):
     kv_comm = RingComm(process_group)
     d_kv_comm = RingComm(process_group)
