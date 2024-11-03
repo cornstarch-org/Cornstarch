@@ -48,9 +48,9 @@ class TestRingAttentionBaseClass(RingAttentionTestBase):
         # Check inputs
         self.check_tensors(
             reference_tensors=(
-                q.chunk(self.world_size, dim=seq_dim)[self.rank],
-                k.chunk(self.world_size, dim=seq_dim)[self.rank],
-                v.chunk(self.world_size, dim=seq_dim)[self.rank],
+                q.chunk(world_size, dim=seq_dim)[self.rank],
+                k.chunk(world_size, dim=seq_dim)[self.rank],
+                v.chunk(world_size, dim=seq_dim)[self.rank],
             ),
             test_tensors=(local_q, local_k, local_v),
             rtol=rtol,
@@ -98,12 +98,12 @@ class TestRingAttentionBaseClass(RingAttentionTestBase):
         # Check outputs
         self.check_tensors(
             reference_tensors=(
-                out.chunk(self.world_size, dim=seq_dim)[self.rank],
+                out.chunk(world_size, dim=seq_dim)[self.rank],
                 (
                     sharded_lse.transpose(-1, -2)
-                    if (
-                        sharded_lse := lse.chunk(self.world_size, dim=-1)[self.rank]
-                    ).shape[:3]
+                    if (sharded_lse := lse.chunk(world_size, dim=-1)[self.rank]).shape[
+                        :3
+                    ]
                     != ring_lse.shape[:3]
                     else sharded_lse
                 ),
@@ -120,9 +120,9 @@ class TestRingAttentionBaseClass(RingAttentionTestBase):
         # Compare gradients
         self.check_tensors(
             reference_tensors=(
-                q.grad.chunk(self.world_size, dim=seq_dim)[self.rank],
-                k.grad.chunk(self.world_size, dim=seq_dim)[self.rank],
-                v.grad.chunk(self.world_size, dim=seq_dim)[self.rank],
+                q.grad.chunk(world_size, dim=seq_dim)[self.rank],
+                k.grad.chunk(world_size, dim=seq_dim)[self.rank],
+                v.grad.chunk(world_size, dim=seq_dim)[self.rank],
             ),
             test_tensors=(local_q.grad, local_k.grad, local_v.grad),
             rtol=rtol,
