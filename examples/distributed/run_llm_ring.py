@@ -10,13 +10,11 @@ from cornstarch.shardformer.policies.auto_policy import get_autopolicy
 import random
 import numpy as np
 
-
 def reset_seed():
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
     random.seed(0)
     np.random.seed(0)
-
 
 def setup_distributed(rank, world_size):
     os.environ["RANK"] = str(rank)
@@ -26,17 +24,15 @@ def setup_distributed(rank, world_size):
     dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
     torch.cuda.set_device(rank)
 
-
 def data_gen_fn(num_batches, seq_len, vocab_size):
     input_ids = torch.randint(0, 2048, (num_batches, seq_len))
-    attn_mask_rand = torch.randint(0, 2, (num_batches, seq_len, seq_len))  # B, L, L
+    attn_mask_rand = torch.randint(0, 2, (num_batches, seq_len, seq_len)) # B, L, L
     # attn_mask_rand[0, 0, 0] = 0
     return {
         "input_ids": input_ids,
         "attention_mask": attn_mask_rand,
         "labels": input_ids,
     }
-
 
 def train(rank, world_size, tp_size, pp_size, sp_size, sp_mode):
     setup_distributed(rank, world_size)
@@ -80,49 +76,48 @@ def train(rank, world_size, tp_size, pp_size, sp_size, sp_mode):
     seq_len = 512
     vocab_size = 32000
 
-    for epoch in range(num_epochs):
-        for step in range(num_batches):
-            # Generate dummy data
-            data = data_gen_fn(1, seq_len, vocab_size)
-            inputs = {k: v.to("cuda") for k, v in data.items()}
+    try: 
+        for epoch in range(num_epochs):
+            for step in range(num_batches):
+                # Generate dummy data
+                data = data_gen_fn(1, seq_len, vocab_size)
+                inputs = {k: v.to("cuda") for k, v in data.items()}
 
-            # Forward pass
-            outputs = model(**inputs)
-            # print(f"outputs: {outputs}")
-            loss = outputs.loss
+                # Forward pass
+                outputs = model(**inputs)
+                # print(f"outputs: {outputs}")
+                loss = outputs.loss
 
-            # Backward pass and optimization
-            optimizer.zero_grad()
-            booster.backward(loss, optimizer)
-            optimizer.step()
+                # Backward pass and optimization
+                optimizer.zero_grad()
+                booster.backward(loss, optimizer)
+                optimizer.step()
 
-            if rank == 0:
-                print(
-                    f"Epoch {epoch+1}/{num_epochs}, Step {step+1}/{num_batches}, Loss: {loss.item()}"
-                )
+                # check if model parameters are nan
+                for name, param in model.named_parameters():
+                    # if dist.get_rank(plugin) == 0:
+                    if plugin.pg_mesh.rank == 0:
+                        assert not torch.isnan(param).any(), f"{name} contains NaN"
 
+                if rank == 0:
+                    print(f"Epoch {epoch+1}/{num_epochs}, Step {step+1}/{num_batches}, Loss: {loss.item()}")
+
+    except Exception as e:
+        print(f"Error in train_step: {str(e)}")
+        # Ensure cleanup if error occurs
+        if dist.is_initialized():
+            dist.barrier()
+            dist.destroy_process_group()
 
 def parse_args():
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--world_size", type=int, default=4)
     parser.add_argument("--tp_size", type=int, default=1)
     parser.add_argument("--pp_size", type=int, default=1)
     parser.add_argument("--sp_size", type=int, default=4)
-    parser.add_argument(
-        "--sp_mode",
-        type=str,
-        default="ring_attn",
-        choices=[
-            "ring_attn",
-            "ring_attn_zig_zag",
-            "ring_attn_uniform",
-            "ring_attn_optimal",
-        ],
-    )
+    parser.add_argument("--sp_mode", type=str, default="ring_attn", choices=["ring_attn", "ring_attn_zig_zag", "ring_attn_uniform", "ring_attn_optimal"])
     return parser.parse_args()
-
 
 """
 CUDA_VISIBLE_DEVICES=0,1,2,3 python run_llm_ring.py --world_size 4 --tp_size 1 --pp_size 1 --sp_size 4 --sp_mode ring_attn
@@ -144,7 +139,4 @@ if __name__ == "__main__":
     assert world_size == tp_size * pp_size * sp_size
 
     import torch.multiprocessing as mp
-
-    mp.spawn(
-        train, args=(world_size, tp_size, pp_size, sp_size, sp_mode), nprocs=world_size
-    )
+    mp.spawn(train, args=(world_size, tp_size, pp_size, sp_size, sp_mode), nprocs=world_size)
