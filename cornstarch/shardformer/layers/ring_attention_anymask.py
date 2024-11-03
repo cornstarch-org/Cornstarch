@@ -92,7 +92,7 @@ class RingAttentionAnyMask(RingAttentionBase):
         deterministic: Optional[bool] = False,
         return_softmax: Optional[bool] = False,
         **kwargs,
-    ):
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             q (torch.Tensor): Query tensor. Shape should be [B, nHeads, Sq, D]

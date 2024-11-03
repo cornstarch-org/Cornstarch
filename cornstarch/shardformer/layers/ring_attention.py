@@ -124,7 +124,7 @@ class RingAttentionFixedlen(RingAttentionBase):
         return_softmax: Optional[bool] = False,
         kernel_impl: str = "cuda",  # flash attn of tri for cuda, triton flash attn for triton
         **kwargs,
-    ):
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             q (torch.Tensor): Query tensor. Shape should be [B, nHeads, Sq, D]

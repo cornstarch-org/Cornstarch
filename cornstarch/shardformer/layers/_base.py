@@ -12,15 +12,6 @@ class RingAttentionBase(torch.autograd.Function):
     """
 
     @staticmethod
-    def split_batch(
-        batch: torch.Tensor,
-        sp_group: dist.ProcessGroup,
-        seq_dim: int = 1,
-        is_label: bool = False,
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-    @staticmethod
     def attention(
         q: torch.Tensor,
         k: torch.Tensor,
@@ -31,4 +22,5 @@ class RingAttentionBase(torch.autograd.Function):
         deterministic: Optional[bool] = False,
         return_softmax: Optional[bool] = False,
         **kwargs,
-    ): ...
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
