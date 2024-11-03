@@ -1,18 +1,21 @@
-import torch
-import torch.distributed as dist
-import torch.nn.functional as F
-
-from torch.distributed import ProcessGroup
-
 import inspect
 from functools import cache
 from typing import Optional, Tuple
+
+import torch
+import torch.distributed as dist
+import torch.nn.functional as F
+from torch.distributed import ProcessGroup
 
 __all__ = ["update_out_and_lse", "RingComm", "get_default_args"]
 
 
 def split_batch(
-    batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False, sp_mode: str = "ring_attn"
+    batch: torch.Tensor,
+    sp_group: ProcessGroup,
+    seq_dim: int = 1,
+    is_label: bool = False,
+    sp_mode: str = "ring_attn",
 ) -> torch.Tensor:
     if sp_mode == "ring_attn" or sp_mode == "ring_attn_uniform":
         return split_batch_uniform(batch, sp_group, seq_dim, is_label)
@@ -23,8 +26,12 @@ def split_batch(
     else:
         raise ValueError(f"Unknown split mode: {sp_mode}")
 
+
 def split_batch_zig_zag(
-    batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False
+    batch: torch.Tensor,
+    sp_group: ProcessGroup,
+    seq_dim: int = 1,
+    is_label: bool = False,
 ) -> torch.Tensor:
     """
     split them using zigzag strategy
@@ -38,7 +45,9 @@ def split_batch_zig_zag(
 
     seq_len = batch.shape[seq_dim]
 
-    assert seq_len % (sp_size * 2) == 0, f"Sequence length {seq_len} must be divisible by {sp_size * 2}!"
+    assert (
+        seq_len % (sp_size * 2) == 0
+    ), f"Sequence length {seq_len} must be divisible by {sp_size * 2}!"
 
     tensor = batch.view(
         *batch.shape[:seq_dim],
@@ -55,9 +64,11 @@ def split_batch_zig_zag(
 
 
 def split_batch_uniform(
-    batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False
+    batch: torch.Tensor,
+    sp_group: ProcessGroup,
+    seq_dim: int = 1,
+    is_label: bool = False,
 ) -> torch.Tensor:
-
     """
     split them evenly by seq_dim
     """
@@ -71,14 +82,19 @@ def split_batch_uniform(
 
     seq_len = batch.shape[seq_dim]
 
-    assert seq_len % sp_size == 0, f"Sequence length {seq_len} must be divisible by {sp_size}!"
+    assert (
+        seq_len % sp_size == 0
+    ), f"Sequence length {seq_len} must be divisible by {sp_size}!"
     split_batch = batch.chunk(sp_size, dim=seq_dim)[sp_rank].contiguous()
 
     return split_batch
 
 
 def split_batch_optimal(
-    batch: torch.Tensor, sp_group: ProcessGroup, seq_dim: int = 1, is_label: bool = False
+    batch: torch.Tensor,
+    sp_group: ProcessGroup,
+    seq_dim: int = 1,
+    is_label: bool = False,
 ) -> torch.Tensor:
     """
     split them using some strategy
@@ -97,6 +113,7 @@ def get_default_args(func):
         args["softcap"] = 0.0
     return args
 
+
 def update_attention_mask(attention_mask, head_num, head_dim=1):
     """
     transform attention mask 3d(B, L, L) to 4d(B, H, L, L)
@@ -106,6 +123,7 @@ def update_attention_mask(attention_mask, head_num, head_dim=1):
     >>> torch.tensor([[[1, 0, 0], [1, 0, 1], [0, 1, 1]], [[1, 0, 0], [1, 0, 1], [0, 1, 1]]])
     """
     return attention_mask.unsqueeze(dim=head_dim).expand(-1, head_num, -1, -1)
+
 
 @torch.jit.script
 def _update_out_and_lse(

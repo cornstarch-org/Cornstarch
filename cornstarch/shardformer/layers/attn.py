@@ -1,12 +1,21 @@
-import torch
 from typing import Optional
-import torch.distributed as dist
-from cornstarch.shardformer.layers.utils import split_batch_uniform
-from cornstarch.shardformer.layers.ring_attn import ring_flash_attn_forward, ring_flash_attn_backward, ring_flash_attn_anymask_forward, ring_flash_attn_anymask_backward
-from cornstarch.kernel.interface import _flash_attn_anymask_forward
 
-from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
-from cornstarch.kernel.interface import _flash_attn_casualmask_forward, _flash_attn_casualmask_backward
+import torch
+import torch.distributed as dist
+from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
+
+from cornstarch.kernel.interface import (
+    _flash_attn_anymask_forward,
+    _flash_attn_casualmask_backward,
+    _flash_attn_casualmask_forward,
+)
+from cornstarch.shardformer.layers.ring_attn import (
+    ring_flash_attn_anymask_backward,
+    ring_flash_attn_anymask_forward,
+    ring_flash_attn_backward,
+    ring_flash_attn_forward,
+)
+from cornstarch.shardformer.layers.utils import split_batch_uniform
 
 
 class RingAttentionBase(torch.autograd.Function):
@@ -14,6 +23,7 @@ class RingAttentionBase(torch.autograd.Function):
     Base class for ring attention.
     support fixed length input.
     """
+
     @staticmethod
     def forward(
         ctx,
@@ -29,14 +39,14 @@ class RingAttentionBase(torch.autograd.Function):
         window_size_left=-1,
         window_size_right=-1,
         alibi_slopes=None,
-        kernel_impl: str = "cuda", # flash attn of tri for cuda, triton flash attn for triton
+        kernel_impl: str = "cuda",  # flash attn of tri for cuda, triton flash attn for triton
     ):
 
         assert kernel_impl in ["cuda", "triton"]
 
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
-        
+
         q = q.contiguous()
         k = k.contiguous()
         v = v.contiguous()
@@ -54,7 +64,11 @@ class RingAttentionBase(torch.autograd.Function):
             window_size_right=window_size_right,
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
-            ATTN_IMPL= _flash_attn_forward if kernel_impl == "cuda" else _flash_attn_casualmask_forward,
+            ATTN_IMPL=(
+                _flash_attn_forward
+                if kernel_impl == "cuda"
+                else _flash_attn_casualmask_forward
+            ),
         )
         # this should be out_padded
         ctx.save_for_backward(q, k, v, out, softmax_lse)
@@ -90,10 +104,14 @@ class RingAttentionBase(torch.autograd.Function):
             window_size_right=ctx.window_size_right,
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
-            ATTN_IMPL= _flash_attn_backward if ctx.kernel_impl == "cuda" else _flash_attn_casualmask_backward,
+            ATTN_IMPL=(
+                _flash_attn_backward
+                if ctx.kernel_impl == "cuda"
+                else _flash_attn_casualmask_backward
+            ),
         )
         return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
-    
+
     @staticmethod
     def prepare_batch(
         attention_mask: torch.Tensor,
@@ -107,13 +125,13 @@ class RingAttentionBase(torch.autograd.Function):
 
         if sp_size == 1:
             return inputs_embeds, position_ids
-        
+
         if inputs_embeds is not None:
             inputs_embeds = split_batch_uniform(inputs_embeds, sp_group)
         attention_mask = split_batch_uniform(attention_mask, sp_group)
 
     @staticmethod
-    def attention(        
+    def attention(
         q,
         k,
         v,
@@ -122,8 +140,9 @@ class RingAttentionBase(torch.autograd.Function):
         softmax_scale=None,
         deterministic=False,
         return_softmax=False,
-        kernel_impl: str = "cuda", # flash attn of tri for cuda, triton flash attn for triton
-        **kwargs,):
+        kernel_impl: str = "cuda",  # flash attn of tri for cuda, triton flash attn for triton
+        **kwargs,
+    ):
         """
         Args:
             q (torch.Tensor): Query tensor. Shape should be [B, nHeads, Sq, D]
@@ -151,14 +170,14 @@ class RingAttentionBase(torch.autograd.Function):
             k,
             v,
             sp_group,
-            True, # causal
-            True, # return_softmax
+            True,  # causal
+            True,  # return_softmax
             dropout_p,
             softmax_scale,
             deterministic,
-            -1, # window_size_left
-            -1, # window_size_right
-            None, # alibi_slopes
+            -1,  # window_size_left
+            -1,  # window_size_right
+            None,  # alibi_slopes
             kernel_impl,
         )
 
@@ -166,13 +185,16 @@ class RingAttentionBase(torch.autograd.Function):
 
         return out if not return_softmax else (out, softmax_lse)
 
+
 class RingAttentionVarlen(RingAttentionBase):
     """
     support variable length input.
     """
+
     @staticmethod
     def forward(ctx, qkv, mask_info, sp_group, sp_size, inner_ring_size):
         pass
+
 
 class RingAttentionAnyMask(RingAttentionBase):
     """
@@ -241,7 +263,7 @@ class RingAttentionAnyMask(RingAttentionBase):
         return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
     @staticmethod
-    def attention(        
+    def attention(
         q,
         k,
         v,
@@ -251,7 +273,8 @@ class RingAttentionAnyMask(RingAttentionBase):
         softmax_scale=None,
         deterministic=False,
         return_softmax=False,
-        **kwargs,):
+        **kwargs,
+    ):
         """
         Args:
             q (torch.Tensor): Query tensor. Shape should be [B, nHeads, Sq, D]
@@ -276,22 +299,21 @@ class RingAttentionAnyMask(RingAttentionBase):
             v,
             mask,
             sp_group,
-            True, # return_softmax
+            True,  # return_softmax
             dropout_p,
             softmax_scale,
             deterministic,
-            -1, # window_size_left
-            -1, # window_size_right
-            None, # alibi_slopes
+            -1,  # window_size_left
+            -1,  # window_size_right
+            None,  # alibi_slopes
         )
 
         out = out.contiguous()
 
         return out if not return_softmax else (out, softmax_lse)
 
+
 class DoubleRingAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, qkv, mask_info, sp_group, sp_size, inner_ring_size):
         pass
-
-        

@@ -1,13 +1,11 @@
 import math
 from typing import List, Optional, Tuple, Union
-import numpy as np
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from cornstarch.shardformer.layers.attn import RingAttentionBase, RingAttentionAnyMask
 from colossalai.shardformer.layer import (
-    RingAttention,
     dist_cross_entropy,
 )
 from colossalai.shardformer.layer._operation import (
@@ -15,8 +13,6 @@ from colossalai.shardformer.layer._operation import (
     gather_sp_output,
     split_forward_gather_backward,
 )
-# from colossalai.shardformer.layer.utils import split_batch_zigzag
-from cornstarch.shardformer.layers.utils import split_batch_uniform, update_attention_mask, split_batch
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch.nn.modules.loss import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.cache_utils import Cache, DynamicCache
@@ -37,13 +33,26 @@ from transformers.models.llama.modeling_llama import (
     logger,
     repeat_kv,
 )
+from transformers.utils import logging
 from transformers.utils.import_utils import is_torchdynamo_compiling
 
-from transformers.utils import logging
+from cornstarch.shardformer.layers.attn import RingAttentionAnyMask, RingAttentionBase
+
+# from colossalai.shardformer.layer.utils import split_batch_zigzag
+from cornstarch.shardformer.layers.utils import (
+    split_batch,
+    update_attention_mask,
+)
 
 logger = logging.get_logger(__name__)
 
-_SUPPORTED_CP_MODE = ["all_to_all", "ring_attn", "ring_attn_uniform", "ring_attn_zig_zag", "ring_attn_optimal"]
+_SUPPORTED_CP_MODE = [
+    "all_to_all",
+    "ring_attn",
+    "ring_attn_uniform",
+    "ring_attn_zig_zag",
+    "ring_attn_optimal",
+]
 
 
 class LlamaModelForwards:
@@ -138,7 +147,6 @@ class LlamaModelForwards:
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
 
-
         num_heads = self.config.num_attention_heads
         # NOTE(runyu): sp_mode can be "ring_attn", "ring_attn_uniform", "ring_attn_zig_zag", "ring_attn_optimal"
         if sp_mode is not None and "ring_attn" in sp_mode:
@@ -147,15 +155,19 @@ class LlamaModelForwards:
             # TODO(Runyu): check if this is correct, attention mask is not very right, see the api to set a right mask for ring any mask flash attention
             if not attention_mask.bool().all():
                 # shape of attention_mask is [B, L, L]
-                attn_mask = update_attention_mask(attention_mask, num_heads) # shape: [B, H, L, L]
+                attn_mask = update_attention_mask(
+                    attention_mask, num_heads
+                )  # shape: [B, H, L, L]
                 seq_dim = 2
             else:
                 # shape of attention_mask is [B, L], casual mask for huggingface llama
                 attn_mask = attention_mask
                 seq_dim = 1
 
-            attn_mask = split_batch(attn_mask, sp_group, seq_dim=seq_dim, sp_mode=sp_mode) # shape: [B, H, L // sp_size, L] or [B, L // sp_size]
-        elif attention_mask.ndim == 2: # causal mask for llama
+            attn_mask = split_batch(
+                attn_mask, sp_group, seq_dim=seq_dim, sp_mode=sp_mode
+            )  # shape: [B, H, L // sp_size, L] or [B, L // sp_size]
+        elif attention_mask.ndim == 2:  # causal mask for llama
             # NOTE(Runyu): it is essential to update causal mask here for anymask eager implementation
             attn_mask = self._update_causal_mask(
                 attention_mask,
@@ -164,12 +176,14 @@ class LlamaModelForwards:
                 past_key_values,
                 output_attentions,
             )
-        elif attention_mask.ndim == 3: # anymask for llama
+        elif attention_mask.ndim == 3:  # anymask for llama
             attn_mask = update_attention_mask(attention_mask, num_heads)
             # set zero part to -inf
             attn_mask = torch.where(attn_mask == 0, torch.tensor(-np.inf), attn_mask)
         else:
-            raise ValueError(f"Unsupported attention mask dimension: {attention_mask.ndim}")
+            raise ValueError(
+                f"Unsupported attention mask dimension: {attention_mask.ndim}"
+            )
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
@@ -179,12 +193,16 @@ class LlamaModelForwards:
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
             # if sp_mode == "ring_attn" or sp_mode == "ring_attn_uniform":
-                # hidden_states = split_batch_uniform(hidden_states, sp_group)
-                # position_ids = split_batch_uniform(position_ids, sp_group)
+            # hidden_states = split_batch_uniform(hidden_states, sp_group)
+            # position_ids = split_batch_uniform(position_ids, sp_group)
 
             if sp_mode is not None and "ring_attn" in sp_mode:
-                hidden_states = split_batch(hidden_states, sp_group, seq_dim=1, sp_mode=sp_mode) # shape: [B, L // sp_size, ...]
-                position_ids = split_batch(position_ids, sp_group, seq_dim=1, sp_mode=sp_mode) # shape: [B, L // sp_size]
+                hidden_states = split_batch(
+                    hidden_states, sp_group, seq_dim=1, sp_mode=sp_mode
+                )  # shape: [B, L // sp_size, ...]
+                position_ids = split_batch(
+                    position_ids, sp_group, seq_dim=1, sp_mode=sp_mode
+                )  # shape: [B, L // sp_size]
 
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
@@ -348,7 +366,12 @@ class LlamaModelForwards:
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
             # labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
-            labels = split_batch(labels, sp_group, seq_dim=1, sp_mode=shard_config.sequence_parallelism_mode)
+            labels = split_batch(
+                labels,
+                sp_group,
+                seq_dim=1,
+                sp_mode=shard_config.sequence_parallelism_mode,
+            )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = LlamaModelForwards.llama_model_forward(
@@ -528,6 +551,7 @@ class LlamaModelForwards:
             attentions=outputs.attentions,
         )
 
+
 class LlamaAttentionForwards:
     @staticmethod
     def forward(
@@ -633,7 +657,7 @@ class LlamaAttentionForwards:
             if attention_mask.bool().all():
                 # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
                 # shape of the attn_output: [bsz, q_len, num_heads, head_dim], contiguous version
-                logger.info(f"use causal attn version")
+                logger.info("use causal attn version")
                 attn_output = RingAttentionBase.attention(
                     query_states,
                     key_states,
@@ -647,10 +671,12 @@ class LlamaAttentionForwards:
                 )
                 # check if attn_output is nan
                 if dist.get_rank(sp_group) == 0:
-                    assert not torch.isnan(attn_output).any(), "attn_output contains NaN"
+                    assert not torch.isnan(
+                        attn_output
+                    ).any(), "attn_output contains NaN"
             else:
                 # use anymask version
-                logger.info(f"use anymask version")
+                logger.info("use anymask version")
                 attn_output = RingAttentionAnyMask.attention(
                     query_states,
                     key_states,
@@ -663,7 +689,9 @@ class LlamaAttentionForwards:
                 )
                 # check if attn_output is nan
                 if dist.get_rank(sp_group) == 0:
-                    assert not torch.isnan(attn_output).any(), "attn_output contains NaN"
+                    assert not torch.isnan(
+                        attn_output
+                    ).any(), "attn_output contains NaN"
 
         elif not attention_mask.bool().all():
             # NOTE(@runyu): we don't support varlen, so not attention_mask.bool().all() means anymask version
@@ -672,8 +700,10 @@ class LlamaAttentionForwards:
             # causal_mask = attention_mask.unsqueeze(dim=1).expand(-1, self.config.num_attention_heads, -1, -1)
             # set zero part to -inf
             # causal_mask = torch.where(causal_mask == 0, torch.tensor(-np.inf), causal_mask)
-            attn_output = run_naive_attn(self, bsz, q_len, query_states, key_states, value_states, attention_mask)
-        
+            attn_output = run_naive_attn(
+                self, bsz, q_len, query_states, key_states, value_states, attention_mask
+            )
+
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
             # to be able to avoid many of these transpose/reshape/view.
@@ -726,7 +756,9 @@ class LlamaAttentionForwards:
 
             attn_output = attn_output.transpose(1, 2).contiguous()
         else:
-            attn_output = run_naive_attn(self, bsz, q_len, query_states, key_states, value_states, attention_mask)
+            attn_output = run_naive_attn(
+                self, bsz, q_len, query_states, key_states, value_states, attention_mask
+            )
 
         # sp: all-to-all communication when introducing ulysses context parallelism
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
@@ -742,23 +774,26 @@ class LlamaAttentionForwards:
 
         return attn_output, attn_weights, past_key_value
 
-def run_naive_attn(self, bsz, q_len, query_states, key_states, value_states, attention_mask):
+
+def run_naive_attn(
+    self, bsz, q_len, query_states, key_states, value_states, attention_mask
+):
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
     # print(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}")
-    attn_weights = torch.matmul(
-        query_states, key_states.transpose(2, 3)
-    ) / math.sqrt(self.head_dim)
+    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
+        self.head_dim
+    )
 
     if attention_mask is not None:  # no matter the length, we just slice it
-        causal_mask = attention_mask[:, :self.num_heads, :, : key_states.shape[-2]]
+        causal_mask = attention_mask[:, : self.num_heads, :, : key_states.shape[-2]]
         attn_weights = attn_weights + causal_mask
 
     # upcast attention to fp32
-    attn_weights = nn.functional.softmax(
-        attn_weights, dim=-1, dtype=torch.float32
-    ).to(query_states.dtype)
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+        query_states.dtype
+    )
     attn_weights = nn.functional.dropout(
         attn_weights, p=self.attention_dropout, training=self.training
     )

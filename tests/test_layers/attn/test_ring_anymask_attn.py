@@ -3,10 +3,9 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from flash_attn import flash_attn_func
-from cornstarch.shardformer.layers.attn import RingAttentionBase, RingAttentionAnyMask
-from cornstarch.kernel.interface import flash_attn_triton_func
+from cornstarch.shardformer.layers.attn import RingAttentionAnyMask
 from torch.testing import assert_close
+
 
 def set_seed(rank):
     torch.manual_seed(rank)
@@ -15,7 +14,19 @@ def set_seed(rank):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, device, dtype, mask_type):
+
+def prepare_qkv(
+    rank,
+    world_size,
+    batch_size,
+    seq_len,
+    num_heads,
+    head_dim,
+    kernel_impl,
+    device,
+    dtype,
+    mask_type,
+):
     """
     prepare q, k, v tensor for flash attn, local_q, local_k, local_v for ring attention
     """
@@ -25,22 +36,48 @@ def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kern
     elif kernel_impl == "triton":
         seq_dim = 2
     else:
-        raise ValueError(f"kernel_impl must be either cuda or triton, but got {kernel_impl}")
-    
-    qkv = torch.randn(3, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype).normal_(mean=0.0, std=0.5).requires_grad_(True)
+        raise ValueError(
+            f"kernel_impl must be either cuda or triton, but got {kernel_impl}"
+        )
+
+    qkv = (
+        torch.randn(
+            3, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype
+        )
+        .normal_(mean=0.0, std=0.5)
+        .requires_grad_(True)
+    )
     dist.broadcast(qkv, src=0)
 
-    dout = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
-    dist.broadcast(dout, src=0) # now each rank has the same qkv tensor and a dout tensor
-    
+    dout = torch.randn(
+        batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype
+    )
+    dist.broadcast(
+        dout, src=0
+    )  # now each rank has the same qkv tensor and a dout tensor
+
     if kernel_impl == "triton":
-        qkv = qkv.transpose(2, 3) # triton requires q, k, v to be in shape [batch_size, num_heads, seq_len, head_dim]
+        qkv = qkv.transpose(
+            2, 3
+        )  # triton requires q, k, v to be in shape [batch_size, num_heads, seq_len, head_dim]
         dout = dout.transpose(1, 2)
-    
+
     dout = dout.contiguous()
-    
-    local_qkv = qkv.chunk(world_size, dim=seq_dim + 1)[rank].detach().clone().contiguous().requires_grad_(True)
-    local_dout = dout.chunk(world_size, dim=seq_dim)[rank].detach().clone().contiguous().requires_grad_(True) # now each rank has the same local_qkv and local_dout
+
+    local_qkv = (
+        qkv.chunk(world_size, dim=seq_dim + 1)[rank]
+        .detach()
+        .clone()
+        .contiguous()
+        .requires_grad_(True)
+    )
+    local_dout = (
+        dout.chunk(world_size, dim=seq_dim)[rank]
+        .detach()
+        .clone()
+        .contiguous()
+        .requires_grad_(True)
+    )  # now each rank has the same local_qkv and local_dout
 
     # split q, k, v and local_q, local_k, local_v
     q, k, v = qkv.chunk(3, dim=0)
@@ -53,24 +90,48 @@ def prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kern
     local_k = local_k.squeeze(dim=0).detach().clone().contiguous().requires_grad_(True)
     local_v = local_v.squeeze(dim=0).detach().clone().contiguous().requires_grad_(True)
 
-    assert torch.allclose(q.chunk(world_size, dim=seq_dim)[rank], local_q) and torch.allclose(k.chunk(world_size, dim=seq_dim)[rank], local_k) and torch.allclose(v.chunk(world_size, dim=seq_dim)[rank], local_v)
+    assert (
+        torch.allclose(q.chunk(world_size, dim=seq_dim)[rank], local_q)
+        and torch.allclose(k.chunk(world_size, dim=seq_dim)[rank], local_k)
+        and torch.allclose(v.chunk(world_size, dim=seq_dim)[rank], local_v)
+    )
 
     if mask_type == "any":
-        mask = torch.randint(1, 2, (batch_size, seq_len, seq_len), dtype=torch.uint8, device=device, requires_grad=False)
+        mask = torch.randint(
+            1,
+            2,
+            (batch_size, seq_len, seq_len),
+            dtype=torch.uint8,
+            device=device,
+            requires_grad=False,
+        )
     elif mask_type == "causal":
-        mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.uint8, device=device))
+        mask = torch.tril(
+            torch.ones((seq_len, seq_len), dtype=torch.uint8, device=device)
+        )
         mask = mask.unsqueeze(dim=0).expand(batch_size, -1, -1)
     elif mask_type == "full":
-        mask = torch.ones((batch_size, seq_len, seq_len), dtype=torch.uint8, device=device)
+        mask = torch.ones(
+            (batch_size, seq_len, seq_len), dtype=torch.uint8, device=device
+        )
         print("mask ")
     else:
-        raise ValueError(f"mask_type must be either any, causal, or full, but got {mask_type}")
+        raise ValueError(
+            f"mask_type must be either any, causal, or full, but got {mask_type}"
+        )
     mask = mask.unsqueeze(dim=1).expand(-1, num_heads, -1, -1)
     mask = mask.contiguous()
-    local_mask = mask.chunk(world_size, dim=seq_dim)[rank].detach().clone().contiguous().requires_grad_(False)
+    local_mask = (
+        mask.chunk(world_size, dim=seq_dim)[rank]
+        .detach()
+        .clone()
+        .contiguous()
+        .requires_grad_(False)
+    )
     dist.broadcast(mask, src=0)
 
     return q, k, v, dout, local_q, local_k, local_v, local_dout, mask, local_mask
+
 
 def ref_mask_attention(q, k, v, sm_scale, mask):
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
@@ -81,7 +142,17 @@ def ref_mask_attention(q, k, v, sm_scale, mask):
     out = torch.matmul(p, v)
     return out, lse
 
-def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, mask_type="any"):
+
+def run_test(
+    rank,
+    world_size,
+    batch_size,
+    seq_len,
+    num_heads,
+    head_dim,
+    kernel_impl,
+    mask_type="any",
+):
     # Initialize process group
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
@@ -91,7 +162,7 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
     set_seed(rank)
 
     rtol = atol = 5e-2
-    
+
     # Set up input tensors
     torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}")
@@ -101,9 +172,24 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
     if kernel_impl == "triton":
         seq_dim = 2
     else:
-        raise ValueError(f"kernel_impl must be either cuda or triton, but got {kernel_impl}")
+        raise ValueError(
+            f"kernel_impl must be either cuda or triton, but got {kernel_impl}"
+        )
 
-    q, k, v, dout, local_q, local_k, local_v, local_dout, mask, local_mask = prepare_qkv(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, device, dtype, mask_type)
+    q, k, v, dout, local_q, local_k, local_v, local_dout, mask, local_mask = (
+        prepare_qkv(
+            rank,
+            world_size,
+            batch_size,
+            seq_len,
+            num_heads,
+            head_dim,
+            kernel_impl,
+            device,
+            dtype,
+            mask_type,
+        )
+    )
     q.retain_grad()
     k.retain_grad()
     v.retain_grad()
@@ -114,8 +200,12 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
 
     out, lse = ref_mask_attention(q, k, v, sm_scale=0.5, mask=mask)
 
-    refer_local_out = out.chunk(world_size, dim=seq_dim)[rank] # [batch_size, num_heads, seq_len // world_size, head_dim]
-    refer_local_lse = lse.chunk(world_size, dim=-1)[rank] # [batch_size, num_heads, seq_len // world_size]
+    refer_local_out = out.chunk(world_size, dim=seq_dim)[
+        rank
+    ]  # [batch_size, num_heads, seq_len // world_size, head_dim]
+    refer_local_lse = lse.chunk(world_size, dim=-1)[
+        rank
+    ]  # [batch_size, num_heads, seq_len // world_size]
 
     ring_out, ring_lse = RingAttentionAnyMask.apply(
         local_q,
@@ -123,24 +213,28 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
         local_v,
         local_mask,
         dist.group.WORLD,
-        True, # return_softmax
-        0.0, # dropout_p
-        0.5, # softmax_scale
-        False, # deterministic
-        -1, # window_size_left
-        -1, # window_size_right
-        None, # alibi_slopes
+        True,  # return_softmax
+        0.0,  # dropout_p
+        0.5,  # softmax_scale
+        False,  # deterministic
+        -1,  # window_size_left
+        -1,  # window_size_right
+        None,  # alibi_slopes
     )
 
     # Compare outputs
     if refer_local_lse.shape[:3] != ring_lse.shape[:3]:
         refer_local_lse = refer_local_lse.transpose(-1, -2)
-    assert_close(refer_local_out, ring_out, rtol=rtol, atol=atol), \
-        f"{kernel_impl} ring_flash_attn_func output does not match flash_attn_func output on rank {rank}"
-    assert_close(refer_local_lse, ring_lse, rtol=rtol, atol=atol), \
-        f"{kernel_impl} ring_flash_attn_func LSE does not match flash_attn_func LSE on rank {rank}"
+    assert_close(
+        refer_local_out, ring_out, rtol=rtol, atol=atol
+    ), f"{kernel_impl} ring_flash_attn_func output does not match flash_attn_func output on rank {rank}"
+    assert_close(
+        refer_local_lse, ring_lse, rtol=rtol, atol=atol
+    ), f"{kernel_impl} ring_flash_attn_func LSE does not match flash_attn_func LSE on rank {rank}"
 
-    print(f"Test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func")
+    print(
+        f"Test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func"
+    )
 
     # Backward pass
     out.backward(dout)
@@ -156,17 +250,23 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
     ring_dk = local_k.grad
     ring_dv = local_v.grad
 
-    assert_close(local_dq, ring_dq, rtol=rtol, atol=atol), \
-        f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
-    assert_close(local_dk, ring_dk, rtol=rtol, atol=atol), \
-        f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
-    assert_close(local_dv, ring_dv, rtol=rtol, atol=atol), \
-        f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
+    assert_close(
+        local_dq, ring_dq, rtol=rtol, atol=atol
+    ), f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
+    assert_close(
+        local_dk, ring_dk, rtol=rtol, atol=atol
+    ), f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
+    assert_close(
+        local_dv, ring_dv, rtol=rtol, atol=atol
+    ), f"{kernel_impl} ring_flash_attn_func gradient does not match flash_attn_func gradient on rank {rank}"
 
-    print(f"Backward test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func")
+    print(
+        f"Backward test passed on rank {rank}: {kernel_impl} ring_flash_attn_func matches flash_attn_func"
+    )
 
     # Clean up
     dist.destroy_process_group()
+
 
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seq_len", [1024])
@@ -175,17 +275,31 @@ def run_test(rank, world_size, batch_size, seq_len, num_heads, head_dim, kernel_
 @pytest.mark.parametrize("world_size", [2, 4])
 @pytest.mark.parametrize("kernel_impl", ["triton"])
 @pytest.mark.parametrize("mask_type", ["any", "causal", "full"])
-def test_ring_flash_attn_vs_flash_attn(batch_size, seq_len, num_heads, head_dim, world_size, kernel_impl, mask_type):
+def test_ring_flash_attn_vs_flash_attn(
+    batch_size, seq_len, num_heads, head_dim, world_size, kernel_impl, mask_type
+):
     assert seq_len % world_size == 0, "seq_len must be divisible by world_size"
     assert head_dim % 8 == 0, "head_dim must be divisible by 8"
-    assert kernel_impl in ["cuda", "triton"], "kernel_impl must be either cuda or triton"
+    assert kernel_impl in [
+        "cuda",
+        "triton",
+    ], "kernel_impl must be either cuda or triton"
 
     mp.spawn(
         run_test,
-        args=(world_size, batch_size, seq_len, num_heads, head_dim, kernel_impl, mask_type),
+        args=(
+            world_size,
+            batch_size,
+            seq_len,
+            num_heads,
+            head_dim,
+            kernel_impl,
+            mask_type,
+        ),
         nprocs=world_size,
-        join=True
+        join=True,
     )
+
 
 # CUDA_VISIBLE_DEVICES=4,5,6,7 python tests/tmp_test/test_layers/attn/test_ring_anymask_attn.py > triton.log
 
