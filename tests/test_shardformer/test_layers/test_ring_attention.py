@@ -15,7 +15,7 @@ from .utils import RingAttentionTestBase
 
 
 @instantiate_parametrized_tests
-class TestRingAttentionBaseClass(RingAttentionTestBase):
+class TestRingAttentionFixedlenClass(RingAttentionTestBase):
     """
     A class to test the RingAttentionBase class.
     RingAttentionBase provides implementation for basic

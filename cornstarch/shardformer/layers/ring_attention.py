@@ -64,7 +64,7 @@ class RingAttentionFixedlen(RingAttentionBase):
             window_size_right=window_size_right,
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
-            ATTN_IMPL=(
+            attn_impl=(
                 _flash_attn_forward
                 if kernel_impl == "cuda"
                 else _flash_attn_casualmask_forward
@@ -104,7 +104,7 @@ class RingAttentionFixedlen(RingAttentionBase):
             window_size_right=ctx.window_size_right,
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
-            ATTN_IMPL=(
+            attn_impl=(
                 _flash_attn_backward
                 if ctx.kernel_impl == "cuda"
                 else _flash_attn_casualmask_backward

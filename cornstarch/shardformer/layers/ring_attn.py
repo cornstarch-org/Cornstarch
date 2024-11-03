@@ -21,7 +21,7 @@ def ring_flash_attn_forward(
     k: torch.Tensor,
     v: torch.Tensor,
     softmax_scale: float,
-    ATTN_IMPL: Callable = _flash_attn_forward,
+    attn_impl: Callable = _flash_attn_forward,
     dropout_p: float = 0,
     causal: bool = True,
     window_size_left: int = -1,
@@ -43,7 +43,7 @@ def ring_flash_attn_forward(
             comm.commit()
 
         if not causal or step <= comm.rank:
-            params = get_default_args(ATTN_IMPL).copy()
+            params = get_default_args(attn_impl).copy()
             params.update(
                 {
                     "q": q,
@@ -60,7 +60,7 @@ def ring_flash_attn_forward(
                 }
             )
             block_out, _q, _k, _v, _out_padded, block_lse, _S_dmask, _rng_state = (
-                ATTN_IMPL(**params)
+                attn_impl(**params)
             )
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
@@ -83,7 +83,7 @@ def ring_flash_attn_backward(
     out: torch.Tensor,
     softmax_lse: torch.Tensor,
     softmax_scale: float,
-    ATTN_IMPL: Callable = _flash_attn_backward,
+    attn_impl: Callable = _flash_attn_backward,
     dropout_p: float = 0,
     causal: bool = True,
     window_size_left: int = -1,
@@ -111,7 +111,7 @@ def ring_flash_attn_backward(
             kv_comm.commit()
         if step <= kv_comm.rank or not causal:
             bwd_causal = causal and step == 0
-            params = get_default_args(ATTN_IMPL).copy()
+            params = get_default_args(attn_impl).copy()
             params.update(
                 {
                     "dout": dout,
@@ -133,7 +133,7 @@ def ring_flash_attn_backward(
                     "deterministic": deterministic,
                 }
             )
-            ATTN_IMPL(**params)
+            attn_impl(**params)
 
             if dq is None:
                 dq = block_dq_buffer.to(torch.float32)
