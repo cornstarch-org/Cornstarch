@@ -113,24 +113,6 @@ class RingAttentionBase(torch.autograd.Function):
         return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
 
     @staticmethod
-    def prepare_batch(
-        attention_mask: torch.Tensor,
-        sp_group: dist.ProcessGroup,
-        inputs_embeds: torch.Tensor = None,
-        position_ids: Optional[torch.Tensor] = None,
-        is_label: bool = False,
-    ):
-        sp_size = dist.get_world_size(sp_group)
-        sp_rank = dist.get_rank(sp_group)
-
-        if sp_size == 1:
-            return inputs_embeds, position_ids
-
-        if inputs_embeds is not None:
-            inputs_embeds = split_batch_uniform(inputs_embeds, sp_group)
-        attention_mask = split_batch_uniform(attention_mask, sp_group)
-
-    @staticmethod
     def attention(
         q,
         k,
