@@ -1,10 +1,12 @@
 import os
+
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from cornstarch.shardformer.layers.attn import RingAttentionAnyMask
 from torch.testing import assert_close
+
+from cornstarch.shardformer.layers.attn import RingAttentionAnyMask
 
 
 def set_seed(rank):

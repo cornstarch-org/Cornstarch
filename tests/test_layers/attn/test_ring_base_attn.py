@@ -1,12 +1,14 @@
 import os
+
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from flash_attn import flash_attn_func
-from cornstarch.shardformer.layers.attn import RingAttentionBase
-from cornstarch.kernel.interface import flash_attn_triton_func
 from torch.testing import assert_close
+
+from cornstarch.kernel.interface import flash_attn_triton_func
+from cornstarch.shardformer.layers.attn import RingAttentionBase
 
 
 def set_seed(rank):
