@@ -364,7 +364,7 @@ class LlamaModelForwards:
             shard_config.sequence_parallelism_mode == "ring_attn"
             and shard_config.parallel_output
         ):
-            # Split labels in a zigzag fashion too
+            # Split labels too
             sp_group = shard_config.sequence_parallel_process_group
             ring_attn_mode = getattr(
                 shard_config, "ring_attention_distribution_mode", "uniform"
