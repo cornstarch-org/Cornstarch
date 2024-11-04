@@ -170,7 +170,7 @@ def ring_flash_attn_anymask_forward(
     v: torch.Tensor,
     mask: torch.Tensor,  # shape: [B, H, N // sp_size, N]
     softmax_scale: float,
-    ATTN_IMPL: Callable = _flash_attn_anymask_forward,
+    attn_impl: Callable = _flash_attn_anymask_forward,
     dropout_p: float = 0,
     window_size_left: int = -1,
     window_size_right: int = -1,
@@ -190,7 +190,7 @@ def ring_flash_attn_anymask_forward(
             next_v: torch.Tensor = comm.send_recv(v)
             comm.commit()
 
-        params = get_default_args(ATTN_IMPL).copy()
+        params = get_default_args(attn_impl).copy()
         params.update(
             {
                 "q": q,
@@ -207,7 +207,7 @@ def ring_flash_attn_anymask_forward(
                 "return_softmax": True and dropout_p > 0,
             }
         )
-        block_out, block_lse, _, _ = ATTN_IMPL(**params)
+        block_out, block_lse, _, _ = attn_impl(**params)
         out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
@@ -230,7 +230,7 @@ def ring_flash_attn_anymask_backward(
     softmax_lse: torch.Tensor,
     softmax_scale: float,
     mask: torch.Tensor,
-    ATTN_IMPL: Callable = _flash_attn_anymask_backward,
+    attn_impl: Callable = _flash_attn_anymask_backward,
     dropout_p: float = 0,
     window_size_left: int = -1,
     window_size_right: int = -1,
@@ -255,7 +255,7 @@ def ring_flash_attn_anymask_backward(
             next_v = kv_comm.send_recv(v)
             kv_comm.commit()
 
-        params = get_default_args(ATTN_IMPL).copy()
+        params = get_default_args(attn_impl).copy()
         params.update(
             {
                 "dout": dout,
@@ -278,7 +278,7 @@ def ring_flash_attn_anymask_backward(
                 "deterministic": deterministic,
             }
         )
-        ATTN_IMPL(**params)
+        attn_impl(**params)
 
         if dq is None:
             dq = block_dq_buffer.to(torch.float32)

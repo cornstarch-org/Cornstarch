@@ -47,7 +47,7 @@ class RingAttentionAnyMask(RingAttentionBase):
             v,
             mask,
             softmax_scale=softmax_scale,
-            ATTN_IMPL=_flash_attn_anymask_forward,
+            attn_impl=_flash_attn_anymask_forward,
             dropout_p=dropout_p,
             window_size_left=window_size_left,
             window_size_right=window_size_right,
