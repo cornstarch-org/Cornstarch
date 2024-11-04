@@ -3,10 +3,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from colossalai.shardformer.layer import (
-    RingAttention,
-    dist_cross_entropy,
-)
+from colossalai.shardformer.layer import dist_cross_entropy
 from colossalai.shardformer.layer._operation import (
     all_to_all_comm,
     gather_sp_output,
@@ -27,6 +24,12 @@ from transformers.models.gemma.modeling_gemma import (
     apply_rotary_pos_emb,
     logger,
     repeat_kv,
+)
+
+from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
+from cornstarch.shardformer.layers.utils import (
+    repeat_attention_mask_heads,
+    split_batch_for_ring_attn,
 )
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]

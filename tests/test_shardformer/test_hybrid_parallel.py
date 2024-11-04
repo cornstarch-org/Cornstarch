@@ -1,3 +1,4 @@
+import torch
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -84,7 +85,7 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
         self.set_model(vision_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
 
 
 @instantiate_parametrized_tests
@@ -101,7 +102,7 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
         self.set_model(language_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
 
     @parametrize("model_name", causal_lms.keys(), name_fn=lambda m: m)
     @parametrize(
@@ -115,7 +116,7 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
         self.set_model(causal_lms[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
 
 
 @instantiate_parametrized_tests
@@ -128,7 +129,7 @@ class LanguageContextParallel(ColossalaiHybridParallelBase):
     )
     def test_model(self, model_name: str, tp_size: int, pp_size: int):
         self.set_model(language_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, "all_to_all", True, "bf16")
+        self.run_hybrid_parallel(tp_size, pp_size, True, "bf16", "all_to_all")
 
     @parametrize("model_name", causal_lms.keys(), name_fn=lambda m: m)
     @parametrize(
@@ -137,9 +138,15 @@ class LanguageContextParallel(ColossalaiHybridParallelBase):
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("sp_mode", ["all_to_all", "ring_attn"], name_fn=lambda x: x)
-    def test_causal(self, model_name: str, tp_size: int, pp_size: int, sp_mode: str):
+    def test_causal(
+        self,
+        model_name: str,
+        tp_size: int,
+        pp_size: int,
+        sp_mode: str,
+    ):
         self.set_model(causal_lms[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, sp_mode, False, "bf16")
+        self.run_hybrid_parallel(tp_size, pp_size, False, "bf16", sp_mode)
 
 
 @instantiate_parametrized_tests
@@ -156,4 +163,32 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
         self.set_model(audio_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, None, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+
+
+@instantiate_parametrized_tests
+class LanguageRingAttentionAnymask(ColossalaiHybridParallelBase):
+
+    def postprocess_data_for_sharded_model(
+        self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
+    ) -> dict:
+        data = super().postprocess_data_for_sharded_model(data, precision)
+        attention_mask = data["attention_mask"]
+        batch_size, seq_len = attention_mask.shape
+        data["attention_mask"] = torch.tril(
+            torch.ones(batch_size, seq_len, seq_len, dtype=torch.bool, device="cuda")
+        )
+        return data
+
+    @parametrize("model_name", language_models.keys(), name_fn=lambda m: m)
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
+    @parametrize("ring_attn_mode", ["uniform", "zigzag", "random"], name_fn=lambda x: x)
+    def test(self, model_name: str, tp_size: int, pp_size: int, ring_attn_mode: str):
+        self.set_model(causal_lms[model_name]())
+        self.run_hybrid_parallel(
+            tp_size, pp_size, False, "bf16", "ring_attn", ring_attn_mode
+        )

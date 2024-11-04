@@ -23,11 +23,6 @@ from colossalai.tensor.d_tensor.api import (
     is_customized_distributed_tensor,
     is_distributed_tensor,
 )
-from gloo_utils import (
-    all_to_all_gloo,
-    all_to_all_single_gloo,
-    batch_isend_irecv_gloo,
-)
 from torch import Tensor, nn
 from torch.optim import Adam, Optimizer
 from torch.testing import assert_close
@@ -87,6 +82,30 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
     def set_model(self, model: ModelClassBase):
         self.model = model
+
+    def postprocess_data_for_original_model(
+        self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
+    ) -> dict:
+        assert isinstance(data, list) or isinstance(data, dict)
+        if isinstance(data, list):
+            new_data = []
+            for d in data:
+                if isinstance(d, torch.Tensor) and d.is_floating_point():
+                    d = d.to(dtype=precision)
+                new_data.append(d.clone().to("cuda"))
+        elif isinstance(data, dict):
+            new_data = {}
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    v = v.to(dtype=precision)
+                new_data[k] = v.clone().to("cuda")
+
+        return new_data
+
+    def postprocess_data_for_sharded_model(
+        self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
+    ) -> dict:
+        return self.postprocess_data_for_original_model(data, precision)
 
     def check_fn(
         self,
@@ -189,9 +208,10 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         self,
         tp_size: int,
         pp_size: int,
-        sp_mode: str | None,
         fa: bool,
         precision: str,
+        sp_mode: str | None = None,
+        ring_attn_mode: str | None = None,
     ):
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -224,6 +244,11 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         ) = self.build_model_from_hybrid_plugin(
             test_config=test_config, precision=precision
         )
+
+        if sp_mode == "ring_attn":
+            booster.plugin.shard_config.ring_attention_distribution_mode = (
+                ring_attn_mode
+            )
 
         try:
             org_model.gradient_checkpointing_enable()
@@ -332,28 +357,8 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
         data = self.model.data_gen_fn(self.microbatch_size * self.num_microbatches)
 
-        if isinstance(data, list):
-            shard_test_data = []
-            for d in data:
-                if isinstance(d, torch.Tensor) and d.is_floating_point():
-                    d = d.to(dtype=precision)
-                shard_test_data.append(d.clone().to("cuda"))
-            unshard_test_data = []
-            for d in data:
-                if isinstance(d, torch.Tensor) and d.is_floating_point():
-                    d = d.to(dtype=precision)
-                unshard_test_data.append(d.clone().to("cuda"))
-        elif isinstance(data, dict):
-            shard_test_data = {}
-            for k, v in data.items():
-                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                    v = v.to(dtype=precision)
-                shard_test_data[k] = v.clone().to("cuda")
-            unshard_test_data = {}
-            for k, v in data.items():
-                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                    v = v.to(dtype=precision)
-                unshard_test_data[k] = v.clone().to("cuda")
+        unshard_test_data = self.postprocess_data_for_original_model(data, precision)
+        shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()

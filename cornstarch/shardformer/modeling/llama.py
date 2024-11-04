@@ -4,9 +4,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from colossalai.shardformer.layer import (
-    dist_cross_entropy,
-)
+from colossalai.shardformer.layer import dist_cross_entropy
 from colossalai.shardformer.layer._operation import (
     all_to_all_comm,
     gather_sp_output,
@@ -35,8 +33,6 @@ from transformers.models.llama.modeling_llama import (
 from transformers.utils.import_utils import is_torchdynamo_compiling
 
 from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
-
-# from colossalai.shardformer.layer.utils import split_batch_zigzag
 from cornstarch.shardformer.layers.utils import (
     repeat_attention_mask_heads,
     split_batch_for_ring_attn,
@@ -168,10 +164,6 @@ class LlamaModelForwards:
                         dtype=torch.bool,
                     )
                 )
-            else:
-                assert (
-                    self.config._attn_implementation != "flash_attention_2"
-                ), "Flash Attention 2 does not support AnyMask. Use either `sdpa` or `eager`."
 
             assert (
                 attention_mask.ndim == 3
