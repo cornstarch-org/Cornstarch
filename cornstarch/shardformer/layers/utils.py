@@ -9,22 +9,26 @@ from torch.distributed import ProcessGroup
 
 __all__ = ["update_out_and_lse", "RingComm", "get_default_args"]
 
+SUPPORT_RING_ATTN_DISTRIBUTION_MODE = ["uniform", "zigzag", "random"]
 
-def split_batch(
+
+def split_batch_for_ring_attn(
     batch: torch.Tensor,
     sp_group: ProcessGroup,
     seq_dim: int = 1,
     is_label: bool = False,
-    sp_mode: str = "ring_attn",
+    ring_attn_mode: str = "uniform",
 ) -> torch.Tensor:
-    if sp_mode == "ring_attn" or sp_mode == "ring_attn_uniform":
+    assert (
+        ring_attn_mode in SUPPORT_RING_ATTN_DISTRIBUTION_MODE
+    ), f"Ring attention distribution mode {ring_attn_mode} is not in the supported list {SUPPORT_RING_ATTN_DISTRIBUTION_MODE}"
+
+    if ring_attn_mode == "uniform":
         return split_batch_uniform(batch, sp_group, seq_dim, is_label)
-    elif sp_mode == "ring_attn_zig_zag":
+    elif ring_attn_mode == "zigzag":
         return split_batch_zig_zag(batch, sp_group, seq_dim, is_label)
-    elif sp_mode == "ring_attn_optimal":
+    elif ring_attn_mode == "random":
         return split_batch_optimal(batch, sp_group, seq_dim, is_label)
-    else:
-        raise ValueError(f"Unknown split mode: {sp_mode}")
 
 
 def split_batch_zig_zag(
@@ -114,12 +118,12 @@ def get_default_args(func):
     return args
 
 
-def update_attention_mask(attention_mask, head_num, head_dim=1):
+def repeat_attention_mask_heads(attention_mask, head_num, head_dim=1):
     """
     transform attention mask 3d(B, L, L) to 4d(B, H, L, L)
     An example:
     attention_mask = torch.tensor([[1, 0, 0], [1, 0, 1], [0, 1, 1]])
-    update_attention_mask(attention_mask, head_num=2, head_dim=1)
+    repeat_attention_mask_heads(attention_mask, head_num=2, head_dim=1)
     >>> torch.tensor([[[1, 0, 0], [1, 0, 1], [0, 1, 1]], [[1, 0, 0], [1, 0, 1], [0, 1, 1]]])
     """
     return attention_mask.unsqueeze(dim=head_dim).expand(-1, head_num, -1, -1)

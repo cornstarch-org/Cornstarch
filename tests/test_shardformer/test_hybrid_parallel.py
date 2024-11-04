@@ -139,7 +139,7 @@ class LanguageContextParallel(ColossalaiHybridParallelBase):
     @parametrize("sp_mode", ["all_to_all", "ring_attn"], name_fn=lambda x: x)
     def test_causal(self, model_name: str, tp_size: int, pp_size: int, sp_mode: str):
         self.set_model(causal_lms[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, sp_mode, True, "bf16")
+        self.run_hybrid_parallel(tp_size, pp_size, sp_mode, False, "bf16")
 
 
 @instantiate_parametrized_tests
