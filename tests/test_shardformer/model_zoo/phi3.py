@@ -8,8 +8,8 @@ from transformers.models.phi3 import Phi3Config, Phi3ForCausalLM, Phi3Model
 from ..utils import ModelClassBase
 
 phi3_config = Phi3Config(
-    hidden_size=256,
-    intermediate_size=256,
+    hidden_size=512,
+    intermediate_size=64,
     num_attention_heads=16,
     num_key_value_heads=16,
     num_hidden_layers=4,
