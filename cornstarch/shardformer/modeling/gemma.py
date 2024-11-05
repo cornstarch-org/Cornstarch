@@ -467,8 +467,10 @@ class GemmaAttentionForwards:
 
         attn_weights = None
         if sp_mode == "ring_attn":
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
+            key_states = repeat_kv(key_states, self.num_key_value_groups).contiguous()
+            value_states = repeat_kv(
+                value_states, self.num_key_value_groups
+            ).contiguous()
 
             attn_output = RingAttentionAnyMask.attention(
                 query_states,
