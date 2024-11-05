@@ -33,10 +33,7 @@ from transformers.models.llama.modeling_llama import (
 from transformers.utils.import_utils import is_torchdynamo_compiling
 
 from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
-from cornstarch.shardformer.layers.utils import (
-    repeat_attention_mask_heads,
-    split_batch_for_ring_attn,
-)
+from cornstarch.shardformer.layers.utils import repeat_attention_mask_heads
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -174,7 +171,7 @@ class LlamaModelForwards:
             attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
 
             # shape: [B, H, L // sp_size, L]
-            attn_mask = split_batch_for_ring_attn(
+            attn_mask = RingAttentionAnyMask.split_batch(
                 attn_mask, sp_group, seq_dim=2, ring_attn_mode=ring_attn_mode
             )
         else:
@@ -206,10 +203,10 @@ class LlamaModelForwards:
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
             if sp_mode == "ring_attn":
-                hidden_states = split_batch_for_ring_attn(
+                hidden_states = RingAttentionAnyMask.split_batch(
                     hidden_states, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
                 )  # shape: [B, L // sp_size, ...]
-                position_ids = split_batch_for_ring_attn(
+                position_ids = RingAttentionAnyMask.split_batch(
                     position_ids, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
                 )  # shape: [B, L // sp_size]
             elif sp_mode == "all_to_all":
@@ -291,6 +288,9 @@ class LlamaModelForwards:
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
             next_cache = next_cache.to_legacy_cache()
+
+        # Clear cache so that it is not used in the next forward pass
+        RingAttentionAnyMask.clear_split_random_cache()
 
         if not return_dict:
             return tuple(
@@ -375,7 +375,7 @@ class LlamaModelForwards:
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
             # labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
-            labels = split_batch_for_ring_attn(
+            labels = RingAttentionAnyMask.split_batch(
                 labels,
                 sp_group,
                 seq_dim=1,

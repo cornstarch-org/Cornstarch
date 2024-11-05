@@ -6,7 +6,9 @@ from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer.shard.shard_config import ShardConfig as ColossalShardConfig
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.layers.utils import SUPPORT_RING_ATTN_DISTRIBUTION_MODE
+from cornstarch.shardformer.layers.ring_attention_anymask import (
+    SUPPORT_RING_ATTN_DISTRIBUTION_MODE,
+)
 
 
 @dataclass
