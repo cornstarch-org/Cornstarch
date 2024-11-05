@@ -127,12 +127,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 org_loss, sharded_loss, atol=self.model.atol, rtol=self.model.rtol
             )
 
-        # TODO (insujang): Currently RingAttention does not
-        # properly do backward pass, generating wrong gradients.
-        # If the test is the case, skip checking gradients and update.
-        if plugin.shard_config.sequence_parallelism_mode == "ring_attn":
-            return
-
         tp_group: dist.ProcessGroup = booster.plugin.tp_group
         sharded_model: PreTrainedModel = sharded_model.unwrap()
 
@@ -422,12 +416,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         # Loss check
         if stage_manager.is_last_stage(check_only_in_modal=False):
             check_loss(org_loss, sharded_loss, atol=self.llm.atol, rtol=self.llm.rtol)
-
-        # TODO (insujang): Currently RingAttention does not
-        # properly do backward pass, generating wrong gradients.
-        # If the test is the case, skip checking gradients and update.
-        if plugin.shard_config.sequence_parallelism_mode == "ring_attn":
-            return
 
         tp_group: dist.ProcessGroup = plugin.tp_group
         sharded_model: MultimodalModel = sharded_model.unwrap()
