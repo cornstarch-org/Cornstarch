@@ -491,7 +491,7 @@ class InternLM2AttentionForwards:
                 sp_group,
                 attention_mask,
                 return_softmax=False,
-                dropout_p=self.attention_dropout if self.training else 0.0,
+                dropout_p=0.0,
             )
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout
@@ -501,16 +501,13 @@ class InternLM2AttentionForwards:
             key_states = key_states.transpose(1, 2)
             value_states = value_states.transpose(1, 2)
 
-            # dropout_rate = self.attention_dropout if self.training else 0.0
-            dropout_rate = 0.0
-
             attn_output = _flash_attention_forward(
                 query_states,
                 key_states,
                 value_states,
                 attention_mask,
                 q_len,
-                dropout=dropout_rate,
+                dropout=0.0,
                 use_top_left_mask=self._flash_attn_uses_top_left_mask,
                 is_causal=self.is_causal,
             )
