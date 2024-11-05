@@ -158,36 +158,31 @@ class RingAttentionAnyMask(RingAttentionBase):
 
         seq_dim = seq_dim if seq_dim != -1 else batch[0].dim() - 1
         seq_len = batch.shape[seq_dim]
+        num_elements_per_process = seq_len // sp_size
 
         assert (
             seq_len % (sp_size * 2) == 0
         ), f"Sequence length {seq_len} must be divisible by {sp_size * 2}!"
 
-        num_elements_per_process = seq_len // sp_size
+        indices = np.arange(seq_len)
 
-        indices = torch.arange(seq_len, device=batch.device)
-
-        # Split indices into two halves for the zigzag pattern
         first_half = indices[: seq_len // 2]
-        second_half = indices[seq_len // 2 :].flip(0)
+        second_half = indices[seq_len // 2 :][::-1]
 
         # Stack the two halves and interleave them to form the zigzag pattern
-        zigzag_indices = torch.stack((first_half, second_half), dim=1).flatten()
+        zigzag_indices = np.ravel(np.column_stack((first_half, second_half)))
 
         # Select the range of indices for the current process
         start_idx = sp_rank * num_elements_per_process
         end_idx = start_idx + num_elements_per_process
-        process_indices = zigzag_indices[start_idx:end_idx]
+        process_indices = torch.as_tensor(
+            zigzag_indices[start_idx:end_idx], dtype=torch.long, device=batch.device
+        ).detach()
 
-        # Select along the specified dimension using the generated zigzag indices
-        split_tensor = batch.index_select(seq_dim, process_indices).contiguous()
+        slices = [slice(None)] * batch.dim()
+        slices[seq_dim] = process_indices
 
-        # Reshape to maintain the expected structure
-        return split_tensor.view(
-            *batch.shape[:seq_dim],
-            num_elements_per_process,  # Number of elements for this process
-            *batch.shape[seq_dim + 1 :],
-        )
+        return batch[slices].contiguous()
 
     @classmethod
     def clear_split_random_cache(cls: RingAttentionAnyMask):

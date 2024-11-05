@@ -151,7 +151,9 @@ class GemmaModelForwards:
                 attention_mask.ndim == 3
             ), f"Unsupported attention mask dimension: {attention_mask.ndim}"
 
-            num_heads = self.config.num_attention_heads
+            num_heads = (
+                self.config.num_attention_heads // shrd_config.tensor_parallel_size
+            )
             # shape: [B, H, L, L]
             attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
 
@@ -173,7 +175,9 @@ class GemmaModelForwards:
                 assert (
                     self.config._attn_implementation != "flash_attention_2"
                 ), "Flash Attention 2 does not support AnyMask. Use either `sdpa` or `eager`."
-                num_heads = self.config.num_attention_heads
+                num_heads = (
+                    self.config.num_attention_heads // shrd_config.tensor_parallel_size
+                )
                 attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
             else:
                 raise ValueError(
