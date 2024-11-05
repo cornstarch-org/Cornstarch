@@ -294,7 +294,7 @@ class LlamaModelForwards:
             next_cache = next_cache.to_legacy_cache()
 
         # Clear cache so that it is not used in the next forward pass
-        RingAttentionAnyMask.clear_split_random_cache()
+        RingAttentionAnyMask.clear_split_cache()
 
         if not return_dict:
             return tuple(

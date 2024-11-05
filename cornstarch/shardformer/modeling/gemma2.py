@@ -159,7 +159,7 @@ class Gemma2ModelForwards:
             ), f"Unsupported attention mask dimension: {attention_mask.ndim}"
 
             num_heads = (
-                self.config.num_attention_heads // shrd_config.tensor_parallel_size
+                self.config.num_attention_heads // shard_config.tensor_parallel_size
             )
             # shape: [B, H, L, L]
             attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
@@ -183,7 +183,7 @@ class Gemma2ModelForwards:
                     self.config._attn_implementation != "flash_attention_2"
                 ), "Flash Attention 2 does not support AnyMask. Use either `sdpa` or `eager`."
                 num_heads = (
-                    self.config.num_attention_heads // shrd_config.tensor_parallel_size
+                    self.config.num_attention_heads // shard_config.tensor_parallel_size
                 )
                 attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
             else:
@@ -270,7 +270,7 @@ class Gemma2ModelForwards:
         next_cache = past_key_values if use_cache else None
 
         # Clear cache so that it is not used in the next forward pass
-        RingAttentionAnyMask.clear_split_random_cache()
+        RingAttentionAnyMask.clear_split_cache()
 
         if not return_dict:
             return tuple(

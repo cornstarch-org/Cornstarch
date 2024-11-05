@@ -24,7 +24,7 @@ class RingAttentionAnyMask(RingAttentionBase):
     support any mask.
     """
 
-    random_split_batch_cache: Optional[np.ndarray] = None
+    split_batch_cache: Optional[np.ndarray] = None
 
     @staticmethod
     def forward(
@@ -141,8 +141,9 @@ class RingAttentionAnyMask(RingAttentionBase):
 
         return split_batch
 
-    @staticmethod
+    @classmethod
     def _split_batch_zigzag(
+        cls: RingAttentionAnyMask,
         batch: torch.Tensor,
         sp_group: dist.ProcessGroup,
         seq_dim: int = 1,
@@ -164,19 +165,29 @@ class RingAttentionAnyMask(RingAttentionBase):
             seq_len % (sp_size * 2) == 0
         ), f"Sequence length {seq_len} must be divisible by {sp_size * 2}!"
 
-        indices = np.arange(seq_len)
+        if cls.split_batch_cache is not None:
+            assert cls.split_batch_cache.shape == (seq_len,), (
+                f"Zigzag split cache shape {cls.split_batch_cache.shape} "
+                f"does not match the sequence length {seq_len}"
+            )
+            assignments = cls.split_batch_cache
+        else:
+            indices = np.arange(seq_len)
 
-        first_half = indices[: seq_len // 2]
-        second_half = indices[seq_len // 2 :][::-1]
+            first_half = indices[: seq_len // 2]
+            second_half = indices[seq_len // 2 :][::-1]
 
-        # Stack the two halves and interleave them to form the zigzag pattern
-        zigzag_indices = np.ravel(np.column_stack((first_half, second_half)))
+            # Stack the two halves and interleave them to form the zigzag pattern
+            assignments = np.ravel(np.column_stack((first_half, second_half)))
+
+            # Cache assignments
+            cls.split_batch_cache = assignments
 
         # Select the range of indices for the current process
         start_idx = sp_rank * num_elements_per_process
         end_idx = start_idx + num_elements_per_process
         process_indices = torch.as_tensor(
-            zigzag_indices[start_idx:end_idx], dtype=torch.long, device=batch.device
+            assignments[start_idx:end_idx], dtype=torch.long, device=batch.device
         ).detach()
 
         slices = [slice(None)] * batch.dim()
@@ -185,8 +196,8 @@ class RingAttentionAnyMask(RingAttentionBase):
         return batch[slices].contiguous()
 
     @classmethod
-    def clear_split_random_cache(cls: RingAttentionAnyMask):
-        cls.random_split_batch_cache = None
+    def clear_split_cache(cls: RingAttentionAnyMask):
+        cls.split_batch_cache = None
 
     @classmethod
     def _split_batch_random(
@@ -212,12 +223,12 @@ class RingAttentionAnyMask(RingAttentionBase):
         seq_dim = seq_dim if seq_dim != -1 else batch[0].dim() - 1
         seq_len = batch.shape[seq_dim]
 
-        if cls.random_split_batch_cache is not None:
-            assert cls.random_split_batch_cache.shape == (seq_len,), (
-                f"Random split cache shape {cls.random_split_batch_cache.shape} "
+        if cls.split_batch_cache is not None:
+            assert cls.split_batch_cache.shape == (seq_len,), (
+                f"Random split cache shape {cls.split_batch_cache.shape} "
                 f"does not match the sequence length {seq_len}"
             )
-            assignments = cls.random_split_batch_cache
+            assignments = cls.split_batch_cache
         else:
 
             def generate_coprime_a(p, mod):
@@ -243,7 +254,7 @@ class RingAttentionAnyMask(RingAttentionBase):
             assignments = (hash_values % sp_size) == sp_rank  # shape: [seq_len]
 
             # Cache assignments
-            cls.random_split_batch_cache = assignments
+            cls.split_batch_cache = assignments
 
         # Extract the indices assigned to this process
         assigned_indices = np.flatnonzero(assignments)  # shape: [num_assigned_indices]
