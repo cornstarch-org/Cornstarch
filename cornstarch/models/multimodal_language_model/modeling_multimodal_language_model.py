@@ -53,15 +53,19 @@ def prepend_modal_output_to_inputs_embeds(
     new_inputs_embeds = torch.cat([output[0], inputs_embeds], dim=1)
 
     if attention_mask is None:
-        attention_mask = torch.ones_like(input_ids).to(input_ids.device)
+        attention_mask = torch.ones_like(
+            input_ids, dtype=torch.long, device=input_ids.device
+        )
 
     new_attention_mask = torch.cat(
         [
-            torch.ones(output[0].shape[:2], device=attention_mask.device),
+            torch.ones(
+                output[0].shape[:2], dtype=torch.long, device=attention_mask.device
+            ),
             attention_mask,
         ],
         dim=1,
-    ).to(dtype=torch.long)
+    )
     new_position_ids = (
         (new_attention_mask.cumsum(-1) - 1)
         .masked_fill_((new_attention_mask == 0), 1)
@@ -871,8 +875,9 @@ class ModalEncoderModule(ModalModuleBase):
                 torch.Tensor,
                 torch.Tensor,
                 torch.Tensor,
+                torch.Tensor,
             ],
-            torch.Tensor,
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         ] = prepend_modal_output_to_inputs_embeds,
     ):
         """
