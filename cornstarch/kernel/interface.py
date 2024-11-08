@@ -1,30 +1,33 @@
-import torch
 from typing import Optional, Tuple
+
+import torch
+import triton
+from torch._higher_order_ops.flex_attention import (
+    TransformGetItemToIndex,
+    create_fw_bw_graph,
+    flex_attention,
+    flex_attention_autograd,
+    flex_attention_backward,
+)
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    _apply_kernel_options,
+    _convert_block_mask_to_mask,
+    _identity,
+    _vmap_for_bhqkv,
+    create_block_mask,
+)
 
 from cornstarch.kernel.triton.any_mask_attn import _attn_any_mask_fwd
 
-from torch.nn.attention.flex_attention import (
-    create_block_mask,
-    _apply_kernel_options,
-    _identity,
-    BlockMask,
-    _vmap_for_bhqkv,
-    _convert_block_mask_to_mask,
-)
-from torch._higher_order_ops.flex_attention import flex_attention
-from torch._higher_order_ops.flex_attention import flex_attention_backward
-from torch._higher_order_ops.flex_attention import (
-    flex_attention_autograd,
-    TransformGetItemToIndex,
-    create_fw_bw_graph,
-)
-
-import triton
-
 
 # NOTE(runyu): will be removed after insu implement a non-full mask version
-def convert_attention_mask_to_block_mask(attention_mask, block_size=128):
-    # attention_mask should be a boolean tensor of shape [batch_size, num_heads, q_len, kv_len]
+def convert_attention_mask_to_block_mask(
+    attention_mask: torch.Tensor, block_size: int = 128
+):
+    assert (
+        attention_mask.ndim == 4
+    ), f"Expected 4d attention mask of shape (batch_size, num_heads, q_len, kv_len), got {attention_mask.shape}"
 
     def custom_mask_mod(b, h, q_idx, kv_idx):
         return attention_mask[b, h, q_idx, kv_idx].bool()
@@ -37,6 +40,7 @@ def convert_attention_mask_to_block_mask(attention_mask, block_size=128):
         KV_LEN=attention_mask.shape[3],
         device=attention_mask.device,
         BLOCK_SIZE=block_size,
+        _compile=True,
     )
 
     return block_mask
