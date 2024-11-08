@@ -200,7 +200,7 @@ def ring_flash_attn_anymask_forward(
                 "v": v,
                 "mask": mask.chunk(comm.world_size, dim=-1)[
                     (comm.rank - step + comm.world_size) % comm.world_size
-                ],  # NOTE(runyu) we need to pass the right mask to the kernel
+                ],  # NOTE(runyu) use mask now, but will use block mask without full mask in the future
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
@@ -218,11 +218,6 @@ def ring_flash_attn_anymask_forward(
             k = next_k
             v = next_v
         
-    
-    # NOTE(runyu) for triton
-    ctx.HEAD_DIM = q.shape[-1]
-    ctx.USE_MASK = True
-
     out = out.to(q.dtype)
     lse = lse.squeeze(dim=-1)
     return out, lse
@@ -258,12 +253,7 @@ def ring_flash_attn_anymask_backward(
     next_dk, next_dv = None, None
     next_k, next_v = None, None
 
-    if len(mask_info) == 2:
-        mask = mask_info[1]
-        mask = mask.chunk(kv_comm.world_size, dim=-1)[
-            (kv_comm.rank - step + kv_comm.world_size) % kv_comm.world_size
-        ]  # NOTE(runyu) we need to pass the right mask to the kernel
-        mask_info = (mask_info[0], mask)
+    grad_softmax_lse, mask = mask_info
 
     for step in range(kv_comm.world_size):
         if step + 1 != kv_comm.world_size:
@@ -272,6 +262,13 @@ def ring_flash_attn_anymask_backward(
             kv_comm.commit()
 
         params = get_default_args(attn_impl).copy()
+
+        mask_ = mask.chunk(kv_comm.world_size, dim=-1)[
+                    (kv_comm.rank - step + kv_comm.world_size) % kv_comm.world_size
+                ]  # NOTE(runyu) we need to pass the right mask to the kernel
+
+        mask_info = (grad_softmax_lse, mask_)
+
         params.update(
             {
                 "ctx": ctx,

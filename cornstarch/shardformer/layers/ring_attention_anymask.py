@@ -11,6 +11,7 @@ from cornstarch.kernel.interface import (
     _flash_attn_anymask_backward,
     _flex_attn_anymask_forward,
     _flex_attn_anymask_backward,
+    _flex_attn_anymask_naive_backward,
 )
 from cornstarch.shardformer.layers.ring_attn import (
     ring_flash_attn_anymask_backward,
@@ -66,7 +67,15 @@ class RingAttentionAnyMask(RingAttentionBase):
             deterministic=deterministic,
         )
 
-        # ctx.save_for_backward(q, k, v, out, softmax_lse, mask)
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            mask,
+        )
+
         ctx.group = sp_group
         ctx.sm_scale = sm_scale
 
@@ -75,8 +84,8 @@ class RingAttentionAnyMask(RingAttentionBase):
 
     @staticmethod
     def backward(ctx, dout, grad_softmax_lse, *args):
-        q, k, v, out, softmax_lse = ctx.saved_tensors[:5]
-        mask_info = (grad_softmax_lse,) + ctx.saved_tensors[5:]
+        q, k, v, out, softmax_lse, mask = ctx.saved_tensors
+        mask_info = (grad_softmax_lse, mask)
         dq, dk, dv = ring_flash_attn_anymask_backward(
             ctx,
             ctx.group,
@@ -89,6 +98,7 @@ class RingAttentionAnyMask(RingAttentionBase):
             ctx.sm_scale,
             mask_info,
             _flex_attn_anymask_backward,
+            # _flex_attn_anymask_naive_backward,
         )
         return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
