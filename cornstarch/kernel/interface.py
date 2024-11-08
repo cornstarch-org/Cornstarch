@@ -3,20 +3,32 @@ from typing import Optional, Tuple
 
 from cornstarch.kernel.triton.any_mask_attn import _attn_any_mask_fwd
 
-from torch.nn.attention.flex_attention import create_block_mask, _apply_kernel_options, _identity, BlockMask, _vmap_for_bhqkv, _convert_block_mask_to_mask
+from torch.nn.attention.flex_attention import (
+    create_block_mask,
+    _apply_kernel_options,
+    _identity,
+    BlockMask,
+    _vmap_for_bhqkv,
+    _convert_block_mask_to_mask,
+)
 from torch._higher_order_ops.flex_attention import flex_attention
 from torch._higher_order_ops.flex_attention import flex_attention_backward
-from torch._higher_order_ops.flex_attention import flex_attention_autograd, TransformGetItemToIndex, create_fw_bw_graph
+from torch._higher_order_ops.flex_attention import (
+    flex_attention_autograd,
+    TransformGetItemToIndex,
+    create_fw_bw_graph,
+)
 
 import triton
+
 
 # NOTE(runyu): will be removed after insu implement a non-full mask version
 def convert_attention_mask_to_block_mask(attention_mask, block_size=128):
     # attention_mask should be a boolean tensor of shape [batch_size, num_heads, q_len, kv_len]
-    
+
     def custom_mask_mod(b, h, q_idx, kv_idx):
         return attention_mask[b, h, q_idx, kv_idx].bool()
-    
+
     block_mask = create_block_mask(
         mask_mod=custom_mask_mod,
         B=attention_mask.shape[0],
@@ -24,10 +36,11 @@ def convert_attention_mask_to_block_mask(attention_mask, block_size=128):
         Q_LEN=attention_mask.shape[2],
         KV_LEN=attention_mask.shape[3],
         device=attention_mask.device,
-        BLOCK_SIZE=block_size
+        BLOCK_SIZE=block_size,
     )
-    
+
     return block_mask
+
 
 def _flex_attn_anymask_forward(
     ctx: torch.autograd.function.FunctionCtx,
@@ -45,7 +58,9 @@ def _flex_attn_anymask_forward(
 ):
     block_mask = convert_attention_mask_to_block_mask(mask).as_tuple()
 
-    kernel_options = _apply_kernel_options(q, k, v, return_lse=True, kernel_options=None)
+    kernel_options = _apply_kernel_options(
+        q, k, v, return_lse=True, kernel_options=None
+    )
     with TransformGetItemToIndex():
         input_requires_grad = any(t.requires_grad for t in (q, k, v))
 
@@ -56,17 +71,15 @@ def _flex_attn_anymask_forward(
             example_vals = [
                 torch.zeros((), dtype=q.dtype, requires_grad=input_requires_grad)
             ] + [torch.zeros((), dtype=torch.int) for _ in range(4)]
-            fw_graph, bw_graph = create_fw_bw_graph(
-                _identity, example_vals, ()
-            )
+            fw_graph, bw_graph = create_fw_bw_graph(_identity, example_vals, ())
             assert ctx is not None
         else:
             fw_graph, bw_graph = _identity, None
         assert ctx is not None
-        
+
         score_mod_other_buffers = ()
         mask_mod_other_buffers = ()
-        
+
         any_buffer_requires_grad = any(
             buffer.requires_grad
             for buffer in score_mod_other_buffers + mask_mod_other_buffers
@@ -98,6 +111,7 @@ def _flex_attn_anymask_forward(
 
     return out, logsumexp * 0.6931471805599453, None, None
 
+
 def _flex_attn_anymask_naive_backward(
     ctx: torch.autograd.function.FunctionCtx,
     dout: torch.Tensor,
@@ -120,8 +134,29 @@ def _flex_attn_anymask_naive_backward(
     rng_state: Optional[torch.Tensor] = None,
 ):
     _, mask = mask_info
-    dq, dk, dv = _flash_attn_anymask_backward(ctx, dout, q, k, v, out, softmax_lse, dq, dk, dv, mask, dropout_p, softmax_scale, window_size_left, window_size_right, softcap, alibi_slopes, deterministic, rng_state)
+    dq, dk, dv = _flash_attn_anymask_backward(
+        ctx,
+        dout,
+        q,
+        k,
+        v,
+        out,
+        softmax_lse,
+        dq,
+        dk,
+        dv,
+        mask,
+        dropout_p,
+        softmax_scale,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+        deterministic,
+        rng_state,
+    )
     return dq, dk, dv
+
 
 def _flex_attn_anymask_backward(
     ctx: torch.autograd.function.FunctionCtx,
@@ -150,7 +185,16 @@ def _flex_attn_anymask_backward(
 
         grad_softmax_lse, mask = mask_info
         block_mask = convert_attention_mask_to_block_mask(mask).as_tuple()
-        kv_num_blocks, kv_indices, full_kv_num_blocks, full_kv_indices, q_num_blocks, q_indices, full_q_num_blocks, full_q_indices = block_mask[:8]
+        (
+            kv_num_blocks,
+            kv_indices,
+            full_kv_num_blocks,
+            full_kv_indices,
+            q_num_blocks,
+            q_indices,
+            full_q_num_blocks,
+            full_q_indices,
+        ) = block_mask[:8]
         KV_BLOCK_SIZE = block_mask[8]
         Q_BLOCK_SIZE = block_mask[9]
 
@@ -159,11 +203,9 @@ def _flex_attn_anymask_backward(
         mask_graph = ctx._mask_graph
         scale = ctx.scale
         kernel_options = ctx.kernel_options
-        score_mod_other_buffers = tuple(
-        )
-        mask_mod_other_buffers = tuple(
-        )
-        
+        score_mod_other_buffers = tuple()
+        mask_mod_other_buffers = tuple()
+
         # We have asserted that other_buffers do not require grad in the forward
         grad_query, grad_key, grad_value = flex_attention_backward(
             q,
@@ -203,6 +245,7 @@ def _flex_attn_anymask_backward(
 
         return grad_query, grad_key, grad_value
 
+
 class FlexAttnAnyMask(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -221,7 +264,20 @@ class FlexAttnAnyMask(torch.autograd.Function):
         return_softmax,
     ):
 
-        out, softmax_lse, _, _ = _flex_attn_anymask_forward(ctx, q, k, v, mask, softmax_scale, dropout_p, window_size_left, window_size_right, softcap, alibi_slopes, return_softmax)
+        out, softmax_lse, _, _ = _flex_attn_anymask_forward(
+            ctx,
+            q,
+            k,
+            v,
+            mask,
+            softmax_scale,
+            dropout_p,
+            window_size_left,
+            window_size_right,
+            softcap,
+            alibi_slopes,
+            return_softmax,
+        )
 
         ctx.save_for_backward(q, k, v, out, softmax_lse, mask)
 
@@ -234,15 +290,36 @@ class FlexAttnAnyMask(torch.autograd.Function):
         ctx.deterministic = deterministic
 
         return out, softmax_lse, None, None
-    
+
     @staticmethod
     def backward(ctx, dout, grad_lse, *args):
         q, k, v, out, softmax_lse, mask = ctx.saved_tensors
         mask_info = (grad_lse, mask)
         dq, dk, dv = None, None, None
         # dq, dk, dv = _flex_attn_anymask_naive_backward(ctx, dout, q, k, v, out, softmax_lse, dq, dk, dv, mask_info, ctx.dropout_p, ctx.softmax_scale, ctx.window_size_left, ctx.window_size_right, ctx.softcap, ctx.alibi_slopes, ctx.deterministic, None)
-        dq, dk, dv = _flex_attn_anymask_backward(ctx, dout, q, k, v, out, softmax_lse, dq, dk, dv, mask_info, ctx.dropout_p, ctx.softmax_scale, ctx.window_size_left, ctx.window_size_right, ctx.softcap, ctx.alibi_slopes, ctx.deterministic, None)
+        dq, dk, dv = _flex_attn_anymask_backward(
+            ctx,
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            dq,
+            dk,
+            dv,
+            mask_info,
+            ctx.dropout_p,
+            ctx.softmax_scale,
+            ctx.window_size_left,
+            ctx.window_size_right,
+            ctx.softcap,
+            ctx.alibi_slopes,
+            ctx.deterministic,
+            None,
+        )
         return dq, dk, dv, None, None, None, None, None, None, None, None, None
+
 
 def _flash_attn_anymask_forward(
     ctx: torch.autograd.function.FunctionCtx,

@@ -217,7 +217,7 @@ def ring_flash_attn_anymask_forward(
             comm.wait()
             k = next_k
             v = next_v
-        
+
     out = out.to(q.dtype)
     lse = lse.squeeze(dim=-1)
     return out, lse
@@ -264,8 +264,8 @@ def ring_flash_attn_anymask_backward(
         params = get_default_args(attn_impl).copy()
 
         mask_ = mask.chunk(kv_comm.world_size, dim=-1)[
-                    (kv_comm.rank - step + kv_comm.world_size) % kv_comm.world_size
-                ]  # NOTE(runyu) we need to pass the right mask to the kernel
+            (kv_comm.rank - step + kv_comm.world_size) % kv_comm.world_size
+        ]  # NOTE(runyu) we need to pass the right mask to the kernel
 
         mask_info = (grad_softmax_lse, mask_)
 

@@ -1,19 +1,27 @@
 import torch
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask, _apply_kernel_options, _identity
+from torch.nn.attention.flex_attention import (
+    flex_attention,
+    create_block_mask,
+    _apply_kernel_options,
+    _identity,
+)
 from torch._higher_order_ops.flex_attention import flex_attention as flex_attention_hop
-from torch._higher_order_ops.flex_attention import flex_attention_backward as flex_attention_hop_backward
+from torch._higher_order_ops.flex_attention import (
+    flex_attention_backward as flex_attention_hop_backward,
+)
 from torch._higher_order_ops.flex_attention import flex_attention_autograd
 from cornstarch.kernel.interface import FlexAttnAnyMask
 import pytest
 
 from torch.testing import assert_close
 
+
 def convert_attention_mask_to_block_mask(attention_mask, block_size=128):
     # attention_mask should be a boolean tensor of shape [batch_size, num_heads, q_len, kv_len]
-    
+
     def custom_mask_mod(b, h, q_idx, kv_idx):
         return attention_mask[b, h, q_idx, kv_idx].bool()
-    
+
     block_mask = create_block_mask(
         mask_mod=custom_mask_mod,
         B=attention_mask.shape[0],
@@ -21,31 +29,39 @@ def convert_attention_mask_to_block_mask(attention_mask, block_size=128):
         Q_LEN=attention_mask.shape[2],
         KV_LEN=attention_mask.shape[3],
         device=attention_mask.device,
-        BLOCK_SIZE=block_size
+        BLOCK_SIZE=block_size,
     )
-    
+
     return block_mask
+
 
 @pytest.mark.parametrize(
     "Z, H, N_CTX, HEAD_DIM",
-    [(1, 2, 128, 64), (1, 4, 128, 128), (1, 8, 1024, 128), (4, 7, 512, 128), (32, 15, 1024, 256)]
+    [
+        (1, 2, 128, 64),
+        (1, 4, 128, 128),
+        (1, 8, 1024, 128),
+        (4, 7, 512, 128),
+        (32, 15, 1024, 256),
+    ],
 )
-@pytest.mark.parametrize("dtype", [torch.bfloat16]) # NOTE(runyu): "fp16", "fp32" is not supported yet
-@pytest.mark.parametrize("mask_type", ["random"]) # NOTE(runyu): "causal" and "full" are not supported yet
+@pytest.mark.parametrize(
+    "dtype", [torch.bfloat16]
+)  # NOTE(runyu): "fp16", "fp32" is not supported yet
+@pytest.mark.parametrize(
+    "mask_type", ["random"]
+)  # NOTE(runyu): "causal" and "full" are not supported yet
 def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     torch.manual_seed(20)
-    q = (
-        torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda")
-        .requires_grad_()
-    )
-    k = (
-        torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda")
-        .requires_grad_()
-    )
-    v = (
-        torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda")
-        .requires_grad_()
-    )
+    q = torch.empty(
+        (Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda"
+    ).requires_grad_()
+    k = torch.empty(
+        (Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda"
+    ).requires_grad_()
+    v = torch.empty(
+        (Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda"
+    ).requires_grad_()
     sm_scale = 0.5
     dout = torch.randn_like(q)
     # reference implementation
@@ -92,7 +108,9 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     # flex_out, softmax_lse = flex_attention_autograd(q, k, v, score_mod=_identity, block_mask=block_mask.as_tuple(), scale=sm_scale, kernel_options=kernel_options)
 
     # 4. flex_attention_anymask of our own implementation, passed
-    flex_out, softmax_lse, _, _ = FlexAttnAnyMask.apply(q, k, v, 0.0, sm_scale, mask, -1, -1, 0.0, None, False, True)
+    flex_out, softmax_lse, _, _ = FlexAttnAnyMask.apply(
+        q, k, v, 0.0, sm_scale, mask, -1, -1, 0.0, None, False, True
+    )
 
     flex_out.backward(dout)
     flex_dv, v.grad = v.grad.clone(), None
@@ -111,6 +129,7 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     print(
         f"test passed for Z={Z}, H={H}, N_CTX={N_CTX}, HEAD_DIM={HEAD_DIM}, mask_type={mask_type}, dtype={dtype}"
     )
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
