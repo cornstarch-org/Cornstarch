@@ -21,10 +21,9 @@ from torch.nn.attention.flex_attention import (
 from cornstarch.kernel.triton.any_mask_attn import _attn_any_mask_fwd
 
 
-# NOTE(runyu): will be removed after insu implement a non-full mask version
 def convert_attention_mask_to_block_mask(
     attention_mask: torch.Tensor, block_size: int = 128
-):
+) -> BlockMask:
     assert (
         attention_mask.ndim == 4
     ), f"Expected 4d attention mask of shape (batch_size, num_heads, q_len, kv_len), got {attention_mask.shape}"
@@ -44,6 +43,50 @@ def convert_attention_mask_to_block_mask(
     )
 
     return block_mask
+
+
+def convert_bit_attention_mask_to_block_mask(
+    attention_mask: torch.Tensor, num_heads: int
+) -> BlockMask:
+    """
+    For each element, each bit represents a different types of token to attend.
+
+    Args:
+        attention_mask: a 2D tensor of shape (batch_size, seq_len)
+    """
+    bsz, seq_len = attention_mask.shape
+
+    def anymask_mod(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        attn_mask = attention_mask.clone()
+        is_causal = (attn_mask[b][q_idx] & (1 << 62)) != 0
+        attend_non_contiguous = (attn_mask[b][q_idx] & (1 << 61)) != 0
+
+        # Remove 61st and 62nd bits
+        attn_mask &= (1 << 61) - 1
+
+        rolled_mask = attn_mask.roll(1, dims=1)
+        rolled_mask[:, 0] = 0  # Zero out the first column to avoid boundary issues
+        unique_ids = (attn_mask != rolled_mask).cumsum(dim=1)
+
+        return (
+            (is_causal & (q_idx >= kv_idx))
+            | (
+                ~is_causal
+                & ~attend_non_contiguous
+                & (unique_ids[b][q_idx] == unique_ids[b][kv_idx])
+            )
+            | (
+                ~is_causal
+                & attend_non_contiguous
+                & (attn_mask[b][q_idx] == attn_mask[b][kv_idx])
+            )
+        )
+
+    return create_block_mask(
+        anymask_mod, bsz, num_heads, seq_len, seq_len, _compile=True
+    )
 
 
 def _flex_attn_anymask_forward(
