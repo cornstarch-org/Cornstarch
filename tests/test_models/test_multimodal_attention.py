@@ -1,6 +1,4 @@
-import copy
 from abc import ABC, abstractmethod
-from contextlib import nullcontext
 
 import pytest
 import torch
@@ -96,7 +94,7 @@ class TestEncoderInjectionAttentionClass(AttentionTestClassBase):
             else:
                 input_ids[0, i] = i
                 bit_attention_mask[0, i] = (1 << 62) | (1 << 0) | (1 << 1)
-                full_attention_mask[0, i, :i] = 1
+                full_attention_mask[0, i, : i + 1] = 1
 
         return {
             "input_ids": input_ids,

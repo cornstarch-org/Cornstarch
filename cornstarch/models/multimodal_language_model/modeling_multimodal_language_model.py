@@ -92,11 +92,14 @@ def inject_modal_outputs_to_inputs_embeds(
     if attention_mask is None:
         # Create bit attention mask
         attention_mask = bit_attention_mask
+        setattr(attention_mask, "cornstarch_is_bitattention", True)
+        setattr(attention_mask, "cornstarch_num_encoders", len(encoder_outputs))
     else:
         assert attention_mask.ndim in [2, 3], (
             "The attention mask must have 2 or 3 dimensions. "
             f"Got {attention_mask.ndim} dimensions."
         )
+        setattr(attention_mask, "cornstarch_is_bitattention", False)
 
     position_ids = (
         torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
@@ -165,6 +168,7 @@ def prepend_modal_output_to_inputs_embeds(
         )
 
         attention_mask = bit_attention_mask
+        setattr(attention_mask, "cornstarch_is_bitattention", True)
     else:
         if attention_mask.ndim == 2:
             attention_mask = torch.ones_like(
@@ -172,6 +176,8 @@ def prepend_modal_output_to_inputs_embeds(
             )
         else:
             pass
+
+        setattr(attention_mask, "cornstarch_is_bitattention", False)
 
     position_ids = (
         torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)

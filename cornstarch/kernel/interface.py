@@ -22,38 +22,87 @@ from cornstarch.kernel.triton.any_mask_attn import _attn_any_mask_fwd
 
 
 def convert_attention_mask_to_block_mask(
-    attention_mask: torch.Tensor, block_size: int = 128
+    attention_mask: torch.Tensor, num_heads: int
 ) -> BlockMask:
     assert (
-        attention_mask.ndim == 4
-    ), f"Expected 4d attention mask of shape (batch_size, num_heads, q_len, kv_len), got {attention_mask.shape}"
+        attention_mask.ndim == 3
+    ), f"Expected 4d attention mask of shape (batch_size, q_len, kv_len), got {attention_mask.shape}"
 
     def custom_mask_mod(b, h, q_idx, kv_idx):
-        return attention_mask[b, h, q_idx, kv_idx].bool()
+        return attention_mask[b, q_idx, kv_idx].bool()
 
     block_mask = create_block_mask(
         mask_mod=custom_mask_mod,
         B=attention_mask.shape[0],
-        H=attention_mask.shape[1],
-        Q_LEN=attention_mask.shape[2],
-        KV_LEN=attention_mask.shape[3],
+        H=num_heads,
+        Q_LEN=attention_mask.shape[1],
+        KV_LEN=attention_mask.shape[2],
         device=attention_mask.device,
-        BLOCK_SIZE=block_size,
+        BLOCK_SIZE=min(attention_mask.shape[1], 128),
         _compile=True,
     )
 
     return block_mask
 
 
+def convert_legacy_attention_mask_to_block_mask(
+    attention_mask: torch.Tensor, num_heads: int
+) -> BlockMask:
+    """
+    Convert legacy attention mask to BlockMask.
+    Legacy attention mask refers to an attention mask with either 0 or 1,
+    and later converted to a 4D causal mask.
+
+    Args:
+        attention_mask: a 2D tensor of shape (batch_size, seq_len) and type torch.bool or torch.int8.
+    """
+    assert not getattr(
+        attention_mask, "cornstarch_is_bitattention", False
+    ), "Expected Non BitAttentionMask"
+    assert (
+        attention_mask.ndim == 2
+    ), f"Expected 2D attention mask, got {attention_mask.ndim}"
+
+    bsz, seq_len = attention_mask.shape
+
+    def causalmask_mod(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        return q_idx >= kv_idx
+
+    return create_block_mask(
+        causalmask_mod,
+        bsz,
+        num_heads,
+        seq_len,
+        seq_len,
+        device=attention_mask.device,
+        BLOCK_SIZE=min(seq_len, 128),
+        _compile=True,
+    )
+
+
 def convert_bit_attention_mask_to_block_mask(
     attention_mask: torch.Tensor, num_heads: int
 ) -> BlockMask:
     """
-    For each element, each bit represents a different types of token to attend.
+    Convert BitAttentionMask to BlockMask.
+    BitAttentionMask refers to an attention mask, where each element is torch.int64 type
+    and each bit represents a different types of token to attend.
 
     Args:
-        attention_mask: a 2D tensor of shape (batch_size, seq_len)
+        attention_mask: a 2D tensor of shape (batch_size, seq_len) and type torch.int64.
     """
+    assert (
+        attention_mask.dtype == torch.int64
+    ), f"Expected torch.int64, got {attention_mask.dtype}"
+    assert getattr(
+        attention_mask, "cornstarch_is_bitattention", False
+    ), "Expected BitAttentionMask"
+    assert (
+        attention_mask.ndim == 2
+    ), f"Expected 2D attention mask, got {attention_mask.ndim}"
+
     bsz, seq_len = attention_mask.shape
 
     def anymask_mod(
@@ -85,7 +134,14 @@ def convert_bit_attention_mask_to_block_mask(
         )
 
     return create_block_mask(
-        anymask_mod, bsz, num_heads, seq_len, seq_len, _compile=True
+        anymask_mod,
+        bsz,
+        num_heads,
+        seq_len,
+        seq_len,
+        device=attention_mask.device,
+        BLOCK_SIZE=min(seq_len, 128),
+        _compile=True,
     )
 
 
@@ -103,7 +159,18 @@ def _flex_attn_anymask_forward(
     alibi_slopes: Optional[torch.Tensor] = None,
     return_softmax: bool = False,
 ):
-    block_mask = convert_attention_mask_to_block_mask(mask).as_tuple()
+    num_heads = q.shape[1]
+    if mask.ndim == 2:
+        if getattr(mask, "cornstarch_is_bitattention", False):
+            block_mask = convert_bit_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+        else:
+            block_mask = convert_legacy_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+    else:
+        block_mask = convert_attention_mask_to_block_mask(mask, num_heads).as_tuple()
 
     kernel_options = _apply_kernel_options(
         q, k, v, return_lse=True, kernel_options=None
@@ -231,7 +298,22 @@ def _flex_attn_anymask_backward(
         softmax_lse = softmax_lse / 0.6931471805599453
 
         grad_softmax_lse, mask = mask_info
-        block_mask = convert_attention_mask_to_block_mask(mask).as_tuple()
+
+        num_heads = q.shape[1]
+        if mask.ndim == 2:
+            if getattr(mask, "cornstarch_is_bitattention", False):
+                block_mask = convert_bit_attention_mask_to_block_mask(
+                    mask, num_heads
+                ).as_tuple()
+            else:
+                block_mask = convert_legacy_attention_mask_to_block_mask(
+                    mask, num_heads
+                ).as_tuple()
+        else:
+            block_mask = convert_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+
         (
             kv_num_blocks,
             kv_indices,
