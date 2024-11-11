@@ -93,11 +93,10 @@ def inject_modal_outputs_to_inputs_embeds(
         # Create bit attention mask
         attention_mask = bit_attention_mask
     else:
-        assert attention_mask.ndim == 2, (
-            "The attention mask must have 2 dimensions. "
+        assert attention_mask.ndim in [2, 3], (
+            "The attention mask must have 2 or 3 dimensions. "
             f"Got {attention_mask.ndim} dimensions."
         )
-        attention_mask = torch.ones_like(inputs_embeds[:, :, 0], dtype=torch.long)
 
     position_ids = (
         torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
@@ -140,23 +139,39 @@ def prepend_modal_output_to_inputs_embeds(
     inputs_embeds = torch.cat(all_modal_embeds, dim=1)
 
     if attention_mask is None:
-        # Create bit attention mask
-        bit_attention_mask = torch.zeros(
-            inputs_embeds.shape[:2], dtype=torch.long, device=inputs_embeds.device
-        )
-        modal_lengths = torch.tensor(
-            [modal_embeds.shape[1] for modal_embeds in all_modal_embeds[:-1]],
+        num_modal_outputs = len(all_modal_embeds) - 1
+        # Prefill text attention mask with (1 << 62 | sum(1 << i for i in range(num_modal_outputs)))
+        bit_attention_mask = torch.full(
+            input_ids.shape,
+            (1 << 62) | ((1 << num_modal_outputs) - 1),
+            dtype=torch.long,
             device=inputs_embeds.device,
         )
-        modal_indices = torch.arange(
-            len(all_modal_embeds) - 1, device=inputs_embeds.device
+
+        per_encoder_bit_attention_mask: list[torch.Tensor] = []
+        # Prepend encoder bit attention mask
+        for index, modal_output in enumerate(encoder_outputs.values()):
+            bit_value = 1 << index
+            modal_mask = torch.full(
+                modal_output[0].shape[:2],
+                bit_value,
+                dtype=torch.long,
+                device=inputs_embeds.device,
+            )
+            per_encoder_bit_attention_mask.append(modal_mask)
+
+        bit_attention_mask = torch.cat(
+            per_encoder_bit_attention_mask + [bit_attention_mask], dim=1
         )
-        bit_values = 1 << modal_indices
-        expanded_bit_values = bit_values.repeat_interleave(modal_lengths)
-        bit_attention_mask[:, : expanded_bit_values.shape[0]] = expanded_bit_values
+
         attention_mask = bit_attention_mask
     else:
-        attention_mask = torch.ones_like(inputs_embeds[:, :, 0], dtype=torch.long)
+        if attention_mask.ndim == 2:
+            attention_mask = torch.ones_like(
+                inputs_embeds[:, :, 0], dtype=torch.long, device=inputs_embeds.device
+            )
+        else:
+            pass
 
     position_ids = (
         torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
@@ -1064,10 +1079,48 @@ class MultimodalModel(nn.Module):
         encoder_outputs: dict[str, BaseModelOutput | tuple],
         input_ids: torch.Tensor,
         inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.token_ids is not None:
+        inject = self.token_ids is not None
+
+        if attention_mask is not None:
+            # 2d causal mask or full attention mask is used.
+            assert attention_mask.ndim in [2, 3], (
+                "Attention mask should be 2d (batch_size, seq_len) or 3d (batech_size, seq_len, seq_len), "
+                f"got {attention_mask.ndim}."
+            )
+
+            total_seq_length = inputs_embeds.shape[1] + sum(
+                output[0].shape[1] for output in encoder_outputs.values()
+            )
+            if attention_mask.ndim == 2:
+                # check attention_mask shape is equal to input_ids shape
+                assert attention_mask.shape == inputs_embeds.shape[
+                    :2
+                ] or attention_mask.shape == inputs_embeds.shape[:2] + (
+                    total_seq_length,
+                ), (
+                    f"2d attention mask shape {attention_mask.shape} should be equal to either"
+                    f"inputs_embeds shape {inputs_embeds.shape[:2]} or total_seq_length {total_seq_length}."
+                )
+            if attention_mask.ndim == 3:
+                assert attention_mask.shape[1] == attention_mask.shape[2]
+                # if full attention maks is given, it must include
+                # the full attention mask "after" merging happens.
+
+                if inject:
+                    # No seq_length different expected.
+                    assert (
+                        attention_mask.shape[1] == inputs_embeds.shape[1]
+                    ), f"3d attention mask seq_length {attention_mask.shape[1]} should be equal to inputs_embeds seq_length {inputs_embeds.shape[1]}."
+                else:
+                    # expect attention mask to already be prepended.
+                    assert (
+                        attention_mask.shape[1] == total_seq_length
+                    ), f"3d attention mask seq_length {attention_mask.shape[1]} should be equal to total_seq_length {total_seq_length}."
+
+        if inject:
             return inject_modal_outputs_to_inputs_embeds(
                 encoder_inputs=encoder_inputs,
                 encoder_outputs=encoder_outputs,
