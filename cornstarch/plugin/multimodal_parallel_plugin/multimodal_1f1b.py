@@ -616,9 +616,12 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 )
                 output_tensor_grads = output_tensor_grads[0]
             else:
-                output_tensor_grads = self._merge_tensors(
-                    output_tensor_grads, out_shapes=False
-                )
+                if isinstance(output_tensor_grads, list):
+                    output_tensor_grads = output_tensor_grads[0]
+                else:
+                    output_tensor_grads = self._merge_tensors(
+                        output_tensor_grads, out_shapes=False
+                    )
 
         return output_tensor_grads
 
@@ -668,9 +671,14 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 )
                 output_tensor_grads = output_tensor_grads[0]
             else:
-                output_tensor_grads = self._merge_tensors(
-                    output_tensor_grads, out_shapes=False
-                )
+                # If there are multiple tensor grads and each has the same shape
+                # with output_tensor, it means they are duplicated.
+                if isinstance(output_tensor_grads, list):
+                    output_tensor_grads = output_tensor_grads[0]
+                else:
+                    output_tensor_grads = self._merge_tensors(
+                        output_tensor_grads, out_shapes=False
+                    )
 
         return output_tensor_grads
 
