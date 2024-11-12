@@ -8,8 +8,8 @@ from transformers.models.qwen2 import Qwen2Config, Qwen2ForCausalLM, Qwen2Model
 from ..utils import ModelClassBase
 
 qwen2_config = Qwen2Config(
-    hidden_size=256,
-    intermediate_size=256,
+    hidden_size=512,
+    intermediate_size=64,
     num_attention_heads=16,
     num_key_value_heads=8,
     num_hidden_layers=4,

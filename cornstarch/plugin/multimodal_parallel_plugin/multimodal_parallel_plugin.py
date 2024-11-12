@@ -230,16 +230,59 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
         if self.my_modal_name == "language_model":
             if stage_manager.is_first_stage(check_only_in_modal=True):
-                inputs_embeds, attention_mask, labels = (
-                    self.prepare_inputs_for_llm_first_stage(
+                # Forward in the first stage of the language model
+                num_tokens_per_encoder_outputs = getattr(
+                    hidden_states, "_cornstarch_shape"
+                )
+                assert len(num_tokens_per_encoder_outputs) == len(module.encoders), (
+                    f"Expected to have {len(module.encoders)} hidden states, "
+                    f"got {len(hidden_states)}."
+                )
+
+                # Split merged encoder outputs into separate modal features
+                encoders_outputs = hidden_states.split(
+                    num_tokens_per_encoder_outputs, dim=1
+                )
+
+                # step 2. merge encoded multimodal features into text embeddings
+                inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
+
+                # step 3. merge encoder outputs to llm inputs_embeds
+                encoders_inputs: dict[str, dict] = {}
+                # merging functions accept either BaseModelOutput or tuple of tensors,
+                # and the first tensor (last_hidden_state) is merged.
+                encoders_outputs_dict: dict[str, tuple[torch.Tensor]] = {}
+                for modal_key, encoder_outputs in zip(
+                    module.encoders.keys(), encoders_outputs
+                ):
+                    encoder_module: ModalEncoderModule = getattr(
+                        module, f"{modal_key}_encoder"
+                    )
+                    encoder_inputs = {
+                        arg: kwargs[arg]
+                        for arg in module.encoders_args[modal_key]
+                        if arg in kwargs
+                    }
+
+                    for additional_arg in encoder_module.additional_args:
+                        if additional_arg in kwargs:
+                            encoder_inputs[additional_arg] = kwargs[additional_arg]
+
+                    encoders_inputs[modal_key] = encoder_inputs
+                    encoders_outputs_dict[modal_key] = (encoder_outputs,)
+
+                inputs_embeds, attention_mask, position_ids, labels = (
+                    module.merge_encoder_outputs(
+                        encoder_inputs=encoders_inputs,
+                        encoder_outputs=encoders_outputs_dict,
                         input_ids=input_ids,
-                        hidden_states=hidden_states,
+                        inputs_embeds=inputs_embeds,
                         attention_mask=attention_mask,
                         labels=labels,
-                        **kwargs,
                     )
                 )
 
+                # step 4. run llm with merged inputs_embeds
                 language_model_inputs = dict(
                     input_ids=None,
                     attention_mask=attention_mask,
