@@ -26,7 +26,10 @@ from transformers.models.gemma.modeling_gemma import (
 )
 
 from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
-from cornstarch.shardformer.layers.utils import repeat_attention_mask_heads
+from cornstarch.shardformer.layers.utils import (
+    convert_bit_attention_mask_to_full_mask,
+    repeat_attention_mask_heads,
+)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -128,49 +131,29 @@ class GemmaModelForwards:
         )
 
         if sp_mode == "ring_attn":
-            if attention_mask.ndim == 2:  # causal mask
-                # Manually create a 3D causal mask [B, L, L] for ring attention
-                # as transformers attention mask utility
-                # may return None to let attention code
-                # to automatically generate a causal mask inside.
-
-                # Assume attention mask is a simple all-1 matrix.
-                assert attention_mask.bool().all()
-                batch_size, seq_len, _ = hidden_states.shape
-                attention_mask = torch.tril(
-                    torch.ones(
-                        batch_size,
-                        seq_len,
-                        seq_len,
-                        device=hidden_states.device,
-                        dtype=torch.bool,
-                    )
-                )
-
-            assert (
-                attention_mask.ndim == 3
-            ), f"Unsupported attention mask dimension: {attention_mask.ndim}"
-
-            num_heads = (
-                self.config.num_attention_heads // shard_config.tensor_parallel_size
-            )
-            # shape: [B, H, L, L]
-            attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
-
-            # shape: [B, H, L // sp_size, L]
-            attn_mask = RingAttentionAnyMask.split_batch(
-                attn_mask, sp_group, seq_dim=2, ring_attn_mode=ring_attn_mode
-            )
+            # Do nothing. Our RingAttention implementation converts attention mask automatically.
+            attn_mask = attention_mask
         else:
             # non ring attention (either all-to-all or non sequence parallel)
-            if attention_mask.ndim == 2:  # causal mask
-                attn_mask = self._update_causal_mask(
-                    attention_mask,
-                    hidden_states,
-                    cache_position,
-                    past_key_values,
-                    output_attentions,
-                )
+            if attention_mask.ndim == 2:
+                if getattr(attention_mask, "cornstarch_is_bitattention", False):
+                    # BitAttentionMask for anymask
+                    num_heads = (
+                        self.config.num_attention_heads
+                        // shard_config.tensor_parallel_size
+                    )
+                    attn_mask = convert_bit_attention_mask_to_full_mask(
+                        attention_mask, num_heads
+                    )
+                else:
+                    # causal mask
+                    attn_mask = self._update_causal_mask(
+                        attention_mask,
+                        hidden_states,
+                        cache_position,
+                        past_key_values,
+                        output_attentions,
+                    )
             elif attention_mask.ndim == 3:  # anymask
                 assert (
                     self.config._attn_implementation != "flash_attention_2"

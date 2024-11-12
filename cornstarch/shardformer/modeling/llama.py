@@ -153,7 +153,7 @@ class LlamaModelForwards:
             attn_mask = attention_mask
         else:
             # non ring attention (either all-to-all or non sequence parallel)
-            if attention_mask.ndim == 2:  # causal mask
+            if attention_mask.ndim == 2:
                 if getattr(attention_mask, "cornstarch_is_bitattention", False):
                     # BitAttentionMask for anymask
                     num_heads = (
@@ -164,6 +164,7 @@ class LlamaModelForwards:
                         attention_mask, num_heads
                     )
                 else:
+                    # causal mask
                     attn_mask = self._update_causal_mask(
                         attention_mask,
                         hidden_states,
