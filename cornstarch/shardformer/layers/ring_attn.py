@@ -1,5 +1,5 @@
 import logging
-from typing import Callable
+from typing import Callable, Tuple
 
 import torch
 import torch.distributed as dist
@@ -164,6 +164,7 @@ def ring_flash_attn_backward(
 
 
 def ring_flash_attn_anymask_forward(
+    ctx: torch.autograd.function.FunctionCtx,
     process_group: dist.ProcessGroup,
     q: torch.Tensor,
     k: torch.Tensor,
@@ -193,12 +194,13 @@ def ring_flash_attn_anymask_forward(
         params = get_default_args(attn_impl).copy()
         params.update(
             {
+                "ctx": ctx,
                 "q": q,
                 "k": k,
                 "v": v,
                 "mask": mask.chunk(comm.world_size, dim=-1)[
                     (comm.rank - step + comm.world_size) % comm.world_size
-                ],  # NOTE(runyu) we need to pass the right mask to the kernel
+                ],  # NOTE(runyu) use mask now, but will use block mask without full mask in the future
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
@@ -207,6 +209,7 @@ def ring_flash_attn_anymask_forward(
                 "return_softmax": True and dropout_p > 0,
             }
         )
+
         block_out, block_lse, _, _ = attn_impl(**params)
         out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
@@ -221,6 +224,7 @@ def ring_flash_attn_anymask_forward(
 
 
 def ring_flash_attn_anymask_backward(
+    ctx: torch.autograd.function.FunctionCtx,
     process_group: dist.ProcessGroup,
     dout: torch.Tensor,
     q: torch.Tensor,
@@ -229,7 +233,7 @@ def ring_flash_attn_anymask_backward(
     out: torch.Tensor,
     softmax_lse: torch.Tensor,
     softmax_scale: float,
-    mask: torch.Tensor,
+    mask_info: Tuple[torch.Tensor],
     attn_impl: Callable = _flash_attn_anymask_backward,
     dropout_p: float = 0,
     window_size_left: int = -1,
@@ -249,6 +253,8 @@ def ring_flash_attn_anymask_backward(
     next_dk, next_dv = None, None
     next_k, next_v = None, None
 
+    grad_softmax_lse, mask = mask_info
+
     for step in range(kv_comm.world_size):
         if step + 1 != kv_comm.world_size:
             next_k = kv_comm.send_recv(k)
@@ -256,8 +262,16 @@ def ring_flash_attn_anymask_backward(
             kv_comm.commit()
 
         params = get_default_args(attn_impl).copy()
+
+        mask_ = mask.chunk(kv_comm.world_size, dim=-1)[
+            (kv_comm.rank - step + kv_comm.world_size) % kv_comm.world_size
+        ]  # NOTE(runyu) we need to pass the right mask to the kernel
+
+        mask_info = (grad_softmax_lse, mask_)
+
         params.update(
             {
+                "ctx": ctx,
                 "dout": dout,
                 "q": q,
                 "k": k,
@@ -267,9 +281,7 @@ def ring_flash_attn_anymask_backward(
                 "dq": block_dq_buffer,
                 "dk": block_dk_buffer,
                 "dv": block_dv_buffer,
-                "mask": mask.chunk(kv_comm.world_size, dim=-1)[
-                    (kv_comm.rank - step + kv_comm.world_size) % kv_comm.world_size
-                ],  # NOTE(runyu) we need to pass the right mask to the kernel
+                "mask_info": mask_info,
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
@@ -278,7 +290,7 @@ def ring_flash_attn_anymask_backward(
                 "deterministic": deterministic,
             }
         )
-        attn_impl(**params)
+        block_dq_buffer, block_dk_buffer, block_dv_buffer = attn_impl(**params)
 
         if dq is None:
             dq = block_dq_buffer.to(torch.float32)

@@ -205,7 +205,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         fa: bool,
         precision: str,
         sp_mode: str | None = None,
-        ring_attn_mode: str | None = None,
+        ring_attn_mode: str | None = "zigzag",
     ):
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16

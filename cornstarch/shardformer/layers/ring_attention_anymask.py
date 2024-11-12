@@ -8,6 +8,10 @@ import torch.distributed as dist
 
 from cornstarch.kernel.interface import (
     _flash_attn_anymask_forward,
+    _flash_attn_anymask_backward,
+    _flex_attn_anymask_forward,
+    _flex_attn_anymask_backward,
+    _flex_attn_anymask_naive_backward,
 )
 from cornstarch.shardformer.layers.ring_attn import (
     ring_flash_attn_anymask_backward,
@@ -48,13 +52,14 @@ class RingAttentionAnyMask(RingAttentionBase):
         assert alibi_slopes is None
 
         out, softmax_lse = ring_flash_attn_anymask_forward(
+            ctx,
             sp_group,
             q,
             k,
             v,
             mask,
             softmax_scale=softmax_scale,
-            attn_impl=_flash_attn_anymask_forward,
+            attn_impl=_flex_attn_anymask_forward,
             dropout_p=dropout_p,
             window_size_left=window_size_left,
             window_size_right=window_size_right,
@@ -62,19 +67,27 @@ class RingAttentionAnyMask(RingAttentionBase):
             deterministic=deterministic,
         )
 
-        ctx.save_for_backward(q, k, v, out, mask, softmax_lse)
-        # ctx.grid = grid
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            mask,
+        )
+
         ctx.group = sp_group
         ctx.sm_scale = sm_scale
-        ctx.HEAD_DIM = q.shape[-1]
-        ctx.USE_MASK = True
 
-        return out if not return_softmax else (out, softmax_lse)
+        # return out if not return_softmax else (out, softmax_lse)
+        return out, softmax_lse
 
     @staticmethod
-    def backward(ctx, dout, *args):
-        q, k, v, out, mask, softmax_lse = ctx.saved_tensors
+    def backward(ctx, dout, grad_softmax_lse, *args):
+        q, k, v, out, softmax_lse, mask = ctx.saved_tensors
+        mask_info = (grad_softmax_lse, mask)
         dq, dk, dv = ring_flash_attn_anymask_backward(
+            ctx,
             ctx.group,
             dout,
             q,
@@ -83,7 +96,9 @@ class RingAttentionAnyMask(RingAttentionBase):
             out,
             softmax_lse,
             ctx.sm_scale,
-            mask,
+            mask_info,
+            _flex_attn_anymask_backward,
+            # _flex_attn_anymask_naive_backward,
         )
         return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
