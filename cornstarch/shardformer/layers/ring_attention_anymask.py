@@ -7,12 +7,12 @@ import torch
 import torch.distributed as dist
 
 from cornstarch.kernel.interface import (
-    _flash_attn_anymask_forward,
-    _flash_attn_anymask_backward,
+    _attn_anymask_forward,
+    _attn_anymask_backward,
     _flex_attn_anymask_forward,
     _flex_attn_anymask_backward,
-    _flex_attn_anymask_naive_backward,
 )
+
 from cornstarch.shardformer.layers.ring_attn import (
     ring_flash_attn_anymask_backward,
     ring_flash_attn_anymask_forward,
@@ -45,11 +45,18 @@ class RingAttentionAnyMask(RingAttentionBase):
         window_size_left: int = -1,
         window_size_right: int = -1,
         alibi_slopes: Optional[torch.Tensor] = None,
+        kernel_impl: str = "flexattn",
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
-        sm_scale = softmax_scale
+        softmax_scale = softmax_scale
         assert alibi_slopes is None
+
+        attn_impl = (
+            _flex_attn_anymask_forward
+            if kernel_impl == "flexattn"
+            else _attn_anymask_forward
+        )
 
         out, softmax_lse = ring_flash_attn_anymask_forward(
             ctx,
@@ -59,7 +66,7 @@ class RingAttentionAnyMask(RingAttentionBase):
             v,
             mask,
             softmax_scale=softmax_scale,
-            attn_impl=_flex_attn_anymask_forward,
+            attn_impl=attn_impl,
             dropout_p=dropout_p,
             window_size_left=window_size_left,
             window_size_right=window_size_right,
@@ -77,7 +84,8 @@ class RingAttentionAnyMask(RingAttentionBase):
         )
 
         ctx.group = sp_group
-        ctx.sm_scale = sm_scale
+        ctx.softmax_scale = softmax_scale
+        ctx.kernel_impl = kernel_impl
 
         # return out if not return_softmax else (out, softmax_lse)
         return out, softmax_lse
@@ -86,6 +94,11 @@ class RingAttentionAnyMask(RingAttentionBase):
     def backward(ctx, dout, grad_softmax_lse, *args):
         q, k, v, out, softmax_lse, mask = ctx.saved_tensors
         mask_info = (grad_softmax_lse, mask)
+        attn_impl = (
+            _flex_attn_anymask_backward
+            if ctx.kernel_impl == "flexattn"
+            else _attn_anymask_backward
+        )
         dq, dk, dv = ring_flash_attn_anymask_backward(
             ctx,
             ctx.group,
@@ -95,12 +108,11 @@ class RingAttentionAnyMask(RingAttentionBase):
             v,
             out,
             softmax_lse,
-            ctx.sm_scale,
+            ctx.softmax_scale,
             mask_info,
-            _flex_attn_anymask_backward,
-            # _flex_attn_anymask_naive_backward,
+            attn_impl,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
 
     @staticmethod
     def split_batch(
@@ -297,6 +309,7 @@ class RingAttentionAnyMask(RingAttentionBase):
         softmax_scale: Optional[float] = None,
         deterministic: Optional[bool] = False,
         return_softmax: Optional[bool] = False,
+        kernel_impl: str = "flexattn",
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
@@ -330,8 +343,36 @@ class RingAttentionAnyMask(RingAttentionBase):
             -1,  # window_size_left
             -1,  # window_size_right
             None,  # alibi_slopes
+            kernel_impl,
         )
 
         out = out.contiguous()
 
         return out if not return_softmax else (out, softmax_lse)
+
+
+def ring_flexattn_anymask(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sp_group: dist.ProcessGroup,
+    mask: torch.Tensor,
+    dropout_p: Optional[float] = 0.0,
+    softmax_scale: Optional[float] = None,
+    deterministic: Optional[bool] = False,
+    return_softmax: Optional[bool] = False,
+    kernel_impl: str = "flexattn",
+    **kwargs,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    return RingAttentionAnyMask.attention(
+        q,
+        k,
+        v,
+        sp_group,
+        mask,
+        dropout_p,
+        softmax_scale,
+        deterministic,
+        return_softmax,
+        kernel_impl=kernel_impl,
+    )
