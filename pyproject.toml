@@ -17,15 +17,14 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
 ]
 dependencies = [
-    "torch",
-    "transformers==4.45.2",
-    "colossalai==0.4.4",
+    "torch>=2.5.0",
+    "triton>=3.0.0",
+    "transformers==4.45.0",
+    "colossalai>=0.4.4",
     "loguru",
     "simple_parsing",
     "datasets",
-    "tensorboard",
     "click",
-    "timm",
     "flash-attn",
 ]
 

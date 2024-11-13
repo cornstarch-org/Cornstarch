@@ -4,16 +4,12 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from colossalai.shardformer.layer import (
-    RingAttention,
-    dist_cross_entropy,
-)
+from colossalai.shardformer.layer import dist_cross_entropy
 from colossalai.shardformer.layer._operation import (
     all_to_all_comm,
     gather_sp_output,
     split_forward_gather_backward,
 )
-from colossalai.shardformer.layer.utils import split_batch_zigzag
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from torch.nn.modules.loss import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.cache_utils import Cache, DynamicCache
@@ -35,6 +31,12 @@ from transformers.models.llama.modeling_llama import (
     repeat_kv,
 )
 from transformers.utils.import_utils import is_torchdynamo_compiling
+
+from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
+from cornstarch.shardformer.layers.utils import (
+    convert_bit_attention_mask_to_full_mask,
+    repeat_attention_mask_heads,
+)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -130,39 +132,73 @@ class LlamaModelForwards:
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
+        ring_attn_mode = getattr(
+            shard_config, "ring_attention_distribution_mode", "uniform"
+        )
+
+        """
+        NOTE(insujang): attention mask can be either 2D or 3D tensor.
+        For 2D tensor, it is either legacy causal mask or BitAttentionMask for AnyMask,
+        which can be determined by its attribute `cornstarch_is_bitattention`.
+        For 3D tensor, it is AnyMask manually created by the user.
+
+        If RingAttention is used (sp_mode == "ring_attn"), Cornstarch uses FlexAttention
+        which automatically converts all types of attention mask properly, hence
+        there is no need to update attention mask here.
+        In other cases, we need to update attention mask to be compatible with the model.
+        """
 
         if sp_mode == "ring_attn":
-            _, causal_mask, _ = RingAttention.prepare_varlen_batch(
-                attention_mask, sp_group
-            )
+            # Do nothing. Our RingAttention implementation converts attention mask automatically.
+            attn_mask = attention_mask
         else:
-            causal_mask = self._update_causal_mask(
-                attention_mask,
-                hidden_states,
-                cache_position,
-                past_key_values,
-                output_attentions,
-            )
+            # non ring attention (either all-to-all or non sequence parallel)
+            if attention_mask.ndim == 2:
+                if getattr(attention_mask, "cornstarch_is_bitattention", False):
+                    # BitAttentionMask for anymask
+                    num_heads = (
+                        self.config.num_attention_heads
+                        // shard_config.tensor_parallel_size
+                    )
+                    attn_mask = convert_bit_attention_mask_to_full_mask(
+                        attention_mask, num_heads
+                    )
+                else:
+                    # causal mask
+                    attn_mask = self._update_causal_mask(
+                        attention_mask,
+                        hidden_states,
+                        cache_position,
+                        past_key_values,
+                        output_attentions,
+                    )
+            elif attention_mask.ndim == 3:  # anymask
+                assert (
+                    self.config._attn_implementation != "flash_attention_2"
+                ), "Flash Attention 2 does not support AnyMask. Use either `sdpa` or `eager`."
+                num_heads = (
+                    self.config.num_attention_heads // shard_config.tensor_parallel_size
+                )
+                attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
+            else:
+                raise ValueError(
+                    f"Unsupported attention mask dimension: {attention_mask.ndim}"
+                )
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
-            # Ring Attention zigzag batch processing
+            # NOTE(Runyu): ColossalAI uses  attention_mask.bool().all() to judge if the input is var len version, which is a hack way. But in multi-modal model training, it is not good to use this way.
+            # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
+            # TODO(Runyu): We should use a better way to judge if the input is var len version.
+            # TODO(Runyu): support var len version
             if sp_mode == "ring_attn":
-                assert (
-                    self.config._attn_implementation == "flash_attention_2"
-                ), "Ring Attention inherently requires Flash Attention."
-                if not attention_mask.bool().all():
-                    hidden_states, causal_mask, position_ids = (
-                        RingAttention.prepare_varlen_batch(
-                            attention_mask, sp_group, hidden_states, position_ids
-                        )
-                    )
-                else:
-                    hidden_states, position_ids = split_batch_zigzag(
-                        [hidden_states, position_ids], sp_group
-                    )
-
+                hidden_states = RingAttentionAnyMask.split_batch(
+                    hidden_states, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
+                )  # shape: [B, L // sp_size, ...]
+                position_ids = RingAttentionAnyMask.split_batch(
+                    position_ids, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
+                )  # shape: [B, L // sp_size]
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
@@ -188,7 +224,7 @@ class LlamaModelForwards:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    causal_mask,
+                    attn_mask,
                     position_ids,
                     past_key_values,
                     output_attentions,
@@ -199,7 +235,7 @@ class LlamaModelForwards:
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=causal_mask,
+                    attention_mask=attn_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
@@ -242,6 +278,9 @@ class LlamaModelForwards:
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
             next_cache = next_cache.to_legacy_cache()
+
+        # Clear cache so that it is not used in the next forward pass
+        RingAttentionAnyMask.clear_split_cache()
 
         if not return_dict:
             return tuple(
@@ -298,19 +337,40 @@ class LlamaModelForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
+        stage_manager = shard_config.pipeline_stage_manager
+        if stage_manager is not None:
+            if output_attentions:
+                logger.warning_once(
+                    "output_attentions=True is not supported for pipeline models at the moment."
+                )
+                output_attentions = False
+            if output_hidden_states:
+                logger.warning_once(
+                    "output_hidden_states=True is not supported for pipeline models at the moment."
+                )
+                output_hidden_states = False
+
         if (
             shard_config.sequence_parallelism_mode == "ring_attn"
             and shard_config.parallel_output
         ):
-            # Split labels in a zigzag fashion too
+            # Split labels too
             sp_group = shard_config.sequence_parallel_process_group
-            if attention_mask.bool().all():
-                labels = split_batch_zigzag(labels, sp_group, seq_dim=1, is_label=True)
-            else:
-                # [B, max_seqlen // sp_size]
-                labels, _, _ = RingAttention.prepare_varlen_batch(
-                    attention_mask, sp_group, labels, is_label=True
-                )
+            ring_attn_mode = getattr(
+                shard_config, "ring_attention_distribution_mode", "uniform"
+            )
+
+            # NOTE(Runyu): ColossalAI uses attention_mask.bool().all() to judge if the input is var len version, which is a hack way. But in multi-modal model training, it is not good to use this way.
+            # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
+            # TODO(Runyu): We should use a better way to judge if the input is var len version.
+            # TODO(Runyu): support var len version
+            # labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
+            labels = RingAttentionAnyMask.split_batch(
+                labels,
+                sp_group,
+                seq_dim=1,
+                ring_attn_mode=ring_attn_mode,
+            )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = LlamaModelForwards.llama_model_forward(
@@ -579,18 +639,21 @@ class LlamaAttentionForwards:
 
         attn_weights = None
         if sp_mode == "ring_attn":
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
+            key_states = repeat_kv(key_states, self.num_key_value_groups).contiguous()
+            value_states = repeat_kv(
+                value_states, self.num_key_value_groups
+            ).contiguous()
 
-            attn_output = RingAttention.attention(
+            attn_output = RingAttentionAnyMask.attention(
                 query_states,
                 key_states,
                 value_states,
                 sp_group,
-                **attention_mask,
-                inner_ring_size=shard_config.inner_ring_size,
+                attention_mask,
+                return_softmax=False,
+                dropout_p=self.attention_dropout if self.training else 0.0,
             )
-            attn_output = attn_output.transpose(1, 2).contiguous()
+
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
             # to be able to avoid many of these transpose/reshape/view.
@@ -617,26 +680,25 @@ class LlamaAttentionForwards:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-            causal_mask = attention_mask
             if attention_mask is not None:
-                causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
+                attention_mask = attention_mask[:, :, :, : key_states.shape[-2]]
 
             # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
             # Reference: https://github.com/pytorch/pytorch/issues/112577.
-            if query_states.device.type == "cuda" and causal_mask is not None:
+            if query_states.device.type == "cuda" and attention_mask is not None:
                 query_states = query_states.contiguous()
                 key_states = key_states.contiguous()
                 value_states = value_states.contiguous()
 
             # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
             # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-            is_causal = True if causal_mask is None and q_len > 1 else False
+            is_causal = True if attention_mask is None and q_len > 1 else False
 
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 query_states,
                 key_states,
                 value_states,
-                attn_mask=causal_mask,
+                attn_mask=attention_mask,
                 dropout_p=self.attention_dropout if self.training else 0.0,
                 is_causal=is_causal,
             )
@@ -646,13 +708,16 @@ class LlamaAttentionForwards:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+            # print(f"shape of query_states: {query_states.shape}, shape of key_states: {key_states.shape}")
             attn_weights = torch.matmul(
                 query_states, key_states.transpose(2, 3)
             ) / math.sqrt(self.head_dim)
 
             if attention_mask is not None:  # no matter the length, we just slice it
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-                attn_weights = attn_weights + causal_mask
+                attention_mask = attention_mask[
+                    :, : self.num_heads, :, : key_states.shape[-2]
+                ]
+                attn_weights = attn_weights + attention_mask
 
             # upcast attention to fp32
             attn_weights = nn.functional.softmax(

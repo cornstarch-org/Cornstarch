@@ -209,8 +209,13 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 # step 2. merge encoded multimodal features into text embeddings
                 inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
 
-                for modal_key, encoder_outputs in reversed(
-                    list(zip(module.encoders.keys(), encoders_outputs))
+                # step 3. merge encoder outputs to llm inputs_embeds
+                encoders_inputs: dict[str, dict] = {}
+                # merging functions accept either BaseModelOutput or tuple of tensors,
+                # and the first tensor (last_hidden_state) is merged.
+                encoders_outputs_dict: dict[str, tuple[torch.Tensor]] = {}
+                for modal_key, encoder_outputs in zip(
+                    module.encoders.keys(), encoders_outputs
                 ):
                     encoder_module: ModalEncoderModule = getattr(
                         module, f"{modal_key}_encoder"
@@ -225,18 +230,21 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                         if additional_arg in kwargs:
                             encoder_inputs[additional_arg] = kwargs[additional_arg]
 
-                    inputs_embeds, attention_mask, position_ids, labels = (
-                        encoder_module.postprocess_projector_callback(
-                            encoder_inputs,
-                            (encoder_outputs,),
-                            input_ids,
-                            inputs_embeds,
-                            attention_mask,
-                            labels,
-                            pad_token_id=module.language_model.config.pad_token_id,
-                        )
-                    )
+                    encoders_inputs[modal_key] = encoder_inputs
+                    encoders_outputs_dict[modal_key] = (encoder_outputs,)
 
+                inputs_embeds, attention_mask, position_ids, labels = (
+                    module.merge_encoder_outputs(
+                        encoder_inputs=encoders_inputs,
+                        encoder_outputs=encoders_outputs_dict,
+                        input_ids=input_ids,
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+                )
+
+                # step 4. run llm with merged inputs_embeds
                 language_model_inputs = dict(
                     input_ids=None,
                     attention_mask=attention_mask,

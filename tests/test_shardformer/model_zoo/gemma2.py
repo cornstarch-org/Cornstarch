@@ -8,8 +8,8 @@ from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM, Gemma2Mo
 from ..utils import ModelClassBase
 
 gemma2_config = Gemma2Config(
-    hidden_size=256,
-    intermediate_size=256,
+    hidden_size=512,
+    intermediate_size=64,
     num_attention_heads=16,
     num_key_value_heads=8,
     num_hidden_layers=4,

@@ -3,16 +3,12 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from colossalai.shardformer.layer import (
-    RingAttention,
-    dist_cross_entropy,
-)
+from colossalai.shardformer.layer import dist_cross_entropy
 from colossalai.shardformer.layer._operation import (
     all_to_all_comm,
     gather_sp_output,
     split_forward_gather_backward,
 )
-from colossalai.shardformer.layer.utils import split_batch_zigzag
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
@@ -27,6 +23,12 @@ from transformers.models.gemma.modeling_gemma import (
     apply_rotary_pos_emb,
     logger,
     repeat_kv,
+)
+
+from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
+from cornstarch.shardformer.layers.utils import (
+    convert_bit_attention_mask_to_full_mask,
+    repeat_attention_mask_heads,
 )
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
@@ -124,39 +126,58 @@ class GemmaModelForwards:
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
+        ring_attn_mode = getattr(
+            shard_config, "ring_attention_distribution_mode", "uniform"
+        )
 
         if sp_mode == "ring_attn":
-            _, causal_mask, _ = RingAttention.prepare_varlen_batch(
-                attention_mask, sp_group
-            )
+            # Do nothing. Our RingAttention implementation converts attention mask automatically.
+            attn_mask = attention_mask
         else:
-            causal_mask = self._update_causal_mask(
-                attention_mask,
-                hidden_states,
-                cache_position,
-                past_key_values,
-                output_attentions,
-            )
+            # non ring attention (either all-to-all or non sequence parallel)
+            if attention_mask.ndim == 2:
+                if getattr(attention_mask, "cornstarch_is_bitattention", False):
+                    # BitAttentionMask for anymask
+                    num_heads = (
+                        self.config.num_attention_heads
+                        // shard_config.tensor_parallel_size
+                    )
+                    attn_mask = convert_bit_attention_mask_to_full_mask(
+                        attention_mask, num_heads
+                    )
+                else:
+                    # causal mask
+                    attn_mask = self._update_causal_mask(
+                        attention_mask,
+                        hidden_states,
+                        cache_position,
+                        past_key_values,
+                        output_attentions,
+                    )
+            elif attention_mask.ndim == 3:  # anymask
+                assert (
+                    self.config._attn_implementation != "flash_attention_2"
+                ), "Flash Attention 2 does not support AnyMask. Use either `sdpa` or `eager`."
+                num_heads = (
+                    self.config.num_attention_heads // shard_config.tensor_parallel_size
+                )
+                attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
+            else:
+                raise ValueError(
+                    f"Unsupported attention mask dimension: {attention_mask.ndim}"
+                )
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
-            # Ring Attention zigzag batch processing
+            # Ring Attention batch processing
             if sp_mode == "ring_attn":
-                assert (
-                    self.config._attn_implementation == "flash_attention_2"
-                ), "Ring Attention inherently requires Flash Attention."
-                if not attention_mask.bool().all():
-                    hidden_states, causal_mask, position_ids = (
-                        RingAttention.prepare_varlen_batch(
-                            attention_mask, sp_group, hidden_states, position_ids
-                        )
-                    )
-                else:
-                    hidden_states, position_ids = split_batch_zigzag(
-                        [hidden_states, position_ids], sp_group
-                    )
-
+                hidden_states = RingAttentionAnyMask.split_batch(
+                    hidden_states, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
+                )  # shape: [B, L // sp_size, ...]
+                position_ids = RingAttentionAnyMask.split_batch(
+                    position_ids, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
+                )  # shape: [B, L // sp_size]
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
@@ -179,7 +200,7 @@ class GemmaModelForwards:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    causal_mask,
+                    attn_mask,
                     position_ids,
                     past_key_values,
                     output_attentions,
@@ -189,7 +210,7 @@ class GemmaModelForwards:
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=causal_mask,
+                    attention_mask=attn_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
@@ -230,6 +251,9 @@ class GemmaModelForwards:
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
             next_cache = next_cache.to_legacy_cache()
+
+        # Clear cache so that it is not used in the next forward pass
+        RingAttentionAnyMask.clear_split_cache()
 
         if not return_dict:
             return tuple(
@@ -287,15 +311,18 @@ class GemmaModelForwards:
             shard_config.sequence_parallelism_mode == "ring_attn"
             and shard_config.parallel_output
         ):
-            # Split labels in a zigzag fashion too
+            # Split labels too
             sp_group = shard_config.sequence_parallel_process_group
-            if attention_mask.bool().all():
-                labels = split_batch_zigzag(labels, sp_group, seq_dim=1, is_label=True)
-            else:
-                # [B, max_seqlen // sp_size]
-                labels, _, _ = RingAttention.prepare_varlen_batch(
-                    attention_mask, sp_group, labels, is_label=True
-                )
+            ring_attn_mode = getattr(
+                shard_config, "ring_attention_distribution_mode", "uniform"
+            )
+
+            labels = RingAttentionAnyMask.split_batch(
+                labels,
+                sp_group,
+                seq_dim=1,
+                ring_attn_mode=ring_attn_mode,
+            )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = GemmaModelForwards.gemma_model_forward(
@@ -423,18 +450,21 @@ class GemmaAttentionForwards:
 
         attn_weights = None
         if sp_mode == "ring_attn":
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
+            key_states = repeat_kv(key_states, self.num_key_value_groups).contiguous()
+            value_states = repeat_kv(
+                value_states, self.num_key_value_groups
+            ).contiguous()
 
-            attn_output = RingAttention.attention(
+            attn_output = RingAttentionAnyMask.attention(
                 query_states,
                 key_states,
                 value_states,
                 sp_group,
-                **attention_mask,
-                inner_ring_size=shard_config.inner_ring_size,
+                attention_mask,
+                return_softmax=False,
+                dropout_p=self.attention_dropout if self.training else 0.0,
             )
-            attn_output = attn_output.transpose(1, 2).contiguous()
+
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
             # to be able to avoid many of these transpose/reshape/view.
