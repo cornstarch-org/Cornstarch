@@ -16,14 +16,14 @@ import pytest
 
 from torch.testing import assert_close
 
-torch._dynamo.config.cache_size_limit = 128
+torch._dynamo.config.cache_size_limit = 128  # NOTE(runyu): to avoid memory overflow, https://github.com/pytorch/pytorch/issues/114511
 
 
 @pytest.mark.parametrize(
     "Z, H, N_CTX, HEAD_DIM",
     [
         (1, 2, 128, 64),
-        (1, 4, 128, 128),
+        (1, 1, 128, 128),
         (1, 8, 1024, 128),
         (4, 7, 512, 128),
         (32, 15, 1024, 256),
