@@ -16,9 +16,9 @@ from torch.testing._internal.common_utils import FILE_SCHEMA
 class RingAttentionTestBase(MultiProcessTestCase):
 
     batch_size = 4
-    seq_len = 1024
+    seq_len = 2048
     num_heads = 8
-    head_dim = 64
+    head_dim = 128
 
     def prepare_qkv_for_flash_attention(
         self,

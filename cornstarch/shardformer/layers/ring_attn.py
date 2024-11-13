@@ -6,8 +6,10 @@ import torch.distributed as dist
 from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 
 from cornstarch.kernel.interface import (
-    _flash_attn_anymask_backward,
-    _flash_attn_anymask_forward,
+    _flex_attn_anymask_forward,
+    _flex_attn_anymask_backward,
+    _attn_anymask_forward,
+    _attn_anymask_backward,
 )
 
 from .utils import RingComm, get_default_args, update_out_and_lse
@@ -171,7 +173,7 @@ def ring_flash_attn_anymask_forward(
     v: torch.Tensor,
     mask: torch.Tensor,  # shape: [B, H, N // sp_size, N]
     softmax_scale: float,
-    attn_impl: Callable = _flash_attn_anymask_forward,
+    attn_impl: Callable = _flex_attn_anymask_forward,
     dropout_p: float = 0,
     window_size_left: int = -1,
     window_size_right: int = -1,
@@ -234,7 +236,7 @@ def ring_flash_attn_anymask_backward(
     softmax_lse: torch.Tensor,
     softmax_scale: float,
     mask_info: Tuple[torch.Tensor],
-    attn_impl: Callable = _flash_attn_anymask_backward,
+    attn_impl: Callable = _flex_attn_anymask_backward,
     dropout_p: float = 0,
     window_size_left: int = -1,
     window_size_right: int = -1,
