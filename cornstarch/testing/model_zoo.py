@@ -45,6 +45,8 @@ from cornstarch.models.internlm2.modeling_internlm2 import (
     InternLM2ForCausalLM,
 )
 
+from .utils import create_random_image
+
 
 class ModelClassBase(ABC):
     def __init__(self, model_class: Type[PreTrainedModel], config: PretrainedConfig):
@@ -239,14 +241,11 @@ class PixtralVisionClass(ImageModelClassBase):
         self.config._attn_implementation = "eager"
 
     def data(self, batch_size: int) -> dict[str, torch.Tensor]:
-        import requests
-        from PIL import Image
         from transformers.models.pixtral.image_processing_pixtral import (
             PixtralImageProcessor,
         )
 
-        url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-        image = Image.open(requests.get(url, stream=True).raw)
+        image = create_random_image(1280, 720)
         processor = PixtralImageProcessor.from_pretrained(
             "mistral-community/pixtral-12b"
         )
@@ -271,14 +270,11 @@ class Qwen2Vision7bClass(ImageModelClassBase):
         self.config._attn_implementation = "flash_attention_2"
 
     def data(self, batch_size: int) -> dict[str, torch.Tensor]:
-        import requests
-        from PIL import Image
         from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
             Qwen2VLImageProcessor,
         )
 
-        url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-        image = Image.open(requests.get(url, stream=True).raw)
+        image = create_random_image(720, 480)
         processor = Qwen2VLImageProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
         return processor(images=[image] * batch_size, return_tensors="pt").to("cuda")
 
