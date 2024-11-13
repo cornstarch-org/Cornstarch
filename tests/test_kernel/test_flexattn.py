@@ -11,28 +11,12 @@ from torch._higher_order_ops.flex_attention import (
 )
 from torch._higher_order_ops.flex_attention import flex_attention_autograd
 from cornstarch.kernel.interface import FlexAttnAnyMask
+from cornstarch.kernel.interface import convert_attention_mask_to_block_mask
 import pytest
 
 from torch.testing import assert_close
 
-
-def convert_attention_mask_to_block_mask(attention_mask, block_size=128):
-    # attention_mask should be a boolean tensor of shape [batch_size, num_heads, q_len, kv_len]
-
-    def custom_mask_mod(b, h, q_idx, kv_idx):
-        return attention_mask[b, h, q_idx, kv_idx].bool()
-
-    block_mask = create_block_mask(
-        mask_mod=custom_mask_mod,
-        B=attention_mask.shape[0],
-        H=attention_mask.shape[1],
-        Q_LEN=attention_mask.shape[2],
-        KV_LEN=attention_mask.shape[3],
-        device=attention_mask.device,
-        BLOCK_SIZE=block_size,
-    )
-
-    return block_mask
+torch._dynamo.config.cache_size_limit = 128
 
 
 @pytest.mark.parametrize(
@@ -49,7 +33,7 @@ def convert_attention_mask_to_block_mask(attention_mask, block_size=128):
     "dtype", [torch.bfloat16]
 )  # NOTE(runyu): "fp16", "fp32" is not supported yet
 @pytest.mark.parametrize(
-    "mask_type", ["random"]
+    "mask_type", ["random", "causal", "full"]
 )  # NOTE(runyu): "causal" and "full" are not supported yet
 def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     torch.manual_seed(20)
@@ -84,7 +68,7 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     elif mask_type == "full":
         M = torch.ones((N_CTX, N_CTX), device="cuda", dtype=torch.uint8)
 
-    mask = torch.broadcast_to(M, (Z, H, N_CTX, N_CTX))
+    mask = torch.broadcast_to(M, (Z, N_CTX, N_CTX))
     p[:, :, M == 0] = float("-inf")
     lse = torch.logsumexp(p.float(), dim=-1)
     p = torch.softmax(p.float(), dim=-1).to(dtype)
@@ -94,7 +78,8 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     ref_dk, k.grad = k.grad.clone(), None
     ref_dq, q.grad = q.grad.clone(), None
 
-    block_mask = convert_attention_mask_to_block_mask(mask)
+    num_heads = q.shape[1]
+    block_mask = convert_attention_mask_to_block_mask(mask, num_heads)
 
     # 1. flex_attention, passed
     # flex_out, softmax_lse = flex_attention(q, k, v, block_mask=block_mask, scale=sm_scale, return_lse=True)
