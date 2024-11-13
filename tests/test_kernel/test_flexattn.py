@@ -40,6 +40,7 @@ torch._dynamo.config.cache_size_limit = 128  # NOTE(runyu): to avoid memory over
 def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     torch.manual_seed(20)
     torch.cuda.manual_seed(20)
+
     q = (
         torch.randn((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda")
         .normal_(mean=0.0, std=0.5)
@@ -56,7 +57,7 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
         .requires_grad_(True)
     )
     sm_scale = 0.5
-    dout = torch.empty_like(q)
+    dout = torch.rand_like(q)
     # reference implementation
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
 
