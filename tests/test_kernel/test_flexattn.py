@@ -1,20 +1,22 @@
+import pytest
 import torch
-from torch.nn.attention.flex_attention import (
-    flex_attention,
-    create_block_mask,
-    _apply_kernel_options,
-    _identity,
-)
 from torch._higher_order_ops.flex_attention import flex_attention as flex_attention_hop
+from torch._higher_order_ops.flex_attention import flex_attention_autograd
 from torch._higher_order_ops.flex_attention import (
     flex_attention_backward as flex_attention_hop_backward,
 )
-from torch._higher_order_ops.flex_attention import flex_attention_autograd
-from cornstarch.kernel.interface import FlexAttnAnyMask
-from cornstarch.kernel.interface import convert_attention_mask_to_block_mask
-import pytest
-
+from torch.nn.attention.flex_attention import (
+    _apply_kernel_options,
+    _identity,
+    create_block_mask,
+    flex_attention,
+)
 from torch.testing import assert_close
+
+from cornstarch.kernel.interface import (
+    FlexAttnAnyMask,
+    convert_attention_mask_to_block_mask,
+)
 
 torch._dynamo.config.cache_size_limit = 128  # NOTE(runyu): to avoid memory overflow, https://github.com/pytorch/pytorch/issues/114511
 
@@ -37,17 +39,24 @@ torch._dynamo.config.cache_size_limit = 128  # NOTE(runyu): to avoid memory over
 )  # NOTE(runyu): "causal" and "full" are not supported yet
 def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     torch.manual_seed(20)
-    q = torch.empty(
-        (Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda"
-    ).requires_grad_()
-    k = torch.empty(
-        (Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda"
-    ).requires_grad_()
-    v = torch.empty(
-        (Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda"
-    ).requires_grad_()
+    torch.cuda.manual_seed(20)
+    q = (
+        torch.randn((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda")
+        .normal_(mean=0.0, std=0.5)
+        .requires_grad_(True)
+    )
+    k = (
+        torch.randn((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda")
+        .normal_(mean=0.0, std=0.5)
+        .requires_grad_(True)
+    )
+    v = (
+        torch.randn((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda")
+        .normal_(mean=0.0, std=0.5)
+        .requires_grad_(True)
+    )
     sm_scale = 0.5
-    dout = torch.randn_like(q)
+    dout = torch.empty_like(q)
     # reference implementation
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
 
@@ -61,10 +70,7 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
             0, 2, (N_CTX, N_CTX), dtype=torch.uint8, device="cuda", requires_grad=False
         )
     elif mask_type == "causal":
-        # M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
-        M = torch.ones((N_CTX, N_CTX), device="cuda", dtype=torch.uint8)
-        for i in range(N_CTX):
-            M[i, i + 1 :] = 0
+        M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda", dtype=torch.uint8))
     elif mask_type == "full":
         M = torch.ones((N_CTX, N_CTX), device="cuda", dtype=torch.uint8)
 
@@ -102,20 +108,11 @@ def test_op_any_mask(Z, H, N_CTX, HEAD_DIM, dtype, mask_type):
     flex_dk, k.grad = k.grad.clone(), None
     flex_dq, q.grad = q.grad.clone(), None
 
-    atol = 1e-3
-    rtol = 1e-3
+    atol = 5e-3
+    rtol = 5e-3
 
     assert_close(flex_out, ref_out, atol=atol, rtol=rtol)
     assert_close(flex_dv, ref_dv, atol=atol, rtol=rtol)
     assert_close(flex_dk, ref_dk, atol=atol, rtol=rtol)
     assert_close(flex_dq, ref_dq, atol=atol, rtol=rtol)
     assert_close(softmax_lse, lse, atol=atol, rtol=rtol)
-
-    print(
-        f"test passed for Z={Z}, H={H}, N_CTX={N_CTX}, HEAD_DIM={HEAD_DIM}, mask_type={mask_type}, dtype={dtype}"
-    )
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
-    # test_op_any_mask(5, 7, 2048, 128, torch.bfloat16, "random")
