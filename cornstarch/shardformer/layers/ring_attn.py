@@ -6,10 +6,13 @@ import torch.distributed as dist
 from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 
 from cornstarch.kernel.interface import (
-    _flex_attn_anymask_forward,
-    _flex_attn_anymask_backward,
-    _attn_anymask_forward,
     _attn_anymask_backward,
+    _attn_anymask_forward,
+    _flex_attn_anymask_backward,
+    _flex_attn_anymask_forward,
+    convert_attention_mask_to_block_mask,
+    convert_bit_attention_mask_to_block_mask,
+    convert_legacy_attention_mask_to_block_mask,
 )
 
 from .utils import RingComm, get_default_args, update_out_and_lse
@@ -187,11 +190,28 @@ def ring_flash_attn_anymask_forward(
 
     next_k, next_v = None, None
 
+    num_heads = q.shape[1]
+    if mask.ndim == 2:
+        if getattr(mask, "cornstarch_is_bitattention", False):
+            block_mask = convert_bit_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+        else:
+            block_mask = convert_legacy_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+    else:
+        block_mask = convert_attention_mask_to_block_mask(mask, num_heads).as_tuple()
+
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
             next_k: torch.Tensor = comm.send_recv(k)
             next_v: torch.Tensor = comm.send_recv(v)
             comm.commit()
+
+        mask.chunk(comm.world_size, dim=-1)[
+            (comm.rank - step + comm.world_size) % comm.world_size
+        ],  # NOTE(runyu) use mask now, but will use block mask without full mask in the future
 
         params = get_default_args(attn_impl).copy()
         params.update(
@@ -200,9 +220,7 @@ def ring_flash_attn_anymask_forward(
                 "q": q,
                 "k": k,
                 "v": v,
-                "mask": mask.chunk(comm.world_size, dim=-1)[
-                    (comm.rank - step + comm.world_size) % comm.world_size
-                ],  # NOTE(runyu) use mask now, but will use block mask without full mask in the future
+                "mask": block_mask,
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
@@ -257,6 +275,19 @@ def ring_flash_attn_anymask_backward(
 
     grad_softmax_lse, mask = mask_info
 
+    num_heads = q.shape[1]
+    if mask.ndim == 2:
+        if getattr(mask, "cornstarch_is_bitattention", False):
+            block_mask = convert_bit_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+        else:
+            block_mask = convert_legacy_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+    else:
+        block_mask = convert_attention_mask_to_block_mask(mask, num_heads).as_tuple()
+
     for step in range(kv_comm.world_size):
         if step + 1 != kv_comm.world_size:
             next_k = kv_comm.send_recv(k)
@@ -283,7 +314,7 @@ def ring_flash_attn_anymask_backward(
                 "dq": block_dq_buffer,
                 "dk": block_dk_buffer,
                 "dv": block_dv_buffer,
-                "mask_info": mask_info,
+                "mask_info": (grad_softmax_lse, block_mask),
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,

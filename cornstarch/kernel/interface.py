@@ -1,12 +1,15 @@
 from typing import Optional, Tuple
 
 import torch
-import triton
 from torch._higher_order_ops.flex_attention import (
     TransformGetItemToIndex,
     create_fw_bw_graph,
-    flex_attention,
-    flex_attention_backward,
+)
+from torch._higher_order_ops.flex_attention import (
+    flex_attention as flex_attention_hop,
+)
+from torch._higher_order_ops.flex_attention import (
+    flex_attention_backward as flex_attention_backward_hop,
 )
 from torch.nn.attention.flex_attention import (
     BlockMask,
@@ -16,6 +19,15 @@ from torch.nn.attention.flex_attention import (
 )
 
 from .naive_attn import _attn_anymask_backward, _attn_anymask_forward
+
+
+# Dynamo is expecting a callable with "__code__" attribute.
+# We cannot directly pass hop to it. So we wrap it in a dummy function.
+def _flex_attention_hop_wrapper(*args, **kwargs):
+    return flex_attention_hop(*args, **kwargs)
+
+
+flex_attention = torch.compile(_flex_attention_hop_wrapper, fullgraph=True)
 
 
 def convert_attention_mask_to_block_mask(
@@ -142,6 +154,7 @@ def convert_bit_attention_mask_to_block_mask(
     )
 
 
+@torch.cuda.nvtx.range("flex_attn_anymask_forward")
 def _flex_attn_anymask_forward(
     ctx: torch.autograd.function.FunctionCtx,
     q: torch.Tensor,
@@ -156,19 +169,6 @@ def _flex_attn_anymask_forward(
     alibi_slopes: Optional[torch.Tensor] = None,
     return_softmax: bool = False,
 ):
-    num_heads = q.shape[1]
-    if mask.ndim == 2:
-        if getattr(mask, "cornstarch_is_bitattention", False):
-            block_mask = convert_bit_attention_mask_to_block_mask(
-                mask, num_heads
-            ).as_tuple()
-        else:
-            block_mask = convert_legacy_attention_mask_to_block_mask(
-                mask, num_heads
-            ).as_tuple()
-    else:
-        block_mask = convert_attention_mask_to_block_mask(mask, num_heads).as_tuple()
-
     kernel_options = _apply_kernel_options(
         q, k, v, return_lse=True, kernel_options=None
     )
@@ -202,17 +202,16 @@ def _flex_attn_anymask_forward(
         ctx._joint_graph = bw_graph
         ctx.kernel_options = kernel_options
         ctx._score_mod_other_buffers_len = len(score_mod_other_buffers)
+
         with torch._C._AutoDispatchBelowAutograd():
             out, logsumexp = flex_attention(
                 q,
                 k,
                 v,
-                fw_graph,
-                block_mask,
+                _identity,
+                mask,
                 softmax_scale,
                 kernel_options,
-                score_mod_other_buffers,
-                mask_mod_other_buffers,
             )
 
     return out, logsumexp * 0.6931471805599453, None, None
@@ -245,21 +244,6 @@ def _flex_attn_anymask_backward(
 
         grad_softmax_lse, mask = mask_info
 
-        num_heads = q.shape[1]
-        if mask.ndim == 2:
-            if getattr(mask, "cornstarch_is_bitattention", False):
-                block_mask = convert_bit_attention_mask_to_block_mask(
-                    mask, num_heads
-                ).as_tuple()
-            else:
-                block_mask = convert_legacy_attention_mask_to_block_mask(
-                    mask, num_heads
-                ).as_tuple()
-        else:
-            block_mask = convert_attention_mask_to_block_mask(
-                mask, num_heads
-            ).as_tuple()
-
         (
             kv_num_blocks,
             kv_indices,
@@ -269,20 +253,20 @@ def _flex_attn_anymask_backward(
             q_indices,
             full_q_num_blocks,
             full_q_indices,
-        ) = block_mask[:8]
-        KV_BLOCK_SIZE = block_mask[8]
-        Q_BLOCK_SIZE = block_mask[9]
+        ) = mask[:8]
+        KV_BLOCK_SIZE = mask[8]
+        Q_BLOCK_SIZE = mask[9]
 
         fw_graph = ctx._fw_graph
         joint_graph = ctx._joint_graph
-        mask_graph = block_mask[-1]
+        mask_graph = mask[-1]
         scale = softmax_scale
         kernel_options = ctx.kernel_options
         score_mod_other_buffers = tuple()
         mask_mod_other_buffers = tuple()
 
         # We have asserted that other_buffers do not require grad in the forward
-        grad_query, grad_key, grad_value = flex_attention_backward(
+        grad_query, grad_key, grad_value = flex_attention_backward_hop(
             q,
             k,
             v,
