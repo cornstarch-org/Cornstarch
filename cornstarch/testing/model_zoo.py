@@ -36,6 +36,10 @@ from transformers.models.siglip.modeling_siglip import (
 )
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
+from cornstarch.models.evaclip.modeling_evaclip import (
+    EvaCLIPConfig,
+    EvaCLIPVisionModel,
+)
 from cornstarch.models.intern_vit.modeling_intern_vit import (
     InternVisionConfig,
     InternVisionModel,
@@ -80,7 +84,9 @@ class LanguageModelClassBase(ModelClassBase):
                 device=device,
                 requires_grad=False,
             ),
-            # "attention_mask": torch.ones((batch_size, seq_len), device=device),
+            "attention_mask": torch.ones(
+                (batch_size, seq_len), dtype=torch.bool, device=device
+            ),
         }
         data["labels"] = data["input_ids"].clone()
 
@@ -129,6 +135,7 @@ class Gemma2bClass(LanguageModelClassBase):
             GemmaConfig.from_pretrained("google/gemma-2b-it"),
         )
         self.config._attn_implementation = "flash_attention_2"
+        self.config.num_key_value_heads = 2
 
 
 class Gemma7bClass(LanguageModelClassBase):
@@ -140,12 +147,42 @@ class Gemma7bClass(LanguageModelClassBase):
         self.config._attn_implementation = "flash_attention_2"
 
 
+class Llama1bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            LlamaForCausalLM,
+            LlamaConfig.from_pretrained("meta-llama/Llama-3.2-1B"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+        self.config.tie_word_embeddings = False
+
+
+class Llama3bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            LlamaForCausalLM,
+            LlamaConfig.from_pretrained("meta-llama/Llama-3.2-3B"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+        self.config.tie_word_embeddings = False
+
+
 class Llama8bClass(LanguageModelClassBase):
     def __init__(self):
         super().__init__(
             LlamaForCausalLM,
             LlamaConfig.from_pretrained("meta-llama/Llama-3.1-8B-Instruct"),
         )
+        self.config._attn_implementation = "flash_attention_2"
+
+
+class Llama70bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            LlamaForCausalLM,
+            LlamaConfig.from_pretrained("meta-llama/Llama-3.1-70B-Instruct"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
 
 
 class Vicuna7bClass(LanguageModelClassBase):
@@ -184,12 +221,68 @@ class Phi3MiniClass(LanguageModelClassBase):
         self.config._attn_implementation = "flash_attention_2"
 
 
+class Phi3SmallClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Phi3ForCausalLM,
+            Phi3Config.from_pretrained("microsoft/Phi-3-small-8k-instruct"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+        self.config.hidden_act = "gelu"
+
+
+class Qwen205bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Qwen2ForCausalLM,
+            Qwen2Config.from_pretrained("Qwen/Qwen2.5-0.5B"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+
+
+class Qwen215bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Qwen2ForCausalLM,
+            Qwen2Config.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+
+
+class Qwen23bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Qwen2ForCausalLM,
+            Qwen2Config.from_pretrained("Qwen/Qwen2.5-3B-Instruct"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+
+
 class Qwen27bClass(LanguageModelClassBase):
     def __init__(self):
         super().__init__(
             Qwen2ForCausalLM,
             Qwen2Config.from_pretrained("Qwen/Qwen2.5-7B-Instruct"),
         )
+        self.config._attn_implementation = "flash_attention_2"
+
+
+class Qwen272bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Qwen2ForCausalLM,
+            Qwen2Config.from_pretrained("Qwen/Qwen2.5-72B-Instruct"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+
+
+class Qwen214bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Qwen2ForCausalLM,
+            Qwen2Config.from_pretrained("Qwen/Qwen2.5-14B-Instruct"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
 
 
 class CLIPVisionClass(ImageModelClassBase):
@@ -198,7 +291,25 @@ class CLIPVisionClass(ImageModelClassBase):
             CLIPVisionModel,
             CLIPVisionConfig.from_pretrained("openai/clip-vit-large-patch14-336"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "eager"
+
+
+class EvaCLIPVision8bClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            EvaCLIPVisionModel,
+            CLIPVisionConfig.from_pretrained("BAAI/EVA-CLIP-8B-448"),
+        )
+        self.config._attn_implementation = "eager"
+
+
+class EvaCLIPVision18bClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            EvaCLIPVisionModel,
+            CLIPVisionConfig.from_pretrained("BAAI/EVA-CLIP-18B"),
+        )
+        self.config._attn_implementation = "eager"
 
 
 class SiglipVisionClass(ImageModelClassBase):
@@ -207,7 +318,7 @@ class SiglipVisionClass(ImageModelClassBase):
             SiglipVisionModel,
             SiglipVisionConfig.from_pretrained("google/siglip-so400m-patch14-384"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "eager"
 
 
 class InternVision300mClass(ImageModelClassBase):
@@ -252,11 +363,38 @@ class PixtralVisionClass(ImageModelClassBase):
         return processor(images=[image] * batch_size, return_tensors="pt").to("cuda")
 
 
+class Dinov2GiantClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Dinov2Model,
+            Dinov2Config.from_pretrained("facebook/dinov2-giant"),
+        )
+        self.config._attn_implementation = "eager"
+
+
 class Dinov2LargeClass(ImageModelClassBase):
     def __init__(self):
         super().__init__(
             Dinov2Model,
             Dinov2Config.from_pretrained("facebook/dinov2-large"),
+        )
+        self.config._attn_implementation = "eager"
+
+
+class Dinov2BaseClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Dinov2Model,
+            Dinov2Config.from_pretrained("facebook/dinov2-base"),
+        )
+        self.config._attn_implementation = "eager"
+
+
+class Dinov2SmallClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            Dinov2Model,
+            Dinov2Config.from_pretrained("facebook/dinov2-small"),
         )
         self.config._attn_implementation = "eager"
 
@@ -267,14 +405,14 @@ class Qwen2Vision7bClass(ImageModelClassBase):
             Qwen2VisionTransformerPretrainedModel,
             Qwen2VLVisionConfig.from_pretrained("Qwen/Qwen2-VL-7B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "eager"
 
     def data(self, batch_size: int) -> dict[str, torch.Tensor]:
         from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
             Qwen2VLImageProcessor,
         )
 
-        image = create_random_image(720, 480)
+        image = create_random_image(1280, 720)
         processor = Qwen2VLImageProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
         return processor(images=[image] * batch_size, return_tensors="pt").to("cuda")
 
@@ -285,13 +423,31 @@ class Qwen2AudioEncoderClass(AudioModelClassBase):
             Qwen2AudioEncoder,
             Qwen2AudioEncoderConfig.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "eager"
 
 
-class WhisperClass(AudioModelClassBase):
+class WhisperLargeClass(AudioModelClassBase):
     def __init__(self):
         super().__init__(
             WhisperEncoder,
             WhisperConfig.from_pretrained("openai/whisper-large-v3"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "eager"
+
+
+class WhisperBaseClass(AudioModelClassBase):
+    def __init__(self):
+        super().__init__(
+            WhisperEncoder,
+            WhisperConfig.from_pretrained("openai/whisper-base"),
+        )
+        self.config._attn_implementation = "eager"
+
+
+class WhisperSmallClass(AudioModelClassBase):
+    def __init__(self):
+        super().__init__(
+            WhisperEncoder,
+            WhisperConfig.from_pretrained("openai/whisper-small"),
+        )
+        self.config._attn_implementation = "eager"
