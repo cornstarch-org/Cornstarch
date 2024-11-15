@@ -1,10 +1,8 @@
 from typing import Any, Callable
 
+import torch
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
-from torch import dtype
-from torch._C import dtype
-from torch._tensor import Tensor
 from torch.optim import Optimizer
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -188,7 +186,7 @@ class VisionAudioLanguageMultimodalParallelAnymask(CornstarchMultimodalParallelB
         return 12
 
     def postprocess_data_for_sharded_model(
-        self, data: list[Tensor | dict[str, Tensor]], precision: dtype
+        self, data: list[torch.Tensor | dict[str, torch.Tensor]], precision: torch.dtype
     ) -> list | dict:
         data = super().postprocess_data_for_sharded_model(data, precision)
         assert isinstance(data, dict)
@@ -206,7 +204,7 @@ class VisionAudioLanguageMultimodalParallelAnymask(CornstarchMultimodalParallelB
         module_pp_size: dict[str, int],
         llm_sp_mode: str | None,
         test_config: dict[str, Any],
-        precision: dtype,
+        precision: torch.dtype,
     ) -> tuple[
         MultimodalModel,
         Optimizer,
@@ -225,6 +223,7 @@ class VisionAudioLanguageMultimodalParallelAnymask(CornstarchMultimodalParallelB
         ) = super().build_model_from_multimodal_plugin(
             tp_size, module_pp_size, llm_sp_mode, test_config, precision
         )
+
         module: MultimodalModel = shard_model.module
         module.set_token_ids(
             {
