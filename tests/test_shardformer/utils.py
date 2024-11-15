@@ -559,6 +559,8 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         llm_sp_mode: str | None,
         fa: bool,
         precision: str,
+        run_original_model: bool = True,
+        run_sharded_model: bool = True,
     ):
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -598,20 +600,24 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 output_transform_fn=lambda x: x,
                 booster=booster,
                 precision=precision,
+                run_original_model=run_original_model,
+                run_sharded_model=run_sharded_model,
             )
         )
 
-        self.check_fn(
-            booster=booster,
-            org_model=org_model,
-            sharded_model=sharded_model,
-            org_optim=org_optimizer,
-            sharded_optim=sharded_optimizer,
-            org_output=org_output,
-            sharded_output=sharded_output,
-            org_loss=org_loss,
-            sharded_loss=sharded_loss,
-        )
+        # checking correctness can only be done when running both models
+        if run_original_model and run_original_model:
+            self.check_fn(
+                booster=booster,
+                org_model=org_model,
+                sharded_model=sharded_model,
+                org_optim=org_optimizer,
+                sharded_optim=sharded_optimizer,
+                org_output=org_output,
+                sharded_output=sharded_output,
+                org_loss=org_loss,
+                sharded_loss=sharded_loss,
+            )
 
     @staticmethod
     def postprocess_callback(inputs: dict, output: BaseModelOutput) -> BaseModelOutput:
@@ -750,6 +756,30 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             modules_per_stages,
         )
 
+    def postprocess_data_for_original_model(
+        self, data: list[torch.Tensor | dict[str, torch.Tensor]], precision: torch.dtype
+    ) -> list | dict:
+        assert isinstance(data, list) or isinstance(data, dict)
+        if isinstance(data, list):
+            new_data = []
+            for d in data:
+                if isinstance(d, torch.Tensor) and d.is_floating_point():
+                    d = d.to(dtype=precision)
+                new_data.append(d.clone().to("cuda"))
+        elif isinstance(data, dict):
+            new_data = {}
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    v = v.to(dtype=precision)
+                new_data[k] = v.clone().to("cuda")
+
+        return new_data
+
+    def postprocess_data_for_sharded_model(
+        self, data: list[torch.Tensor | dict[str, torch.Tensor]], precision: torch.dtype
+    ) -> list | dict:
+        return self.postprocess_data_for_original_model(data, precision)
+
     def run_forward_backward_with_multimodal_plugin(
         self,
         org_model: nn.Module,
@@ -759,6 +789,8 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         output_transform_fn: Callable,
         booster: Booster,
         precision: torch.dtype,
+        run_original_model: bool = True,
+        run_sharded_model: bool = True,
     ):
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
@@ -771,36 +803,34 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             data.update(model_base.data_gen_fn(batch_size))
         data.update(self.llm.data_gen_fn(batch_size))
 
-        shard_test_data = {}
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                v = v.to(dtype=precision)
-            shard_test_data[k] = v.clone().to("cuda")
-        unshard_test_data = {}
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                v = v.to(dtype=precision)
-            unshard_test_data[k] = v.clone().to("cuda")
+        unshard_test_data = self.postprocess_data_for_original_model(data, precision)
+        shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
 
-        org_model.train()
-        with torch.autocast(
-            device_type="cuda", enabled=precision == torch.float16, dtype=torch.float16
-        ):
-            org_output = org_model(**unshard_test_data)
-            org_loss = criterion(org_output).to(precision)
-        org_loss.backward()
+        org_loss, org_output = None, None
+        if run_original_model:
+            org_model.train()
+            with torch.autocast(
+                device_type="cuda",
+                enabled=precision == torch.float16,
+                dtype=torch.float16,
+            ):
+                org_output = org_model(**unshard_test_data)
+                org_loss = criterion(org_output).to(precision)
+            org_loss.backward()
 
-        sharded_model.train()
-        data_iter = iter([shard_test_data])
-        sharded_output = booster.execute_pipeline(
-            data_iter,
-            sharded_model,
-            _criterion,
-            sharded_optimizer,
-            return_loss=True,
-            return_outputs=False,
-        )
-        sharded_loss = sharded_output["loss"]
+        sharded_loss, sharded_output = None, None
+        if run_sharded_model:
+            sharded_model.train()
+            data_iter = iter([shard_test_data])
+            sharded_output = booster.execute_pipeline(
+                data_iter,
+                sharded_model,
+                _criterion,
+                sharded_optimizer,
+                return_loss=True,
+                return_outputs=False,
+            )
+            sharded_loss = sharded_output["loss"]
 
         return org_loss, org_output, sharded_loss, sharded_output
 

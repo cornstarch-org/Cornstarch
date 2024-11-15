@@ -169,6 +169,7 @@ def prepend_modal_output_to_inputs_embeds(
 
         attention_mask = bit_attention_mask
         setattr(attention_mask, "cornstarch_is_bitattention", True)
+        setattr(attention_mask, "cornstarch_num_encoders", len(encoder_outputs))
     else:
         if attention_mask.ndim == 2:
             attention_mask = torch.ones_like(

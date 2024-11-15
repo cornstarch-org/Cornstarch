@@ -261,41 +261,14 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             else:
                 assert inputs_embeds is None
 
-                if attention_mask is None:
-                    new_attention_mask = torch.ones_like(
-                        hidden_states, device=hidden_states.device
-                    )
-                else:
-                    new_attention_mask = torch.ones(
-                        hidden_states.shape[:2], device=attention_mask.device
-                    )
-                    new_attention_mask[:, -attention_mask.shape[1] :] = attention_mask
-                new_attention_mask.to(dtype=torch.long)
-
-                new_position_ids = (
-                    (new_attention_mask.cumsum(-1) - 1)
-                    .masked_fill_((new_attention_mask == 0), 1)
-                    .to(dtype=torch.long)
-                )
-
-                if labels is None:
-                    new_labels = None
-                else:
-                    # TODO: should we get this ignore_index from somewhere if it is cutomized?
-                    ignore_index = -100
-                    new_labels = torch.full(
-                        hidden_states.shape[:2], ignore_index, device=labels.device
-                    )
-                    new_labels[:, -labels.shape[1] :] = labels
-
                 language_model_inputs = dict(
                     input_ids=None,
-                    attention_mask=new_attention_mask,
-                    position_ids=new_position_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
                     past_key_values=past_key_values,
                     inputs_embeds=None,
                     hidden_states=hidden_states,
-                    labels=new_labels,
+                    labels=labels,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
@@ -310,7 +283,10 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 if key not in language_model_arguments:
                     language_model_inputs.pop(key)
 
-            return module.language_model(**language_model_inputs)
+            result = module.language_model(**language_model_inputs)
+            if isinstance(result, dict):
+                result["attention_mask"] = attention_mask
+            return result
         elif "encoder" in self.my_modal_name:
             # TODO: support colocated modal forward.
             # assume currently they are parallelized.
