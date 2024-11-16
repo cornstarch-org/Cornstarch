@@ -16,6 +16,12 @@ from cornstarch.models.multimodal_language_model import (
     MultimodalModel,
 )
 from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (
+    EncodersColocatedMultimodalParallelPlugin,
+)
+from cornstarch.plugin.encoders_replicated_plugin.encoders_replicated_plugin import (
+    EncodersReplicatedMultimodalParallelPlugin,
+)
 from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
     MultimodalParallelModule,
@@ -110,6 +116,7 @@ class CornstarchTestingClass:
         tp_size: int,
         llm_pp_size: int,
         encoders_pp_size: dict[str, int],
+        plugin_type: str,
         test_config: dict[str, Any],
     ) -> tuple[MultimodalParallelModule, Optimizer, Callable, Booster]:
         test_config.update(
@@ -166,13 +173,27 @@ class CornstarchTestingClass:
             for key in encoders
         }
 
-        plugin = MultimodalParallelPlugin(
-            encoder_plugins=encoders_plugins,
-            language_model_plugin=llm_plugin,
-            **test_config,
-        )
-        plugin.precision = None
+        if plugin_type == "cornstarch":
+            plugin = MultimodalParallelPlugin(
+                encoder_plugins=encoders_plugins,
+                language_model_plugin=llm_plugin,
+                **test_config,
+            )
+        elif plugin_type == "colocated":
+            plugin = EncodersColocatedMultimodalParallelPlugin(
+                encoder_plugins=encoders_plugins,
+                language_model_plugin=llm_plugin,
+                **test_config,
+            )
+        elif plugin_type == "replicated":
+            plugin = EncodersReplicatedMultimodalParallelPlugin(
+                language_model_plugin=llm_plugin,
+                **test_config,
+            )
+        else:
+            raise ValueError(f"Unknown plugin type {plugin_type}")
 
+        plugin.precision = None
         booster = Booster(plugin=plugin)
 
         def loss_fn(x: CausalLMOutputWithPast) -> torch.Tensor:
@@ -209,6 +230,7 @@ class CornstarchTestingClass:
 
 
 def run_profile(
+    plugin_type: str,
     llm_model_name: str,
     llm_pp_size: int,
     tp_size: int,
@@ -217,6 +239,8 @@ def run_profile(
     vision_pp_size: int | None = None,
     audio_pp_size: int | None = None,
 ):
+    assert plugin_type in ["cornstarch", "colocated", "replicated"]
+
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group(
         backend="nccl",
@@ -242,6 +266,7 @@ def run_profile(
         tp_size=tp_size,
         llm_pp_size=llm_pp_size,
         encoders_pp_size=encoder_pp_sizes,
+        plugin_type=plugin_type,
         test_config=dict(),
     )
 
@@ -249,9 +274,16 @@ def run_profile(
 
     manager = TimerContextManager()
 
-    with manager.measure(
-        "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
-    ):
+    if plugin_type == "cornstarch":
+        measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
+    elif plugin_type == "colocated":
+        measure_name = "cornstarch.plugin.encoders_colocated_plugin.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
+    elif plugin_type == "replicated":
+        measure_name = "colossalai.pipeline.schedule.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
+    else:
+        raise ValueError(f"Unknown plugin type {plugin_type}")
+
+    with manager.measure(measure_name):
         cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
 
         torch.cuda.synchronize()
@@ -319,12 +351,19 @@ if __name__ == "__main__":
             default=None,
             help="Encoder pipeline parallel size",
         )
+        parser.add_argument(
+            "--plugin_type",
+            type=str,
+            default="cornstarch",
+            help="Plugin type (cornstarch, colocated, replicated)",
+        )
         args = parser.parse_args()
 
         kargs = {
             "llm_model_name": args.llm_model_name,
             "llm_pp_size": args.llm_pp_size,
             "tp_size": args.tp_size,
+            "plugin_type": args.plugin_type,
         }
 
         if args.vision_pp_size > 0:
@@ -352,7 +391,7 @@ if __name__ == "__main__":
         import sys
 
         # If LOCAL_RANK is not set, we are in the main process and need to launch child processes
-        num_gpus = 4  # Set this to the number of GPUs you want to use
+        num_gpus = 2  # Set this to the number of GPUs you want to use
 
         for llm_model_name, vision_model_name, audio_model_name in model_names_to_test:
             command = [
@@ -366,6 +405,8 @@ if __name__ == "__main__":
                 "2",
                 "--tp_size",
                 "1",
+                "--plugin_type",
+                "replicated",
             ]
 
             if vision_model_name:

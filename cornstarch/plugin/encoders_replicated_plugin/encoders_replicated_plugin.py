@@ -16,6 +16,7 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
+from colossalai.lazy import LazyInitContext
 from colossalai.pipeline.schedule.one_f_one_b import OneForwardOneBackwardSchedule
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from torch.optim import Optimizer
@@ -25,6 +26,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
 
 from cornstarch.models.multimodal_language_model import (
+    ModalEncoderModule,
     MultimodalModel,
 )
 from cornstarch.plugin.encoders_replicated_plugin.encoders_replicated_stage_manager import (
@@ -137,7 +139,7 @@ class EncodersReplicatedMultimodalParallelModule(MultimodalParallelModule):
             use_cache = False
 
         # Run all encoders
-        encoder_outputs = {}
+        encoders_outputs = {}
         for modal_key, encoder_module in module.encoders.items():
             encoder_inputs = {
                 arg: kwargs[arg]
@@ -149,7 +151,7 @@ class EncodersReplicatedMultimodalParallelModule(MultimodalParallelModule):
                 if additional_arg in kwargs:
                     encoder_inputs[additional_arg] = kwargs[additional_arg]
 
-            encoder_outputs[modal_key] = encoder_module(
+            encoders_outputs[modal_key] = encoder_module(
                 **encoder_inputs,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
@@ -159,6 +161,48 @@ class EncodersReplicatedMultimodalParallelModule(MultimodalParallelModule):
         # Run the language model
         if stage_manager.is_first_stage():
             inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
+
+            """
+            Although encoders are replicated, here we consider tokens are injected
+            in the middle of the inputs_embeds, not using cross-attention.
+            With this scenario, we can run non cross-attention multimodal LLMs
+            but overall computation may be inaccurate.
+            It "simulates" the overhead of multiple encoder execution, not for
+            the actual cross-attention.
+            """
+
+            # step 3. merge encoder outputs to llm inputs_embeds
+            encoders_inputs: dict[str, dict] = {}
+            # merging functions accept either BaseModelOutput or tuple of tensors,
+            # and the first tensor (last_hidden_state) is merged.
+            encoders_outputs_dict: dict[str, tuple[torch.Tensor]] = {}
+            for modal_key, encoder_outputs in encoders_outputs.items():
+                encoder_module: ModalEncoderModule = getattr(
+                    module, f"{modal_key}_encoder"
+                )
+                encoder_inputs = {
+                    arg: kwargs[arg]
+                    for arg in module.encoders_args[modal_key]
+                    if arg in kwargs
+                }
+
+                for additional_arg in encoder_module.additional_args:
+                    if additional_arg in kwargs:
+                        encoder_inputs[additional_arg] = kwargs[additional_arg]
+
+                encoders_inputs[modal_key] = encoder_inputs
+                encoders_outputs_dict[modal_key] = encoder_outputs
+
+            inputs_embeds, attention_mask, position_ids, labels = (
+                module.merge_encoder_outputs(
+                    encoder_inputs=encoders_inputs,
+                    encoder_outputs=encoders_outputs_dict,
+                    input_ids=input_ids,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+            )
 
             language_model_inputs = dict(
                 input_ids=None,
@@ -190,9 +234,6 @@ class EncodersReplicatedMultimodalParallelModule(MultimodalParallelModule):
                 return_dict=return_dict,
             )
 
-        # Add encoder outputs here.
-        language_model_inputs["cross_attention_states"] = encoder_outputs
-
         # remove inputs that the language model doesn't accept
         language_model_arguments = list(
             inspect.signature(module.language_model.forward).parameters.keys()
@@ -201,7 +242,10 @@ class EncodersReplicatedMultimodalParallelModule(MultimodalParallelModule):
             if key not in language_model_arguments:
                 language_model_inputs.pop(key)
 
-        return module.language_model(**language_model_inputs)
+        result = module.language_model(**language_model_inputs)
+        if isinstance(result, dict):
+            result["attention_mask"] = attention_mask
+        return result
 
 
 class EncodersReplicatedMultimodalParallelPlugin(HybridParallelPlugin):
@@ -343,6 +387,9 @@ class EncodersReplicatedMultimodalParallelPlugin(HybridParallelPlugin):
         param_info = get_param_info(optimizer)
 
         if not isinstance(model, ModelWrapper):
+            for encoder_module in model.encoders.values():
+                LazyInitContext.materialize(encoder_module)
+
             llm_shard_config = replace(
                 self.shard_config,
                 pipeline_template=self.language_model_plugin.pipeline_template,

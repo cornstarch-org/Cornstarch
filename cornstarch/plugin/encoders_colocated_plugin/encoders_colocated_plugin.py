@@ -164,10 +164,10 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # There may be multiple hidden_states_{modal_key}s here.
                 # Merge them so that we can pass them to the language model.
-                encoders_outputs = {
+                encoders_outputs = [
                     kwargs[f"hidden_states_{modal_key}"]
                     for modal_key in module.encoders.keys()
-                }
+                ]
 
                 # step 2. merge encoded multimodal features into text embeddings
                 inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
