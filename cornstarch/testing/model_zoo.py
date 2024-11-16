@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 from abc import ABC, abstractmethod
 from typing import Type
@@ -83,9 +85,6 @@ class LanguageModelClassBase(ModelClassBase):
                 dtype=torch.long,
                 device=device,
                 requires_grad=False,
-            ),
-            "attention_mask": torch.ones(
-                (batch_size, seq_len), dtype=torch.bool, device=device
             ),
         }
         data["labels"] = data["input_ids"].clone()
@@ -451,3 +450,76 @@ class WhisperSmallClass(AudioModelClassBase):
             WhisperConfig.from_pretrained("openai/whisper-small"),
         )
         self.config._attn_implementation = "eager"
+
+
+model_to_class = {
+    "gemma_2b": Gemma2bClass,
+    "gemma_7b": Gemma7bClass,
+    "llama_1b": Llama1bClass,
+    "llama_3b": Llama3bClass,
+    "llama_8b": Llama8bClass,
+    "llama_70b": Llama70bClass,
+    "internlm2": InternLM27bClass,
+    "mistral_7b": Mistral7bClass,
+    "phi3_mini": Phi3MiniClass,
+    "phi3_small": Phi3SmallClass,
+    "qwen2_0.5b": Qwen205bClass,
+    "qwen2_1.5b": Qwen215bClass,
+    "qwen2_3b": Qwen23bClass,
+    "qwen2_7b": Qwen27bClass,
+    "qwen2_14b": Qwen214bClass,
+    "qwen2_72b": Qwen272bClass,
+    "vicuna": Vicuna7bClass,
+    "clip": CLIPVisionClass,
+    "evaclip_8b": EvaCLIPVision8bClass,
+    "evaclip_18b": EvaCLIPVision18bClass,
+    "dinov2_22m": Dinov2SmallClass,
+    "dinov2_86m": Dinov2BaseClass,
+    "dinov2_300m": Dinov2LargeClass,
+    "dinov2_1.1b": Dinov2GiantClass,
+    "intern_vit_300m": InternVision300mClass,
+    "intern_vit_6b": InternVision6bClass,
+    "pixtral_400m": PixtralVisionClass,
+    "qwen2_vision_675m": Qwen2Vision7bClass,
+    "siglip_878m": SiglipVisionClass,
+    "whisper_1.5b": WhisperLargeClass,
+    "whisper_242m": WhisperSmallClass,
+    "whisper_72m": WhisperBaseClass,
+    "qwen2_audio": Qwen2AudioEncoderClass,
+}
+
+class_to_forward_str = {
+    Gemma2bClass: "cornstarch.shardformer.modeling.gemma.GemmaModelForwards.gemma_model_forward",
+    Gemma7bClass: "cornstarch.shardformer.modeling.gemma.GemmaModelForwards.gemma_model_forward",
+    Llama1bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
+    Llama3bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
+    Llama8bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
+    Llama70bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
+    InternLM27bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
+    Mistral7bClass: "cornstarch.shardformer.modeling.mistral.MistralModelForwards.mistral_model_forward",
+    Phi3MiniClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
+    Phi3SmallClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
+    Qwen205bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
+    Qwen215bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
+    Qwen23bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
+    Qwen27bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
+    Qwen214bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
+    Qwen272bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
+    Vicuna7bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
+    CLIPVisionClass: "cornstarch.shardformer.modeling.clip.CLIPVisionModelForwards.clip_vision_transformer_forward",
+    EvaCLIPVision8bClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
+    EvaCLIPVision18bClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
+    Dinov2SmallClass: "cornstarch.shardformer.modeling.dinov2.Dinov2ModelForwards.dinov2_encoder_forward",
+    Dinov2BaseClass: "cornstarch.shardformer.modeling.dinov2.Dinov2ModelForwards.dinov2_encoder_forward",
+    Dinov2LargeClass: "cornstarch.shardformer.modeling.dinov2.Dinov2ModelForwards.dinov2_encoder_forward",
+    Dinov2GiantClass: "cornstarch.shardformer.modeling.dinov2.Dinov2ModelForwards.dinov2_encoder_forward",
+    InternVision300mClass: "cornstarch.shardformer.modeling.intern_vit.InternVisionModelForwards.intern_vit_model_forward",
+    InternVision6bClass: "cornstarch.shardformer.modeling.intern_vit.InternVisionModelForwards.intern_vit_model_forward",
+    PixtralVisionClass: "cornstarch.shardformer.modeling.pixtral.PixtralVisionModelForwards.pixtral_vision_model_forward",
+    Qwen2Vision7bClass: "cornstarch.shardformer.modeling.qwen2_vision.Qwen2VisionModelForwards.qwen2_vision_transformer_forward",
+    SiglipVisionClass: "cornstarch.shardformer.modeling.siglip.SiglipVisionModelForwards.siglip_vision_transformer_forward",
+    WhisperSmallClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    WhisperBaseClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    WhisperLargeClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    Qwen2AudioEncoderClass: "cornstarch.shardformer.modeling.qwen2_audio.Qwen2AudioModelForwards.qwen2_audio_encoder_forward",
+}
