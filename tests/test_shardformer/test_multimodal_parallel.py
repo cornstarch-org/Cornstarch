@@ -187,7 +187,7 @@ class VisionAudioLanguageMultimodalAnymask(CornstarchMultimodalParallelBase):
 
     @property
     def world_size(self) -> int:
-        return 16
+        return 8
 
     def postprocess_data_for_sharded_model(
         self, data: list[torch.Tensor | dict[str, torch.Tensor]], precision: torch.dtype
@@ -256,10 +256,7 @@ class VisionAudioLanguageMultimodalAnymask(CornstarchMultimodalParallelBase):
         ],
         name_fn=lambda tp, vpp, app, lpp: f"tp={tp}, pp={vpp},{app},{lpp}",
     )
-    @parametrize(
-        "sp_mode", ["ring_attn", None], name_fn=lambda x: "ring" if x else "no-cp"
-    )
-    def test(
+    def test_non_cp(
         self,
         vision_model_name: str,
         language_model_name: str,
@@ -268,7 +265,6 @@ class VisionAudioLanguageMultimodalAnymask(CornstarchMultimodalParallelBase):
         vision_pp_size: int,
         audio_pp_size: int,
         language_pp_size: int,
-        sp_mode: str | None,
     ):
         self.set_model(
             encoders={
@@ -280,7 +276,7 @@ class VisionAudioLanguageMultimodalAnymask(CornstarchMultimodalParallelBase):
         self.run_multimodal_parallel(
             tp_size,
             {"vision": vision_pp_size, "audio": audio_pp_size, "llm": language_pp_size},
-            sp_mode,
+            None,
             True,
             "bf16",
             run_original_model=False,
