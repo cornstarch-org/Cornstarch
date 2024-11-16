@@ -180,10 +180,14 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
 
 
 @instantiate_parametrized_tests
-class VisionAudioLanguageMultimodalParallelAnymask(CornstarchMultimodalParallelBase):
+class VisionAudioLanguageMultimodalAnymask(CornstarchMultimodalParallelBase):
+    """
+    Compare AnyMask only vs AnyMask context parallelism with other types of parallelism
+    """
+
     @property
     def world_size(self) -> int:
-        return 12
+        return 16
 
     def postprocess_data_for_sharded_model(
         self, data: list[torch.Tensor | dict[str, torch.Tensor]], precision: torch.dtype
@@ -252,6 +256,9 @@ class VisionAudioLanguageMultimodalParallelAnymask(CornstarchMultimodalParallelB
         ],
         name_fn=lambda tp, vpp, app, lpp: f"tp={tp}, pp={vpp},{app},{lpp}",
     )
+    @parametrize(
+        "sp_mode", ["ring_attn", None], name_fn=lambda x: "ring" if x else "no-cp"
+    )
     def test(
         self,
         vision_model_name: str,
@@ -261,6 +268,7 @@ class VisionAudioLanguageMultimodalParallelAnymask(CornstarchMultimodalParallelB
         vision_pp_size: int,
         audio_pp_size: int,
         language_pp_size: int,
+        sp_mode: str | None,
     ):
         self.set_model(
             encoders={
@@ -272,8 +280,8 @@ class VisionAudioLanguageMultimodalParallelAnymask(CornstarchMultimodalParallelB
         self.run_multimodal_parallel(
             tp_size,
             {"vision": vision_pp_size, "audio": audio_pp_size, "llm": language_pp_size},
-            "ring_attn",
-            False,
+            sp_mode,
+            True,
             "bf16",
             run_original_model=False,
             run_sharded_model=True,

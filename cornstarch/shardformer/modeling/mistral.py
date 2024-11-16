@@ -11,6 +11,7 @@ from colossalai.shardformer.layer._operation import (
     split_forward_gather_backward,
 )
 from colossalai.shardformer.shard.shard_config import ShardConfig
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import (
@@ -26,11 +27,11 @@ from transformers.models.mistral.modeling_mistral import (
     repeat_kv,
 )
 
+from cornstarch.kernel.interface import convert_bit_attention_mask_to_block_mask
 from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
-from cornstarch.shardformer.layers.utils import (
-    convert_bit_attention_mask_to_full_mask,
-    repeat_attention_mask_heads,
-)
+from cornstarch.shardformer.layers.utils import repeat_attention_mask_heads
+
+flex_attention = torch.compile(flex_attention, fullgraph=True)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -134,7 +135,7 @@ class MistralModelForwards:
                         self.config.num_attention_heads
                         // shard_config.tensor_parallel_size
                     )
-                    attn_mask = convert_bit_attention_mask_to_full_mask(
+                    attn_mask = convert_bit_attention_mask_to_block_mask(
                         attention_mask, num_heads
                     )
                 else:
@@ -486,6 +487,15 @@ class MistralAttentionForwards:
                 attention_mask,
                 return_softmax=False,
                 dropout_p=self.attention_dropout if self.training else 0.0,
+            )
+        elif isinstance(attention_mask, BlockMask):
+            attn_output, attn_weights = flex_attention(
+                query_states,
+                key_states,
+                value_states,
+                block_mask=attention_mask,
+                enable_gqa=True,
+                return_lse=True,
             )
         elif self.config._attn_implementation == "flash_attention_2":
             if isinstance(past_key_value, StaticCache):
