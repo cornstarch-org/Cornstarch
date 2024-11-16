@@ -23,6 +23,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.utils import logging
 
 from cornstarch.models.multimodal_language_model import (
+    ModalEncoderModule,
     MultimodalModel,
 )
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
@@ -163,32 +164,50 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # There may be multiple hidden_states_{modal_key}s here.
                 # Merge them so that we can pass them to the language model.
-                hidden_states = torch.cat(
-                    [
-                        kwargs[f"hidden_states_{modal_key}"]
-                        for modal_key in module.encoders.keys()
-                    ],
-                    dim=1,
-                )
-                setattr(
-                    hidden_states,
-                    "_cornstarch_shape",
-                    [
-                        kwargs[f"hidden_states_{modal_key}"].shape[1]
-                        for modal_key in module.encoders.keys()
-                    ],
-                )
+                encoders_outputs = {
+                    kwargs[f"hidden_states_{modal_key}"]
+                    for modal_key in module.encoders.keys()
+                }
 
-                inputs_embeds, attention_mask, labels = (
-                    self.prepare_inputs_for_llm_first_stage(
+                # step 2. merge encoded multimodal features into text embeddings
+                inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
+
+                # step 3. merge encoder outputs to llm inputs_embeds
+                encoders_inputs: dict[str, dict] = {}
+                # merging functions accept either BaseModelOutput or tuple of tensors,
+                # and the first tensor (last_hidden_state) is merged.
+                encoders_outputs_dict: dict[str, tuple[torch.Tensor]] = {}
+                for modal_key, encoder_outputs in zip(
+                    module.encoders.keys(), encoders_outputs
+                ):
+                    encoder_module: ModalEncoderModule = getattr(
+                        module, f"{modal_key}_encoder"
+                    )
+                    encoder_inputs = {
+                        arg: kwargs[arg]
+                        for arg in module.encoders_args[modal_key]
+                        if arg in kwargs
+                    }
+
+                    for additional_arg in encoder_module.additional_args:
+                        if additional_arg in kwargs:
+                            encoder_inputs[additional_arg] = kwargs[additional_arg]
+
+                    encoders_inputs[modal_key] = encoder_inputs
+                    encoders_outputs_dict[modal_key] = (encoder_outputs,)
+
+                inputs_embeds, attention_mask, position_ids, labels = (
+                    module.merge_encoder_outputs(
+                        encoder_inputs=encoders_inputs,
+                        encoder_outputs=encoders_outputs_dict,
                         input_ids=input_ids,
-                        hidden_states=hidden_states,
+                        inputs_embeds=inputs_embeds,
                         attention_mask=attention_mask,
                         labels=labels,
-                        **kwargs,
                     )
                 )
 
+                # step 4. run llm with merged inputs_embeds
                 language_model_inputs = dict(
                     input_ids=None,
                     attention_mask=attention_mask,
@@ -204,42 +223,20 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                 )
             else:
                 assert inputs_embeds is None
-
-                if attention_mask is None:
-                    new_attention_mask = torch.ones_like(
-                        hidden_states, device=hidden_states.device
-                    )
-                else:
-                    new_attention_mask = torch.ones(
-                        hidden_states.shape[:2], device=attention_mask.device
-                    )
-                    new_attention_mask[:, -attention_mask.shape[1] :] = attention_mask
-                new_attention_mask.to(dtype=torch.long)
-
-                new_position_ids = (
-                    (new_attention_mask.cumsum(-1) - 1)
-                    .masked_fill_((new_attention_mask == 0), 1)
-                    .to(dtype=torch.long)
+                setattr(
+                    attention_mask,
+                    "cornstarch_is_bitattention",
+                    torch.any(attention_mask > 1),
                 )
-
-                if labels is None:
-                    new_labels = None
-                else:
-                    # TODO: should we get this ignore_index from somewhere if it is cutomized?
-                    ignore_index = -100
-                    new_labels = torch.full(
-                        hidden_states.shape[:2], ignore_index, device=labels.device
-                    )
-                    new_labels[:, -labels.shape[1] :] = labels
 
                 language_model_inputs = dict(
                     input_ids=None,
-                    attention_mask=new_attention_mask,
-                    position_ids=new_position_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
                     past_key_values=past_key_values,
                     inputs_embeds=None,
                     hidden_states=hidden_states,
-                    labels=new_labels,
+                    labels=labels,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
@@ -254,8 +251,10 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                 if key not in language_model_arguments:
                     language_model_inputs.pop(key)
 
-            return module.language_model(**language_model_inputs)
-
+            result = module.language_model(**language_model_inputs)
+            if isinstance(result, dict):
+                result["attention_mask"] = attention_mask
+            return result
         else:
             assert isinstance(self.my_modal_name, list)
             encoder_outputs = {}

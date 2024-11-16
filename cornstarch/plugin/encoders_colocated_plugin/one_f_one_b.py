@@ -2,6 +2,7 @@
 Copied from colossalai.pipeline.schedule.one_f_one_b
 
 add check_only_in_modal=False to is_first_stage and is_last_stage
+Plus include the number of tokens from encoders to llm
 """
 
 from functools import partial
