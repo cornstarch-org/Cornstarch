@@ -40,7 +40,7 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
 
         modules = []
         modules.extend(["patch_embed", "rotary_pos_emb"])
-        modules.extend([f"blocks.{i}" for i in range(config.num_hidden_layers)])
+        modules.extend([f"blocks.{i}" for i in range(config.depth)])
         modules.append("merger")
 
         return modules

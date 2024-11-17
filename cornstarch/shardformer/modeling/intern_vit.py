@@ -20,6 +20,7 @@ class InternVisionModelForwards:
     def intern_vit_model_forward(
         self: InternVisionModel,
         pixel_values: Optional[torch.FloatTensor] = None,
+        output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         pixel_embeds: Optional[torch.FloatTensor] = None,

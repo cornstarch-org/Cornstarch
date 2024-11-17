@@ -6,6 +6,7 @@
 # --------------------------------------------------------
 from typing import Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -271,10 +272,7 @@ class InternVisionEncoder(nn.Module):
         super().__init__()
         self.config = config
         # stochastic depth decay rule
-        dpr = [
-            x.item()
-            for x in torch.linspace(0, config.drop_path_rate, config.num_hidden_layers)
-        ]
+        dpr = np.linspace(0, config.drop_path_rate, config.num_hidden_layers).tolist()
         self.layers = nn.ModuleList(
             [
                 InternVisionEncoderLayer(config, dpr[idx])

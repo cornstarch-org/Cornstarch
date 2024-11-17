@@ -487,7 +487,7 @@ class InternLM2AttentionForwards:
                 enable_gqa=True,
                 return_lse=True,
             )
-        elif self.config._attn_implementation == "flash_attention_2":
+        elif self.config.attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout
             # [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
             # to be able to avoid many of these transpose/reshape/view.
@@ -505,7 +505,7 @@ class InternLM2AttentionForwards:
                 use_top_left_mask=self._flash_attn_uses_top_left_mask,
                 is_causal=self.is_causal,
             )
-        elif self.config._attn_implementation == "sdpa":
+        elif self.config.attn_implementation == "sdpa":
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 

@@ -110,7 +110,7 @@ class InternLM2Policy(PipelineTemplatePolicyBase, Policy):
             "sdpa": InternLM2SdpaAttention,
             "flash_attention_2": InternLM2FlashAttention2,
         }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
+        attn_cls = ATTN_IMPLEMENTATION[config.attn_implementation]
 
         policy = {}
 
@@ -178,7 +178,8 @@ class InternLM2Policy(PipelineTemplatePolicyBase, Policy):
 
             policy[InternLM2Model] = ModulePolicyDescription(
                 attribute_replacement={
-                    "config._attn_implementation": "flash_attention_2"
+                    "config._attn_implementation": "flash_attention_2",
+                    "config.attn_implementation": "flash_attention_2",
                 },
             )
 
