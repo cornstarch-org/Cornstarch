@@ -44,7 +44,7 @@ model_names_to_test = [
 
 
 class CornstarchTestingClass:
-    num_microbatches: int = 16
+    num_microbatches: int = 24
     microbatch_size: int = 1
 
     def __init__(
@@ -216,15 +216,16 @@ class CornstarchTestingClass:
         data = self.data()
         data_iter = iter([data for _ in range(num_iterations)])
 
-        for _ in range(num_iterations):
-            booster.execute_pipeline(
-                data_iter,
-                model,
-                lambda outputs, inputs: criterion(outputs),
-                optimizer,
-                return_loss=True,
-                return_outputs=False,
-            )
+        for i in range(num_iterations):
+            with torch.autograd.profiler.emit_nvtx(), torch.cuda.nvtx.range(f"iter{i}"):
+                booster.execute_pipeline(
+                    data_iter,
+                    model,
+                    lambda outputs, inputs: criterion(outputs),
+                    optimizer,
+                    return_loss=True,
+                    return_outputs=False,
+                )
 
 
 def run_profile(
@@ -398,7 +399,14 @@ if __name__ == "__main__":
             if vision_model_name is None and audio_model_name is None:
                 continue
 
-            command = [
+            standalone_command = [
+                "torchrun",
+                "--standalone",
+                "--nproc_per_node=4",
+                sys.argv[0],  # The current script file
+            ]
+
+            multinode_command = [
                 "torchrun",
                 f"--nnodes={len(node_hostnames)}",
                 "--nproc_per_node=4",
@@ -406,6 +414,9 @@ if __name__ == "__main__":
                 f"--rdzv_endpoint={master_node_rdzv_backend}",
                 f"--node-rank={node_hostnames.index(socket.gethostname())}",
                 sys.argv[0],  # The current script file
+            ]
+
+            command = multinode_command + [
                 f"--llm_model_name={llm_model_name}",
                 "--llm_pp_size=5",
                 "--tp_size=4",
