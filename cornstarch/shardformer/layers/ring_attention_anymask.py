@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Dict, Callable
 
 import numpy as np
 import torch
@@ -11,12 +11,27 @@ from cornstarch.kernel.interface import (
     _attn_anymask_backward,
     _flex_attn_anymask_forward,
     _flex_attn_anymask_backward,
+    _flex_attn_cached_kernel_forward,
+    _flex_attn_cached_kernel_backward,
 )
 
 from cornstarch.shardformer.layers.ring_attn import (
     ring_flash_attn_anymask_backward,
     ring_flash_attn_anymask_forward,
 )
+
+forward_kernel_dict: Dict[str, Callable] = {
+    "flexattn": _flex_attn_anymask_forward,
+    "naive_attn": _attn_anymask_forward,
+    "cached_attn": _flex_attn_cached_kernel_forward,
+}
+
+backward_kernel_dict: Dict[str, Callable] = {
+    "flexattn": _flex_attn_anymask_backward,
+    "naive_attn": _attn_anymask_backward,
+    "cached_attn": _flex_attn_cached_kernel_backward,
+}
+
 
 from ._base import RingAttentionBase
 
@@ -45,18 +60,14 @@ class RingAttentionAnyMask(RingAttentionBase):
         window_size_left: int = -1,
         window_size_right: int = -1,
         alibi_slopes: Optional[torch.Tensor] = None,
-        kernel_impl: str = "flexattn",
+        kernel_impl: str = "cached_attn",
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         softmax_scale = softmax_scale
         assert alibi_slopes is None
 
-        attn_impl = (
-            _flex_attn_anymask_forward
-            if kernel_impl == "flexattn"
-            else _attn_anymask_forward
-        )
+        attn_impl = forward_kernel_dict[kernel_impl]
 
         out, softmax_lse = ring_flash_attn_anymask_forward(
             ctx,
@@ -94,11 +105,9 @@ class RingAttentionAnyMask(RingAttentionBase):
     def backward(ctx, dout, grad_softmax_lse, *args):
         q, k, v, out, softmax_lse, mask = ctx.saved_tensors
         mask_info = (grad_softmax_lse, mask)
-        attn_impl = (
-            _flex_attn_anymask_backward
-            if ctx.kernel_impl == "flexattn"
-            else _attn_anymask_backward
-        )
+
+        attn_impl = backward_kernel_dict[ctx.kernel_impl]
+
         dq, dk, dv = ring_flash_attn_anymask_backward(
             ctx,
             ctx.group,
@@ -309,7 +318,7 @@ class RingAttentionAnyMask(RingAttentionBase):
         softmax_scale: Optional[float] = None,
         deterministic: Optional[bool] = False,
         return_softmax: Optional[bool] = False,
-        kernel_impl: str = "flexattn",
+        kernel_impl: str = "cached_attn",
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
@@ -361,7 +370,7 @@ def ring_flexattn_anymask(
     softmax_scale: Optional[float] = None,
     deterministic: Optional[bool] = False,
     return_softmax: Optional[bool] = False,
-    kernel_impl: str = "flexattn",
+    kernel_impl: str = "cached_attn",
     **kwargs,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     return RingAttentionAnyMask.attention(
