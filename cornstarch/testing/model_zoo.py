@@ -53,6 +53,7 @@ from cornstarch.models.internlm2.modeling_internlm2 import (
 )
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
+    MultimodalProjector,
 )
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
     Qwen2VLModel,
@@ -442,6 +443,7 @@ class Qwen2Vision7bClass(ImageModelClassBase):
 
     def build_model(self) -> PreTrainedModel:
         model: Qwen2VisionTransformerPretrainedModel = ModelClassBase.build_model(self)
+        projector = model.merger
         model.merger = Qwen2VLModel.FakeMerger()
         model.forward = MethodType(
             functools.partial(
@@ -451,8 +453,11 @@ class Qwen2Vision7bClass(ImageModelClassBase):
             model,
         )
 
+        projector = MultimodalProjector(None, projector)
+
         return ModalEncoderModule(
             model=model,
+            projector=projector,
             additional_args=[
                 "pixel_values",
                 "pixel_values_videos",

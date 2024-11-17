@@ -257,7 +257,7 @@ if __name__ == "__main__":
                 sys.argv[0],  # The current script file
             ]
 
-            command = standalone_command + [
+            command = multinode_command + [
                 f"--llm_model_name={llm_model_name}",
             ]
 
