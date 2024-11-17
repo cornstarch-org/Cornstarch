@@ -187,7 +187,7 @@ class CacheManager:
         fwd_kernel, bwd_kernel, fwd_key, bwd_key = (
             self.extract_kernel_from_inductor_cache()
         )
-        print(fwd_kernel, bwd_kernel, fwd_key, bwd_key)
+        # print(fwd_kernel, bwd_kernel, fwd_key, bwd_key)
         if fwd_kernel and bwd_kernel:
             # fwd_kernel = flexattention
             self.cache_kernels(config, fwd_kernel, bwd_kernel, fwd_key, bwd_key)

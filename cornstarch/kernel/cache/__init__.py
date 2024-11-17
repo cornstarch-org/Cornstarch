@@ -18,7 +18,7 @@ if os.path.exists(CACHE_PATH):
             fd = os.open(marker_file, os.O_CREAT | os.O_EXCL)
             os.close(fd)
             # Only the process that successfully created the marker will clean
-            print(f"remove cache files in {CACHE_PATH}")
+            # print(f"remove cache files in {CACHE_PATH}")
             shutil.rmtree(CACHE_PATH)
             os.makedirs(CACHE_PATH)
         except FileExistsError:
@@ -31,4 +31,3 @@ else:
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = (
     CACHE_PATH  # https://github.com/pytorch/pytorch/issues/121122
 )
-
