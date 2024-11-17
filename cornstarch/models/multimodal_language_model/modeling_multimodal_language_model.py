@@ -858,10 +858,8 @@ class ModalEncoderModule(ModalModuleBase):
         kwargs = self.preprocess_callback(inputs=kwargs)
 
         outputs: BaseModelOutput = self.module(
-            return_dict=return_dict,
-            output_hidden_states=output_hidden_states,
             # Filter out additional arguments
-            **{k: v for k, v in kwargs.items() if k in module_params},
+            **{k: v for k, v in kwargs.items() if k in module_params}
         )
         outputs = self.postprocess_module_callback(inputs=kwargs, output=outputs)
 
@@ -1240,14 +1238,15 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
-            encoders_inputs[modal_key] = args
+            if "output_attentions" in self.encoders_args[modal_key]:
+                args["output_attentions"] = output_attentions
+            if "output_hidden_states" in self.encoders_args[modal_key]:
+                args["output_hidden_states"] = output_hidden_states
+            if "return_dict" in self.encoders_args[modal_key]:
+                args["return_dict"] = return_dict
 
-            encoders_outputs[modal_key] = encoder_module(
-                **args,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
+            encoders_inputs[modal_key] = args
+            encoders_outputs[modal_key] = encoder_module(**args)
 
         # step 2. merge encoded multimodal features into text embeddings
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)

@@ -8,13 +8,13 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp import fully_shard
 
 from cornstarch.models.multimodal_language_model import (
-    ModalEncoderModule,
     MultimodalModel,
 )
 from cornstarch.testing.model_zoo import (
     AudioModelClassBase,
     ImageModelClassBase,
     LanguageModelClassBase,
+    Qwen2Vision7bClass,
     model_to_class,
 )
 from cornstarch.testing.nodes_info import master_node_rdzv_backend, node_hostnames
@@ -22,11 +22,24 @@ from cornstarch.testing.timer import TimerContextManager
 
 file_path = "profile_fsdp_result.csv"
 
-model_names_to_test = [("llama_8b", "clip", "qwen2_audio")]
+# model_names_to_test = [("llama_8b", "clip", "qwen2_audio")]
+model_names_to_test = [
+    # ("llama_8b", "clip", None),
+    # ("gemma_2b", "siglip_878m", None),
+    # ("internlm2_20b", "intern_vit_6b", None),
+    # ("mistral_7b", "pixtral_400m", None),
+    # ("phi3_mini", "evaclip_8b", None),
+    # ("vicuna", "dinov2_1.1b", None),
+    # ("qwen2_7b", None, "qwen2_audio"),
+    ("qwen2_7b", "qwen2_vision_675m", None),
+    ("llama_8b", None, "whisper_1.5b"),
+    ("llama_8b", "siglip_878m", "whisper_1.5b"),
+    ("qwen2_7b", "qwen2_vision_675m", "qwen2_audio"),
+]
 
 
 class FSDPTestingClass:
-    num_microbatches: int = 24
+    num_microbatches: int = 20
     microbatch_size: int = 1
 
     def __init__(
@@ -39,31 +52,37 @@ class FSDPTestingClass:
 
     def data(self) -> dict[str, torch.Tensor]:
         data = {}
-        batch_size = self.num_microbatches * self.microbatch_size
-        data.update(self.llm_model_class.data(batch_size, seq_len=4096))
+        data.update(self.llm_model_class.data(self.microbatch_size, seq_len=4096))
 
         if "vision" in self.encoder_model_classes:
-            data.update(self.encoder_model_classes["vision"].data(batch_size))
+            data.update(self.encoder_model_classes["vision"].data(self.microbatch_size))
         if "audio" in self.encoder_model_classes:
-            data.update(self.encoder_model_classes["audio"].data(batch_size))
+            data.update(self.encoder_model_classes["audio"].data(self.microbatch_size))
 
         return data
 
     def build_model(self) -> nn.Module:
         encoders = {
-            key: ModalEncoderModule(encoder_class.build_model())
+            key: encoder_class.build_model()
             for key, encoder_class in self.encoder_model_classes.items()
         }
-        for encoder in encoders.values():
-            encoder.train(module=False, projector=True)
-            encoder.module.requires_grad_(False)
-            if encoder.projector is not None:
-                encoder.projector.requires_grad_(True)
+
+        if (
+            "vision" in encoders
+            and self.encoder_model_classes["vision"].__class__ == Qwen2Vision7bClass
+        ):
+            module = encoders["vision"]
 
         model = MultimodalModel(
             encoders=encoders,
             language_model=self.llm_model_class.build_model(),
         ).to(dtype=torch.bfloat16)
+
+        for encoder in encoders.values():
+            encoder.train(module=False, projector=True)
+            encoder.module.requires_grad_(False)
+            if encoder.projector is not None:
+                encoder.projector.requires_grad_(True)
 
         model.language_model.train(mode=False)
         model.language_model.requires_grad_(False)
@@ -93,17 +112,12 @@ class FSDPTestingClass:
 
     def microbatch_forward(self, model: nn.Module, data: dict):
         assert self.num_microbatches % dist.get_world_size() == 0
+        num_microbatches_per_gpu = self.num_microbatches // dist.get_world_size()
         with torch.autograd.profiler.emit_nvtx():
-            for i in range(self.num_microbatches // dist.get_world_size()):
-                model.set_requires_gradient_sync(i == self.num_microbatches - 1)
-                batch = {
-                    key: tensor[
-                        i * self.microbatch_size : (i + 1) * self.microbatch_size
-                    ]
-                    for key, tensor in data.items()
-                }
+            for i in range(num_microbatches_per_gpu):
+                model.set_requires_gradient_sync(i == num_microbatches_per_gpu - 1)
                 with torch.cuda.nvtx.range("forward"):
-                    output = model(**batch)
+                    output = model(**data)
                     loss = output.loss
                 with torch.cuda.nvtx.range("backward"):
                     loss.backward()
@@ -116,7 +130,8 @@ class FSDPTestingClass:
 
         data = self.data()
 
-        for _ in range(num_iterations):
+        for i in range(num_iterations):
+            print(f"Iteration {i}")
             self.microbatch_forward(model, data)
 
 
@@ -145,18 +160,17 @@ def run_profile(
 
     model = fsdp_class.build_model()
 
-    dist.barrier()
+    local_rank = int(os.environ["LOCAL_RANK"])
+    dist.barrier(device_ids=[local_rank])
 
     manager = TimerContextManager()
 
-    with manager.measure(
-        "cornstarch.testing.profile_fsdp.FSDPTestingClass.microbatch_forward"
-    ):
+    with manager.measure(f"{__name__}.FSDPTestingClass.microbatch_forward"):
         fsdp_class.run_multimodal_model(model)
 
         torch.cuda.synchronize()
 
-    if dist.get_rank() == 0:
+    if local_rank == 0:
         elapsed_times = manager.get_elapsed_times()
         average_exec_time = sum(time for _, time in elapsed_times[1:]) / (
             len(elapsed_times) - 1
@@ -184,7 +198,7 @@ def run_profile(
                 }
             )
 
-    dist.barrier()
+    dist.barrier(device_ids=[local_rank])
     dist.destroy_process_group()
 
 
@@ -192,6 +206,8 @@ if __name__ == "__main__":
     if "LOCAL_RANK" in os.environ:
         # If LOCAL_RANK is set, we are in a child process
         import argparse
+
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
         parser = argparse.ArgumentParser(
             description="Run profile with distributed processes"
@@ -241,7 +257,7 @@ if __name__ == "__main__":
                 sys.argv[0],  # The current script file
             ]
 
-            command = multinode_command + [
+            command = standalone_command + [
                 f"--llm_model_name={llm_model_name}",
             ]
 

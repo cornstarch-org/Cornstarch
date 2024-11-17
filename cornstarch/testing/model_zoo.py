@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import functools
 from abc import ABC, abstractmethod
+from types import MethodType
 from typing import Type
 
 import torch
@@ -39,7 +41,6 @@ from transformers.models.siglip.modeling_siglip import (
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
 from cornstarch.models.evaclip.modeling_evaclip import (
-    EvaCLIPConfig,
     EvaCLIPVisionModel,
 )
 from cornstarch.models.intern_vit.modeling_intern_vit import (
@@ -49,6 +50,12 @@ from cornstarch.models.intern_vit.modeling_intern_vit import (
 from cornstarch.models.internlm2.modeling_internlm2 import (
     InternLM2Config,
     InternLM2ForCausalLM,
+)
+from cornstarch.models.multimodal_language_model import (
+    ModalEncoderModule,
+)
+from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
+    Qwen2VLModel,
 )
 
 from .utils import create_random_image
@@ -109,6 +116,9 @@ class ImageModelClassBase(ModelClassBase):
 
         return data
 
+    def build_model(self) -> ModalEncoderModule:
+        return ModalEncoderModule(super().build_model())
+
 
 class AudioModelClassBase(ModelClassBase):
     def data(self, batch_size: int) -> dict[str, torch.Tensor]:
@@ -125,6 +135,9 @@ class AudioModelClassBase(ModelClassBase):
         }
 
         return data
+
+    def build_model(self) -> ModalEncoderModule:
+        return ModalEncoderModule(super().build_model())
 
 
 class Gemma2bClass(LanguageModelClassBase):
@@ -194,11 +207,29 @@ class Vicuna7bClass(LanguageModelClassBase):
         self.config._attn_implementation = "flash_attention_2"
 
 
-class InternLM27bClass(LanguageModelClassBase):
+class InternLM218bClass(LanguageModelClassBase):
     def __init__(self):
         super().__init__(
             InternLM2ForCausalLM,
-            InternLM2Config.from_pretrained("internlm/internlm2_5-7b-chat-1m"),
+            InternLM2Config.from_pretrained("internlm/internlm2_5-1_8b"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+
+
+class InternLM28bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            InternLM2ForCausalLM,
+            InternLM2Config.from_pretrained("internlm/internlm2_5-1_8b"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+
+
+class InternLM220bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            InternLM2ForCausalLM,
+            InternLM2Config.from_pretrained("internlm/internlm2_5-20b"),
         )
         self.config._attn_implementation = "flash_attention_2"
 
@@ -407,6 +438,32 @@ class Qwen2Vision7bClass(ImageModelClassBase):
             Qwen2VLVisionConfig.from_pretrained("Qwen/Qwen2-VL-7B-Instruct"),
         )
         self.config._attn_implementation = "eager"
+        self.config.image_token_id = 44
+
+    def build_model(self) -> PreTrainedModel:
+        model: Qwen2VisionTransformerPretrainedModel = ModelClassBase.build_model(self)
+        model.merger = Qwen2VLModel.FakeMerger()
+        model.forward = MethodType(
+            functools.partial(
+                Qwen2VLModel.vision_transformer_forward,
+                original_forward=model.forward,
+            ),
+            model,
+        )
+
+        return ModalEncoderModule(
+            model=model,
+            additional_args=[
+                "pixel_values",
+                "pixel_values_videos",
+                "image_grid_thw",
+                "video_grid_thw",
+            ],
+            preprocess_callback=functools.partial(
+                Qwen2VLModel.preprocess_vision_callback,
+                visual_dtype=model.get_dtype(),
+            ),
+        )
 
     def data(self, batch_size: int) -> dict[str, torch.Tensor]:
         from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
@@ -461,7 +518,9 @@ model_to_class = {
     "llama_3b": Llama3bClass,
     "llama_8b": Llama8bClass,
     "llama_70b": Llama70bClass,
-    "internlm2": InternLM27bClass,
+    "internlm2_1.8b": InternLM218bClass,
+    "internlm2_8b": InternLM28bClass,
+    "internlm2_20b": InternLM220bClass,
     "mistral_7b": Mistral7bClass,
     "phi3_mini": Phi3MiniClass,
     "phi3_small": Phi3SmallClass,
@@ -497,7 +556,9 @@ class_to_forward_str = {
     Llama3bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
     Llama8bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
     Llama70bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
-    InternLM27bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
+    InternLM218bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
+    InternLM28bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
+    InternLM220bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
     Mistral7bClass: "cornstarch.shardformer.modeling.mistral.MistralModelForwards.mistral_model_forward",
     Phi3MiniClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
     Phi3SmallClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
