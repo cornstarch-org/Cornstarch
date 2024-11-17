@@ -24,13 +24,13 @@ file_path = "profile_fsdp_result.csv"
 
 # model_names_to_test = [("llama_8b", "clip", "qwen2_audio")]
 model_names_to_test = [
-    # ("llama_8b", "clip", None),
-    # ("gemma_2b", "siglip_878m", None),
-    # ("internlm2_20b", "intern_vit_6b", None),
-    # ("mistral_7b", "pixtral_400m", None),
-    # ("phi3_mini", "evaclip_8b", None),
-    # ("vicuna", "dinov2_1.1b", None),
-    # ("qwen2_7b", None, "qwen2_audio"),
+    ("llama_8b", "clip", None),
+    ("gemma_2b", "siglip_878m", None),
+    ("internlm2_20b", "intern_vit_6b", None),
+    ("mistral_7b", "pixtral_400m", None),
+    ("phi3_mini", "evaclip_8b", None),
+    ("vicuna", "dinov2_1.1b", None),
+    ("qwen2_7b", None, "qwen2_audio"),
     ("qwen2_7b", "qwen2_vision_675m", None),
     ("llama_8b", None, "whisper_1.5b"),
     ("llama_8b", "siglip_878m", "whisper_1.5b"),
@@ -62,21 +62,22 @@ class FSDPTestingClass:
         return data
 
     def build_model(self) -> nn.Module:
-        encoders = {
-            key: encoder_class.build_model()
-            for key, encoder_class in self.encoder_model_classes.items()
-        }
+        with torch.device("meta"):
+            encoders = {
+                key: encoder_class.build_model()
+                for key, encoder_class in self.encoder_model_classes.items()
+            }
 
-        if (
-            "vision" in encoders
-            and self.encoder_model_classes["vision"].__class__ == Qwen2Vision7bClass
-        ):
-            module = encoders["vision"]
+            if (
+                "vision" in encoders
+                and self.encoder_model_classes["vision"].__class__ == Qwen2Vision7bClass
+            ):
+                module = encoders["vision"]
 
-        model = MultimodalModel(
-            encoders=encoders,
-            language_model=self.llm_model_class.build_model(),
-        ).to(dtype=torch.bfloat16)
+            model = MultimodalModel(
+                encoders=encoders,
+                language_model=self.llm_model_class.build_model(),
+            ).to(dtype=torch.bfloat16)
 
         for encoder in encoders.values():
             encoder.train(module=False, projector=True)
@@ -107,6 +108,8 @@ class FSDPTestingClass:
         for encoder in model.encoders.values():
             fully_shard(encoder, reshard_after_forward=True)
         fully_shard(model, reshard_after_forward=True)
+
+        model.to_empty(device="cuda")
 
         return model
 
@@ -170,6 +173,19 @@ def run_profile(
 
         torch.cuda.synchronize()
 
+    peak_memory = torch.tensor(
+        torch.cuda.max_memory_allocated() / 1024**3,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    gathered_peak_memory = torch.zeros(
+        dist.get_world_size(), dtype=torch.float32, device="cuda"
+    )
+    dist.all_gather_into_tensor(gathered_peak_memory, peak_memory)
+    max_peak_memory = gathered_peak_memory.max().item()
+    min_peak_memory = gathered_peak_memory.min().item()
+    avg_peak_memory = gathered_peak_memory.mean().item()
+
     if local_rank == 0:
         elapsed_times = manager.get_elapsed_times()
         average_exec_time = sum(time for _, time in elapsed_times[1:]) / (
@@ -184,6 +200,9 @@ def run_profile(
                     "vision_model",
                     "audio_model",
                     "exec_time (ms)",
+                    "peak_memory (GB)",
+                    "min_peak_memory (GB)",
+                    "max_peak_memory (GB)",
                 ],
             )
             if f.tell() == 0:
@@ -195,6 +214,9 @@ def run_profile(
                     "vision_model": vision_model_name,
                     "audio_model": audio_model_name,
                     "exec_time (ms)": average_exec_time,
+                    "peak_memory (GB)": avg_peak_memory,
+                    "min_peak_memory (GB)": min_peak_memory,
+                    "max_peak_memory (GB)": max_peak_memory,
                 }
             )
 

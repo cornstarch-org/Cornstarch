@@ -38,8 +38,19 @@ from cornstarch.testing.timer import TimerContextManager
 
 file_path = "profile_pipeline_result.csv"
 
+model_names_to_test = [("llama_70b", "clip", "qwen2_audio")]
 model_names_to_test = [
-    ("llama_70b", "clip", "qwen2_audio"),
+    ("llama_8b", "clip", None),
+    ("gemma_2b", "siglip_878m", None),
+    ("internlm2_20b", "intern_vit_6b", None),
+    ("mistral_7b", "pixtral_400m", None),
+    ("phi3_mini", "evaclip_8b", None),
+    ("vicuna", "dinov2_1.1b", None),
+    ("qwen2_7b", None, "qwen2_audio"),
+    ("qwen2_7b", "qwen2_vision_675m", None),
+    ("llama_8b", None, "whisper_1.5b"),
+    ("llama_8b", "siglip_878m", "whisper_1.5b"),
+    ("qwen2_7b", "qwen2_vision_675m", "qwen2_audio"),
 ]
 
 
@@ -269,7 +280,8 @@ def run_profile(
         test_config=dict(),
     )
 
-    dist.barrier()
+    local_rank = int(os.environ["LOCAL_RANK"])
+    dist.barrier(device_ids=[local_rank])
 
     manager = TimerContextManager()
 
@@ -287,7 +299,20 @@ def run_profile(
 
         torch.cuda.synchronize()
 
-    if dist.get_rank() == 0:
+    peak_memory = torch.tensor(
+        torch.cuda.max_memory_allocated() / 1024**3,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    gathered_peak_memory = torch.zeros(
+        dist.get_world_size(), dtype=torch.float32, device="cuda"
+    )
+    dist.all_gather_into_tensor(gathered_peak_memory, peak_memory)
+    max_peak_memory = gathered_peak_memory.max().item()
+    min_peak_memory = gathered_peak_memory.min().item()
+    avg_peak_memory = gathered_peak_memory.mean().item()
+
+    if local_rank == 0:
         elapsed_times = manager.get_elapsed_times()
         average_exec_time = sum(time for _, time in elapsed_times[1:]) / (
             len(elapsed_times) - 1
@@ -302,6 +327,9 @@ def run_profile(
                     "vision_model",
                     "audio_model",
                     "exec_time (ms)",
+                    "peak_memory (GB)",
+                    "min_peak_memory (GB)",
+                    "max_peak_memory (GB)",
                 ],
             )
             if f.tell() == 0:
@@ -314,10 +342,13 @@ def run_profile(
                     "vision_model": vision_model_name,
                     "audio_model": audio_model_name,
                     "exec_time (ms)": average_exec_time,
+                    "peak_memory (GB)": avg_peak_memory,
+                    "min_peak_memory (GB)": min_peak_memory,
+                    "max_peak_memory (GB)": max_peak_memory,
                 }
             )
 
-    dist.barrier()
+    dist.barrier(device_ides=[local_rank])
     dist.destroy_process_group()
 
 
@@ -416,10 +447,10 @@ if __name__ == "__main__":
                 sys.argv[0],  # The current script file
             ]
 
-            command = multinode_command + [
+            command = standalone_command + [
                 f"--llm_model_name={llm_model_name}",
-                "--llm_pp_size=5",
-                "--tp_size=4",
+                "--llm_pp_size=4",
+                "--tp_size=1",
                 f"--plugin_type={plugin_type}",
             ]
 
