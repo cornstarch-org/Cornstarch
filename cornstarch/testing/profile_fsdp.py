@@ -92,7 +92,7 @@ class FSDPTestingClass:
         return model
 
     def microbatch_forward(self, model: nn.Module, data: dict):
-        assert self.num_microbatches // dist.get_world_size() == 0
+        assert self.num_microbatches % dist.get_world_size() == 0
         with torch.autograd.profiler.emit_nvtx():
             for i in range(self.num_microbatches // dist.get_world_size()):
                 model.set_requires_gradient_sync(i == self.num_microbatches - 1)
