@@ -38,24 +38,24 @@ from cornstarch.testing.timer import TimerContextManager
 
 file_path = "profile_pipeline_result.csv"
 
-model_names_to_test = [("llama_70b", "clip", "qwen2_audio")]
+# model_names_to_test = [("llama_70b", "clip", "qwen2_audio")]
 model_names_to_test = [
-    ("llama_8b", "clip", None),
+    ("llama_70b", "clip", None),
     ("gemma_2b", "siglip_878m", None),
     ("internlm2_20b", "intern_vit_6b", None),
     ("mistral_7b", "pixtral_400m", None),
     ("phi3_mini", "evaclip_8b", None),
     ("vicuna", "dinov2_1.1b", None),
+    ("qwen2_72b", "qwen2_vision_675m", None),
     ("qwen2_7b", None, "qwen2_audio"),
-    ("qwen2_7b", "qwen2_vision_675m", None),
     ("llama_8b", None, "whisper_1.5b"),
-    ("llama_8b", "siglip_878m", "whisper_1.5b"),
-    ("qwen2_7b", "qwen2_vision_675m", "qwen2_audio"),
+    ("llama_8b", "qwen2_vision_675m", "qwen2_audio"),
+    ("qwen2_7b", "evaclip_8b", "whisper_1.5b"),
 ]
 
 
 class CornstarchTestingClass:
-    num_microbatches: int = 24
+    num_microbatches: int = 20
     microbatch_size: int = 1
 
     def __init__(
@@ -136,21 +136,22 @@ class CornstarchTestingClass:
             }
         )
 
-        with LazyInitContext():
+        with LazyInitContext(default_device=torch.device("cuda")):
             encoders = {
-                key: ModalEncoderModule(encoder_class.build_model())
+                key: encoder_class.build_model()
                 for key, encoder_class in self.encoder_model_classes.items()
             }
-            for encoder in encoders.values():
-                encoder.train(module=False, projector=True)
-                encoder.module.requires_grad_(False)
-                if encoder.projector is not None:
-                    encoder.projector.requires_grad_(True)
 
             model = MultimodalModel(
                 encoders=encoders,
                 language_model=self.llm_model_class.build_model(),
             )
+
+        for encoder in encoders.values():
+            encoder.train(module=False, projector=True)
+            encoder.module.requires_grad_(False)
+            if encoder.projector is not None:
+                encoder.projector.requires_grad_(True)
 
         model.language_model.train(mode=False)
         model.language_model.requires_grad_(False)
@@ -348,7 +349,7 @@ def run_profile(
                 }
             )
 
-    dist.barrier(device_ides=[local_rank])
+    dist.barrier(device_ids=[local_rank])
     dist.destroy_process_group()
 
 
@@ -398,16 +399,14 @@ if __name__ == "__main__":
             "plugin_type": args.plugin_type,
         }
 
-        if args.vision_pp_size > 0:
-            assert args.vision_model_name is not None
+        if args.vision_model_name is not None:
             kargs.update(
                 {
                     "vision_model_name": args.vision_model_name,
                     "vision_pp_size": args.vision_pp_size,
                 }
             )
-        if args.audio_pp_size > 0:
-            assert args.audio_model_name is not None
+        if args.audio_model_name is not None:
             kargs.update(
                 {
                     "audio_model_name": args.audio_model_name,
@@ -424,7 +423,7 @@ if __name__ == "__main__":
         import subprocess
         import sys
 
-        plugin_type = "replicated"
+        plugin_type = "colocated"
 
         for llm_model_name, vision_model_name, audio_model_name in model_names_to_test:
             if vision_model_name is None and audio_model_name is None:
@@ -435,6 +434,9 @@ if __name__ == "__main__":
                 "--standalone",
                 "--nproc_per_node=4",
                 sys.argv[0],  # The current script file
+                f"--plugin_type={plugin_type}",
+                f"--llm_model_name={llm_model_name}",
+                "--tp_size=1",
             ]
 
             multinode_command = [
@@ -445,14 +447,12 @@ if __name__ == "__main__":
                 f"--rdzv_endpoint={master_node_rdzv_backend}",
                 f"--node-rank={node_hostnames.index(socket.gethostname())}",
                 sys.argv[0],  # The current script file
+                f"--plugin_type={plugin_type}",
+                f"--llm_model_name={llm_model_name}",
+                "--tp_size=4",
             ]
 
-            command = standalone_command + [
-                f"--llm_model_name={llm_model_name}",
-                "--llm_pp_size=4",
-                "--tp_size=1",
-                f"--plugin_type={plugin_type}",
-            ]
+            command = multinode_command
 
             if vision_model_name:
                 command.extend(
