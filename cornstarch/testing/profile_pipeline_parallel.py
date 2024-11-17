@@ -33,12 +33,13 @@ from cornstarch.testing.model_zoo import (
     LanguageModelClassBase,
     model_to_class,
 )
+from cornstarch.testing.nodes_info import master_node_rdzv_backend, node_hostnames
 from cornstarch.testing.timer import TimerContextManager
 
 file_path = "profile_pipeline_result.csv"
 
 model_names_to_test = [
-    ("llama_8b", "clip", "qwen2_audio"),
+    ("llama_70b", "clip", "qwen2_audio"),
 ]
 
 
@@ -51,9 +52,6 @@ class CornstarchTestingClass:
         llm_model_class: LanguageModelClassBase,
         encoder_model_classes: dict[str, ImageModelClassBase | AudioModelClassBase],
     ):
-        llm_model_class.config.num_hidden_layers = 2
-        for encoder_class in encoder_model_classes.values():
-            encoder_class.config.num_hidden_layers = 1
         self.llm_model_class = llm_model_class
         self.encoder_model_classes = encoder_model_classes
 
@@ -298,6 +296,7 @@ def run_profile(
             writer = csv.DictWriter(
                 f,
                 fieldnames=[
+                    "type",
                     "llm_model",
                     "vision_model",
                     "audio_model",
@@ -309,6 +308,7 @@ def run_profile(
 
             writer.writerow(
                 {
+                    "type": plugin_type,
                     "llm_model": llm_model_name,
                     "vision_model": vision_model_name,
                     "audio_model": audio_model_name,
@@ -387,26 +387,29 @@ if __name__ == "__main__":
         run_profile(**kargs)
         torch.cuda.synchronize()
     else:
+        # If LOCAL_RANK is not set, we are in the main process and need to launch child processes
+        import socket
         import subprocess
         import sys
 
-        # If LOCAL_RANK is not set, we are in the main process and need to launch child processes
-        num_gpus = 2  # Set this to the number of GPUs you want to use
+        plugin_type = "replicated"
 
         for llm_model_name, vision_model_name, audio_model_name in model_names_to_test:
+            if vision_model_name is None and audio_model_name is None:
+                continue
+
             command = [
                 "torchrun",
-                "--nproc_per_node",
-                str(num_gpus),
+                f"--nnodes={len(node_hostnames)}",
+                "--nproc_per_node=4",
+                "--rdzv_backend=c10d",
+                f"--rdzv_endpoint={master_node_rdzv_backend}",
+                f"--node-rank={node_hostnames.index(socket.gethostname())}",
                 sys.argv[0],  # The current script file
-                "--llm_model_name",
-                llm_model_name,
-                "--llm_pp_size",
-                "2",
-                "--tp_size",
-                "1",
-                "--plugin_type",
-                "replicated",
+                f"--llm_model_name={llm_model_name}",
+                "--llm_pp_size=5",
+                "--tp_size=4",
+                f"--plugin_type={plugin_type}",
             ]
 
             if vision_model_name:

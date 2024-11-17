@@ -182,6 +182,7 @@ class Llama70bClass(LanguageModelClassBase):
             LlamaConfig.from_pretrained("meta-llama/Llama-3.1-70B-Instruct"),
         )
         self.config._attn_implementation = "flash_attention_2"
+        self.config.num_hidden_layers = 40
 
 
 class Vicuna7bClass(LanguageModelClassBase):
@@ -273,6 +274,7 @@ class Qwen272bClass(LanguageModelClassBase):
             Qwen2Config.from_pretrained("Qwen/Qwen2.5-72B-Instruct"),
         )
         self.config._attn_implementation = "flash_attention_2"
+        self.config.num_hidden_layers = 40
 
 
 class Qwen214bClass(LanguageModelClassBase):
