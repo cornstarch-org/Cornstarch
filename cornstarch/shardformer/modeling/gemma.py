@@ -28,12 +28,9 @@ from transformers.models.gemma.modeling_gemma import (
 
 from cornstarch.kernel.interface import convert_bit_attention_mask_to_block_mask
 from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
-from cornstarch.shardformer.layers.utils import (
-    convert_bit_attention_mask_to_full_mask,
-    repeat_attention_mask_heads,
-)
+from cornstarch.shardformer.layers.utils import repeat_attention_mask_heads
 
-flex_attention = torch.compile(flex_attention, fullgraph=True)
+# flex_attention = torch.compile(flex_attention, fullgraph=True)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
