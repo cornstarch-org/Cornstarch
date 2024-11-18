@@ -16,8 +16,8 @@ from colossalai.shardformer.policies.base_policy import (
 from torch import nn
 from transformers import PretrainedConfig
 from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
+from transformers.models.clip.configuration_clip import CLIPVisionConfig
 
-from cornstarch.models.evaclip.configuration_evaclip import EvaCLIPVisionConfig
 from cornstarch.models.evaclip.modeling_evaclip import (
     EvaCLIPVisionModel,
     EvaCLIPVisionTransformer,
@@ -36,9 +36,9 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> List[str]:
         assert isinstance(
-            config, EvaCLIPVisionConfig
-        ), f"config must be EvaCLIPVisionConfig, got {type(config)}"
-        config: EvaCLIPVisionConfig = cast(EvaCLIPVisionConfig, config)
+            config, CLIPVisionConfig
+        ), f"config must be CLIPVisionConfig, got {type(config)}"
+        config: CLIPVisionConfig = cast(CLIPVisionConfig, config)
 
         modules = []
         modules.append("embeddings")
@@ -108,7 +108,7 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
             EvaCLIPVisionTransformer,
         )
 
-        config: EvaCLIPVisionConfig = self.model.config
+        config: CLIPVisionConfig = self.model.config
         policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
         if self.shard_config.enable_sequence_parallelism:

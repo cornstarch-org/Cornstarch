@@ -147,7 +147,7 @@ class Gemma2bClass(LanguageModelClassBase):
             GemmaConfig.from_pretrained("google/gemma-2b-it"),
         )
         self.config._attn_implementation = "flash_attention_2"
-        self.config.num_key_value_heads = 2
+        self.config.num_key_value_heads = 4
 
 
 class Gemma7bClass(LanguageModelClassBase):
@@ -392,7 +392,17 @@ class PixtralVisionClass(ImageModelClassBase):
         processor = PixtralImageProcessor.from_pretrained(
             "mistral-community/pixtral-12b"
         )
-        return processor(images=[image] * batch_size, return_tensors="pt").to("cuda")
+
+        inputs = processor(images=image, return_tensors="pt").to("cuda")
+        """
+        Pixtral doesn't seem to support batch processing, hence
+        here we do some data preprocessing to make it work.
+        """
+        inputs["pixel_values"] = torch.cat(
+            [pixel_value.unsqueeze(0) for pixel_value in inputs["pixel_values"]], dim=0
+        ).repeat(batch_size, 1, 1, 1)
+
+        return inputs
 
 
 class Dinov2GiantClass(ImageModelClassBase):
