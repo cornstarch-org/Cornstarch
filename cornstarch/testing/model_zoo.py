@@ -15,6 +15,7 @@ from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2Model,
 )
 from transformers.models.gemma.modeling_gemma import GemmaConfig, GemmaForCausalLM
+from transformers.models.gemma2.modeling_gemma2 import Gemma2Config, Gemma2ForCausalLM
 from transformers.models.llama.modeling_llama import LlamaConfig, LlamaForCausalLM
 from transformers.models.mistral.modeling_mistral import (
     MistralConfig,
@@ -162,8 +163,8 @@ class Gemma7bClass(LanguageModelClassBase):
 class Gemma227bClass(LanguageModelClassBase):
     def __init__(self):
         super().__init__(
-            GemmaForCausalLM,
-            GemmaConfig.from_pretrained("google/gemma-2-27b-it"),
+            Gemma2ForCausalLM,
+            Gemma2Config.from_pretrained("google/gemma-2-27b-it"),
         )
         self.config._attn_implementation = "eager"
 
