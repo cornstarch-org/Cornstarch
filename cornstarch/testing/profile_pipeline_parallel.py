@@ -7,7 +7,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from colossalai.booster import Booster
-from colossalai.lazy import LazyInitContext
 from torch.optim import Optimizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -41,16 +40,16 @@ file_path = "profile_pipeline_result.csv"
 # model_names_to_test = [("llama_70b", "clip", "qwen2_audio")]
 model_names_to_test = [
     ("llama_70b", "clip", None),
-    ("gemma_2b", "siglip_878m", None),
+    ("gemma2_27b", "siglip_878m", None),
     ("internlm2_20b", "intern_vit_6b", None),
     ("mistral_7b", "pixtral_400m", None),
-    ("phi3_mini", "evaclip_8b", None),
+    ("phi3_small", "evaclip_8b", None),
     ("vicuna", "dinov2_1.1b", None),
-    ("qwen2_72b", "qwen2_vision_675m", None),
-    ("qwen2_7b", None, "qwen2_audio"),
+    ("qwen2_1.5b", "qwen2_vision_675m", None),
+    ("qwen2_72b", None, "qwen2_audio"),
     ("llama_8b", None, "whisper_1.5b"),
-    ("llama_8b", "qwen2_vision_675m", "qwen2_audio"),
-    ("qwen2_7b", "evaclip_8b", "whisper_1.5b"),
+    ("mixtral_8x7b", "qwen2_vision_675m", "qwen2_audio"),
+    ("qwen2_14b", "clip", "whisper_1.5b"),
 ]
 
 
@@ -136,7 +135,7 @@ class CornstarchTestingClass:
             }
         )
 
-        with LazyInitContext(default_device=torch.device("cuda")):
+        with torch.device("meta"):
             encoders = {
                 key: encoder_class.build_model()
                 for key, encoder_class in self.encoder_model_classes.items()
@@ -229,6 +228,7 @@ class CornstarchTestingClass:
         data_iter = iter([data for _ in range(num_iterations)])
 
         for i in range(num_iterations):
+            print(f"Iteration {i}")
             with torch.autograd.profiler.emit_nvtx(), torch.cuda.nvtx.range(f"iter{i}"):
                 booster.execute_pipeline(
                     data_iter,
@@ -253,6 +253,7 @@ def run_profile(
     assert plugin_type in ["cornstarch", "colocated", "replicated"]
 
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    torch.set_default_device("cuda")
     dist.init_process_group(
         backend="nccl",
         world_size=int(os.environ["WORLD_SIZE"]),
@@ -301,7 +302,7 @@ def run_profile(
         torch.cuda.synchronize()
 
     peak_memory = torch.tensor(
-        torch.cuda.max_memory_allocated() / 1024**3,
+        torch.cuda.max_memory_allocated(f"cuda:{local_rank}") / 1024**3,
         dtype=torch.float32,
         device="cuda",
     )
@@ -452,7 +453,10 @@ if __name__ == "__main__":
                 "--tp_size=4",
             ]
 
-            command = multinode_command
+            command = standalone_command + [
+                "--llm_pp_size",
+                "3",
+            ]
 
             if vision_model_name:
                 command.extend(
@@ -474,4 +478,7 @@ if __name__ == "__main__":
                 )
 
             print(f"Running: {' '.join(command)}")
-            subprocess.run(command)
+            result = subprocess.run(command)
+            if result.returncode > 0:
+                print(f"Error running command: {' '.join(command)}")
+                sys.exit(1)
