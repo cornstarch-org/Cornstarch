@@ -146,7 +146,7 @@ class Gemma2bClass(LanguageModelClassBase):
             GemmaForCausalLM,
             GemmaConfig.from_pretrained("google/gemma-2b-it"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
         self.config.num_key_value_heads = 4
 
 
@@ -156,7 +156,16 @@ class Gemma7bClass(LanguageModelClassBase):
             GemmaForCausalLM,
             GemmaConfig.from_pretrained("google/gemma-1.1-7b-it"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
+
+
+class Gemma227bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            GemmaForCausalLM,
+            GemmaConfig.from_pretrained("google/gemma-2-27b-it"),
+        )
+        self.config._attn_implementation = "eager"
 
 
 class Llama1bClass(LanguageModelClassBase):
@@ -165,7 +174,7 @@ class Llama1bClass(LanguageModelClassBase):
             LlamaForCausalLM,
             LlamaConfig.from_pretrained("meta-llama/Llama-3.2-1B"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
         self.config.tie_word_embeddings = False
 
 
@@ -175,7 +184,7 @@ class Llama3bClass(LanguageModelClassBase):
             LlamaForCausalLM,
             LlamaConfig.from_pretrained("meta-llama/Llama-3.2-3B"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
         self.config.tie_word_embeddings = False
 
 
@@ -185,7 +194,7 @@ class Llama8bClass(LanguageModelClassBase):
             LlamaForCausalLM,
             LlamaConfig.from_pretrained("meta-llama/Llama-3.1-8B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class Llama70bClass(LanguageModelClassBase):
@@ -194,7 +203,7 @@ class Llama70bClass(LanguageModelClassBase):
             LlamaForCausalLM,
             LlamaConfig.from_pretrained("meta-llama/Llama-3.1-70B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
         self.config.num_hidden_layers = 40
 
 
@@ -204,7 +213,7 @@ class Vicuna7bClass(LanguageModelClassBase):
             LlamaForCausalLM,
             LlamaConfig.from_pretrained("lmsys/vicuna-7b-v1.5"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class InternLM218bClass(LanguageModelClassBase):
@@ -213,7 +222,7 @@ class InternLM218bClass(LanguageModelClassBase):
             InternLM2ForCausalLM,
             InternLM2Config.from_pretrained("internlm/internlm2_5-1_8b"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class InternLM28bClass(LanguageModelClassBase):
@@ -222,7 +231,7 @@ class InternLM28bClass(LanguageModelClassBase):
             InternLM2ForCausalLM,
             InternLM2Config.from_pretrained("internlm/internlm2_5-1_8b"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class InternLM220bClass(LanguageModelClassBase):
@@ -231,7 +240,7 @@ class InternLM220bClass(LanguageModelClassBase):
             InternLM2ForCausalLM,
             InternLM2Config.from_pretrained("internlm/internlm2_5-20b"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class Mistral7bClass(LanguageModelClassBase):
@@ -240,7 +249,16 @@ class Mistral7bClass(LanguageModelClassBase):
             MistralForCausalLM,
             MistralConfig.from_pretrained("mistralai/Mistral-7B-Instruct-v0.3"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
+
+
+class Mixtral8x7bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            MistralForCausalLM,
+            MistralConfig.from_pretrained("mistralai/Mixtral-8x7B-Instruct-v0.1"),
+        )
+        self.config._attn_implementation = "sdpa"
 
 
 class Phi3MiniClass(LanguageModelClassBase):
@@ -249,7 +267,10 @@ class Phi3MiniClass(LanguageModelClassBase):
             Phi3ForCausalLM,
             Phi3Config.from_pretrained("microsoft/Phi-3.5-mini-instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
+        # FlexAttention doesn't support non-power-of-2 head_dim as of now.
+        # Fix hidden_size to make it work
+        self.config.hidden_size = 4096  # 32 * 128
 
 
 class Phi3SmallClass(LanguageModelClassBase):
@@ -258,7 +279,7 @@ class Phi3SmallClass(LanguageModelClassBase):
             Phi3ForCausalLM,
             Phi3Config.from_pretrained("microsoft/Phi-3-small-8k-instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
         self.config.hidden_act = "gelu"
 
 
@@ -268,7 +289,7 @@ class Qwen205bClass(LanguageModelClassBase):
             Qwen2ForCausalLM,
             Qwen2Config.from_pretrained("Qwen/Qwen2.5-0.5B"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class Qwen215bClass(LanguageModelClassBase):
@@ -277,7 +298,7 @@ class Qwen215bClass(LanguageModelClassBase):
             Qwen2ForCausalLM,
             Qwen2Config.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class Qwen23bClass(LanguageModelClassBase):
@@ -286,7 +307,7 @@ class Qwen23bClass(LanguageModelClassBase):
             Qwen2ForCausalLM,
             Qwen2Config.from_pretrained("Qwen/Qwen2.5-3B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class Qwen27bClass(LanguageModelClassBase):
@@ -295,7 +316,7 @@ class Qwen27bClass(LanguageModelClassBase):
             Qwen2ForCausalLM,
             Qwen2Config.from_pretrained("Qwen/Qwen2.5-7B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class Qwen272bClass(LanguageModelClassBase):
@@ -304,7 +325,7 @@ class Qwen272bClass(LanguageModelClassBase):
             Qwen2ForCausalLM,
             Qwen2Config.from_pretrained("Qwen/Qwen2.5-72B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
         self.config.num_hidden_layers = 40
 
 
@@ -314,7 +335,7 @@ class Qwen214bClass(LanguageModelClassBase):
             Qwen2ForCausalLM,
             Qwen2Config.from_pretrained("Qwen/Qwen2.5-14B-Instruct"),
         )
-        self.config._attn_implementation = "flash_attention_2"
+        self.config._attn_implementation = "sdpa"
 
 
 class CLIPVisionClass(ImageModelClassBase):
@@ -525,6 +546,7 @@ class WhisperSmallClass(AudioModelClassBase):
 model_to_class = {
     "gemma_2b": Gemma2bClass,
     "gemma_7b": Gemma7bClass,
+    "gemma2_27b": Gemma227bClass,
     "llama_1b": Llama1bClass,
     "llama_3b": Llama3bClass,
     "llama_8b": Llama8bClass,
@@ -533,6 +555,7 @@ model_to_class = {
     "internlm2_8b": InternLM28bClass,
     "internlm2_20b": InternLM220bClass,
     "mistral_7b": Mistral7bClass,
+    "mixtral_8x7b": Mixtral8x7bClass,
     "phi3_mini": Phi3MiniClass,
     "phi3_small": Phi3SmallClass,
     "qwen2_0.5b": Qwen205bClass,
@@ -563,6 +586,7 @@ model_to_class = {
 class_to_forward_str = {
     Gemma2bClass: "cornstarch.shardformer.modeling.gemma.GemmaModelForwards.gemma_model_forward",
     Gemma7bClass: "cornstarch.shardformer.modeling.gemma.GemmaModelForwards.gemma_model_forward",
+    Gemma227bClass: "cornstarch.shardformer.modeling.gemma2.Gemma2ModelForwards.gemma2_model_forward",
     Llama1bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
     Llama3bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
     Llama8bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
@@ -571,6 +595,7 @@ class_to_forward_str = {
     InternLM28bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
     InternLM220bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
     Mistral7bClass: "cornstarch.shardformer.modeling.mistral.MistralModelForwards.mistral_model_forward",
+    Mixtral8x7bClass: "cornstarch.shardformer.modeling.mixtral.MixtralModelForwards.mixtral_model_forward",
     Phi3MiniClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
     Phi3SmallClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
     Qwen205bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
