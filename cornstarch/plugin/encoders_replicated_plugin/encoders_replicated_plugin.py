@@ -16,7 +16,6 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
-from colossalai.lazy import LazyInitContext
 from colossalai.pipeline.schedule.one_f_one_b import OneForwardOneBackwardSchedule
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from torch.optim import Optimizer
@@ -387,8 +386,18 @@ class EncodersReplicatedMultimodalParallelPlugin(HybridParallelPlugin):
         param_info = get_param_info(optimizer)
 
         if not isinstance(model, ModelWrapper):
+            # Configure to replace layers for compatibility
+            # but without any parallelization
+            tp_size = dist.get_world_size(self.tp_group)
             for encoder_module in model.encoders.values():
-                LazyInitContext.materialize(encoder_module)
+                encoder_plugin = ModalParallelPlugin(tp_size=tp_size)
+                encoder_shard_config = ShardConfig(
+                    tensor_parallel_process_group=self.tp_group,
+                    enable_tensor_parallelism=tp_size > 1,
+                )
+                encoder_plugin.configure(
+                    encoder_module, encoder_shard_config, self.stage_manager
+                )
 
             llm_shard_config = replace(
                 self.shard_config,
