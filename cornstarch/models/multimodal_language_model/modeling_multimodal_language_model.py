@@ -662,8 +662,9 @@ class Qwen2VLModel(PretrainedVisionLanguageModel):
         inputs: dict,
         output: torch.Tensor,
     ) -> BaseModelOutput | tuple:
-        assert isinstance(output, torch.Tensor)
-        return (output,)
+        if isinstance(output, torch.Tensor):
+            return (output,)
+        return output
 
 
 class MultimodalProjector(PreTrainedModel):
