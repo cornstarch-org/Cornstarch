@@ -16,6 +16,9 @@ class Qwen2VisionModelForwards:
         image_grid_thw: Optional[torch.LongTensor] = None,
         pixel_values_videos: Optional[torch.FloatTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
+        return_dict: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         grid_thw: Optional[torch.LongTensor] = None,
         rotary_pos_emb: Optional[torch.FloatTensor] = None,
@@ -25,6 +28,11 @@ class Qwen2VisionModelForwards:
         stage_manager = shard_config.pipeline_stage_manager
 
         if stage_manager is None or stage_manager.is_first_stage():
+            if hidden_states.ndim == 3:
+                # Slice-based microbatching leaves one more dimension
+                hidden_states.squeeze_(0)
+                grid_thw.squeeze_(0)
+
             if pixel_values is not None:
                 hidden_states = pixel_values
                 grid_thw = image_grid_thw

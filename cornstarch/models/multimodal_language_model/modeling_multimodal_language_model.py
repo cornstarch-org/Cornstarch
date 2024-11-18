@@ -642,7 +642,7 @@ class Qwen2VLModel(PretrainedVisionLanguageModel):
 
     @staticmethod
     def preprocess_vision_callback(
-        visual_dtype: torch.dtype, inputs: dict[str, Any]
+        inputs: dict[str, Any], visual_dtype: torch.dtype
     ) -> dict[str, Any]:
         new_inputs = {}
 

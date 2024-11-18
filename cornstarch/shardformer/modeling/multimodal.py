@@ -1,6 +1,7 @@
 import inspect
 from typing import Optional
 
+import torch
 from transformers.modeling_outputs import BaseModelOutput, ModelOutput
 
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
@@ -60,6 +61,9 @@ class ModalModulePipelineForwards:
 
         if stage_manager.is_last_stage(check_only_in_modal=True):
             outputs = self.postprocess_module_callback(kwargs, outputs)
+
+            if isinstance(outputs, torch.Tensor):
+                outputs = (outputs,)
 
             assert isinstance(outputs, (tuple, ModelOutput)), (
                 f"Expected the model to return a tuple or ModelOutput, "
