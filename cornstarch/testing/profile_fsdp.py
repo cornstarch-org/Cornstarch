@@ -24,17 +24,17 @@ file_path = "profile_fsdp_result.csv"
 
 # model_names_to_test = [("llama_8b", "clip", "qwen2_audio")]
 model_names_to_test = [
-    ("llama_8b", "clip", None),
-    ("gemma_2b", "siglip_878m", None),
+    ("llama_70b", "clip", None),
+    ("gemma2_27b", "siglip_878m", None),
     ("internlm2_20b", "intern_vit_6b", None),
     ("mistral_7b", "pixtral_400m", None),
-    ("phi3_mini", "evaclip_8b", None),
+    ("phi3_small", "evaclip_8b", None),
     ("vicuna", "dinov2_1.1b", None),
-    ("qwen2_7b", None, "qwen2_audio"),
-    ("qwen2_7b", "qwen2_vision_675m", None),
+    ("qwen2_1.5b", "qwen2_vision_675m", None),
+    ("qwen2_72b", None, "qwen2_audio"),
     ("llama_8b", None, "whisper_1.5b"),
-    ("llama_8b", "siglip_878m", "whisper_1.5b"),
-    ("qwen2_7b", "qwen2_vision_675m", "qwen2_audio"),
+    ("mixtral_8x7b", "qwen2_vision_675m", "qwen2_audio"),
+    ("qwen2_14b", "clip", "whisper_1.5b"),
 ]
 
 
@@ -174,7 +174,7 @@ def run_profile(
         torch.cuda.synchronize()
 
     peak_memory = torch.tensor(
-        torch.cuda.max_memory_allocated() / 1024**3,
+        torch.cuda.max_memory_allocated(f"cuda:{local_rank}") / 1024**3,
         dtype=torch.float32,
         device="cuda",
     )
@@ -279,7 +279,7 @@ if __name__ == "__main__":
                 sys.argv[0],  # The current script file
             ]
 
-            command = multinode_command + [
+            command = standalone_command + [
                 f"--llm_model_name={llm_model_name}",
             ]
 
