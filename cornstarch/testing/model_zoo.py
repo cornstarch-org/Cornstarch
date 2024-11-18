@@ -28,8 +28,8 @@ from transformers.models.pixtral.modeling_pixtral import (
 )
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Config, Qwen2ForCausalLM
 from transformers.models.qwen2_audio.modeling_qwen2_audio import (
+    Qwen2AudioConfig,
     Qwen2AudioEncoder,
-    Qwen2AudioEncoderConfig,
 )
 from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
@@ -54,6 +54,8 @@ from cornstarch.models.internlm2.modeling_internlm2 import (
 )
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
+    MultimodalProjector,
+    MultimodalProjectorConfig,
 )
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
     Qwen2VLModel,
@@ -505,6 +507,7 @@ class Qwen2Vision7bClass(ImageModelClassBase):
                 Qwen2VLModel.preprocess_vision_callback,
                 visual_dtype=model.get_dtype(),
             ),
+            postprocess_module_callback=Qwen2VLModel.postprocess_vision_callback,
         )
 
     def data(self, batch_size: int) -> dict[str, torch.Tensor]:
@@ -529,7 +532,9 @@ class Qwen2AudioEncoderClass(AudioModelClassBase):
     def __init__(self):
         super().__init__(
             Qwen2AudioEncoder,
-            Qwen2AudioEncoderConfig.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct"),
+            Qwen2AudioConfig.from_pretrained(
+                "Qwen/Qwen2-Audio-7B-Instruct"
+            ).audio_config,
         )
         self.config._attn_implementation = "eager"
 

@@ -629,6 +629,7 @@ class Qwen2VLModel(PretrainedVisionLanguageModel):
             preprocess_callback=functools.partial(
                 self.preprocess_vision_callback, visual_dtype=model.visual.get_dtype()
             ),
+            postprocess_module_callback=self.postprocess_vision_callback,
         )
 
         delattr(model, "visual")
@@ -655,6 +656,14 @@ class Qwen2VLModel(PretrainedVisionLanguageModel):
 
         new_inputs["hidden_states"] = new_inputs["hidden_states"].to(visual_dtype)
         return new_inputs
+
+    @staticmethod
+    def postprocess_vision_callback(
+        inputs: dict,
+        output: torch.Tensor,
+    ) -> BaseModelOutput | tuple:
+        assert isinstance(output, torch.Tensor)
+        return (output,)
 
 
 class MultimodalProjector(PreTrainedModel):
@@ -1002,18 +1011,12 @@ class MultimodalModel(nn.Module):
                     != modal_module.module.config.hidden_size
                     or projector_config.out_features
                     != language_model.config.hidden_size
-                    or projector_config.encoder_model_type
-                    != modal_module.module.config.model_type
-                    or projector_config.language_model_type
-                    != language_model.config.model_type
                 ):
                     raise ValueError(
                         f"Projector configuration for {modal_key} encoder is incompatible "
                         "to the current configuration: "
                         f"in_features (expected: {modal_module.module.config.hidden_size}, got: {projector_config.in_features}), "
-                        f"out_features (expected: {language_model.config.hidden_size}, got: {projector_config.out_features}), "
-                        f"encoder_model_type (expected: {modal_module.module.config.model_type}, got: {projector_config.encoder_model_type=}), "
-                        f"language_model_type (expected: {language_model.config.model_type}, got: {projector_config.language_model_type=})."
+                        f"out_features (expected: {language_model.config.hidden_size}, got: {projector_config.out_features})."
                     )
 
             self.add_module(f"{modal_key}_encoder", modal_module)
