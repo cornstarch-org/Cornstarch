@@ -254,6 +254,21 @@ class Mistral7bClass(LanguageModelClassBase):
         )
         self.config._attn_implementation = "flash_attention_2"
 
+    def data(self, batch_size: int, seq_len: int) -> dict[str, torch.Tensor]:
+        data = super().data(batch_size, seq_len)
+        data["use_cache"] = torch.tensor([False] * batch_size, dtype=torch.bool)
+
+        return data
+
+
+class Mistral123bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            MistralForCausalLM,
+            MistralConfig.from_pretrained("SillyTilly/Mistral-Large-Instruct-2407"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+
 
 class Mixtral8x7bClass(LanguageModelClassBase):
     def __init__(self):
@@ -578,6 +593,7 @@ model_to_class = {
     "internlm2_8b": InternLM28bClass,
     "internlm2_20b": InternLM220bClass,
     "mistral_7b": Mistral7bClass,
+    "mistral_123b": Mistral123bClass,
     "mixtral_8x7b": Mixtral8x7bClass,
     "phi3_mini": Phi3MiniClass,
     "phi3_small": Phi3SmallClass,
@@ -619,6 +635,7 @@ class_to_forward_str = {
     InternLM28bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
     InternLM220bClass: "cornstarch.shardformer.modeling.internlm2.InternLM2ModelForwards.internlm2_model_forward",
     Mistral7bClass: "cornstarch.shardformer.modeling.mistral.MistralModelForwards.mistral_model_forward",
+    Mistral123bClass: "cornstarch.shardformer.modeling.mistral.MistralModelForwards.mistral_model_forward",
     Mixtral8x7bClass: "cornstarch.shardformer.modeling.mixtral.MixtralModelForwards.mixtral_model_forward",
     Phi3MiniClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
     Phi3SmallClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
