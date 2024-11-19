@@ -39,6 +39,7 @@ from transformers.models.siglip.modeling_siglip import (
     SiglipVisionConfig,
     SiglipVisionModel,
 )
+from transformers.models.vit.modeling_vit import ViTConfig, ViTModel
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
 from cornstarch.models.evaclip.modeling_evaclip import (
@@ -54,8 +55,6 @@ from cornstarch.models.internlm2.modeling_internlm2 import (
 )
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
-    MultimodalProjector,
-    MultimodalProjectorConfig,
 )
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
     Qwen2VLModel,
@@ -365,6 +364,22 @@ class Qwen232bClass(LanguageModelClassBase):
         self.config._attn_implementation = "flash_attention_2"
 
 
+class ViT22bClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            ViTModel,
+            ViTConfig(
+                hidden_size=6144,
+                num_hidden_layers=48,
+                intermediate_size=24576,
+                num_attention_heads=48,
+                image_size=512,
+                patch_size=16,
+            ),
+        )
+        self.config._attn_implementation = "eager"
+
+
 class CLIPVisionClass(ImageModelClassBase):
     def __init__(self):
         super().__init__(
@@ -605,6 +620,7 @@ model_to_class = {
     "qwen2_32b": Qwen232bClass,
     "qwen2_72b": Qwen272bClass,
     "vicuna": Vicuna7bClass,
+    "vit_22b": ViT22bClass,
     "clip": CLIPVisionClass,
     "evaclip_8b": EvaCLIPVision8bClass,
     "evaclip_18b": EvaCLIPVision18bClass,
@@ -647,6 +663,7 @@ class_to_forward_str = {
     Qwen232bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
     Qwen272bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
     Vicuna7bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
+    ViT22bClass: "cornstarch.shardformer.modeling.vit.ViTModelForwards.vit_model_forward",
     CLIPVisionClass: "cornstarch.shardformer.modeling.clip.CLIPVisionModelForwards.clip_vision_transformer_forward",
     EvaCLIPVision8bClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
     EvaCLIPVision18bClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
