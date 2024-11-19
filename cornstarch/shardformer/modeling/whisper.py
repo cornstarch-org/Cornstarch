@@ -11,7 +11,7 @@ class WhisperModelForwards:
     @staticmethod
     def whisper_encoder_forward(
         self: WhisperEncoder,
-        input_features: torch.LongTensor = None,
+        input_features: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,

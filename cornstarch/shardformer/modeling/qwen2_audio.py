@@ -13,7 +13,7 @@ class Qwen2AudioModelForwards:
     @staticmethod
     def qwen2_audio_encoder_forward(
         self: Qwen2AudioEncoder,
-        input_features: torch.LongTensor,
+        input_features: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
@@ -24,16 +24,6 @@ class Qwen2AudioModelForwards:
         all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: Optional[ShardConfig] = None,
     ) -> Union[Tuple, BaseModelOutput]:
-        expected_seq_length = (
-            self.config.max_source_positions
-            * self.conv1.stride[0]
-            * self.conv2.stride[0]
-        )
-        if input_features.shape[-1] != expected_seq_length:
-            raise ValueError(
-                f"Qwen2Audio expects the mel input features to be of length {expected_seq_length}, but found {input_features.shape[-1]}. Make sure to pad the input mel features to {expected_seq_length}."
-            )
-
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -52,6 +42,16 @@ class Qwen2AudioModelForwards:
 
         # Process inputs if at the first stage of encoder.
         if stage_manager is None or stage_manager.is_first_stage():
+            expected_seq_length = (
+                self.config.max_source_positions
+                * self.conv1.stride[0]
+                * self.conv2.stride[0]
+            )
+            if input_features.shape[-1] != expected_seq_length:
+                raise ValueError(
+                    f"Qwen2Audio expects the mel input features to be of length {expected_seq_length}, but found {input_features.shape[-1]}. Make sure to pad the input mel features to {expected_seq_length}."
+                )
+
             # Ignore copy
             input_features = input_features.to(
                 dtype=self.conv1.weight.dtype, device=self.conv1.weight.device
