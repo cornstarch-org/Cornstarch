@@ -81,12 +81,6 @@ _POLICY_LIST = {
     "transformers.models.vit.modeling_vit.ViTModel": PolicyLocation(
         file_name="vit", class_name="ViTModelPolicy"
     ),
-    "transformers.models.vit.modeling_vit.ViTForImageClassification": PolicyLocation(
-        file_name="vit", class_name="ViTForImageClassificationPolicy"
-    ),
-    "transformers.models.vit.modeling_vit.ViTForMaskedImageModeling": PolicyLocation(
-        file_name="vit", class_name="ViTForMaskedImageModelingPolicy"
-    ),
     # OPT
     "transformers.models.opt.modeling_opt.OPTModel": PolicyLocation(
         file_name="opt", class_name="OPTModelPolicy"

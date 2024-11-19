@@ -14,4 +14,5 @@ from .qwen2 import Qwen2ForCausalLMBase, Qwen2ModelBase
 from .qwen2_audio import Qwen2AudioEncoderBase
 from .qwen2_vision import Qwen2VisionTransformerBase
 from .siglip import SiglipModelBase
+from .vit import ViTModelBase
 from .whisper import WhisperEncoderBase

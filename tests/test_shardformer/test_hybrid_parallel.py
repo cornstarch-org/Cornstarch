@@ -29,6 +29,7 @@ from .model_zoo import (
     Qwen2ModelBase,
     Qwen2VisionTransformerBase,
     SiglipModelBase,
+    ViTModelBase,
     WhisperEncoderBase,
 )
 from .utils import ColossalaiHybridParallelBase
@@ -41,6 +42,7 @@ vision_models = dict(
     intern_vit=InternVisonModelBase,
     pixtral=PixtralVisionModelBase,
     qwen2_vision=Qwen2VisionTransformerBase,
+    vit=ViTModelBase,
 )
 
 language_models = dict(
