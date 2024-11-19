@@ -1,6 +1,7 @@
 import csv
 import os
 import re
+import time
 from typing import Any, Callable
 
 import torch
@@ -39,22 +40,23 @@ file_path = "profile_pipeline_result.csv"
 
 # model_names_to_test = [("llama_70b", "clip", "qwen2_audio")]
 model_names_to_test = [
-    ("llama_70b", "clip", None),
-    ("gemma2_27b", "siglip_878m", None),
-    ("internlm2_20b", "intern_vit_6b", None),
-    ("mistral_7b", "pixtral_400m", None),
-    ("phi3_small", "evaclip_8b", None),
-    ("vicuna", "dinov2_1.1b", None),
-    ("qwen2_1.5b", "qwen2_vision_675m", None),
-    ("qwen2_72b", None, "qwen2_audio"),
-    ("llama_8b", None, "whisper_1.5b"),
-    ("mixtral_8x7b", "qwen2_vision_675m", "qwen2_audio"),
-    ("qwen2_14b", "clip", "whisper_1.5b"),
+    # ("llama_70b", "clip", None),
+    # ("gemma2_27b", "siglip_878m", None),
+    # ("internlm2_20b", "intern_vit_6b", None),
+    ("mistral_7b", "vit_22b", None),
+    # ("mistral_7b", "pixtral_400m", None),
+    # ("phi3_small", "evaclip_8b", None),
+    # ("vicuna", "dinov2_1.1b", None),
+    # ("qwen2_32b", "qwen2_vision_675m", None),
+    # ("qwen2_72b", None, "qwen2_audio"),
+    # ("llama_8b", None, "whisper_1.5b"),
+    # ("mixtral_8x7b", "qwen2_vision_675m", "qwen2_audio"),
+    # ("qwen2_14b", "clip", "whisper_1.5b"),
 ]
 
 
 class CornstarchTestingClass:
-    num_microbatches: int = 20
+    num_microbatches: int = 24
     microbatch_size: int = 1
 
     def __init__(
@@ -146,11 +148,12 @@ class CornstarchTestingClass:
                 language_model=self.llm_model_class.build_model(),
             )
 
+            model.gradient_checkpointing_enable({"use_reentrant": False})
+
         for encoder in encoders.values():
             encoder.train(module=False, projector=True)
             encoder.module.requires_grad_(False)
-            if encoder.projector is not None:
-                encoder.projector.requires_grad_(True)
+            encoder.projector.requires_grad_(True)
 
         model.language_model.train(mode=False)
         model.language_model.requires_grad_(False)
@@ -219,7 +222,7 @@ class CornstarchTestingClass:
         criterion: Callable[[torch.Tensor], torch.Tensor],
         booster: Booster,
     ):
-        num_iterations = 5
+        num_iterations = 2
 
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
@@ -288,15 +291,20 @@ def run_profile(
     manager = TimerContextManager()
 
     if plugin_type == "cornstarch":
-        measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
+        fb_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
+        fwd_measure_name = (
+            "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.forward_step"
+        )
     elif plugin_type == "colocated":
-        measure_name = "cornstarch.plugin.encoders_colocated_plugin.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
+        fb_measure_name = "cornstarch.plugin.encoders_colocated_plugin.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
+        fwd_measure_name = "cornstarch.plugin.encoders_colocated_plugin.one_f_one_b.OneForwardOneBackwardSchedule.forward_step"
     elif plugin_type == "replicated":
-        measure_name = "colossalai.pipeline.schedule.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
+        fb_measure_name = "colossalai.pipeline.schedule.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
+        fwd_measure_name = "colossalai.pipeline.schedule.one_f_one_b.OneForwardOneBackwardSchedule.forward_step"
     else:
         raise ValueError(f"Unknown plugin type {plugin_type}")
 
-    with manager.measure(measure_name):
+    with manager.measure([fb_measure_name, fwd_measure_name]):
         cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
 
         torch.cuda.synchronize()
@@ -314,13 +322,26 @@ def run_profile(
     min_peak_memory = gathered_peak_memory.min().item()
     avg_peak_memory = gathered_peak_memory.mean().item()
 
-    if local_rank == 0:
-        elapsed_times = manager.get_elapsed_times()
-        average_exec_time = sum(time for _, time in elapsed_times[1:]) / (
-            len(elapsed_times) - 1
-        )
+    elapsed_times = manager.get_elapsed_times()
 
-        with open(file_path, "a", newline="") as f:
+    tp_rank = dist.get_rank(booster.plugin.tp_group)
+    if tp_rank == 0:
+        try:
+            pp_group = booster.plugin.pp_groups[0]
+        except AttributeError:
+            pp_group = booster.plugin.pp_group
+        fwd_times = elapsed_times[fwd_measure_name]
+        average_fwd_time = torch.tensor(
+            sum(fwd_times[1:]) / (len(fwd_times) - 1),
+            device="cuda",
+        )
+        average_fwd_times = torch.empty(dist.get_world_size(pp_group), device="cuda")
+        dist.all_gather_into_tensor(average_fwd_times, average_fwd_time, group=pp_group)
+
+        fb_times = elapsed_times[fb_measure_name]
+        average_exec_time = sum(fb_times[1:]) / (len(fb_times) - 1)
+
+        with open(f"pp{dist.get_rank(pp_group)}_{file_path}", "a", newline="") as f:
             writer = csv.DictWriter(
                 f,
                 fieldnames=[
@@ -329,6 +350,7 @@ def run_profile(
                     "vision_model",
                     "audio_model",
                     "exec_time (ms)",
+                    "fwd_time_per_pp (ms)",
                     "peak_memory (GB)",
                     "min_peak_memory (GB)",
                     "max_peak_memory (GB)",
@@ -344,6 +366,7 @@ def run_profile(
                     "vision_model": vision_model_name,
                     "audio_model": audio_model_name,
                     "exec_time (ms)": average_exec_time,
+                    "fwd_time_per_pp (ms)": str(average_fwd_times.tolist()),
                     "peak_memory (GB)": avg_peak_memory,
                     "min_peak_memory (GB)": min_peak_memory,
                     "max_peak_memory (GB)": max_peak_memory,
@@ -424,61 +447,65 @@ if __name__ == "__main__":
         import subprocess
         import sys
 
-        plugin_type = "colocated"
+        # plugin_type = "colocated"
 
-        for llm_model_name, vision_model_name, audio_model_name in model_names_to_test:
-            if vision_model_name is None and audio_model_name is None:
-                continue
+        for plugin_type in ["colocated"]:
+            for (
+                llm_model_name,
+                vision_model_name,
+                audio_model_name,
+            ) in model_names_to_test:
+                if vision_model_name is None and audio_model_name is None:
+                    continue
 
-            standalone_command = [
-                "torchrun",
-                "--standalone",
-                "--nproc_per_node=4",
-                sys.argv[0],  # The current script file
-                f"--plugin_type={plugin_type}",
-                f"--llm_model_name={llm_model_name}",
-                "--tp_size=1",
-            ]
+                standalone_command = [
+                    "torchrun",
+                    "--standalone",
+                    "--nproc_per_node=4",
+                    sys.argv[0],  # The current script file
+                    "--tp_size=1",
+                    f"--llm_pp_size={3 if plugin_type == 'colocated' else 4}",
+                ]
 
-            multinode_command = [
-                "torchrun",
-                f"--nnodes={len(node_hostnames)}",
-                "--nproc_per_node=4",
-                "--rdzv_backend=c10d",
-                f"--rdzv_endpoint={master_node_rdzv_backend}",
-                f"--node-rank={node_hostnames.index(socket.gethostname())}",
-                sys.argv[0],  # The current script file
-                f"--plugin_type={plugin_type}",
-                f"--llm_model_name={llm_model_name}",
-                "--tp_size=4",
-            ]
+                multinode_command = [
+                    "torchrun",
+                    f"--nnodes={len(node_hostnames)}",
+                    "--nproc_per_node=4",
+                    "--rdzv_backend=c10d",
+                    f"--rdzv_endpoint={master_node_rdzv_backend}",
+                    f"--node-rank={node_hostnames.index(socket.gethostname())}",
+                    sys.argv[0],  # The current script file
+                    "--tp_size=4",
+                    f"--llm_pp_size={5 if plugin_type == 'colocated' else 6}",
+                ]
 
-            command = standalone_command + [
-                "--llm_pp_size",
-                "3",
-            ]
+                command = multinode_command + [
+                    f"--plugin_type={plugin_type}",
+                    f"--llm_model_name={llm_model_name}",
+                ]
 
-            if vision_model_name:
-                command.extend(
-                    [
-                        "--vision_model_name",
-                        vision_model_name,
-                        "--vision_pp_size",
-                        "1",
-                    ]
-                )
-            if audio_model_name:
-                command.extend(
-                    [
-                        "--audio_model_name",
-                        audio_model_name,
-                        "--audio_pp_size",
-                        "1",
-                    ]
-                )
+                if vision_model_name:
+                    command.extend(
+                        [
+                            "--vision_model_name",
+                            vision_model_name,
+                            "--vision_pp_size",
+                            "1",
+                        ]
+                    )
+                if audio_model_name:
+                    command.extend(
+                        [
+                            "--audio_model_name",
+                            audio_model_name,
+                            "--audio_pp_size",
+                            "1",
+                        ]
+                    )
 
-            print(f"Running: {' '.join(command)}")
-            result = subprocess.run(command)
-            if result.returncode > 0:
-                print(f"Error running command: {' '.join(command)}")
-                sys.exit(1)
+                print(f"Running: {' '.join(command)}")
+                time.sleep(5)
+                result = subprocess.run(command)
+                if result.returncode > 0:
+                    print(f"Error running command: {' '.join(command)}")
+                    sys.exit(1)

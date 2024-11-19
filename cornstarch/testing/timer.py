@@ -57,67 +57,72 @@ class TimerContextManager:
         return wrapped_function
 
     @contextlib.contextmanager
-    def measure(self, full_function_path: str):
+    def measure(self, full_function_paths: str | list[str]):
         """
         Wrap the target function with the wrapper and measure the elapsed time.
         When it is done, restore the original function.
 
         For the same function, only wrap once; otherwise it raises a ValueError.
         """
-        self.logger.debug(f"Measuring {full_function_path}")
+        self.logger.debug(f"Measuring {full_function_paths}")
 
-        # Check if it is already wrapped. If not, wrap it.
-        if full_function_path in self.original_functions:
-            raise ValueError(f"{full_function_path} is already wrapped. ")
+        if isinstance(full_function_paths, str):
+            full_function_paths = [full_function_paths]
 
-        module_path = full_function_path
-        attr_chain: list[str] = []
-        while True:
-            try:
-                module = importlib.import_module(module_path)
-                break
-            except ImportError:
-                if "." not in module_path:
-                    raise
-                module_path, attr = module_path.rsplit(".", 1)
-                attr_chain.insert(0, attr)
-        obj: Any = module
-        for attr in attr_chain[:-1]:
-            obj = getattr(obj, attr)
-        parent: Any = obj
-        original_function: Callable = getattr(parent, attr_chain[-1])
+        for full_function_path in full_function_paths:
+            # Check if it is already wrapped. If not, wrap it.
+            if full_function_path in self.original_functions:
+                raise ValueError(f"{full_function_path} is already wrapped. ")
 
-        self.original_functions[full_function_path] = (
-            parent,
-            attr_chain[-1],
-            original_function,
-        )
-        wrapped_function: Callable = self.wrapper(original_function, full_function_path)
-        setattr(parent, attr_chain[-1], wrapped_function)
+            module_path = full_function_path
+            attr_chain: list[str] = []
+            while True:
+                try:
+                    module = importlib.import_module(module_path)
+                    break
+                except ImportError:
+                    if "." not in module_path:
+                        raise
+                    module_path, attr = module_path.rsplit(".", 1)
+                    attr_chain.insert(0, attr)
+            obj: Any = module
+            for attr in attr_chain[:-1]:
+                obj = getattr(obj, attr)
+            parent: Any = obj
+            original_function: Callable = getattr(parent, attr_chain[-1])
+
+            self.original_functions[full_function_path] = (
+                parent,
+                attr_chain[-1],
+                original_function,
+            )
+            wrapped_function: Callable = self.wrapper(
+                original_function, full_function_path
+            )
+            setattr(parent, attr_chain[-1], wrapped_function)
 
         try:
             yield
         finally:
             # Restore the original function.
-            assert full_function_path in self.original_functions
-            parent, last_attr, original_function = self.original_functions.pop(
-                full_function_path
-            )
-            setattr(parent, last_attr, original_function)
+            for full_function_path in list(self.original_functions):
+                assert full_function_path in self.original_functions
+                parent, last_attr, original_function = self.original_functions.pop(
+                    full_function_path
+                )
+                setattr(parent, last_attr, original_function)
 
-    def get_elapsed_times(self) -> list[tuple[str, float]]:
+    def get_elapsed_times(self) -> dict[str, list[float]]:
         """
         Get ALL elasped times. As elasped time is measured with torch.cuda.Event,
         torch.cuda.synchronize() must be called to get the elapsed time.
         """
         torch.cuda.synchronize()
-        elasped_times: list[tuple[str, float]] = []
-        num_events_per_function: dict[str, int] = defaultdict(int)
+        elasped_times = defaultdict(list)
+
         for event in self.events:
             full_function_path, start_event, end_event = event
-            elasped_time = start_event.elapsed_time(end_event)
-            key = f"{full_function_path}#{num_events_per_function[full_function_path]}"
-            elasped_times.append((key, elasped_time))
-            num_events_per_function[full_function_path] += 1
+            elapsed_time = start_event.elapsed_time(end_event)
+            elasped_times[full_function_path].append(elapsed_time)
 
         return elasped_times

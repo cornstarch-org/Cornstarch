@@ -1,11 +1,13 @@
 import csv
 import os
 import socket
+import time
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.fsdp import fully_shard
+from torch.distributed.tensor.device_mesh import init_device_mesh
 
 from cornstarch.models.multimodal_language_model import (
     MultimodalModel,
@@ -39,7 +41,7 @@ model_names_to_test = [
 
 
 class FSDPTestingClass:
-    num_microbatches: int = 20
+    num_microbatches: int = 24
     microbatch_size: int = 1
 
     def __init__(
@@ -68,12 +70,6 @@ class FSDPTestingClass:
                 for key, encoder_class in self.encoder_model_classes.items()
             }
 
-            if (
-                "vision" in encoders
-                and self.encoder_model_classes["vision"].__class__ == Qwen2Vision7bClass
-            ):
-                module = encoders["vision"]
-
             model = MultimodalModel(
                 encoders=encoders,
                 language_model=self.llm_model_class.build_model(),
@@ -82,11 +78,22 @@ class FSDPTestingClass:
         for encoder in encoders.values():
             encoder.train(module=False, projector=True)
             encoder.module.requires_grad_(False)
-            if encoder.projector is not None:
-                encoder.projector.requires_grad_(True)
+            encoder.projector.requires_grad_(True)
+            try:
+                # use_reentrant=False is neccesary for gradient checkpointing + partial freeze
+                encoder.module.gradient_checkpointing_enable({"use_reentrant": False})
+            except ValueError:
+                # If some model doesn't support gradient checkpointing
+                pass
 
         model.language_model.train(mode=False)
         model.language_model.requires_grad_(False)
+        try:
+            # use_reentrant=False is neccesary for gradient checkpointing + partial freeze
+            model.language_model.gradient_checkpointing_enable({"use_reentrant": False})
+        except ValueError:
+            # If some model doesn't support gradient checkpointing
+            pass
         token_ids = {
             "vision": 44,
             "audio": 55,
@@ -95,19 +102,23 @@ class FSDPTestingClass:
             {key: value for key, value in token_ids.items() if key in encoders}
         )
 
+        device_mesh = init_device_mesh("cuda", mesh_shape=(dist.get_world_size(),))
         layer_lists = [
             module for module in model.modules() if isinstance(module, nn.ModuleList)
         ]
-
         for layer_list in layer_lists:
             for layer_id, module in enumerate(layer_list):
 
                 reshard_after_forward = layer_id < len(layer_list) - 1
 
-                fully_shard(module, reshard_after_forward=reshard_after_forward)
+                fully_shard(
+                    module,
+                    reshard_after_forward=reshard_after_forward,
+                    mesh=device_mesh,
+                )
         for encoder in model.encoders.values():
-            fully_shard(encoder, reshard_after_forward=True)
-        fully_shard(model, reshard_after_forward=True)
+            fully_shard(encoder, reshard_after_forward=True, mesh=device_mesh)
+        fully_shard(model, reshard_after_forward=True, mesh=device_mesh)
 
         model.to_empty(device="cuda")
 
@@ -116,6 +127,7 @@ class FSDPTestingClass:
     def microbatch_forward(self, model: nn.Module, data: dict):
         assert self.num_microbatches % dist.get_world_size() == 0
         num_microbatches_per_gpu = self.num_microbatches // dist.get_world_size()
+
         with torch.autograd.profiler.emit_nvtx():
             for i in range(num_microbatches_per_gpu):
                 model.set_requires_gradient_sync(i == num_microbatches_per_gpu - 1)
@@ -132,6 +144,14 @@ class FSDPTestingClass:
         torch.cuda.manual_seed(0)
 
         data = self.data()
+
+        # Special data handling for pixtral/qwen2vl
+        if (
+            "vision" in self.encoder_model_classes
+            and self.encoder_model_classes["vision"].__class__ == Qwen2Vision7bClass
+        ):
+            data["pixel_values"].squeeze_(0)
+            data["image_grid_thw"].squeeze_(0)
 
         for i in range(num_iterations):
             print(f"Iteration {i}")
@@ -168,7 +188,8 @@ def run_profile(
 
     manager = TimerContextManager()
 
-    with manager.measure(f"{__name__}.FSDPTestingClass.microbatch_forward"):
+    measure_name = f"{__name__}.FSDPTestingClass.microbatch_forward"
+    with manager.measure(measure_name):
         fsdp_class.run_multimodal_model(model)
 
         torch.cuda.synchronize()
@@ -187,10 +208,8 @@ def run_profile(
     avg_peak_memory = gathered_peak_memory.mean().item()
 
     if local_rank == 0:
-        elapsed_times = manager.get_elapsed_times()
-        average_exec_time = sum(time for _, time in elapsed_times[1:]) / (
-            len(elapsed_times) - 1
-        )
+        elapsed_times = manager.get_elapsed_times()[measure_name]
+        average_exec_time = sum(elapsed_times[1:]) / (len(elapsed_times) - 1)
 
         with open(file_path, "a", newline="") as f:
             writer = csv.DictWriter(
@@ -279,7 +298,7 @@ if __name__ == "__main__":
                 sys.argv[0],  # The current script file
             ]
 
-            command = standalone_command + [
+            command = multinode_command + [
                 f"--llm_model_name={llm_model_name}",
             ]
 
@@ -289,4 +308,8 @@ if __name__ == "__main__":
                 command.extend(["--audio_model_name", audio_model_name])
 
             print(f"Running: {' '.join(command)}")
-            subprocess.run(command)
+            time.sleep(5)
+            result = subprocess.run(command)
+            # if result.returncode > 0:
+            #     print(f"Error running command: {' '.join(command)}")
+            #     sys.exit(1)
