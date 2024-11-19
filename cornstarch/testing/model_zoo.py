@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import math
 from abc import ABC, abstractmethod
 from types import MethodType
 from typing import Type
@@ -102,16 +103,20 @@ class LanguageModelClassBase(ModelClassBase):
 
 
 class ImageModelClassBase(ModelClassBase):
-    def data(self, batch_size: int) -> dict[str, torch.Tensor]:
-        device = torch.device("cuda")
+    def data(
+        self, batch_size: int, image_size: tuple[int, int]
+    ) -> dict[str, torch.Tensor]:
+        num_chunks = math.ceil(image_size[0] / self.config.image_size) * math.ceil(
+            image_size[1] / self.config.image_size
+        )
         data = {
             "pixel_values": torch.randn(
-                batch_size,
+                batch_size * num_chunks,
                 self.config.num_channels,
                 self.config.image_size,
                 self.config.image_size,
                 dtype=torch.bfloat16,
-                device=device,
+                device=torch.device("cuda"),
                 requires_grad=False,
             )
         }
@@ -124,14 +129,13 @@ class ImageModelClassBase(ModelClassBase):
 
 class AudioModelClassBase(ModelClassBase):
     def data(self, batch_size: int) -> dict[str, torch.Tensor]:
-        device = torch.device("cuda")
         data = {
             "input_features": torch.randn(
                 batch_size,
                 self.config.num_mel_bins,
                 self.config.max_source_positions * 2,
                 dtype=torch.bfloat16,
-                device=device,
+                device=torch.device("cuda"),
                 requires_grad=False,
             )
         }
@@ -278,6 +282,15 @@ class Mixtral8x7bClass(LanguageModelClassBase):
         self.config._attn_implementation = "flash_attention_2"
 
 
+class Mixtral8x22bClass(LanguageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            MistralForCausalLM,
+            MistralConfig.from_pretrained("mistralai/Mixtral-8x22B-Instruct-v0.1"),
+        )
+        self.config._attn_implementation = "flash_attention_2"
+
+
 class Phi3MiniClass(LanguageModelClassBase):
     def __init__(self):
         super().__init__(
@@ -373,8 +386,8 @@ class ViT22bClass(ImageModelClassBase):
                 num_hidden_layers=48,
                 intermediate_size=24576,
                 num_attention_heads=48,
-                image_size=512,
-                patch_size=16,
+                image_size=224,
+                patch_size=14,
             ),
         )
         self.config._attn_implementation = "eager"
@@ -610,6 +623,7 @@ model_to_class = {
     "mistral_7b": Mistral7bClass,
     "mistral_123b": Mistral123bClass,
     "mixtral_8x7b": Mixtral8x7bClass,
+    "mixtral_8x22b": Mixtral8x22bClass,
     "phi3_mini": Phi3MiniClass,
     "phi3_small": Phi3SmallClass,
     "qwen2_0.5b": Qwen205bClass,
@@ -653,6 +667,7 @@ class_to_forward_str = {
     Mistral7bClass: "cornstarch.shardformer.modeling.mistral.MistralModelForwards.mistral_model_forward",
     Mistral123bClass: "cornstarch.shardformer.modeling.mistral.MistralModelForwards.mistral_model_forward",
     Mixtral8x7bClass: "cornstarch.shardformer.modeling.mixtral.MixtralModelForwards.mixtral_model_forward",
+    Mixtral8x22bClass: "cornstarch.shardformer.modeling.mixtral.MixtralModelForwards.mixtral_model_forward",
     Phi3MiniClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
     Phi3SmallClass: "cornstarch.shardformer.modeling.phi3.Phi3ModelForwards.phi3_model_forward",
     Qwen205bClass: "cornstarch.shardformer.modeling.qwen2.Qwen2ModelForwards.qwen2_model_forward",
