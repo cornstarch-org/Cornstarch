@@ -214,6 +214,7 @@ class EncodersColocatedMultimodalParallel(CornstarchMultimodalParallelBase):
             (2, 1, 2),
             (1, 1, 2),
             (1, 1, 3),
+            (1, 2, 2),
         ],
         name_fn=lambda tp, epp, lpp: f"tp={tp}, pp={epp},{lpp}",
     )

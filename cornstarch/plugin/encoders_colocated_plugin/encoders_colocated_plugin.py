@@ -162,10 +162,10 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
 
         if self.my_modal_name == "language_model":
             if stage_manager.is_first_stage(check_only_in_modal=True):
-                # There may be multiple hidden_states_{modal_key}s here.
+                # There may be multiple encoder_output_{modal_key}s here.
                 # Merge them so that we can pass them to the language model.
                 encoders_outputs = [
-                    kwargs[f"hidden_states_{modal_key}"]
+                    kwargs[f"encoder_output_{modal_key}"][0]
                     for modal_key in module.encoders.keys()
                 ]
 
@@ -277,29 +277,34 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                         output_hidden_states=output_hidden_states,
                         return_dict=return_dict,
                     )
+
             else:
                 for modal_key, encoder_module in module.encoders.items():
-                    assert hidden_states is not None
+                    assert f"encoder_output_{modal_key}" in kwargs
 
-                    previous_stage_output: ModelOutput | tuple = kwargs.get(modal_key)
-                    encoder_inputs = dict(hidden_states=previous_stage_output[0])
-
+                    previous_stage_output: dict = kwargs.get(
+                        f"encoder_output_{modal_key}"
+                    )
                     encoder_outputs[modal_key] = encoder_module(
-                        **encoder_inputs,
+                        **previous_stage_output,
                         output_attentions=output_attentions,
                         output_hidden_states=output_hidden_states,
                         return_dict=return_dict,
                     )
 
-            # Different from multimodal_parallel_plugin, where all encoder outputs
-            # are merged at the end of encoder modules after going through the projector
-            # and thus have the same dimension, here hidden_states from encoders
-            # might have different dimension, thus `torch.cat`() is not applicable.
-            # Thus, instead of merging encoder outputs, we return them as is,
-            # but just with the prefix `hidden_states`.
+                # Different from multimodal_parallel_plugin, where all encoder outputs
+                # are merged at the end of encoder modules after going through the projector
+                # and thus have the same dimension, here hidden_states from encoders
+                # might have different dimension, thus `torch.cat`() is not applicable.
+                # Thus, instead of merging encoder outputs, we return them as is,
+                # but just with the prefix `hidden_states`.
 
             return {
-                f"hidden_states_{modal_key}": encoder_output[0]
+                f"encoder_output_{modal_key}": (
+                    encoder_output
+                    if isinstance(encoder_output, dict)
+                    else encoder_output[0]
+                )
                 for modal_key, encoder_output in encoder_outputs.items()
             }
 
