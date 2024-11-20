@@ -106,8 +106,10 @@ class ImageModelClassBase(ModelClassBase):
     def data(
         self, batch_size: int, image_size: tuple[int, int]
     ) -> dict[str, torch.Tensor]:
-        num_chunks = math.ceil(image_size[0] / self.config.image_size) * math.ceil(
-            image_size[1] / self.config.image_size
+        num_chunks = (
+            math.ceil(image_size[0] / self.config.image_size)
+            * math.ceil(image_size[1] / self.config.image_size)
+            + 1
         )
         data = {
             "pixel_values": torch.randn(
@@ -386,7 +388,7 @@ class ViT22bClass(ImageModelClassBase):
                 num_hidden_layers=48,
                 intermediate_size=24576,
                 num_attention_heads=48,
-                image_size=224,
+                image_size=448,
                 patch_size=14,
             ),
         )
@@ -459,12 +461,14 @@ class PixtralVisionClass(ImageModelClassBase):
         )
         self.config._attn_implementation = "eager"
 
-    def data(self, batch_size: int) -> dict[str, torch.Tensor]:
+    def data(
+        self, batch_size: int, image_size: tuple[int, int]
+    ) -> dict[str, torch.Tensor]:
         from transformers.models.pixtral.image_processing_pixtral import (
             PixtralImageProcessor,
         )
 
-        image = create_random_image(1280, 720)
+        image = create_random_image(*image_size)
         processor = PixtralImageProcessor.from_pretrained(
             "mistral-community/pixtral-12b"
         )
@@ -553,12 +557,14 @@ class Qwen2Vision7bClass(ImageModelClassBase):
             postprocess_module_callback=Qwen2VLModel.postprocess_vision_callback,
         )
 
-    def data(self, batch_size: int) -> dict[str, torch.Tensor]:
+    def data(
+        self, batch_size: int, image_size: tuple[int, int]
+    ) -> dict[str, torch.Tensor]:
         from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
             Qwen2VLImageProcessor,
         )
 
-        image = create_random_image(1280, 720)
+        image = create_random_image(*image_size)
         processor = Qwen2VLImageProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
 
         inputs = processor(images=image, return_tensors="pt").to("cuda")
@@ -587,6 +593,15 @@ class WhisperLargeClass(AudioModelClassBase):
         super().__init__(
             WhisperEncoder,
             WhisperConfig.from_pretrained("openai/whisper-large-v3"),
+        )
+        self.config._attn_implementation = "eager"
+
+
+class WhisperMediumClass(AudioModelClassBase):
+    def __init__(self):
+        super().__init__(
+            WhisperEncoder,
+            WhisperConfig.from_pretrained("openai/whisper-medium"),
         )
         self.config._attn_implementation = "eager"
 
@@ -649,6 +664,7 @@ model_to_class = {
     "siglip_878m": SiglipVisionClass,
     "whisper_1.5b": WhisperLargeClass,
     "whisper_242m": WhisperSmallClass,
+    "whisper_307m": WhisperMediumClass,
     "whisper_72m": WhisperBaseClass,
     "qwen2_audio": Qwen2AudioEncoderClass,
 }
@@ -693,6 +709,7 @@ class_to_forward_str = {
     SiglipVisionClass: "cornstarch.shardformer.modeling.siglip.SiglipVisionModelForwards.siglip_vision_transformer_forward",
     WhisperSmallClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
     WhisperBaseClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    WhisperMediumClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
     WhisperLargeClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
     Qwen2AudioEncoderClass: "cornstarch.shardformer.modeling.qwen2_audio.Qwen2AudioModelForwards.qwen2_audio_encoder_forward",
 }
