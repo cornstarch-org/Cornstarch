@@ -1,13 +1,8 @@
-import os
-import shutil
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional, Tuple
+
 import torch
 from torch._inductor.codecache import PyCodeCache
 from torch._inductor.runtime.compile_tasks import _module_to_triton_kernel
-
-CACHE_PATH = os.path.expanduser("~/.cache_inductor")
-
-
 from torch.nn.attention.flex_attention import BlockMask
 
 
@@ -60,14 +55,10 @@ class CacheManager:
     """
 
     def __init__(self):
-        self.cache_dir = CACHE_PATH
         self.kernel_cache: Dict[FlexAttnKernelConfig, Tuple[object, object]] = {}
         self.cached_keys = set()  # Store cache keys
-        os.makedirs(self.cache_dir, exist_ok=True)
 
     def clear_cache(self):
-        if os.path.exists(self.cache_dir):
-            shutil.rmtree(self.cache_dir)
         self.kernel_cache.clear()
         self.cached_keys.clear()
 
