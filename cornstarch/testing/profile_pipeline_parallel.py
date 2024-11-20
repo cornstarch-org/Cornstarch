@@ -40,18 +40,15 @@ file_path = "profile_pipeline_result.csv"
 
 # model_names_to_test = [("llama_70b", "clip", "qwen2_audio")]
 model_names_to_test = [
-    # ("llama_70b", "clip", None),
-    # ("gemma2_27b", "siglip_878m", None),
-    # ("internlm2_20b", "intern_vit_6b", None),
-    ("mistral_7b", "vit_22b", None),
-    # ("mistral_7b", "pixtral_400m", None),
-    # ("phi3_small", "evaclip_8b", None),
-    # ("vicuna", "dinov2_1.1b", None),
-    # ("qwen2_32b", "qwen2_vision_675m", None),
-    # ("qwen2_72b", None, "qwen2_audio"),
-    # ("llama_8b", None, "whisper_1.5b"),
-    # ("mixtral_8x7b", "qwen2_vision_675m", "qwen2_audio"),
-    # ("qwen2_14b", "clip", "whisper_1.5b"),
+    ("qwen2_72b", "vit_22b", None),  # VLM-large
+    ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
+    ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
+    ("gemma2_27b", "dinov2_1.1b", None),  # VLM-medium
+    ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
+    ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
+    ("llama_8b", "pixtral_400m", None),  # VLM-small
+    ("phi3_small", None, "whisper_242m"),  # ALM-small
+    ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
 ]
 
 
@@ -70,10 +67,14 @@ class CornstarchTestingClass:
     def data(self) -> dict[str, torch.Tensor]:
         data = {}
         batch_size = self.num_microbatches * self.microbatch_size
-        data.update(self.llm_model_class.data(batch_size, seq_len=4096))
+        data.update(self.llm_model_class.data(batch_size, seq_len=2048))
 
         if "vision" in self.encoder_model_classes:
-            data.update(self.encoder_model_classes["vision"].data(batch_size))
+            data.update(
+                self.encoder_model_classes["vision"].data(
+                    batch_size, image_size=(1280, 720)
+                )
+            )
         if "audio" in self.encoder_model_classes:
             data.update(self.encoder_model_classes["audio"].data(batch_size))
 
@@ -148,15 +149,18 @@ class CornstarchTestingClass:
                 language_model=self.llm_model_class.build_model(),
             )
 
-            model.gradient_checkpointing_enable({"use_reentrant": False})
-
         for encoder in encoders.values():
             encoder.train(module=False, projector=True)
             encoder.module.requires_grad_(False)
             encoder.projector.requires_grad_(True)
+            try:
+                encoder.module.gradient_checkpointing_enable({"use_reentrant": False})
+            except ValueError:
+                pass
 
         model.language_model.train(mode=False)
         model.language_model.requires_grad_(False)
+        model.language_model.gradient_checkpointing_enable({"use_reentrant": False})
         token_ids = {
             "vision": 44,
             "audio": 55,
@@ -475,7 +479,7 @@ if __name__ == "__main__":
                     f"--rdzv_endpoint={master_node_rdzv_backend}",
                     f"--node-rank={node_hostnames.index(socket.gethostname())}",
                     sys.argv[0],  # The current script file
-                    "--tp_size=4",
+                    "--tp_size=2",
                     f"--llm_pp_size={5 if plugin_type == 'colocated' else 6}",
                 ]
 
@@ -487,19 +491,15 @@ if __name__ == "__main__":
                 if vision_model_name:
                     command.extend(
                         [
-                            "--vision_model_name",
-                            vision_model_name,
-                            "--vision_pp_size",
-                            "1",
+                            f"--vision_model_name={vision_model_name}",
+                            "--vision_pp_size=1",
                         ]
                     )
                 if audio_model_name:
                     command.extend(
                         [
-                            "--audio_model_name",
-                            audio_model_name,
-                            "--audio_pp_size",
-                            "1",
+                            f"--audio_model_name={audio_model_name}",
+                            "--audio_pp_size=1",
                         ]
                     )
 

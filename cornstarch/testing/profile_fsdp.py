@@ -26,22 +26,19 @@ file_path = "profile_fsdp_result.csv"
 
 # model_names_to_test = [("llama_8b", "clip", "qwen2_audio")]
 model_names_to_test = [
-    ("llama_70b", "clip", None),
-    ("gemma2_27b", "siglip_878m", None),
-    ("internlm2_20b", "intern_vit_6b", None),
-    ("mistral_7b", "pixtral_400m", None),
-    ("phi3_small", "evaclip_8b", None),
-    ("vicuna", "dinov2_1.1b", None),
-    ("qwen2_1.5b", "qwen2_vision_675m", None),
-    ("qwen2_72b", None, "qwen2_audio"),
-    ("llama_8b", None, "whisper_1.5b"),
-    ("mixtral_8x7b", "qwen2_vision_675m", "qwen2_audio"),
-    ("qwen2_14b", "clip", "whisper_1.5b"),
+    # ("qwen2_72b", "vit_22b", None),  # VLM-large
+    # ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
+    # ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
+    ("gemma2_27b", "dinov2_1.1b", None),  # VLM-medium
+    ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
+    ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
+    ("llama_8b", "pixtral_400m", None),  # VLM-small
+    ("phi3_small", None, "whisper_242m"),  # ALM-small
+    ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
 ]
 
 
 class FSDPTestingClass:
-    num_microbatches: int = 24
     microbatch_size: int = 1
 
     def __init__(
@@ -57,7 +54,11 @@ class FSDPTestingClass:
         data.update(self.llm_model_class.data(self.microbatch_size, seq_len=4096))
 
         if "vision" in self.encoder_model_classes:
-            data.update(self.encoder_model_classes["vision"].data(self.microbatch_size))
+            data.update(
+                self.encoder_model_classes["vision"].data(
+                    self.microbatch_size, image_size=(1280, 720)
+                )
+            )
         if "audio" in self.encoder_model_classes:
             data.update(self.encoder_model_classes["audio"].data(self.microbatch_size))
 
@@ -125,20 +126,16 @@ class FSDPTestingClass:
         return model
 
     def microbatch_forward(self, model: nn.Module, data: dict):
-        assert self.num_microbatches % dist.get_world_size() == 0
-        num_microbatches_per_gpu = self.num_microbatches // dist.get_world_size()
-
         with torch.autograd.profiler.emit_nvtx():
-            for i in range(num_microbatches_per_gpu):
-                model.set_requires_gradient_sync(i == num_microbatches_per_gpu - 1)
-                with torch.cuda.nvtx.range("forward"):
-                    output = model(**data)
-                    loss = output.loss
-                with torch.cuda.nvtx.range("backward"):
-                    loss.backward()
+            model.set_requires_gradient_sync(True)
+            with torch.cuda.nvtx.range("forward"):
+                output = model(**data)
+                loss = output.loss
+            with torch.cuda.nvtx.range("backward"):
+                loss.backward()
 
     def run_multimodal_model(self, model: nn.Module):
-        num_iterations = 5
+        num_iterations = 2
 
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
@@ -303,9 +300,9 @@ if __name__ == "__main__":
             ]
 
             if vision_model_name:
-                command.extend(["--vision_model_name", vision_model_name])
+                command.append(f"--vision_model_name={vision_model_name}")
             if audio_model_name:
-                command.extend(["--audio_model_name", audio_model_name])
+                command.append(f"--audio_model_name={audio_model_name}")
 
             print(f"Running: {' '.join(command)}")
             time.sleep(5)
