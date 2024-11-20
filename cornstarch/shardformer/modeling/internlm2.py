@@ -32,7 +32,7 @@ from cornstarch.models.internlm2.modeling_internlm2 import (
 from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
 from cornstarch.shardformer.layers.utils import repeat_attention_mask_heads
 
-# flex_attention = torch.compile(flex_attention, fullgraph=True)
+flex_attention = torch.compile(flex_attention, fullgraph=True)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 

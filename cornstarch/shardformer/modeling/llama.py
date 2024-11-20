@@ -37,8 +37,6 @@ from cornstarch.kernel.interface import convert_bit_attention_mask_to_block_mask
 from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
 from cornstarch.shardformer.layers.utils import repeat_attention_mask_heads
 
-# flex_attention = torch.compile(flex_attention, fullgraph=True)
-
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
 
@@ -655,13 +653,21 @@ class LlamaAttentionForwards:
                 dropout_p=self.attention_dropout if self.training else 0.0,
             )
         elif isinstance(attention_mask, BlockMask):
-            attn_output, attn_weights = flex_attention(
+            attn_output, attn_weights = torch.compile(flex_attention, fullgraph=True)(
                 query_states,
                 key_states,
                 value_states,
                 block_mask=attention_mask,
                 enable_gqa=True,
                 return_lse=True,
+                kernel_options={
+                    "BLOCK_M": 64,
+                    "BLOCK_N": 64,
+                    "BLOCK_M1": 32,
+                    "BLOCK_N1": 64,
+                    "BLOCK_M2": 64,
+                    "BLOCK_N2": 32,
+                },
             )
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
