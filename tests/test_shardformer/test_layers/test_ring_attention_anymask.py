@@ -130,6 +130,7 @@ class TestRingAttentionAnymaskClass(RingAttentionTestBase):
             -1,  # window_size_left
             -1,  # window_size_right
             None,  # alibi_slopes
+            "cached_attn",  # kernel_impl
         )
 
         # Check outputs

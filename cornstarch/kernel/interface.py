@@ -18,6 +18,8 @@ from torch.nn.attention.flex_attention import (
     create_block_mask,
 )
 
+from .cache import get_cached_kernels
+
 from .naive_attn import _attn_anymask_backward, _attn_anymask_forward
 
 
@@ -277,6 +279,223 @@ def _flex_attn_anymask_backward(
             dv.copy_(grad_value)
 
         return grad_query, grad_key, grad_value
+
+
+def _flex_attn_cached_kernel_forward(
+    ctx: torch.autograd.function.FunctionCtx,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor,
+    softmax_scale: float = 1.0,
+    dropout_p: float = 0.0,  # TODO(@runyu) not used
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    softcap: float = 0.0,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    return_softmax: bool = False,
+):
+    # Convert mask to block mask
+    num_heads = q.shape[1]
+    if mask.ndim == 2:
+        if getattr(mask, "cornstarch_is_bitattention", False):
+            block_mask = convert_bit_attention_mask_to_block_mask(mask, num_heads)
+        else:
+            block_mask = convert_legacy_attention_mask_to_block_mask(mask, num_heads)
+    else:
+        block_mask = convert_attention_mask_to_block_mask(mask, num_heads)
+
+    # Extract block mask components
+    (
+        kv_num_blocks,
+        kv_indices,
+        full_kv_num_blocks,
+        full_kv_indices,
+        q_num_blocks,
+        q_indices,
+        full_q_num_blocks,
+        full_q_indices,
+    ) = block_mask.as_tuple()[:8]
+    KV_BLOCK_SIZE = block_mask.as_tuple()[8]
+    Q_BLOCK_SIZE = block_mask.as_tuple()[9]
+
+    ctx.fwd_kernel = None
+    ctx.bwd_kernel = None
+
+    fwd_kernel, bwd_kernel = get_cached_kernels(
+        q.size(0),
+        q.size(1),
+        q.size(2),
+        q.size(3),
+        q.dtype,
+        softmax_scale,
+        block_mask,
+    )
+
+    assert fwd_kernel is not None and bwd_kernel is not None
+
+    ctx.fwd_kernel = fwd_kernel
+    ctx.bwd_kernel = bwd_kernel
+
+    # Get the raw CUDA stream instead of torch.cuda.Stream
+    from torch._C import _cuda_getCurrentRawStream
+
+    stream0 = _cuda_getCurrentRawStream(0)  # or the device index you're using
+
+    out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    lse = torch.empty(q.shape[:3], device=q.device, dtype=torch.float32)
+
+    meta0 = {
+        "ROWS_GUARANTEED_SAFE": False,
+        "PRESCALE_QK": False,
+        "OUTPUT_LOGSUMEXP": True,
+        "FLOAT32_PRECISION": "'ieee'",
+        "IS_DIVISIBLE": True,
+        "SM_SCALE": softmax_scale,
+        "GQA_SHARED_HEADS": 1,
+        "HAS_FULL_BLOCKS": True,
+        "QK_HEAD_DIM": q.size(3),
+        "V_HEAD_DIM": v.size(3),
+        "BLOCK_M": 128,
+        "BLOCK_N": 64,
+        "SPARSE_Q_BLOCK_SIZE": q.size(3),
+        "SPARSE_KV_BLOCK_SIZE": k.size(3),
+    }
+
+    fwd_kernel.run(
+        q,
+        k,
+        v,
+        lse,
+        kv_num_blocks,
+        kv_indices,
+        full_kv_num_blocks,
+        full_kv_indices,
+        mask,
+        out,
+        grid=torch._inductor.kernel.flex_attention.flex_attention_grid(
+            q.size(0),
+            q.size(1),
+            q.size(2),
+            q.size(3),
+            meta0,
+        ),
+        stream=stream0,
+    )
+
+    return out, lse * 0.6931471805599453, None, None
+
+
+def _flex_attn_cached_kernel_backward(
+    ctx: torch.autograd.function.FunctionCtx,
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dq: Optional[torch.Tensor],
+    dk: Optional[torch.Tensor],
+    dv: Optional[torch.Tensor],
+    mask_info: Tuple[torch.Tensor],
+    dropout_p: float = 0.0,
+    softmax_scale: float = 1.0,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    softcap: float = 0.0,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    deterministic: bool = False,
+    rng_state: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+    softmax_lse = softmax_lse / 0.6931471805599453
+    grad_softmax_lse, mask = mask_info
+
+    num_heads = q.shape[1]
+    if mask.ndim == 2:
+        if getattr(mask, "cornstarch_is_bitattention", False):
+            block_mask = convert_bit_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+        else:
+            block_mask = convert_legacy_attention_mask_to_block_mask(
+                mask, num_heads
+            ).as_tuple()
+    else:
+        block_mask = convert_attention_mask_to_block_mask(mask, num_heads).as_tuple()
+
+    (
+        kv_num_blocks,
+        kv_indices,
+        full_kv_num_blocks,
+        full_kv_indices,
+        q_num_blocks,
+        q_indices,
+        full_q_num_blocks,
+        full_q_indices,
+    ) = block_mask[:8]
+
+    # Get the raw CUDA stream instead of torch.cuda.Stream
+    from torch._C import _cuda_getCurrentRawStream
+
+    stream0 = _cuda_getCurrentRawStream(0)  # or the device index you're using
+
+    meta0 = {
+        "ROWS_GUARANTEED_SAFE": False,
+        "PRESCALE_QK": False,
+        "OUTPUT_LOGSUMEXP": True,
+        "FLOAT32_PRECISION": "'ieee'",
+        "IS_DIVISIBLE": True,
+        "SM_SCALE": ctx.softmax_scale,
+        "GQA_SHARED_HEADS": 1,
+        "HAS_FULL_BLOCKS": True,
+        "QK_HEAD_DIM": q.size(3),
+        "V_HEAD_DIM": v.size(3),
+        "BLOCK_M1": 64,  # could be tuned
+        "BLOCK_N1": 128,  # could be tuned
+        "BLOCK_M2": 128,  # could be tuned
+        "BLOCK_N2": 64,  # could be tuned
+        "SPARSE_Q_BLOCK_SIZE": q.size(3),
+        "SPARSE_KV_BLOCK_SIZE": k.size(3),
+    }
+
+    dq = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    dk = torch.empty(k.shape, device=k.device, dtype=k.dtype)
+    dv = torch.empty(v.shape, device=v.device, dtype=v.dtype)
+
+    # Run backward kernel with corrected stream parameter
+    ctx.bwd_kernel.run(
+        q,
+        k,
+        v,
+        softmax_lse,
+        torch.sum(out * dout, dim=-1),  # NOTE(Runyu) this parameter maybe wrong
+        dout,
+        dq,
+        dv,
+        kv_num_blocks,
+        kv_indices,
+        q_num_blocks,
+        q_indices,
+        full_kv_num_blocks,
+        full_kv_indices,
+        full_q_num_blocks,
+        full_q_indices,
+        mask,
+        dk,
+        grid=torch._inductor.kernel.flex_attention.flex_attention_backward_grid(
+            q.size(0),
+            q.size(1),
+            q.size(2),
+            q.size(3),
+            k.size(1),
+            k.size(2),
+            meta0,
+        ),
+        stream=stream0,  # Pass the raw stream
+    )
+
+    return dq, dk, dv
 
 
 class FlexAttnAnyMask(torch.autograd.Function):
