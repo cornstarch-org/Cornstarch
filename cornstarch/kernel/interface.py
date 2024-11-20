@@ -285,7 +285,7 @@ def _flex_attn_cached_kernel_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    mask: torch.Tensor,
+    mask: BlockMask,
     softmax_scale: float = 1.0,
     dropout_p: float = 0.0,  # TODO(@runyu) not used
     window_size_left: int = -1,
@@ -294,16 +294,8 @@ def _flex_attn_cached_kernel_forward(
     alibi_slopes: Optional[torch.Tensor] = None,
     return_softmax: bool = False,
 ):
-    # Convert mask to block mask
-    num_heads = q.shape[1]
-    if mask.ndim == 2:
-        if getattr(mask, "cornstarch_is_bitattention", False):
-            block_mask = convert_bit_attention_mask_to_block_mask(mask, num_heads)
-        else:
-            block_mask = convert_legacy_attention_mask_to_block_mask(mask, num_heads)
-    else:
-        block_mask = convert_attention_mask_to_block_mask(mask, num_heads)
-
+    assert isinstance(mask, BlockMask)
+    block_mask = mask.as_tuple()
     # Extract block mask components
     (
         kv_num_blocks,
@@ -314,9 +306,9 @@ def _flex_attn_cached_kernel_forward(
         q_indices,
         full_q_num_blocks,
         full_q_indices,
-    ) = block_mask.as_tuple()[:8]
-    KV_BLOCK_SIZE = block_mask.as_tuple()[8]
-    Q_BLOCK_SIZE = block_mask.as_tuple()[9]
+    ) = block_mask[:8]
+    KV_BLOCK_SIZE = block_mask[8]
+    Q_BLOCK_SIZE = block_mask[9]
 
     ctx.fwd_kernel = None
     ctx.bwd_kernel = None
@@ -328,7 +320,7 @@ def _flex_attn_cached_kernel_forward(
         q.size(3),
         q.dtype,
         softmax_scale,
-        block_mask,
+        mask,
     )
 
     assert fwd_kernel is not None and bwd_kernel is not None
@@ -410,18 +402,8 @@ def _flex_attn_cached_kernel_backward(
     softmax_lse = softmax_lse / 0.6931471805599453
     grad_softmax_lse, mask = mask_info
 
-    num_heads = q.shape[1]
-    if mask.ndim == 2:
-        if getattr(mask, "cornstarch_is_bitattention", False):
-            block_mask = convert_bit_attention_mask_to_block_mask(
-                mask, num_heads
-            ).as_tuple()
-        else:
-            block_mask = convert_legacy_attention_mask_to_block_mask(
-                mask, num_heads
-            ).as_tuple()
-    else:
-        block_mask = convert_attention_mask_to_block_mask(mask, num_heads).as_tuple()
+    assert isinstance(mask, BlockMask)
+    block_mask = mask.as_tuple()
 
     (
         kv_num_blocks,
