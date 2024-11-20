@@ -6,10 +6,10 @@ import torch.distributed as dist
 from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 
 from cornstarch.kernel.interface import (
-    _flex_attn_anymask_forward,
-    _flex_attn_anymask_backward,
-    _attn_anymask_forward,
     _attn_anymask_backward,
+    _attn_anymask_forward,
+    _flex_attn_anymask_backward,
+    _flex_attn_anymask_forward,
 )
 
 from .utils import RingComm, get_default_args, update_out_and_lse
@@ -187,6 +187,15 @@ def ring_flash_attn_anymask_forward(
 
     next_k, next_v = None, None
 
+    num_heads = q.shape[1]
+    if mask.ndim == 2:
+        if getattr(mask, "cornstarch_is_bitattention", False):
+            block_mask = convert_bit_attention_mask_to_block_mask(mask, num_heads)
+        else:
+            block_mask = convert_legacy_attention_mask_to_block_mask(mask, num_heads)
+    else:
+        block_mask = convert_attention_mask_to_block_mask(mask, num_heads)
+
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
             next_k: torch.Tensor = comm.send_recv(k)
@@ -256,6 +265,15 @@ def ring_flash_attn_anymask_backward(
     next_k, next_v = None, None
 
     grad_softmax_lse, mask = mask_info
+
+    num_heads = q.shape[1]
+    if mask.ndim == 2:
+        if getattr(mask, "cornstarch_is_bitattention", False):
+            block_mask = convert_bit_attention_mask_to_block_mask(mask, num_heads)
+        else:
+            block_mask = convert_legacy_attention_mask_to_block_mask(mask, num_heads)
+    else:
+        block_mask = convert_attention_mask_to_block_mask(mask, num_heads)
 
     for step in range(kv_comm.world_size):
         if step + 1 != kv_comm.world_size:
