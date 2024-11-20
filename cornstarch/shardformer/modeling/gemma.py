@@ -473,6 +473,14 @@ class GemmaAttentionForwards:
                 block_mask=attention_mask,
                 enable_gqa=True,
                 return_lse=True,
+                kernel_options={
+                    "BLOCK_M": 64,
+                    "BLOCK_N": 64,
+                    "BLOCK_M1": 32,
+                    "BLOCK_N1": 64,
+                    "BLOCK_M2": 64,
+                    "BLOCK_N2": 32,
+                },
             )
         elif self.config._attn_implementation == "flash_attention_2":
             # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
