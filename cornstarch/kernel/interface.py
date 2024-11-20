@@ -18,9 +18,8 @@ from torch.nn.attention.flex_attention import (
     create_block_mask,
 )
 
-from .cache import get_cached_kernels
-
-from .naive_attn import _attn_anymask_backward, _attn_anymask_forward
+from cornstarch.kernel.cache.cache_manager import get_cached_kernels
+from cornstarch.kernel.naive_attn import _attn_anymask_backward, _attn_anymask_forward
 
 
 def convert_attention_mask_to_block_mask(
