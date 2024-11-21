@@ -190,15 +190,6 @@ def ring_flash_attn_anymask_forward(
 
     next_k, next_v = None, None
 
-    num_heads = q.shape[1]
-    if mask.ndim == 2:
-        if getattr(mask, "cornstarch_is_bitattention", False):
-            block_mask = convert_bit_attention_mask_to_block_mask(mask, num_heads)
-        else:
-            block_mask = convert_legacy_attention_mask_to_block_mask(mask, num_heads)
-    else:
-        block_mask = convert_attention_mask_to_block_mask(mask, num_heads)
-
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
             next_k: torch.Tensor = comm.send_recv(k)
@@ -216,7 +207,7 @@ def ring_flash_attn_anymask_forward(
                 "q": q,
                 "k": k,
                 "v": v,
-                "mask": block_mask,
+                "mask": mask,
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
@@ -271,15 +262,6 @@ def ring_flash_attn_anymask_backward(
 
     grad_softmax_lse, mask = mask_info
 
-    num_heads = q.shape[1]
-    if mask.ndim == 2:
-        if getattr(mask, "cornstarch_is_bitattention", False):
-            block_mask = convert_bit_attention_mask_to_block_mask(mask, num_heads)
-        else:
-            block_mask = convert_legacy_attention_mask_to_block_mask(mask, num_heads)
-    else:
-        block_mask = convert_attention_mask_to_block_mask(mask, num_heads)
-
     for step in range(kv_comm.world_size):
         if step + 1 != kv_comm.world_size:
             next_k = kv_comm.send_recv(k)
@@ -306,7 +288,7 @@ def ring_flash_attn_anymask_backward(
                 "dq": block_dq_buffer,
                 "dk": block_dk_buffer,
                 "dv": block_dv_buffer,
-                "mask_info": (grad_softmax_lse, block_mask),
+                "mask_info": (grad_softmax_lse, mask_),
                 "dropout_p": dropout_p,
                 "softmax_scale": softmax_scale,
                 "window_size_left": window_size_left,
