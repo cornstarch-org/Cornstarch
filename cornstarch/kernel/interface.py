@@ -347,7 +347,7 @@ def _flex_attn_cached_kernel_forward(
         "HAS_FULL_BLOCKS": True,
         "QK_HEAD_DIM": q.size(3),
         "V_HEAD_DIM": v.size(3),
-        "BLOCK_M": 128,
+        "BLOCK_M": 64,
         "BLOCK_N": 64,
         "SPARSE_Q_BLOCK_SIZE": q.size(3),
         "SPARSE_KV_BLOCK_SIZE": k.size(3),
@@ -432,10 +432,10 @@ def _flex_attn_cached_kernel_backward(
         "HAS_FULL_BLOCKS": True,
         "QK_HEAD_DIM": q.size(3),
         "V_HEAD_DIM": v.size(3),
-        "BLOCK_M1": 64,  # could be tuned
-        "BLOCK_N1": 128,  # could be tuned
-        "BLOCK_M2": 128,  # could be tuned
-        "BLOCK_N2": 64,  # could be tuned
+        "BLOCK_M1": 32,  # could be tuned
+        "BLOCK_N1": 64,  # could be tuned
+        "BLOCK_M2": 64,  # could be tuned
+        "BLOCK_N2": 32,  # could be tuned
         "SPARSE_Q_BLOCK_SIZE": q.size(3),
         "SPARSE_KV_BLOCK_SIZE": k.size(3),
     }

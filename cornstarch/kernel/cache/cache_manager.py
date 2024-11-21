@@ -167,7 +167,20 @@ class CacheManager:
 
         # Forward pass
         flex_out, softmax_lse = flexattention(
-            q, k, v, block_mask=block_mask, scale=sm_scale, return_lse=True
+            q,
+            k,
+            v,
+            block_mask=block_mask,
+            scale=sm_scale,
+            return_lse=True,
+            kernel_options={
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_M1": 32,
+                "BLOCK_N1": 64,
+                "BLOCK_M2": 64,
+                "BLOCK_N2": 32,
+            },
         )
 
         # Create gradient for backward pass
