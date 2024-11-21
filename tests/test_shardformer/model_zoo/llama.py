@@ -9,7 +9,7 @@ from ..utils import ModelClassBase
 
 llama_config = LlamaConfig(
     hidden_size=512,
-    intermediate_size=64,
+    intermediate_size=512,
     num_attention_heads=16,
     num_key_value_heads=8,
     num_hidden_layers=4,
@@ -30,8 +30,8 @@ class LlamaModelBase(ModelClassBase):
 
     def data_gen_fn(self, num_batch: int) -> dict:
         input = {
-            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
-            "attention_mask": torch.ones(num_batch, 64),
+            "input_ids": torch.randint(0, 2048, (num_batch, 256)),
+            "attention_mask": torch.ones(num_batch, 256),
         }
 
         return input

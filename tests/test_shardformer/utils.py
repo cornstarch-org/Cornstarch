@@ -220,6 +220,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
             enable_flash_attention=fa,
         )
         if sp_mode is not None:
+            torch._dynamo.config.optimize_ddp = False
             test_config.update(
                 {
                     "enable_sequence_parallelism": True,
