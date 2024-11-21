@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-from typing import Optional, Dict, Callable
+from typing import Callable, Dict, Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
 from cornstarch.kernel.interface import (
-    _attn_anymask_forward,
     _attn_anymask_backward,
-    _flex_attn_anymask_forward,
+    _attn_anymask_forward,
     _flex_attn_anymask_backward,
-    _flex_attn_cached_kernel_forward,
+    _flex_attn_anymask_forward,
     _flex_attn_cached_kernel_backward,
+    _flex_attn_cached_kernel_forward,
 )
-
 from cornstarch.shardformer.layers.ring_attn import (
     ring_flash_attn_anymask_backward,
     ring_flash_attn_anymask_forward,
@@ -33,7 +32,7 @@ backward_kernel_dict: Dict[str, Callable] = {
 }
 
 
-from ._base import RingAttentionBase
+from cornstarch.shardformer.layers._base import RingAttentionBase
 
 SUPPORT_RING_ATTN_DISTRIBUTION_MODE = ["uniform", "zigzag", "random"]
 

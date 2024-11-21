@@ -362,7 +362,6 @@ def _flex_attn_cached_kernel_forward(
         kv_indices,
         full_kv_num_blocks,
         full_kv_indices,
-        mask,
         out,
         grid=torch._inductor.kernel.flex_attention.flex_attention_grid(
             q.size(0),
@@ -462,7 +461,6 @@ def _flex_attn_cached_kernel_backward(
         full_kv_indices,
         full_q_num_blocks,
         full_q_indices,
-        mask,
         dk,
         grid=torch._inductor.kernel.flex_attention.flex_attention_backward_grid(
             q.size(0),
