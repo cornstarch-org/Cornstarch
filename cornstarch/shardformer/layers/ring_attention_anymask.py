@@ -1,37 +1,13 @@
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
+from torch.nn.attention.flex_attention import flex_attention
 
-from cornstarch.kernel.interface import (
-    _attn_anymask_backward,
-    _attn_anymask_forward,
-    _flex_attn_anymask_backward,
-    _flex_attn_anymask_forward,
-    _flex_attn_cached_kernel_backward,
-    _flex_attn_cached_kernel_forward,
-)
-from cornstarch.shardformer.layers.ring_attn import (
-    ring_flash_attn_anymask_backward,
-    ring_flash_attn_anymask_forward,
-)
-
-forward_kernel_dict: Dict[str, Callable] = {
-    "flexattn": _flex_attn_anymask_forward,
-    "naive_attn": _attn_anymask_forward,
-    "cached_attn": _flex_attn_cached_kernel_forward,
-}
-
-backward_kernel_dict: Dict[str, Callable] = {
-    "flexattn": _flex_attn_anymask_backward,
-    "naive_attn": _attn_anymask_backward,
-    "cached_attn": _flex_attn_cached_kernel_backward,
-}
-
-
+from cornstarch.kernel.interface import convert_bit_attention_mask_to_block_mask
 from cornstarch.shardformer.layers._base import RingAttentionBase
 
 SUPPORT_RING_ATTN_DISTRIBUTION_MODE = ["uniform", "zigzag", "random"]
@@ -50,77 +26,35 @@ class RingAttentionAnyMask(RingAttentionBase):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        mask: torch.Tensor,
+        out: torch.Tensor,
         sp_group: dist.ProcessGroup,
-        return_softmax: bool,
-        dropout_p: Optional[float] = 0.0,
-        softmax_scale: Optional[float] = None,
-        deterministic: Optional[bool] = False,
-        window_size_left: int = -1,
-        window_size_right: int = -1,
-        alibi_slopes: Optional[torch.Tensor] = None,
-        kernel_impl: str = "cached_attn",
     ):
-        if softmax_scale is None:
-            softmax_scale = q.shape[-1] ** (-0.5)
-        softmax_scale = softmax_scale
-        assert alibi_slopes is None
-
-        attn_impl = forward_kernel_dict[kernel_impl]
-
-        out, softmax_lse = ring_flash_attn_anymask_forward(
-            ctx,
-            sp_group,
-            q,
-            k,
-            v,
-            mask,
-            softmax_scale=softmax_scale,
-            attn_impl=attn_impl,
-            dropout_p=dropout_p,
-            window_size_left=window_size_left,
-            window_size_right=window_size_right,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-        )
-
-        ctx.save_for_backward(
-            q,
-            k,
-            v,
-            out,
-            softmax_lse,
-            mask,
-        )
-
+        ctx.save_for_backward(q, k, v, out)
         ctx.group = sp_group
-        ctx.softmax_scale = softmax_scale
-        ctx.kernel_impl = kernel_impl
 
-        # return out if not return_softmax else (out, softmax_lse)
-        return out, softmax_lse
+        return out
 
     @staticmethod
-    def backward(ctx, dout, grad_softmax_lse, *args):
-        q, k, v, out, softmax_lse, mask = ctx.saved_tensors
-        mask_info = (grad_softmax_lse, mask)
+    def backward(ctx, dout, *args):
+        q, k, v, out = ctx.saved_tensors
+        sp_group: dist.ProcessGroup = ctx.group
 
-        attn_impl = backward_kernel_dict[ctx.kernel_impl]
-
-        dq, dk, dv = ring_flash_attn_anymask_backward(
-            ctx,
-            ctx.group,
-            dout,
-            q,
-            k,
-            v,
+        dq, dk, dv = torch.autograd.grad(
             out,
-            softmax_lse,
-            ctx.softmax_scale,
-            mask_info,
-            attn_impl,
+            (q, k, v),
+            dout,
+            retain_graph=True,
+            create_graph=False,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
+
+        # Reduce scatter the gradients to transfer partial results
+        # back to the original process
+        local_dk = torch.empty_like(q)
+        local_dv = torch.empty_like(q)
+        dist.reduce_scatter_tensor(local_dk, dk, group=sp_group)
+        dist.reduce_scatter_tensor(local_dv, dv, group=sp_group)
+
+        return dq, dk, dv, None, None
 
     @staticmethod
     def split_batch(
@@ -313,11 +247,6 @@ class RingAttentionAnyMask(RingAttentionBase):
         v: torch.Tensor,
         sp_group: dist.ProcessGroup,
         mask: torch.Tensor,
-        dropout_p: Optional[float] = 0.0,
-        softmax_scale: Optional[float] = None,
-        deterministic: Optional[bool] = False,
-        return_softmax: Optional[bool] = False,
-        kernel_impl: str = "cached_attn",
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
@@ -338,25 +267,46 @@ class RingAttentionAnyMask(RingAttentionBase):
                 Shape should be [total_q_seqlen, nHeads]
         """
 
-        out, softmax_lse = RingAttentionAnyMask.apply(
+        # Gather k and v tensors
+        sp_size = dist.get_world_size(sp_group)
+        gathered_k = [torch.empty_like(k) for _ in range(sp_size)]
+        gathered_v = [torch.empty_like(v) for _ in range(sp_size)]
+
+        dist.all_gather(gathered_k, k, group=sp_group)
+        dist.all_gather(gathered_v, v, group=sp_group)
+
+        gathered_k = torch.cat(gathered_k, dim=2).requires_grad_()
+        gathered_v = torch.cat(gathered_v, dim=2).requires_grad_()
+
+        block_mask = convert_bit_attention_mask_to_block_mask(mask, q.shape[1])
+
+        # Call FlexAttention to compute attention output
+        out = torch.compile(flex_attention, backend="inductor", fullgraph=True)(
             q,
-            k,
-            v,
-            mask,
-            sp_group,
-            True,  # return_softmax
-            dropout_p,
-            softmax_scale,
-            deterministic,
-            -1,  # window_size_left
-            -1,  # window_size_right
-            None,  # alibi_slopes
-            kernel_impl,
+            gathered_k,
+            gathered_v,
+            block_mask=block_mask,
+            enable_gqa=False,
+            return_lse=False,
+            kernel_options={
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_M1": 32,
+                "BLOCK_N1": 64,
+                "BLOCK_M2": 64,
+                "BLOCK_N2": 32,
+            },
         )
 
-        out = out.contiguous()
+        result = RingAttentionAnyMask.apply(
+            q,
+            gathered_k,
+            gathered_v,
+            out,
+            sp_group,
+        )
 
-        return out if not return_softmax else (out, softmax_lse)
+        return result
 
 
 def ring_flexattn_anymask(
@@ -369,7 +319,6 @@ def ring_flexattn_anymask(
     softmax_scale: Optional[float] = None,
     deterministic: Optional[bool] = False,
     return_softmax: Optional[bool] = False,
-    kernel_impl: str = "cached_attn",
     **kwargs,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     return RingAttentionAnyMask.attention(
@@ -382,5 +331,4 @@ def ring_flexattn_anymask(
         softmax_scale,
         deterministic,
         return_softmax,
-        kernel_impl=kernel_impl,
     )

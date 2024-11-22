@@ -279,7 +279,7 @@ class LlamaModelForwards:
             next_cache = next_cache.to_legacy_cache()
 
         # Clear cache so that it is not used in the next forward pass
-        RingAttentionAnyMask.clear_split_cache()
+        # RingAttentionAnyMask.clear_split_cache()
 
         if not return_dict:
             return tuple(
@@ -649,7 +649,6 @@ class LlamaAttentionForwards:
                 value_states,
                 sp_group,
                 attention_mask,
-                return_softmax=False,
                 dropout_p=self.attention_dropout if self.training else 0.0,
             )
         elif isinstance(attention_mask, BlockMask):

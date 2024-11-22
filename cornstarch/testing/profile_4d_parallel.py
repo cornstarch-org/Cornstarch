@@ -334,16 +334,23 @@ def run_profile(
     tp_rank = dist.get_rank(booster.plugin.tp_group)
     if tp_rank == 0:
         try:
-            pp_group = booster.plugin.pp_groups[0]
+            pp_groups = booster.plugin.pp_groups
         except AttributeError:
-            pp_group = booster.plugin.pp_group
+            pp_groups = [booster.plugin.pp_group]
+
         fwd_times = elapsed_times[fwd_measure_name]
         average_fwd_time = torch.tensor(
             sum(fwd_times[1:]) / (len(fwd_times) - 1),
             device="cuda",
         )
-        average_fwd_times = torch.empty(dist.get_world_size(pp_group), device="cuda")
-        dist.all_gather_into_tensor(average_fwd_times, average_fwd_time, group=pp_group)
+
+        for pp_group in pp_groups:
+            average_fwd_times = torch.empty(
+                dist.get_world_size(pp_group), device="cuda"
+            )
+            dist.all_gather_into_tensor(
+                average_fwd_times, average_fwd_time, group=pp_group
+            )
 
         fb_times = elapsed_times[fb_measure_name]
         average_exec_time = sum(fb_times[1:]) / (len(fb_times) - 1)
