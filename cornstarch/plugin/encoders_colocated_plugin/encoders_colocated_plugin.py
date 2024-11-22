@@ -170,9 +170,12 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                 # There may be multiple encoder_output_{modal_key}s here.
                 # Merge them so that we can pass them to the language model.
                 encoders_outputs = [
-                    kwargs[f"encoder_output_{modal_key}"][0]
+                    kwargs[f"encoder_output_{modal_key}"]
                     for modal_key in module.encoders.keys()
                 ]
+                assert all(
+                    isinstance(output, torch.Tensor) for output in encoders_outputs
+                )
 
                 # step 2. merge encoded multimodal features into text embeddings
                 inputs_embeds = module.language_model.get_input_embeddings()(input_ids)

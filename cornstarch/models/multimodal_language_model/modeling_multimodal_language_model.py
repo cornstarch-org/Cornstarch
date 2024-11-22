@@ -663,6 +663,9 @@ class Qwen2VLModel(PretrainedVisionLanguageModel):
         output: torch.Tensor,
     ) -> BaseModelOutput | tuple:
         if isinstance(output, torch.Tensor):
+            if output.ndim == 2:
+                # Add batch dimension here
+                output.unsqueeze_(0)
             return (output,)
         return output
 
