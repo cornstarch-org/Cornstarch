@@ -420,6 +420,7 @@ class EvaCLIPVision18bClass(ImageModelClassBase):
             CLIPVisionConfig.from_pretrained("BAAI/EVA-CLIP-18B"),
         )
         self.config._attn_implementation = "eager"
+        self.config.image_size = 448
 
 
 class SiglipVisionClass(ImageModelClassBase):
@@ -501,6 +502,8 @@ class Dinov2LargeClass(ImageModelClassBase):
             Dinov2Config.from_pretrained("facebook/dinov2-large"),
         )
         self.config._attn_implementation = "eager"
+        self.config.image_size = 518
+        self.config.patch_size = 14
 
 
 class Dinov2BaseClass(ImageModelClassBase):

@@ -1,4 +1,5 @@
 import csv
+import math
 import os
 import re
 import time
@@ -43,12 +44,40 @@ model_names_to_test = [
     ("qwen2_72b", "vit_22b", None),  # VLM-large
     ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
     ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
-    ("gemma2_27b", "dinov2_1.1b", None),  # VLM-medium
+    ("gemma2_27b", "intern_vit_6b", None),  # VLM-medium
     ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
     ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
     ("llama_8b", "pixtral_400m", None),  # VLM-small
     ("phi3_small", None, "whisper_242m"),  # ALM-small
     ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
+]
+
+colocate_parallel_configuration = [
+    # Megatron-like configuration without considering freeze
+    # (llm_pp_size, vision_pp_size, audio_pp_size, total_num_rankls_per_replica)
+    (4, 2, 2, 20),  # VLM-large
+    (5, 1, 1, 22),
+    (4, 2, 2, 20),
+    (5, 1, 1, 22),  # VLM-medium
+    (5, 1, 1, 22),
+    (3, 3, 3, 18),
+    (4, 2, 2, 20),  # VLM-small
+    (5, 1, 1, 22),
+    (5, 1, 1, 22),
+]
+
+cornstarch_parallel_configuration = [
+    # Freeze-location aware configuration
+    # (llm_pp_size, vision_pp_size, audio_pp_size, total_num_ranks_per_replica)
+    (5, 1, 1, 22),  # VLM-large
+    (5, 1, 1, 22),
+    (4, 2, 2, 24),
+    (4, 2, 2, 24),  # VLM-medium
+    (5, 1, 1, 22),
+    (5, 1, 1, 22),
+    (5, 1, 1, 22),  # VLM-small
+    (5, 1, 1, 22),
+    (5, 1, 1, 22),
 ]
 
 
@@ -299,12 +328,10 @@ def run_profile(
 
     if plugin_type == "cornstarch":
         fb_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
-        fwd_measure_name = (
-            "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.forward_step"
-        )
+        fwd_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.forward_step"
     elif plugin_type == "colocated":
-        fb_measure_name = "cornstarch.plugin.encoders_colocated_plugin.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
-        fwd_measure_name = "cornstarch.plugin.encoders_colocated_plugin.one_f_one_b.OneForwardOneBackwardSchedule.forward_step"
+        fb_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
+        fwd_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.forward_step"
     elif plugin_type == "replicated":
         fb_measure_name = "colossalai.pipeline.schedule.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
         fwd_measure_name = "colossalai.pipeline.schedule.one_f_one_b.OneForwardOneBackwardSchedule.forward_step"
@@ -332,7 +359,8 @@ def run_profile(
     elapsed_times = manager.get_elapsed_times()
 
     tp_rank = dist.get_rank(booster.plugin.tp_group)
-    if tp_rank == 0:
+    sp_rank = dist.get_rank(booster.plugin.sp_group)
+    if tp_rank == 0 and sp_rank == 0:
         try:
             pp_groups = booster.plugin.pp_groups
         except AttributeError:
@@ -344,18 +372,31 @@ def run_profile(
             device="cuda",
         )
 
-        for pp_group in pp_groups:
-            average_fwd_times = torch.empty(
-                dist.get_world_size(pp_group), device="cuda"
-            )
-            dist.all_gather_into_tensor(
-                average_fwd_times, average_fwd_time, group=pp_group
-            )
+        # Hacky way to pick one process group across all ranks. The order of pp_group in pp_groups might be different between ranks.
+        pp_group_rank_sum = [
+            sum(dist.get_process_group_ranks(pp_group)) for pp_group in pp_groups
+        ]
+        min_rank_sum_pp_group = pp_groups[
+            pp_group_rank_sum.index(min(pp_group_rank_sum))
+        ]
+
+        print(
+            f"Gathering forward time across pipeline stages... rank: {dist.get_rank()}, "
+            f"group ranks: {dist.get_process_group_ranks(min_rank_sum_pp_group)}"
+        )
+        average_fwd_times = torch.empty(
+            dist.get_world_size(min_rank_sum_pp_group), device="cuda"
+        )
+        dist.all_gather_into_tensor(
+            average_fwd_times, average_fwd_time, group=min_rank_sum_pp_group
+        )
 
         fb_times = elapsed_times[fb_measure_name]
         average_exec_time = sum(fb_times[1:]) / (len(fb_times) - 1)
 
-        with open(f"pp{dist.get_rank(pp_group)}_{file_path}", "a", newline="") as f:
+        with open(
+            f"pp{dist.get_rank(min_rank_sum_pp_group)}_{file_path}", "a", newline=""
+        ) as f:
             writer = csv.DictWriter(
                 f,
                 fieldnames=[
@@ -393,6 +434,11 @@ def run_profile(
 
 if __name__ == "__main__":
     if "LOCAL_RANK" in os.environ:
+
+        print(
+            f"Rank: {int(os.environ['RANK'])}, World size: {int(os.environ['WORLD_SIZE'])}"
+        )
+
         # If LOCAL_RANK is set, we are in a child process
         import argparse
 
@@ -461,14 +507,28 @@ if __name__ == "__main__":
         import subprocess
         import sys
 
-        # plugin_type = "colocated"
+        my_node_index = node_hostnames.index(socket.gethostname())
+        store = dist.TCPStore(
+            host_name=node_hostnames[0],
+            port=14400,
+            world_size=len(node_hostnames),
+            is_master=my_node_index == 0,
+            wait_for_workers=True,
+        )
 
-        for plugin_type in ["colocated"]:
-            for (
+        dist.init_process_group(
+            backend="gloo",
+            store=store,
+            rank=my_node_index,
+            world_size=len(node_hostnames),
+        )
+
+        for plugin_type in ["cornstarch"]:
+            for model_index, (
                 llm_model_name,
                 vision_model_name,
                 audio_model_name,
-            ) in model_names_to_test:
+            ) in enumerate(model_names_to_test):
                 if vision_model_name is None and audio_model_name is None:
                     continue
 
@@ -481,41 +541,78 @@ if __name__ == "__main__":
                     f"--llm_pp_size={3 if plugin_type == 'colocated' else 4}",
                 ]
 
-                multinode_command = [
-                    "torchrun",
-                    f"--nnodes={len(node_hostnames)}",
-                    "--nproc_per_node=4",
-                    "--rdzv_backend=c10d",
-                    f"--rdzv_endpoint={master_node_rdzv_backend}",
-                    f"--node-rank={node_hostnames.index(socket.gethostname())}",
-                    sys.argv[0],  # The current script file
-                    "--tp_size=2",
-                    f"--llm_pp_size={5 if plugin_type == 'colocated' else 6}",
-                ]
-
-                command = multinode_command + [
-                    f"--plugin_type={plugin_type}",
-                    f"--llm_model_name={llm_model_name}",
-                ]
-
-                if vision_model_name:
-                    command.extend(
-                        [
-                            f"--vision_model_name={vision_model_name}",
-                            "--vision_pp_size=1",
-                        ]
+                if plugin_type == "cornstarch":
+                    llm_pp_size, vision_pp_size, audio_pp_size, total_num_ranks = (
+                        cornstarch_parallel_configuration[model_index]
                     )
-                if audio_model_name:
-                    command.extend(
-                        [
-                            f"--audio_model_name={audio_model_name}",
-                            "--audio_pp_size=1",
-                        ]
+                elif plugin_type == "colocated":
+                    llm_pp_size, vision_pp_size, audio_pp_size, total_num_ranks = (
+                        colocate_parallel_configuration[model_index]
+                    )
+                    assert vision_pp_size == audio_pp_size
+                else:
+                    llm_pp_size, vision_pp_size, audio_pp_size, total_num_ranks = (
+                        6,
+                        1,
+                        1,
+                        24,
                     )
 
-                print(f"Running: {' '.join(command)}")
-                time.sleep(5)
-                result = subprocess.run(command)
-                if result.returncode > 0:
-                    print(f"Error running command: {' '.join(command)}")
-                    sys.exit(1)
+                print(
+                    f"Running {llm_model_name}+{vision_model_name}+{audio_model_name} with {total_num_ranks} ranks"
+                )
+
+                num_nodes_to_join = math.ceil(total_num_ranks / 4)
+                if my_node_index < len(node_hostnames) - num_nodes_to_join:
+                    print(
+                        "This node does not join the current model run. Waiting for the job to finish."
+                    )
+                else:
+                    node_rank = my_node_index - (
+                        len(node_hostnames) - num_nodes_to_join
+                    )
+                    num_processes = 4
+                    if node_rank == 0 and total_num_ranks % 4 != 0:
+                        num_processes = total_num_ranks % 4
+
+                    multinode_command = [
+                        "torchrun",
+                        f"--nnodes={num_nodes_to_join}",
+                        f"--nproc_per_node={num_processes}",
+                        "--rdzv_backend=c10d",
+                        f"--rdzv_endpoint={master_node_rdzv_backend}",
+                        f"--node-rank={node_rank}",
+                        sys.argv[0],  # The current script file
+                        "--tp_size=2",
+                        f"--llm_pp_size={llm_pp_size}",
+                    ]
+
+                    command = multinode_command + [
+                        f"--plugin_type={plugin_type}",
+                        f"--llm_model_name={llm_model_name}",
+                    ]
+
+                    if vision_model_name:
+                        command.extend(
+                            [
+                                f"--vision_model_name={vision_model_name}",
+                                f"--vision_pp_size={vision_pp_size}",
+                            ]
+                        )
+                    if audio_model_name:
+                        command.extend(
+                            [
+                                f"--audio_model_name={audio_model_name}",
+                                f"--audio_pp_size={audio_pp_size}",
+                            ]
+                        )
+
+                    print(f"Running: {' '.join(command)}")
+                    time.sleep(5)
+                    result = subprocess.run(command)
+                    if result.returncode > 0:
+                        print(f"Error running command: {' '.join(command)}")
+
+                dist.barrier()
+
+        dist.destroy_process_group()
