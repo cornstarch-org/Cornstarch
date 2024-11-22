@@ -1,4 +1,5 @@
 import inspect
+from collections import OrderedDict
 from dataclasses import replace
 from types import MethodType
 from typing import Any, Callable, Optional
@@ -29,15 +30,19 @@ from cornstarch.models.multimodal_language_model import (
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
     EncodersColocatedPipelineStageManager,
 )
-from cornstarch.plugin.encoders_colocated_plugin.one_f_one_b import (
-    OneForwardOneBackwardSchedule,
-)
 from cornstarch.plugin.encoders_colocated_plugin.process_group_mesh import (
     EncodersColocatedProcessGroupMesh,
 )
 from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
     MultimodalParallelModule,
+)
+
+# from cornstarch.plugin.encoders_colocated_plugin.one_f_one_b import (
+#     OneForwardOneBackwardSchedule,
+# )
+from cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b import (
+    MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
 )
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
@@ -301,9 +306,9 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
 
             return {
                 f"encoder_output_{modal_key}": (
-                    encoder_output
-                    if isinstance(encoder_output, dict)
-                    else encoder_output[0]
+                    encoder_output[0]
+                    if isinstance(encoder_output, OrderedDict)
+                    else encoder_output
                 )
                 for modal_key, encoder_output in encoder_outputs.items()
             }
@@ -431,11 +436,10 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
-        self.schedule = OneForwardOneBackwardSchedule(
+        self.schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             self.stage_manager,
             self.num_microbatches,
             self.microbatch_size,
-            enable_metadata_cache=False,
         )
 
         self.shard_config.tensor_parallel_process_group = self.tp_group

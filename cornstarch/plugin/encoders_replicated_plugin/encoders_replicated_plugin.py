@@ -16,7 +16,8 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
 from colossalai.booster.plugin.pp_plugin_base import PipelinePluginBase
 from colossalai.checkpoint_io import CheckpointIO
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
-from colossalai.pipeline.schedule.one_f_one_b import OneForwardOneBackwardSchedule
+
+# from colossalai.pipeline.schedule.one_f_one_b import OneForwardOneBackwardSchedule
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
@@ -37,6 +38,9 @@ from cornstarch.plugin.encoders_replicated_plugin.process_group_mesh import (
 from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
     MultimodalParallelModule,
+)
+from cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b import (
+    MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
 )
 from cornstarch.shardformer.shard.shard_config import ShardConfig
 
@@ -351,11 +355,10 @@ class EncodersReplicatedMultimodalParallelPlugin(HybridParallelPlugin):
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
-        self.schedule = OneForwardOneBackwardSchedule(
+        self.schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             self.stage_manager,
             self.num_microbatches,
             self.microbatch_size,
-            enable_metadata_cache=False,
         )
 
         self.shard_config.tensor_parallel_process_group = self.tp_group

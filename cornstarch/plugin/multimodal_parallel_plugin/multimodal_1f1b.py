@@ -502,7 +502,10 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         ), "Both num_microbatches and microbatch_size must be provided."
         PipelineSchedule.__init__(self, stage_manager)
 
-        assert len(stage_manager.pg_mesh.decoder_templates) == 0, (
+        assert (
+            not hasattr(stage_manager.pg_mesh, "decoder_templates")
+            or len(stage_manager.pg_mesh.decoder_templates) == 0
+        ), (
             "MultimodalEncoderTrainingOneForwardOneBackwardSchedule does not support "
             "decoders in the model."
         )
@@ -778,6 +781,9 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         my_modal = self.stage_manager.stage_index_to_modal[
             self.stage_manager.pg_mesh.coords[0][self.stage_manager.pipeline_axis]
         ]
+        if isinstance(my_modal, list):
+            my_modal = my_modal[0]
+
         # If LLM exists, calculate the number of warmup microbatches considering
         # LLM pipeline stages.
         if self.stage_manager.pg_mesh.llm_template is not None:
