@@ -114,6 +114,7 @@ def ring_flash_attn_backward(
             next_k = kv_comm.send_recv(k)
             next_v = kv_comm.send_recv(v)
             kv_comm.commit()
+
         if step <= kv_comm.rank or not causal:
             bwd_causal = causal and step == 0
             params = get_default_args(attn_impl).copy()
@@ -149,6 +150,7 @@ def ring_flash_attn_backward(
                 d_kv_comm.wait()
                 dk = block_dk_buffer + next_dk
                 dv = block_dv_buffer + next_dv
+
         elif step != 0:
             d_kv_comm.wait()
             dk = next_dk
@@ -273,6 +275,17 @@ def ring_flash_attn_anymask_backward(
         mask_ = mask.chunk(kv_comm.world_size, dim=-1)[
             (kv_comm.rank - step + kv_comm.world_size) % kv_comm.world_size
         ]  # NOTE(runyu) we need to pass the right mask to the kernel
+        if hasattr(mask, "cornstarch_is_bitattention"):
+            setattr(
+                mask_,
+                "cornstarch_is_bitattention",
+                getattr(mask, "cornstarch_is_bitattention"),
+            )
+            setattr(
+                mask_,
+                "cornstarch_num_encoders",
+                getattr(mask, "cornstarch_num_encoders"),
+            )
 
         mask_info = (grad_softmax_lse, mask_)
 
