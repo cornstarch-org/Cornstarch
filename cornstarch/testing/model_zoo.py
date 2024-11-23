@@ -22,6 +22,10 @@ from transformers.models.mistral.modeling_mistral import (
     MistralConfig,
     MistralForCausalLM,
 )
+from transformers.models.mixtral.modeling_mixtral import (
+    MixtralConfig,
+    MixtralForCausalLM,
+)
 from transformers.models.phi3.modeling_phi3 import Phi3Config, Phi3ForCausalLM
 from transformers.models.pixtral.modeling_pixtral import (
     PixtralVisionConfig,
@@ -125,6 +129,14 @@ class ImageModelClassBase(ModelClassBase):
 
         return data
 
+    def get_num_tokens(self, batch_size: int, image_size: tuple[int, int]) -> int:
+        num_chunks = (
+            math.ceil(image_size[0] / self.config.image_size)
+            * math.ceil(image_size[1] / self.config.image_size)
+            + 1
+        )
+        return batch_size * num_chunks
+
     def build_model(self) -> ModalEncoderModule:
         return ModalEncoderModule(super().build_model())
 
@@ -143,6 +155,9 @@ class AudioModelClassBase(ModelClassBase):
         }
 
         return data
+
+    def get_num_tokens(self) -> int:
+        return self.config.max_source_positions
 
     def build_model(self) -> ModalEncoderModule:
         return ModalEncoderModule(super().build_model())
@@ -269,8 +284,8 @@ class Mistral7bClass(LanguageModelClassBase):
 class Mistral123bClass(LanguageModelClassBase):
     def __init__(self):
         super().__init__(
-            MistralForCausalLM,
-            MistralConfig.from_pretrained("SillyTilly/Mistral-Large-Instruct-2407"),
+            MixtralForCausalLM,
+            MixtralConfig.from_pretrained("SillyTilly/Mistral-Large-Instruct-2407"),
         )
         self.config._attn_implementation = "flash_attention_2"
 
@@ -278,8 +293,8 @@ class Mistral123bClass(LanguageModelClassBase):
 class Mixtral8x7bClass(LanguageModelClassBase):
     def __init__(self):
         super().__init__(
-            MistralForCausalLM,
-            MistralConfig.from_pretrained("mistralai/Mixtral-8x7B-Instruct-v0.1"),
+            MixtralForCausalLM,
+            MixtralConfig.from_pretrained("mistralai/Mixtral-8x7B-Instruct-v0.1"),
         )
         self.config._attn_implementation = "flash_attention_2"
 
@@ -287,8 +302,8 @@ class Mixtral8x7bClass(LanguageModelClassBase):
 class Mixtral8x22bClass(LanguageModelClassBase):
     def __init__(self):
         super().__init__(
-            MistralForCausalLM,
-            MistralConfig.from_pretrained("mistralai/Mixtral-8x22B-Instruct-v0.1"),
+            MixtralForCausalLM,
+            MixtralConfig.from_pretrained("mistralai/Mixtral-8x22B-Instruct-v0.1"),
         )
         self.config._attn_implementation = "flash_attention_2"
 
@@ -461,6 +476,7 @@ class PixtralVisionClass(ImageModelClassBase):
             PixtralVisionConfig.from_pretrained("mistral-community/pixtral-12b"),
         )
         self.config._attn_implementation = "eager"
+        self.data_shape = None
 
     def data(
         self, batch_size: int, image_size: tuple[int, int]
@@ -475,6 +491,7 @@ class PixtralVisionClass(ImageModelClassBase):
         )
 
         inputs = processor(images=image, return_tensors="pt").to("cuda")
+        self.data_shape = inputs["pixel_values"][0].shape
         """
         Pixtral doesn't seem to support batch processing, hence
         here we do some data preprocessing to make it work.
@@ -484,6 +501,11 @@ class PixtralVisionClass(ImageModelClassBase):
         ).repeat(batch_size, 1, 1, 1)
 
         return inputs
+
+    def get_num_tokens(self, batch_size: int, image_size: tuple[int, int]) -> int:
+        return (self.data_shape[-1] // self.config.patch_size) * (
+            self.data_shape[-2] // self.config.patch_size
+        )
 
 
 class Dinov2GiantClass(ImageModelClassBase):
@@ -532,6 +554,7 @@ class Qwen2Vision7bClass(ImageModelClassBase):
         )
         self.config._attn_implementation = "eager"
         self.config.image_token_id = 44
+        self.data_shape = None
 
     def build_model(self) -> PreTrainedModel:
         model: Qwen2VisionTransformerPretrainedModel = ModelClassBase.build_model(self)
@@ -571,6 +594,7 @@ class Qwen2Vision7bClass(ImageModelClassBase):
         processor = Qwen2VLImageProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
 
         inputs = processor(images=image, return_tensors="pt").to("cuda")
+        self.data_shape = inputs["pixel_values"].shape
         """
         Preprocess inputs to make it work with micro batching.
         """
@@ -578,6 +602,9 @@ class Qwen2Vision7bClass(ImageModelClassBase):
             inputs[key] = torch.cat([value.unsqueeze(0)] * batch_size, dim=0)
 
         return inputs
+
+    def get_num_tokens(self, batch_size: int, image_size: tuple[int, int]) -> int:
+        return self.data_shape[0] // (self.config.temporal_patch_size**2)
 
 
 class Qwen2AudioEncoderClass(AudioModelClassBase):
@@ -589,6 +616,9 @@ class Qwen2AudioEncoderClass(AudioModelClassBase):
             ).audio_config,
         )
         self.config._attn_implementation = "eager"
+
+    def get_num_tokens(self) -> int:
+        return self.config.max_source_positions // 2
 
 
 class WhisperLargeClass(AudioModelClassBase):
