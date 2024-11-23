@@ -262,7 +262,8 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                     language_model_inputs.pop(key)
 
             result = module.language_model(**language_model_inputs)
-            if isinstance(result, dict):
+            if not self.stage_manager.is_last_stage(check_only_in_modal=True):
+                assert isinstance(result, dict)
                 result["attention_mask"] = attention_mask
             return result
         else:
