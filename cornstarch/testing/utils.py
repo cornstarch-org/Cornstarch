@@ -100,9 +100,10 @@ def generate_prefix_lm_document_mask(seq_len, min_doc_size=32, max_doc_size=512)
         current_pos = end_pos
 
     # Handle first block (prefix LM causal)
-    first_start, first_end = blocks[0]
-    for i in range(first_start, first_end):
-        mask[i, first_start : i + 1] = 1  # Causal attention within first block
+    # first_start, first_end = blocks[0]
+    # for i in range(first_start, first_end):
+    #     mask[i, first_start:i+1] = 1  # Causal attention within first block
+    mask[: blocks[0][1], : blocks[0][1]] = generate_prefix_lm_causal_mask(blocks[0][1])
 
     # Handle middle blocks (document mask only)
     for start, end in blocks[1:-1]:
@@ -112,8 +113,11 @@ def generate_prefix_lm_document_mask(seq_len, min_doc_size=32, max_doc_size=512)
     # Handle last block (prefix LM causal)
     last_start, last_end = blocks[-1]
     # Attend to all previous tokens + causal within block
-    for i in range(last_start, last_end):
-        mask[i, : i + 1] = 1
+    # for i in range(last_start, last_end):
+    #     mask[i, :i+1] = 1
+    mask[last_start:last_end, last_start:last_end] = generate_prefix_lm_causal_mask(
+        last_end - last_start
+    )
 
     return mask
 
@@ -125,9 +129,9 @@ def generate_prefix_lm_causal_mask(seq_len, prefix_len=None):
     """
     mask = torch.zeros((seq_len, seq_len))
 
-    # If prefix_len not specified, randomly choose between 10-60% of seq_len
+    # If prefix_len not specified, randomly choose between 10-100% of seq_len
     if prefix_len is None:
-        prefix_len = torch.randint(seq_len // 10, seq_len // 1.5, (1,)).item()
+        prefix_len = torch.randint(seq_len // 10, seq_len // 1, (1,)).item()
 
     # Prefix tokens can attend to all prefix tokens
     mask[:prefix_len, :prefix_len] = 1
@@ -195,7 +199,7 @@ if __name__ == "__main__":
         print(f"\nVisualizing masks for sequence length: {seq_len}")
         visualize_masks(seq_len)
 
-    # for testing
+    # for Usage
     seq_len = 512
     get_random_mask(seq_len, "causal_blockwise")
     get_random_mask(seq_len, "prefix_lm_document")
