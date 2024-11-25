@@ -125,9 +125,9 @@ def generate_prefix_lm_causal_mask(seq_len, prefix_len=None):
     """
     mask = torch.zeros((seq_len, seq_len))
 
-    # If prefix_len not specified, randomly choose between 10-30% of seq_len
+    # If prefix_len not specified, randomly choose between 10-60% of seq_len
     if prefix_len is None:
-        prefix_len = torch.randint(seq_len // 10, seq_len // 3, (1,)).item()
+        prefix_len = torch.randint(seq_len // 10, seq_len // 1.5, (1,)).item()
 
     # Prefix tokens can attend to all prefix tokens
     mask[:prefix_len, :prefix_len] = 1
@@ -186,18 +186,17 @@ def visualize_masks(seq_len=32, num_samples=10):
 
 if __name__ == "__main__":
 
-    # only for visualization
     # seq_lengths = [8192, 16384, 32768, 65536]
-    # seq_lengths = [512, 1024]
 
-    # for seq_len in seq_lengths:
-    #     print(f"\nVisualizing masks for sequence length: {seq_len}")
-    #     # Use smaller sequence length for visualization
-    #     visualize_masks(seq_len)
+    # only for visualization
+    seq_lengths = [512, 1024]
+
+    for seq_len in seq_lengths:
+        print(f"\nVisualizing masks for sequence length: {seq_len}")
+        visualize_masks(seq_len)
 
     # for testing
     seq_len = 512
-    # visualize_masks(seq_len)
     get_random_mask(seq_len, "causal_blockwise")
     get_random_mask(seq_len, "prefix_lm_document")
     get_random_mask(seq_len, "prefix_lm_causal")
