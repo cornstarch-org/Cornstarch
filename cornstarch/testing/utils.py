@@ -1,11 +1,10 @@
 import io
 
-import numpy as np
-from PIL import Image
-
-import torch
-import matplotlib.pyplot as plt
 import matplotlib.colors
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from PIL import Image
 
 
 def create_random_image(width: int, height: int) -> Image:
@@ -86,7 +85,7 @@ def generate_prefix_lm_document_mask(seq_len, min_doc_size=32, max_doc_size=512)
     current_pos = 0
     blocks = []  # Keep track of block positions
 
-    while current_pos < seq_len:
+    while current_pos < int(seq_len * 0.9):
         remaining = seq_len - current_pos
 
         if remaining <= min_doc_size:
@@ -111,13 +110,67 @@ def generate_prefix_lm_document_mask(seq_len, min_doc_size=32, max_doc_size=512)
         mask[start:end, start:end] = 1
 
     # Handle last block (prefix LM causal)
-    last_start, last_end = blocks[-1]
+    last_start, last_end = blocks[-1][0], seq_len
     # Attend to all previous tokens + causal within block
+    for i in range(last_start, last_end):
+        mask[i, : i + 1] = 1
+    # mask[last_start:last_end, last_start:last_end] = generate_prefix_lm_causal_mask(
+    #     last_end - last_start
+    # )
+
+    return mask
+
+
+def generate_encoder_embedded_mask(seq_len, min_block_size=32, max_block_size=512):
+    mask = torch.zeros((seq_len, seq_len))
+
+    current_pos = 0
+    blocks = []
+    causals = []
+
+    # Handle first causal mask
+    first_causal_size = torch.randint(
+        int(seq_len * 0.1), int(seq_len * 0.3), (1,)
+    ).item()
+    causals.append((0, first_causal_size))
+    current_pos = first_causal_size
+
+    while current_pos < seq_len * 0.9:
+        remaining = seq_len - current_pos
+
+        if remaining <= min_block_size:
+            block_size = remaining
+        else:
+            max_size = min(max_block_size, remaining)
+            block_size = torch.randint(min_block_size, max_size + 1, (1,)).item()
+
+        # Add block
+        end_pos = current_pos + block_size
+        blocks.append((current_pos, end_pos))
+        current_pos = end_pos
+
+        # Add causal mask between blocks
+        max_size = min(seq_len - current_pos, max_block_size)
+        min_size = min(min_block_size, max_size)
+        causal_size = torch.randint(min_size, max_size + 1, (1,)).item()
+
+        end_pos = current_pos + causal_size
+        causals.append((current_pos, end_pos))
+        current_pos = end_pos
+
+    # Handle middle blocks
+    for start, end in blocks:
+        mask[start:end, start:end] = 1
+
+    # Handle causal blocks
+    for start, end in causals:
+        for i in range(start, end):
+            mask[i, : i + 1] = 1
+
+    # Handle last block as causal
+    # last_start, last_end = blocks[-1][0], seq_len
     # for i in range(last_start, last_end):
-    #     mask[i, :i+1] = 1
-    mask[last_start:last_end, last_start:last_end] = generate_prefix_lm_causal_mask(
-        last_end - last_start
-    )
+    #     mask[i, : i + 1] = 1
 
     return mask
 
@@ -151,6 +204,7 @@ def get_random_mask(seq_len, mask_type="causal_blockwise"):
         "causal_blockwise": generate_causal_blockwise_mask,
         "prefix_lm_document": generate_prefix_lm_document_mask,
         "prefix_lm_causal": generate_prefix_lm_causal_mask,
+        "encoder_embedded": generate_encoder_embedded_mask,
     }
 
     if mask_type not in mask_generators:
@@ -166,10 +220,15 @@ def visualize_masks(seq_len=32, num_samples=10):
         seq_len: Sequence length for visualization
         num_samples: Number of different masks to generate for each type
     """
-    mask_types = ["causal_blockwise", "prefix_lm_document", "prefix_lm_causal"]
+    mask_types = [
+        "causal_blockwise",
+        "prefix_lm_document",
+        "prefix_lm_causal",
+        "encoder_embedded",
+    ]
 
     # Create subplot grid: 2 rows (mask types) x 10 columns (samples)
-    fig, axes = plt.subplots(3, num_samples, figsize=(30, 10))
+    fig, axes = plt.subplots(len(mask_types), num_samples, figsize=(30, 10))
     cmap = matplotlib.colors.ListedColormap(["#CBCBCB", "#7EA6E1"])
 
     for type_idx, mask_type in enumerate(mask_types):
