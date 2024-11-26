@@ -196,6 +196,38 @@ def generate_prefix_lm_causal_mask(seq_len, prefix_len=None):
     return mask
 
 
+def generate_multimodal_packed_mask(seq_len):
+    """
+    Generate a packed mask for multimodal fusion.
+    """
+    num_pack = 2
+    mask = torch.zeros((seq_len, seq_len))
+
+    # Calculate num_pack numbers where the sume is seq_len
+    pack_sizes = torch.randint(1, seq_len, (num_pack,))
+    pack_sizes = pack_sizes / pack_sizes.sum() * seq_len
+    pack_sizes = pack_sizes.int().tolist()
+
+    mask_type = [
+        generate_prefix_lm_document_mask,
+        generate_prefix_lm_causal_mask,
+        generate_encoder_embedded_mask,
+    ]
+
+    current_pos = 0
+    for pack_size in pack_sizes:
+
+        picked_mask_type = mask_type[torch.randint(0, len(mask_type), (1,)).item()]
+
+        mask[
+            current_pos : current_pos + pack_size, current_pos : current_pos + pack_size
+        ] = picked_mask_type(pack_size)
+
+        current_pos += pack_size
+
+    return mask
+
+
 def get_random_mask(seq_len, mask_type="causal_blockwise"):
     """
     Main function to generate a random mask of specified type
@@ -205,6 +237,7 @@ def get_random_mask(seq_len, mask_type="causal_blockwise"):
         "prefix_lm_document": generate_prefix_lm_document_mask,
         "prefix_lm_causal": generate_prefix_lm_causal_mask,
         "encoder_embedded": generate_encoder_embedded_mask,
+        "multimodal_packed": generate_multimodal_packed_mask,
     }
 
     if mask_type not in mask_generators:
@@ -221,10 +254,11 @@ def visualize_masks(seq_len=32, num_samples=10):
         num_samples: Number of different masks to generate for each type
     """
     mask_types = [
-        "causal_blockwise",
+        # "causal_blockwise",
         "prefix_lm_document",
         "prefix_lm_causal",
         "encoder_embedded",
+        "multimodal_packed",
     ]
 
     # Create subplot grid: 2 rows (mask types) x 10 columns (samples)

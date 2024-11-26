@@ -33,6 +33,7 @@ class AttentionMaskType(Enum):
     prefix_lm_causal = "prefix_lm_causal"
     prefix_lm_document = "prefix_lm_document"
     encoder_embedded = "encoder_embedded"
+    multimodal_packed = "multimodal_packed"
 
 
 def get_naive_ring_query_positions(
@@ -48,7 +49,7 @@ def get_stripe_query_positions(
     attention_mask: torch.BoolTensor,
     seq_len: int,
     world_size: int,
-    block_size: int = 2048,
+    block_size: int = 1024,
 ) -> torch.Tensor:
     assert seq_len % block_size == 0
     num_blocks = seq_len // block_size
@@ -118,15 +119,19 @@ def get_makespan_min_query_positions(
     block_mask = attention_mask.view(num_blocks, block_size, num_blocks, block_size)
     block_mask = torch.any(block_mask, dim=(1, 3))
 
+    per_block_workloads_sorted, indices = torch.sort(
+        block_mask.sum(dim=1), descending=True
+    )
+
     loads_per_gpu = []
     for i in range(world_size):
         heapq.heappush(loads_per_gpu, (0, i, []))
 
-    for i in range(num_blocks):
+    for indice, block_workload in zip(indices, per_block_workloads_sorted):
         load, gpu, block_indices = heapq.heappop(loads_per_gpu)
-        block_indices.append(i)
+        block_indices.append(indice.item())
         heapq.heappush(
-            loads_per_gpu, (load + block_mask[i].sum().item(), gpu, block_indices)
+            loads_per_gpu, (load + block_workload.item(), gpu, block_indices)
         )
 
     assignments = torch.empty(num_blocks, dtype=torch.long, device="cuda")
@@ -168,6 +173,8 @@ def create_layer():
     config: LlamaConfig = LlamaConfig.from_pretrained(
         "meta-llama/Meta-Llama-3-70B-Instruct"
     )
+    config.num_attention_heads //= 8
+    config.num_key_value_heads //= 8
 
     with torch.device("meta"):
         layer = LlamaAttention(config, layer_idx=0).to(dtype=torch.bfloat16)
@@ -273,7 +280,7 @@ def run_profile(
     attention_mask_type: AttentionMaskType,
 ):
     num_batch = 1
-    num_iterations = 100
+    num_iterations = 50
 
     # Create a layer
     layer: LlamaAttention = create_layer()
@@ -288,11 +295,9 @@ def run_profile(
 
         # Create attention mask.
         # This attention mask is used for every distribution method to compare their perofrmance.
-        attention_mask: torch.BoolTensor = (
-            get_random_mask(seq_len, attention_mask_type.value)
-            .to("cuda")
-            .to(torch.bool)
-        )
+        attention_mask: torch.BoolTensor = get_random_mask(
+            seq_len, attention_mask_type.value
+        ).to(dtype=torch.bool, device="cuda")
 
         # Reset caches
         global makespan_cache
@@ -390,7 +395,7 @@ def run_profile(
                     "seq_len": seq_len,
                     "world_size": world_size,
                     "distribute_method": distribute_method.value,
-                    "per_rank_time (ms)": per_rank_average,
+                    "per_rank_time (ms)": ",".join(per_rank_average.tolist()),
                     "max_time (ms)": np.max(per_rank_average),
                     "average_time (ms)": np.mean(per_rank_average),
                     "minmax_diff": (np.max(per_rank_average) - np.min(per_rank_average))
@@ -400,9 +405,16 @@ def run_profile(
 
 
 if __name__ == "__main__":
-    # for seq_len in [16384, 16384 * 2, 16384 * 4]:
-    #     for attention_mask_type in AttentionMaskType:
-    #         run_profile(seq_len, 8, attention_mask_type)
+    import os
 
-    for seq_len in [16384, 16384 * 2, 16384 * 4]:
-        run_profile(seq_len, 8, AttentionMaskType.encoder_embedded)
+    index = int(os.environ["CUDA_VISIBLE_DEVICES"])
+    type = [
+        AttentionMaskType.prefix_lm_causal,
+        AttentionMaskType.prefix_lm_document,
+        AttentionMaskType.encoder_embedded,
+        AttentionMaskType.multimodal_packed,
+    ]
+
+    for seq_len in [16384, 16384 * 2, 16384 * 4, 16384 * 8]:
+        for num_rank in [8, 16]:
+            run_profile(seq_len, num_rank, type[index])
