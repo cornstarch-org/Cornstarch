@@ -20,14 +20,11 @@ from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (
     EncodersColocatedMultimodalParallelPlugin,
 )
-from cornstarch.plugin.encoders_replicated_plugin.encoders_replicated_plugin import (
-    EncodersReplicatedMultimodalParallelPlugin,
-)
 from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
     MultimodalParallelModule,
-    MultimodalParallelPlugin,
 )
+from cornstarch.testing.dcgm import DcgmContextManager
 from cornstarch.testing.model_zoo import (
     AudioModelClassBase,
     ImageModelClassBase,
@@ -78,6 +75,7 @@ class CornstarchTestingClass:
     ):
         self.llm_model_class = llm_model_class
         self.encoder_model_classes = encoder_model_classes
+        self.iteration = 0
 
     def data(self) -> dict[str, torch.Tensor]:
         seq_length = 1024
@@ -295,25 +293,27 @@ class CornstarchTestingClass:
         criterion: Callable[[torch.Tensor], torch.Tensor],
         booster: Booster,
     ):
-        num_iterations = 2
-
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
 
         data = self.data()
-        data_iter = iter([data for _ in range(num_iterations)])
+        data_iter = iter([data])
 
-        for i in range(num_iterations):
-            print(f"Iteration {i}")
-            with torch.autograd.profiler.emit_nvtx(), torch.cuda.nvtx.range(f"iter{i}"):
-                booster.execute_pipeline(
-                    data_iter,
-                    model,
-                    lambda outputs, inputs: criterion(outputs),
-                    optimizer,
-                    return_loss=True,
-                    return_outputs=False,
-                )
+        # warmup
+        with (
+            torch.autograd.profiler.emit_nvtx(),
+            torch.cuda.nvtx.range(f"iter{self.iteration}"),
+        ):
+            booster.execute_pipeline(
+                data_iter,
+                model,
+                lambda outputs, inputs: criterion(outputs),
+                optimizer,
+                return_loss=True,
+                return_outputs=False,
+            )
+
+        self.iteration += 1
 
 
 def run_profile(
@@ -357,18 +357,31 @@ def run_profile(
     local_rank = int(os.environ["LOCAL_RANK"])
     dist.barrier(device_ids=[local_rank])
 
-    manager = TimerContextManager()
+    timer_manager = TimerContextManager()
+    dcgm_manager = DcgmContextManager()
 
     fb_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
     fwd_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.forward_step"
     bwd_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.backward_step"
 
-    with manager.measure([fb_measure_name, fwd_measure_name, bwd_measure_name]):
-        cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
+    # warmup
+    cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
 
-        torch.cuda.synchronize()
+    dist.barrier()
+    torch.cuda.synchronize()
 
-    elapsed_times = manager.get_elapsed_times()
+    num_iterations = 1
+    with (
+        timer_manager.measure([fb_measure_name, fwd_measure_name, bwd_measure_name]),
+        dcgm_manager.profile(),
+    ):
+        for _ in range(num_iterations):
+            cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
+
+    torch.cuda.synchronize()
+
+    elapsed_times = timer_manager.get_elapsed_times()
+    sm_occupancy_trace = dcgm_manager.get_sm_occupancy_trace()
 
     tp_rank = dist.get_rank(booster.plugin.tp_group)
     if tp_rank == 0:
@@ -378,23 +391,22 @@ def run_profile(
             pp_group = booster.plugin.pp_group
         fwd_times = elapsed_times[fwd_measure_name]
         average_fwd_time = torch.tensor(
-            sum(fwd_times[1:]) / (len(fwd_times) - 1),
+            sum(fwd_times) / len(fwd_times),
             device="cuda",
         )
         average_fwd_times = torch.empty(dist.get_world_size(pp_group), device="cuda")
         dist.all_gather_into_tensor(average_fwd_times, average_fwd_time, group=pp_group)
 
         bwd_times = elapsed_times[bwd_measure_name]
-        average_bwd_time = torch.tensor(
-            sum(bwd_times[1:]) / (len(bwd_times) - 1), device="cuda"
-        )
+        average_bwd_time = torch.tensor(sum(bwd_times) / len(bwd_times), device="cuda")
         average_bwd_times = torch.empty(dist.get_world_size(pp_group), device="cuda")
         dist.all_gather_into_tensor(average_bwd_times, average_bwd_time, group=pp_group)
 
         fb_times = elapsed_times[fb_measure_name]
-        average_exec_time = sum(fb_times[1:]) / (len(fb_times) - 1)
+        average_exec_time = sum(fb_times) / len(fb_times)
 
-        with open(f"pp{dist.get_rank(pp_group)}_{file_path}", "a", newline="") as f:
+        pp_rank = dist.get_rank(pp_group)
+        with open(f"pp{pp_rank}_{file_path}", "a", newline="") as f:
             writer = csv.DictWriter(
                 f,
                 fieldnames=[
@@ -419,6 +431,11 @@ def run_profile(
                     "bwd_time_per_pp (ms)": str(average_bwd_times.tolist()),
                 }
             )
+
+        with open(f"pp{pp_rank}_sm_occupancy.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["timestamp", "sm_occupancy"])
+            writer.writerows(sm_occupancy_trace)
 
     dist.barrier(device_ids=[local_rank])
     dist.destroy_process_group()
