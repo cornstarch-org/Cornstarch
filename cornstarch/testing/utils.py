@@ -35,13 +35,16 @@ def create_random_image(width: int, height: int) -> Image:
     return jpeg_image
 
 
-def generate_causal_blockwise_mask(seq_len, min_block_size=32, max_block_size=256):
+def generate_causal_blockwise_mask(seq_len):
     """
     Generate causal blockwise mask where:
     - Each block attends only to itself within the block (causally)
     - The last block attends to all previous tokens
     """
-    mask = torch.zeros((seq_len, seq_len))
+    mask = torch.zeros((seq_len, seq_len), device="cuda")
+
+    max_block_size = seq_len // 8
+    min_block_size = max_block_size // 8
 
     current_pos = 0
     blocks = []  # Keep track of block positions
@@ -73,14 +76,17 @@ def generate_causal_blockwise_mask(seq_len, min_block_size=32, max_block_size=25
     return mask
 
 
-def generate_prefix_lm_document_mask(seq_len, min_doc_size=32, max_doc_size=512):
+def generate_prefix_lm_document_mask(seq_len):
     """
     Generate prefix LM document mask where:
     - First block: prefix LM causal (attends causally within block)
     - Middle blocks: document mask only (bidirectional within block)
     - Last block: prefix LM causal (attends to all previous + causal within block)
     """
-    mask = torch.zeros((seq_len, seq_len))
+    mask = torch.zeros((seq_len, seq_len), device="cuda")
+
+    max_block_size = seq_len // 8
+    min_block_size = max_block_size // 8
 
     current_pos = 0
     blocks = []  # Keep track of block positions
@@ -88,11 +94,11 @@ def generate_prefix_lm_document_mask(seq_len, min_doc_size=32, max_doc_size=512)
     while current_pos < int(seq_len * 0.9):
         remaining = seq_len - current_pos
 
-        if remaining <= min_doc_size:
+        if remaining <= min_block_size:
             block_size = remaining
         else:
-            max_size = min(max_doc_size, remaining)
-            block_size = torch.randint(min_doc_size, max_size + 1, (1,)).item()
+            max_size = min(max_block_size, remaining)
+            block_size = torch.randint(min_block_size, max_size + 1, (1,)).item()
 
         end_pos = current_pos + block_size
         blocks.append((current_pos, end_pos))
@@ -121,12 +127,15 @@ def generate_prefix_lm_document_mask(seq_len, min_doc_size=32, max_doc_size=512)
     return mask
 
 
-def generate_encoder_embedded_mask(seq_len, min_block_size=32, max_block_size=512):
-    mask = torch.zeros((seq_len, seq_len))
+def generate_encoder_embedded_mask(seq_len):
+    mask = torch.zeros((seq_len, seq_len), device="cuda")
 
     current_pos = 0
     blocks = []
     causals = []
+
+    max_block_size = seq_len // 8
+    min_block_size = max_block_size // 8
 
     # Handle first causal mask
     first_causal_size = torch.randint(
@@ -180,7 +189,7 @@ def generate_prefix_lm_causal_mask(seq_len, prefix_len=None):
     Generate prefix LM causal mask where prefix tokens can attend to each other,
     and other tokens can attend to prefix and previous tokens
     """
-    mask = torch.zeros((seq_len, seq_len))
+    mask = torch.zeros((seq_len, seq_len), device="cuda")
 
     # If prefix_len not specified, randomly choose between 10-100% of seq_len
     if prefix_len is None:
@@ -200,28 +209,20 @@ def generate_multimodal_packed_mask(seq_len):
     """
     Generate a packed mask for multimodal fusion.
     """
-    num_pack = 2
-    mask = torch.zeros((seq_len, seq_len))
+    num_pack = 4
+    mask = torch.zeros((seq_len, seq_len), device="cuda")
 
     # Calculate num_pack numbers where the sume is seq_len
     pack_sizes = torch.randint(1, seq_len, (num_pack,))
     pack_sizes = pack_sizes / pack_sizes.sum() * seq_len
     pack_sizes = pack_sizes.int().tolist()
 
-    mask_type = [
-        generate_prefix_lm_document_mask,
-        generate_prefix_lm_causal_mask,
-        generate_encoder_embedded_mask,
-    ]
-
     current_pos = 0
     for pack_size in pack_sizes:
 
-        picked_mask_type = mask_type[torch.randint(0, len(mask_type), (1,)).item()]
-
         mask[
             current_pos : current_pos + pack_size, current_pos : current_pos + pack_size
-        ] = picked_mask_type(pack_size)
+        ] = generate_encoder_embedded_mask(pack_size)
 
         current_pos += pack_size
 

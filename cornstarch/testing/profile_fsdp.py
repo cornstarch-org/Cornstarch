@@ -26,10 +26,10 @@ file_path = "profile_fsdp_result.csv"
 
 # model_names_to_test = [("llama_8b", "clip", "qwen2_audio")]
 model_names_to_test = [
-    # ("qwen2_72b", "vit_22b", None),  # VLM-large
-    # ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
-    # ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
-    ("gemma2_27b", "dinov2_1.1b", None),  # VLM-medium
+    ("qwen2_72b", "vit_22b", None),  # VLM-large
+    ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
+    ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
+    ("gemma2_27b", "intern_vit_6b", None),  # VLM-medium
     ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
     ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
     ("llama_8b", "pixtral_400m", None),  # VLM-small

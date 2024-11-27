@@ -42,14 +42,14 @@ file_path = "profile_pipeline_result.csv"
 # model_names_to_test = [("llama_70b", "clip", "qwen2_audio")]
 model_names_to_test = [
     ("qwen2_72b", "vit_22b", None),  # VLM-large
-    # ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
-    # ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
-    # ("gemma2_27b", "intern_vit_6b", None),  # VLM-medium
-    # ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
-    # ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
-    # ("llama_8b", "pixtral_400m", None),  # VLM-small
-    # ("phi3_small", None, "whisper_242m"),  # ALM-small
-    # ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
+    ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
+    ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
+    ("gemma2_27b", "intern_vit_6b", None),  # VLM-medium
+    ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
+    ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
+    ("llama_8b", "pixtral_400m", None),  # VLM-small
+    ("phi3_small", None, "whisper_242m"),  # ALM-small
+    ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
 ]
 
 colocate_parallel_configuration = [
@@ -429,6 +429,9 @@ def run_profile(
             writer = csv.DictWriter(
                 f,
                 fieldnames=[
+                    "llm_pp",
+                    "vision_pp",
+                    "audio_pp",
                     "llm_model",
                     "vision_model",
                     "audio_model",
@@ -442,6 +445,9 @@ def run_profile(
 
             writer.writerow(
                 {
+                    "llm_pp": llm_pp_size,
+                    "vision_pp": vision_pp_size,
+                    "audio_pp": audio_pp_size,
                     "llm_model": llm_model_name,
                     "vision_model": vision_model_name,
                     "audio_model": audio_model_name,
@@ -452,7 +458,7 @@ def run_profile(
             )
 
         with open(
-            f"pp{pp_rank}_sm_{llm_model_name}+{vision_model_name}+{audio_model_name}.csv",
+            f"pp{pp_rank}_tensor_{llm_model_name}+{vision_model_name}+{audio_model_name}.csv",
             "w",
             newline="",
         ) as f:

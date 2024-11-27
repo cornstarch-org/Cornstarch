@@ -416,5 +416,6 @@ if __name__ == "__main__":
     ]
 
     for seq_len in [16384, 16384 * 2, 16384 * 4, 16384 * 8]:
-        for num_rank in [8, 16]:
+        # for num_rank in [8, 16]:
+        for num_rank in [8]:
             run_profile(seq_len, num_rank, type[index])
