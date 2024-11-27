@@ -76,6 +76,7 @@ class ModelClassBase(ABC):
     def build_model(self) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.tie_word_embeddings = False
+        config.use_cache = False
         model = self.model_class(config)
         try:
             model.gradient_checkpointing_enable()
@@ -110,14 +111,9 @@ class ImageModelClassBase(ModelClassBase):
     def data(
         self, batch_size: int, image_size: tuple[int, int]
     ) -> dict[str, torch.Tensor]:
-        num_chunks = (
-            math.ceil(image_size[0] / self.config.image_size)
-            * math.ceil(image_size[1] / self.config.image_size)
-            + 1
-        )
         data = {
             "pixel_values": torch.randn(
-                batch_size * num_chunks,
+                self.get_num_tokens(batch_size, image_size),
                 self.config.num_channels,
                 self.config.image_size,
                 self.config.image_size,
@@ -130,10 +126,8 @@ class ImageModelClassBase(ModelClassBase):
         return data
 
     def get_num_tokens(self, batch_size: int, image_size: tuple[int, int]) -> int:
-        num_chunks = (
-            math.ceil(image_size[0] / self.config.image_size)
-            * math.ceil(image_size[1] / self.config.image_size)
-            + 1
+        num_chunks = math.ceil(image_size[0] / self.config.image_size) * math.ceil(
+            image_size[1] / self.config.image_size
         )
         return batch_size * num_chunks
 

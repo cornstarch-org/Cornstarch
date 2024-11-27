@@ -17,10 +17,13 @@ from cornstarch.models.multimodal_language_model import (
     MultimodalModel,
 )
 from cornstarch.pipeline_template import PipelineTemplate
+
+# from cornstarch.plugin.multimodal_parallel_plugin import (
+#     ModalParallelPlugin,
+#     MultimodalParallelModule,
+# )
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (
     EncodersColocatedMultimodalParallelPlugin,
-)
-from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
     MultimodalParallelModule,
 )
@@ -39,20 +42,20 @@ file_path = "profile_pipeline_result.csv"
 # model_names_to_test = [("llama_70b", "clip", "qwen2_audio")]
 model_names_to_test = [
     ("qwen2_72b", "vit_22b", None),  # VLM-large
-    ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
-    ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
-    ("gemma2_27b", "intern_vit_6b", None),  # VLM-medium
-    ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
-    ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
-    ("llama_8b", "pixtral_400m", None),  # VLM-small
-    ("phi3_small", None, "whisper_242m"),  # ALM-small
-    ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
+    # ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
+    # ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
+    # ("gemma2_27b", "intern_vit_6b", None),  # VLM-medium
+    # ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
+    # ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
+    # ("llama_8b", "pixtral_400m", None),  # VLM-small
+    # ("phi3_small", None, "whisper_242m"),  # ALM-small
+    # ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
 ]
 
 colocate_parallel_configuration = [
     # Megatron-like configuration without considering freeze
     # (llm_pp_size, vision_pp_size, audio_pp_size)
-    (3, 3, 3),  # VLM-large
+    (4, 2, 2),  # VLM-large
     (5, 1, 1),
     (4, 2, 2),
     (4, 2, 2),  # VLM-medium
