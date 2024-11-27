@@ -5,6 +5,7 @@ import re
 import time
 from typing import Any, Callable
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -52,32 +53,33 @@ model_names_to_test = [
     ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
 ]
 
+# for 1024 tokens
 colocate_parallel_configuration = [
     # Megatron-like configuration without considering freeze
-    # (llm_pp_size, vision_pp_size, audio_pp_size, total_num_rankls_per_replica)
-    (4, 2, 2, 20),  # VLM-large
-    (5, 1, 1, 22),
-    (4, 2, 2, 20),
-    (5, 1, 1, 22),  # VLM-medium
-    (5, 1, 1, 22),
-    (3, 3, 3, 18),
-    (4, 2, 2, 20),  # VLM-small
-    (5, 1, 1, 22),
-    (5, 1, 1, 22),
+    # (llm_pp_size, vision_pp_size, audio_pp_size)
+    (3, 3, 3),  # VLM-large
+    (5, 1, 1),
+    (4, 2, 2),
+    (4, 2, 2),  # VLM-medium
+    (5, 1, 1),
+    (3, 3, 3),
+    (5, 1, 1),  # VLM-small
+    (5, 1, 1),
+    (5, 1, 1),
 ]
 
 cornstarch_parallel_configuration = [
     # Freeze-location aware configuration
-    # (llm_pp_size, vision_pp_size, audio_pp_size, total_num_ranks_per_replica)
-    (5, 1, 1, 22),  # VLM-large
-    (5, 1, 1, 22),
-    (4, 2, 2, 24),
-    (4, 2, 2, 24),  # VLM-medium
-    (5, 1, 1, 22),
-    (5, 1, 1, 22),
-    (5, 1, 1, 22),  # VLM-small
-    (5, 1, 1, 22),
-    (5, 1, 1, 22),
+    # (llm_pp_size, vision_pp_size, audio_pp_size)
+    (4, 2, 2),  # VLM-large
+    (5, 1, 1),
+    (5, 1, 1),
+    (5, 1, 1),  # VLM-medium
+    (5, 1, 1),
+    (5, 1, 1),
+    (5, 1, 1),  # VLM-small
+    (5, 1, 1),
+    (5, 1, 1),
 ]
 
 
@@ -94,18 +96,79 @@ class CornstarchTestingClass:
         self.encoder_model_classes = encoder_model_classes
 
     def data(self) -> dict[str, torch.Tensor]:
+        seq_length = 2048
+
         data = {}
         batch_size = self.num_microbatches * self.microbatch_size
-        data.update(self.llm_model_class.data(batch_size, seq_len=2048))
+        data.update(self.llm_model_class.data(batch_size, seq_len=seq_length))
 
+        total_length = seq_length
         if "vision" in self.encoder_model_classes:
-            data.update(
-                self.encoder_model_classes["vision"].data(
-                    batch_size, image_size=(1280, 720)
-                )
+            image_size = (1280, 720)
+            vision_data = self.encoder_model_classes["vision"].data(
+                batch_size, image_size=image_size
             )
+            num_tokens_to_inject = self.encoder_model_classes["vision"].get_num_tokens(
+                batch_size, image_size
+            )
+            start_point = seq_length // 4
+
+            data["input_ids"] = torch.cat(
+                [
+                    data["input_ids"][:, :start_point],
+                    torch.full(
+                        (batch_size, num_tokens_to_inject), 44, dtype=torch.long
+                    ),
+                    data["input_ids"][:, start_point:],
+                ],
+                dim=1,
+            )
+            data["labels"] = torch.cat(
+                [
+                    data["labels"][:, :start_point],
+                    torch.full(
+                        (batch_size, num_tokens_to_inject), -100, dtype=torch.long
+                    ),
+                    data["labels"][:, start_point:],
+                ],
+                dim=1,
+            )
+            data.update(vision_data)
+            total_length += num_tokens_to_inject
+
         if "audio" in self.encoder_model_classes:
-            data.update(self.encoder_model_classes["audio"].data(batch_size))
+            audio_data = self.encoder_model_classes["audio"].data(batch_size)
+            num_tokens_to_inject = self.encoder_model_classes["audio"].get_num_tokens()
+            start_point = total_length // 4 * 3
+
+            data["input_ids"] = torch.cat(
+                [
+                    data["input_ids"][:, :start_point],
+                    torch.full(
+                        (batch_size, num_tokens_to_inject), 55, dtype=torch.long
+                    ),
+                    data["input_ids"][:, start_point:],
+                ],
+                dim=1,
+            )
+            data["labels"] = torch.cat(
+                [
+                    data["labels"][:, :start_point],
+                    torch.full(
+                        (batch_size, num_tokens_to_inject), -100, dtype=torch.long
+                    ),
+                    data["labels"][:, start_point:],
+                ],
+                dim=1,
+            )
+
+            data.update(audio_data)
+            total_length += num_tokens_to_inject
+
+        remainder = total_length % 4
+        if remainder != 0:
+            data["input_ids"] = data["input_ids"][:, :-remainder]
+            data["labels"] = data["labels"][:, :-remainder]
 
         return data
 
@@ -202,8 +265,8 @@ class CornstarchTestingClass:
 
         llm_plugin = ModalParallelPlugin(
             tp_size=tp_size,
-            sp_size=2,
-            sequence_parallelism_mode="ring_attn",
+            sp_size=1,
+            # sequence_parallelism_mode="ring_attn",
             pipeline_template=self.get_megatron_style_pipeline_template(
                 model.language_model, llm_pp_size
             ),
@@ -212,8 +275,8 @@ class CornstarchTestingClass:
         encoders_plugins = {
             key: ModalParallelPlugin(
                 tp_size=tp_size,
-                sp_size=2,
-                sequence_parallelism_mode="ring_attn",
+                sp_size=1,
+                # sequence_parallelism_mode="ring_attn",
                 pipeline_template=self.get_megatron_style_pipeline_template(
                     model.get_submodule(f"{key}_encoder"), encoders_pp_size[key]
                 ),
@@ -227,17 +290,20 @@ class CornstarchTestingClass:
                 language_model_plugin=llm_plugin,
                 **test_config,
             )
+            plugin.shard_config.ring_attention_distribution_mode = "random"
         elif plugin_type == "colocated":
             plugin = EncodersColocatedMultimodalParallelPlugin(
                 encoder_plugins=encoders_plugins,
                 language_model_plugin=llm_plugin,
                 **test_config,
             )
+            plugin.shard_config.ring_attention_distribution_mode = "zigzag"
         elif plugin_type == "replicated":
             plugin = EncodersReplicatedMultimodalParallelPlugin(
                 language_model_plugin=llm_plugin,
                 **test_config,
             )
+            plugin.shard_config.ring_attention_distribution_mode = "zigzag"
         else:
             raise ValueError(f"Unknown plugin type {plugin_type}")
 
@@ -262,6 +328,7 @@ class CornstarchTestingClass:
 
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
+        np.random.seed(0)
 
         data = self.data()
         data_iter = iter([data for _ in range(num_iterations)])
@@ -430,6 +497,7 @@ def run_profile(
 
     dist.barrier(device_ids=[local_rank])
     dist.destroy_process_group()
+    torch.cuda.synchronize()
 
 
 if __name__ == "__main__":
@@ -500,7 +568,6 @@ if __name__ == "__main__":
 
         torch._dynamo.config.optimize_ddp = False
         run_profile(**kargs)
-        torch.cuda.synchronize()
     else:
         # If LOCAL_RANK is not set, we are in the main process and need to launch child processes
         import socket
@@ -523,7 +590,8 @@ if __name__ == "__main__":
             world_size=len(node_hostnames),
         )
 
-        for plugin_type in ["cornstarch"]:
+        # for plugin_type in ["colocated"]:
+        for plugin_type in ["colocated", "replicated", "cornstarch"]:
             for model_index, (
                 llm_model_name,
                 vision_model_name,
@@ -532,37 +600,34 @@ if __name__ == "__main__":
                 if vision_model_name is None and audio_model_name is None:
                     continue
 
-                standalone_command = [
-                    "torchrun",
-                    "--standalone",
-                    "--nproc_per_node=4",
-                    sys.argv[0],  # The current script file
-                    "--tp_size=1",
-                    f"--llm_pp_size={3 if plugin_type == 'colocated' else 4}",
-                ]
-
                 if plugin_type == "cornstarch":
-                    llm_pp_size, vision_pp_size, audio_pp_size, total_num_ranks = (
+                    llm_pp_size, vision_pp_size, audio_pp_size = (
                         cornstarch_parallel_configuration[model_index]
                     )
+                    num_ranks = (llm_pp_size * 2 + vision_pp_size + audio_pp_size) * 2
+                    if vision_model_name is None:
+                        num_ranks -= vision_pp_size * 2
+                    if audio_model_name is None:
+                        num_ranks -= audio_pp_size * 2
                 elif plugin_type == "colocated":
-                    llm_pp_size, vision_pp_size, audio_pp_size, total_num_ranks = (
+                    llm_pp_size, vision_pp_size, audio_pp_size = (
                         colocate_parallel_configuration[model_index]
                     )
                     assert vision_pp_size == audio_pp_size
+                    num_ranks = (llm_pp_size * 2 + vision_pp_size) * 2
                 else:
-                    llm_pp_size, vision_pp_size, audio_pp_size, total_num_ranks = (
+                    llm_pp_size, vision_pp_size, audio_pp_size = (
                         6,
                         1,
                         1,
-                        24,
                     )
+                    num_ranks = 24
 
                 print(
-                    f"Running {llm_model_name}+{vision_model_name}+{audio_model_name} with {total_num_ranks} ranks"
+                    f"Running {llm_model_name}+{vision_model_name}+{audio_model_name} with {num_ranks} ranks"
                 )
 
-                num_nodes_to_join = math.ceil(total_num_ranks / 4)
+                num_nodes_to_join = math.ceil(num_ranks / 4)
                 if my_node_index < len(node_hostnames) - num_nodes_to_join:
                     print(
                         "This node does not join the current model run. Waiting for the job to finish."
@@ -572,8 +637,8 @@ if __name__ == "__main__":
                         len(node_hostnames) - num_nodes_to_join
                     )
                     num_processes = 4
-                    if node_rank == 0 and total_num_ranks % 4 != 0:
-                        num_processes = total_num_ranks % 4
+                    if node_rank == 0 and num_ranks % 4 != 0:
+                        num_processes = num_ranks % 4
 
                     multinode_command = [
                         "torchrun",
