@@ -1,4 +1,5 @@
 import csv
+import math
 import os
 import re
 import time
@@ -43,12 +44,26 @@ model_names_to_test = [
     ("qwen2_72b", "vit_22b", None),  # VLM-large
     ("mixtral_8x7b", None, "qwen2_audio"),  # ALM-large
     ("llama_70b", "evaclip_18b", "whisper_1.5b"),  # VALM-large
-    ("gemma2_27b", "dinov2_1.1b", None),  # VLM-medium
+    ("gemma2_27b", "intern_vit_6b", None),  # VLM-medium
     ("internlm2_20b", None, "whisper_307m"),  # ALM-medium
     ("qwen2_14b", "qwen2_vision_675m", "whisper_307m"),  # VALM-medium
     ("llama_8b", "pixtral_400m", None),  # VLM-small
     ("phi3_small", None, "whisper_242m"),  # ALM-small
     ("mistral_7b", "siglip_878m", "whisper_242m"),  # VALM-small
+]
+
+colocate_parallel_configuration = [
+    # Megatron-like configuration without considering freeze
+    # (llm_pp_size, vision_pp_size, audio_pp_size)
+    (3, 3, 3),  # VLM-large
+    (5, 1, 1),
+    (4, 2, 2),
+    (4, 2, 2),  # VLM-medium
+    (5, 1, 1),
+    (3, 3, 3),
+    (5, 1, 1),  # VLM-small
+    (5, 1, 1),
+    (5, 1, 1),
 ]
 
 
@@ -65,18 +80,79 @@ class CornstarchTestingClass:
         self.encoder_model_classes = encoder_model_classes
 
     def data(self) -> dict[str, torch.Tensor]:
+        seq_length = 1024
+
         data = {}
         batch_size = self.num_microbatches * self.microbatch_size
-        data.update(self.llm_model_class.data(batch_size, seq_len=2048))
+        data.update(self.llm_model_class.data(batch_size, seq_len=seq_length))
 
+        total_length = seq_length
         if "vision" in self.encoder_model_classes:
-            data.update(
-                self.encoder_model_classes["vision"].data(
-                    batch_size, image_size=(1280, 720)
-                )
+            image_size = (1280, 720)
+            vision_data = self.encoder_model_classes["vision"].data(
+                batch_size, image_size=image_size
             )
+            num_tokens_to_inject = self.encoder_model_classes["vision"].get_num_tokens(
+                batch_size, image_size
+            )
+            start_point = seq_length // 4
+
+            data["input_ids"] = torch.cat(
+                [
+                    data["input_ids"][:, :start_point],
+                    torch.full(
+                        (batch_size, num_tokens_to_inject), 44, dtype=torch.long
+                    ),
+                    data["input_ids"][:, start_point:],
+                ],
+                dim=1,
+            )
+            data["labels"] = torch.cat(
+                [
+                    data["labels"][:, :start_point],
+                    torch.full(
+                        (batch_size, num_tokens_to_inject), -100, dtype=torch.long
+                    ),
+                    data["labels"][:, start_point:],
+                ],
+                dim=1,
+            )
+            data.update(vision_data)
+            total_length += num_tokens_to_inject
+
         if "audio" in self.encoder_model_classes:
-            data.update(self.encoder_model_classes["audio"].data(batch_size))
+            audio_data = self.encoder_model_classes["audio"].data(batch_size)
+            num_tokens_to_inject = self.encoder_model_classes["audio"].get_num_tokens()
+            start_point = total_length // 4 * 3
+
+            data["input_ids"] = torch.cat(
+                [
+                    data["input_ids"][:, :start_point],
+                    torch.full(
+                        (batch_size, num_tokens_to_inject), 55, dtype=torch.long
+                    ),
+                    data["input_ids"][:, start_point:],
+                ],
+                dim=1,
+            )
+            data["labels"] = torch.cat(
+                [
+                    data["labels"][:, :start_point],
+                    torch.full(
+                        (batch_size, num_tokens_to_inject), -100, dtype=torch.long
+                    ),
+                    data["labels"][:, start_point:],
+                ],
+                dim=1,
+            )
+
+            data.update(audio_data)
+            total_length += num_tokens_to_inject
+
+        remainder = total_length % 4
+        if remainder != 0:
+            data["input_ids"] = data["input_ids"][:, :-remainder]
+            data["labels"] = data["labels"][:, :-remainder]
 
         return data
 
@@ -127,7 +203,6 @@ class CornstarchTestingClass:
         tp_size: int,
         llm_pp_size: int,
         encoders_pp_size: dict[str, int],
-        plugin_type: str,
         test_config: dict[str, Any],
     ) -> tuple[MultimodalParallelModule, Optimizer, Callable, Booster]:
         test_config.update(
@@ -149,18 +224,6 @@ class CornstarchTestingClass:
                 language_model=self.llm_model_class.build_model(),
             )
 
-        for encoder in encoders.values():
-            encoder.train(module=False, projector=True)
-            encoder.module.requires_grad_(False)
-            encoder.projector.requires_grad_(True)
-            try:
-                encoder.module.gradient_checkpointing_enable({"use_reentrant": False})
-            except ValueError:
-                pass
-
-        model.language_model.train(mode=False)
-        model.language_model.requires_grad_(False)
-        model.language_model.gradient_checkpointing_enable({"use_reentrant": False})
         token_ids = {
             "vision": 44,
             "audio": 55,
@@ -189,26 +252,11 @@ class CornstarchTestingClass:
             for key in encoders
         }
 
-        if plugin_type == "cornstarch":
-            plugin = MultimodalParallelPlugin(
-                encoder_plugins=encoders_plugins,
-                language_model_plugin=llm_plugin,
-                **test_config,
-            )
-        elif plugin_type == "colocated":
-            plugin = EncodersColocatedMultimodalParallelPlugin(
-                encoder_plugins=encoders_plugins,
-                language_model_plugin=llm_plugin,
-                **test_config,
-            )
-        elif plugin_type == "replicated":
-            plugin = EncodersReplicatedMultimodalParallelPlugin(
-                language_model_plugin=llm_plugin,
-                **test_config,
-            )
-        else:
-            raise ValueError(f"Unknown plugin type {plugin_type}")
-
+        plugin = EncodersColocatedMultimodalParallelPlugin(
+            encoder_plugins=encoders_plugins,
+            language_model_plugin=llm_plugin,
+            **test_config,
+        )
         plugin.precision = None
         booster = Booster(plugin=plugin)
 
@@ -217,6 +265,27 @@ class CornstarchTestingClass:
 
         model, optimizer, criterion, *_ = booster.boost(model, optimizer, loss_fn)
         model.to(dtype=torch.bfloat16)
+
+        for encoder in model.module.encoders.values():
+            encoder.train(module=False, projector=True)
+            for param in encoder.module.parameters():
+                param.requires_grad_(False)
+            for param in encoder.projector.parameters():
+                param.requires_grad_(True)
+            try:
+                encoder.module.gradient_checkpointing_enable({"use_reentrant": False})
+            except ValueError:
+                pass
+
+        model.module.language_model.train(mode=False)
+        for param in model.module.language_model.parameters():
+            param.requires_grad_(False)
+        for buf in model.module.language_model.buffers():
+            buf.requires_grad_(False)
+        model.module.language_model.gradient_checkpointing_enable(
+            {"use_reentrant": False}
+        )
+
         return model, optimizer, criterion, booster
 
     def run_multimodal_model(
@@ -248,7 +317,6 @@ class CornstarchTestingClass:
 
 
 def run_profile(
-    plugin_type: str,
     llm_model_name: str,
     llm_pp_size: int,
     tp_size: int,
@@ -257,8 +325,6 @@ def run_profile(
     vision_pp_size: int | None = None,
     audio_pp_size: int | None = None,
 ):
-    assert plugin_type in ["cornstarch", "colocated", "replicated"]
-
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.set_default_device("cuda")
     dist.init_process_group(
@@ -285,7 +351,6 @@ def run_profile(
         tp_size=tp_size,
         llm_pp_size=llm_pp_size,
         encoders_pp_size=encoder_pp_sizes,
-        plugin_type=plugin_type,
         test_config=dict(),
     )
 
@@ -294,37 +359,14 @@ def run_profile(
 
     manager = TimerContextManager()
 
-    if plugin_type == "cornstarch":
-        fb_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
-        fwd_measure_name = (
-            "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.forward_step"
-        )
-    elif plugin_type == "colocated":
-        fb_measure_name = "cornstarch.plugin.encoders_colocated_plugin.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
-        fwd_measure_name = "cornstarch.plugin.encoders_colocated_plugin.one_f_one_b.OneForwardOneBackwardSchedule.forward_step"
-    elif plugin_type == "replicated":
-        fb_measure_name = "colossalai.pipeline.schedule.one_f_one_b.OneForwardOneBackwardSchedule.run_forward_backward"
-        fwd_measure_name = "colossalai.pipeline.schedule.one_f_one_b.OneForwardOneBackwardSchedule.forward_step"
-    else:
-        raise ValueError(f"Unknown plugin type {plugin_type}")
+    fb_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.run_forward_backward"
+    fwd_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.forward_step"
+    bwd_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.backward_step"
 
-    with manager.measure([fb_measure_name, fwd_measure_name]):
+    with manager.measure([fb_measure_name, fwd_measure_name, bwd_measure_name]):
         cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
 
         torch.cuda.synchronize()
-
-    peak_memory = torch.tensor(
-        torch.cuda.max_memory_allocated(f"cuda:{local_rank}") / 1024**3,
-        dtype=torch.float32,
-        device="cuda",
-    )
-    gathered_peak_memory = torch.zeros(
-        dist.get_world_size(), dtype=torch.float32, device="cuda"
-    )
-    dist.all_gather_into_tensor(gathered_peak_memory, peak_memory)
-    max_peak_memory = gathered_peak_memory.max().item()
-    min_peak_memory = gathered_peak_memory.min().item()
-    avg_peak_memory = gathered_peak_memory.mean().item()
 
     elapsed_times = manager.get_elapsed_times()
 
@@ -342,6 +384,13 @@ def run_profile(
         average_fwd_times = torch.empty(dist.get_world_size(pp_group), device="cuda")
         dist.all_gather_into_tensor(average_fwd_times, average_fwd_time, group=pp_group)
 
+        bwd_times = elapsed_times[bwd_measure_name]
+        average_bwd_time = torch.tensor(
+            sum(bwd_times[1:]) / (len(bwd_times) - 1), device="cuda"
+        )
+        average_bwd_times = torch.empty(dist.get_world_size(pp_group), device="cuda")
+        dist.all_gather_into_tensor(average_bwd_times, average_bwd_time, group=pp_group)
+
         fb_times = elapsed_times[fb_measure_name]
         average_exec_time = sum(fb_times[1:]) / (len(fb_times) - 1)
 
@@ -349,15 +398,12 @@ def run_profile(
             writer = csv.DictWriter(
                 f,
                 fieldnames=[
-                    "type",
                     "llm_model",
                     "vision_model",
                     "audio_model",
                     "exec_time (ms)",
                     "fwd_time_per_pp (ms)",
-                    "peak_memory (GB)",
-                    "min_peak_memory (GB)",
-                    "max_peak_memory (GB)",
+                    "bwd_time_per_pp (ms)",
                 ],
             )
             if f.tell() == 0:
@@ -365,15 +411,12 @@ def run_profile(
 
             writer.writerow(
                 {
-                    "type": plugin_type,
                     "llm_model": llm_model_name,
                     "vision_model": vision_model_name,
                     "audio_model": audio_model_name,
                     "exec_time (ms)": average_exec_time,
                     "fwd_time_per_pp (ms)": str(average_fwd_times.tolist()),
-                    "peak_memory (GB)": avg_peak_memory,
-                    "min_peak_memory (GB)": min_peak_memory,
-                    "max_peak_memory (GB)": max_peak_memory,
+                    "bwd_time_per_pp (ms)": str(average_bwd_times.tolist()),
                 }
             )
 
@@ -412,19 +455,12 @@ if __name__ == "__main__":
             default=None,
             help="Encoder pipeline parallel size",
         )
-        parser.add_argument(
-            "--plugin_type",
-            type=str,
-            default="cornstarch",
-            help="Plugin type (cornstarch, colocated, replicated)",
-        )
         args = parser.parse_args()
 
         kargs = {
             "llm_model_name": args.llm_model_name,
             "llm_pp_size": args.llm_pp_size,
             "tp_size": args.tp_size,
-            "plugin_type": args.plugin_type,
         }
 
         if args.vision_model_name is not None:
@@ -451,40 +487,60 @@ if __name__ == "__main__":
         import subprocess
         import sys
 
-        # plugin_type = "colocated"
+        my_node_index = node_hostnames.index(socket.gethostname())
+        store = dist.TCPStore(
+            host_name=node_hostnames[0],
+            port=14400,
+            world_size=len(node_hostnames),
+            is_master=my_node_index == 0,
+            wait_for_workers=True,
+        )
 
-        for plugin_type in ["colocated"]:
-            for (
-                llm_model_name,
-                vision_model_name,
-                audio_model_name,
-            ) in model_names_to_test:
-                if vision_model_name is None and audio_model_name is None:
-                    continue
+        dist.init_process_group(
+            backend="gloo",
+            store=store,
+            rank=my_node_index,
+            world_size=len(node_hostnames),
+        )
 
-                standalone_command = [
-                    "torchrun",
-                    "--standalone",
-                    "--nproc_per_node=4",
-                    sys.argv[0],  # The current script file
-                    "--tp_size=1",
-                    f"--llm_pp_size={3 if plugin_type == 'colocated' else 4}",
-                ]
+        for model_index, (
+            llm_model_name,
+            vision_model_name,
+            audio_model_name,
+        ) in enumerate(model_names_to_test):
+            if vision_model_name is None and audio_model_name is None:
+                continue
+
+            llm_pp_size, vision_pp_size, audio_pp_size = (
+                colocate_parallel_configuration[model_index]
+            )
+            num_ranks = (llm_pp_size + vision_pp_size) * 2
+
+            num_nodes_to_join = math.ceil(num_ranks / 4)
+
+            if my_node_index < len(node_hostnames) - num_nodes_to_join:
+                print(
+                    "This node does not join the current model run. Waiting for the job to finish."
+                )
+            else:
+                node_rank = my_node_index - (len(node_hostnames) - num_nodes_to_join)
+                num_processes = 4
+                if node_rank == 0 and num_ranks % 4 != 0:
+                    num_processes = num_ranks % 4
 
                 multinode_command = [
                     "torchrun",
-                    f"--nnodes={len(node_hostnames)}",
-                    "--nproc_per_node=4",
+                    f"--nnodes={num_nodes_to_join}",
+                    f"--nproc_per_node={num_processes}",
                     "--rdzv_backend=c10d",
                     f"--rdzv_endpoint={master_node_rdzv_backend}",
-                    f"--node-rank={node_hostnames.index(socket.gethostname())}",
+                    f"--node-rank={node_rank}",
                     sys.argv[0],  # The current script file
                     "--tp_size=2",
-                    f"--llm_pp_size={5 if plugin_type == 'colocated' else 6}",
+                    f"--llm_pp_size={llm_pp_size}",
                 ]
 
                 command = multinode_command + [
-                    f"--plugin_type={plugin_type}",
                     f"--llm_model_name={llm_model_name}",
                 ]
 
@@ -492,14 +548,14 @@ if __name__ == "__main__":
                     command.extend(
                         [
                             f"--vision_model_name={vision_model_name}",
-                            "--vision_pp_size=1",
+                            f"--vision_pp_size={vision_pp_size}",
                         ]
                     )
                 if audio_model_name:
                     command.extend(
                         [
                             f"--audio_model_name={audio_model_name}",
-                            "--audio_pp_size=1",
+                            f"--audio_pp_size={audio_pp_size}",
                         ]
                     )
 
@@ -508,4 +564,7 @@ if __name__ == "__main__":
                 result = subprocess.run(command)
                 if result.returncode > 0:
                     print(f"Error running command: {' '.join(command)}")
-                    sys.exit(1)
+
+            dist.barrier()
+
+        dist.destroy_process_group()
