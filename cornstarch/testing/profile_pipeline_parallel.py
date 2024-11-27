@@ -63,6 +63,20 @@ colocate_parallel_configuration = [
     (5, 1, 1),
 ]
 
+cornstarch_parallel_configuration = [
+    # Megatron-like configuration without considering freeze
+    # (llm_pp_size, vision_pp_size, audio_pp_size)
+    (5, 1, 1),  # VLM-large
+    (5, 1, 1),
+    (5, 1, 1),
+    (5, 1, 1),  # VLM-medium
+    (5, 1, 1),
+    (5, 1, 1),
+    (5, 1, 1),  # VLM-small
+    (5, 1, 1),
+    (5, 1, 1),
+]
+
 
 class CornstarchTestingClass:
     num_microbatches: int = 24
@@ -299,6 +313,8 @@ class CornstarchTestingClass:
         data = self.data()
         data_iter = iter([data])
 
+        self.iteration += 1
+
         # warmup
         with (
             torch.autograd.profiler.emit_nvtx(),
@@ -312,8 +328,6 @@ class CornstarchTestingClass:
                 return_loss=True,
                 return_outputs=False,
             )
-
-        self.iteration += 1
 
 
 def run_profile(
@@ -365,6 +379,7 @@ def run_profile(
     bwd_measure_name = "cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b.MultimodalEncoderTrainingOneForwardOneBackwardSchedule.backward_step"
 
     # warmup
+    print("Warming up")
     cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
 
     dist.barrier()
@@ -376,12 +391,13 @@ def run_profile(
         dcgm_manager.profile(),
     ):
         for _ in range(num_iterations):
+            print(f"Running iteration {cornstarch_class.iteration}/{num_iterations}")
             cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
 
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
     elapsed_times = timer_manager.get_elapsed_times()
-    sm_occupancy_trace = dcgm_manager.get_sm_occupancy_trace()
+    tensor_core_util_trace = dcgm_manager.get_tensor_core_util_trace()
 
     tp_rank = dist.get_rank(booster.plugin.tp_group)
     if tp_rank == 0:
@@ -432,13 +448,18 @@ def run_profile(
                 }
             )
 
-        with open(f"pp{pp_rank}_sm_occupancy.csv", "w", newline="") as f:
+        with open(
+            f"pp{pp_rank}_sm_{llm_model_name}+{vision_model_name}+{audio_model_name}.csv",
+            "w",
+            newline="",
+        ) as f:
             writer = csv.writer(f)
-            writer.writerow(["timestamp", "sm_occupancy"])
-            writer.writerows(sm_occupancy_trace)
+            writer.writerow(["timestamp", "tensor_active"])
+            writer.writerows(tensor_core_util_trace)
 
     dist.barrier(device_ids=[local_rank])
     dist.destroy_process_group()
+    dcgm_manager.shutdown()
 
 
 if __name__ == "__main__":
