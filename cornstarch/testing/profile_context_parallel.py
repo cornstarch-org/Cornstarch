@@ -395,7 +395,7 @@ def run_profile(
                     "seq_len": seq_len,
                     "world_size": world_size,
                     "distribute_method": distribute_method.value,
-                    "per_rank_time (ms)": ",".join(per_rank_average.tolist()),
+                    "per_rank_time (ms)": per_rank_average.tolist(),
                     "max_time (ms)": np.max(per_rank_average),
                     "average_time (ms)": np.mean(per_rank_average),
                     "minmax_diff": (np.max(per_rank_average) - np.min(per_rank_average))
