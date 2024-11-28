@@ -1,5 +1,6 @@
 import csv
 import heapq
+import time
 from collections import defaultdict
 from enum import Enum
 from types import MethodType
@@ -49,14 +50,28 @@ def get_stripe_query_positions(
     attention_mask: torch.BoolTensor,
     seq_len: int,
     world_size: int,
-    block_size: int = 1024,
+    block_size: int = 2048,
 ) -> torch.Tensor:
-    assert seq_len % block_size == 0
+    while seq_len < block_size * 2 * world_size:
+        block_size //= 2
+
+    assert seq_len % (block_size * 2) == 0
     num_blocks = seq_len // block_size
 
-    block_indices = torch.arange(world_size).repeat(num_blocks // world_size)
+    half_num_blocks = num_blocks // 2
+
+    block_indices_first_half = torch.arange(world_size, device="cuda").repeat(
+        half_num_blocks // world_size
+    )
+    block_indices_second_half = (
+        torch.arange(world_size, device="cuda")
+        .repeat(half_num_blocks // world_size)
+        .flip(0)
+    )
+
+    block_indices = torch.cat((block_indices_first_half, block_indices_second_half))
     assignments = block_indices.repeat_interleave(block_size)
-    assert assignments.size(0) == seq_len
+    assert assignments.size(0) == seq_len, f"{assignments.size(0)} != {seq_len}"
 
     return assignments
 
@@ -381,25 +396,34 @@ def run_profile(
                 "per_rank_time (ms)",
                 "max_time (ms)",
                 "average_time (ms)",
-                "minmax_diff",
+                "coefficient_variation",
             ],
         )
         if f.tell() == 0:
             writer.writeheader()
 
+        random_sample_per_rank_time = np.random.randint(num_iterations)
+
         for distribute_method in DistributeMethod:
-            per_rank_average = np.mean(np.array(times[distribute_method]), axis=1)
+
+            dist_times = np.array(times[distribute_method])
+            average_per_trial = np.mean(dist_times, axis=0)
+            max_per_trial = np.max(dist_times, axis=0)
+            std_per_trial = np.std(dist_times, axis=0)
+            cv = std_per_trial / average_per_trial
+
             writer.writerow(
                 {
                     "attention_mask_type": attention_mask_type.value,
                     "seq_len": seq_len,
                     "world_size": world_size,
                     "distribute_method": distribute_method.value,
-                    "per_rank_time (ms)": per_rank_average.tolist(),
-                    "max_time (ms)": np.max(per_rank_average),
-                    "average_time (ms)": np.mean(per_rank_average),
-                    "minmax_diff": (np.max(per_rank_average) - np.min(per_rank_average))
-                    / np.mean(per_rank_average),
+                    "per_rank_time (ms)": dist_times[
+                        :, random_sample_per_rank_time
+                    ].tolist(),
+                    "max_time (ms)": np.mean(max_per_trial),
+                    "average_time (ms)": np.mean(average_per_trial),
+                    "coefficient_variation": np.mean(cv),
                 }
             )
 
@@ -415,7 +439,12 @@ if __name__ == "__main__":
         AttentionMaskType.multimodal_packed,
     ]
 
-    for seq_len in [16384, 16384 * 2, 16384 * 4, 16384 * 8]:
+    for seq_len in [16384, 16384 * 2, 16384 * 4]:
+        # for seq_len in [16384 * 4, 16384 * 8]:
         # for num_rank in [8, 16]:
         for num_rank in [8]:
+            seed = time.time()
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed(seed)
+            np.random.seed(int(seed))
             run_profile(seq_len, num_rank, type[index])
