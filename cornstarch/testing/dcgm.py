@@ -23,8 +23,9 @@ class DcgmContextManager:
             fieldIds=[
                 dcgm_fields.DCGM_FI_PROF_SM_OCCUPANCY,
                 dcgm_fields.DCGM_FI_PROF_PIPE_TENSOR_ACTIVE,
+                dcgm_fields.DCGM_FI_PROF_SM_ACTIVE,
             ],
-            updateFrequency=10,
+            updateFrequency=1000,  # 1ms
             fieldGroupName=str(os.getpid()),
             # GPU indices based on ordering on the host (where DCGM daemon is running).
             # This ignores CUDA_VISIBLE_DEVICES and whatever's mounted in Docker.
@@ -65,6 +66,17 @@ class DcgmContextManager:
         assert len(self.data) == 1, "Only supports one GPU."
         data: list[pydcgm.dcgm_field_helpers.DcgmFieldValue] = self.data[self.gpu_id][
             "sm_occupancy"
+        ]
+
+        return [(field.ts, field.value) for field in data]
+
+    def get_sm_activity_trace(self) -> list[tuple[int, float]]:
+        if self.data is None:
+            raise RuntimeError("Must call profile() first.")
+
+        assert len(self.data) == 1, "Only supports one GPU."
+        data: list[pydcgm.dcgm_field_helpers.DcgmFieldValue] = self.data[self.gpu_id][
+            "sm_active"
         ]
 
         return [(field.ts, field.value) for field in data]

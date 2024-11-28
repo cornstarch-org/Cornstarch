@@ -21,6 +21,7 @@ from cornstarch.pipeline_template import PipelineTemplate
 # from cornstarch.plugin.multimodal_parallel_plugin import (
 #     ModalParallelPlugin,
 #     MultimodalParallelModule,
+#     MultimodalParallelPlugin,
 # )
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (
     EncodersColocatedMultimodalParallelPlugin,
@@ -55,9 +56,9 @@ model_names_to_test = [
 colocate_parallel_configuration = [
     # Megatron-like configuration without considering freeze
     # (llm_pp_size, vision_pp_size, audio_pp_size)
-    (4, 2, 2),  # VLM-large
-    (5, 1, 1),
-    (4, 2, 2),
+    # (4, 2, 2),  # VLM-large
+    # (5, 1, 1),
+    # (4, 2, 2),
     (4, 2, 2),  # VLM-medium
     (5, 1, 1),
     (3, 3, 3),
@@ -69,9 +70,9 @@ colocate_parallel_configuration = [
 cornstarch_parallel_configuration = [
     # Megatron-like configuration without considering freeze
     # (llm_pp_size, vision_pp_size, audio_pp_size)
-    (5, 1, 1),  # VLM-large
-    (5, 1, 1),
-    (5, 1, 1),
+    # (5, 1, 1),  # VLM-large
+    # (5, 1, 1),
+    # (5, 1, 1),
     (5, 1, 1),  # VLM-medium
     (5, 1, 1),
     (5, 1, 1),
@@ -93,6 +94,9 @@ class CornstarchTestingClass:
         self.llm_model_class = llm_model_class
         self.encoder_model_classes = encoder_model_classes
         self.iteration = 0
+
+        data = self.data()
+        self.data_iter = iter([data] * 10)
 
     def data(self) -> dict[str, torch.Tensor]:
         seq_length = 1024
@@ -313,18 +317,14 @@ class CornstarchTestingClass:
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
 
-        data = self.data()
-        data_iter = iter([data])
-
         self.iteration += 1
 
-        # warmup
         with (
             torch.autograd.profiler.emit_nvtx(),
             torch.cuda.nvtx.range(f"iter{self.iteration}"),
         ):
             booster.execute_pipeline(
-                data_iter,
+                self.data_iter,
                 model,
                 lambda outputs, inputs: criterion(outputs),
                 optimizer,
@@ -400,7 +400,7 @@ def run_profile(
         torch.cuda.synchronize()
 
     elapsed_times = timer_manager.get_elapsed_times()
-    tensor_core_util_trace = dcgm_manager.get_tensor_core_util_trace()
+    sm_activity_trace = dcgm_manager.get_sm_activity_trace()
 
     tp_rank = dist.get_rank(booster.plugin.tp_group)
     if tp_rank == 0:
@@ -458,13 +458,13 @@ def run_profile(
             )
 
         with open(
-            f"pp{pp_rank}_tensor_{llm_model_name}+{vision_model_name}+{audio_model_name}.csv",
+            f"pp{pp_rank}_sm_{llm_model_name}+{vision_model_name}+{audio_model_name}.csv",
             "w",
             newline="",
         ) as f:
             writer = csv.writer(f)
-            writer.writerow(["timestamp", "tensor_active"])
-            writer.writerows(tensor_core_util_trace)
+            writer.writerow(["timestamp", "sm_active"])
+            writer.writerows(sm_activity_trace)
 
     dist.barrier(device_ids=[local_rank])
     dist.destroy_process_group()
@@ -559,7 +559,7 @@ if __name__ == "__main__":
                 continue
 
             llm_pp_size, vision_pp_size, audio_pp_size = (
-                colocate_parallel_configuration[model_index]
+                cornstarch_parallel_configuration[model_index]
             )
             num_ranks = (llm_pp_size + vision_pp_size) * 2
 
