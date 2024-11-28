@@ -43,8 +43,8 @@ def generate_causal_blockwise_mask(seq_len):
     """
     mask = torch.zeros((seq_len, seq_len), device="cuda")
 
-    max_block_size = seq_len // 8
-    min_block_size = max_block_size // 8
+    max_block_size = seq_len // 16
+    min_block_size = max_block_size // 4
 
     current_pos = 0
     blocks = []  # Keep track of block positions
@@ -85,8 +85,8 @@ def generate_prefix_lm_document_mask(seq_len):
     """
     mask = torch.zeros((seq_len, seq_len), device="cuda")
 
-    max_block_size = seq_len // 8
-    min_block_size = max_block_size // 8
+    max_block_size = seq_len // 16
+    min_block_size = max_block_size // 4
 
     current_pos = 0
     blocks = []  # Keep track of block positions
@@ -134,8 +134,8 @@ def generate_encoder_embedded_mask(seq_len):
     blocks = []
     causals = []
 
-    max_block_size = seq_len // 8
-    min_block_size = max_block_size // 8
+    max_block_size = seq_len // 16
+    min_block_size = max_block_size // 4
 
     # Handle first causal mask
     first_causal_size = torch.randint(
@@ -191,9 +191,10 @@ def generate_prefix_lm_causal_mask(seq_len, prefix_len=None):
     """
     mask = torch.zeros((seq_len, seq_len), device="cuda")
 
-    # If prefix_len not specified, randomly choose between 10-100% of seq_len
+    # If prefix_len not specified, randomly choose between 10-80% of seq_len
     if prefix_len is None:
-        prefix_len = torch.randint(seq_len // 10, seq_len // 1, (1,)).item()
+        min_len = seq_len // 10
+        prefix_len = torch.randint(min_len, seq_len, (1,)).item()
 
     # Prefix tokens can attend to all prefix tokens
     mask[:prefix_len, :prefix_len] = 1
@@ -213,16 +214,25 @@ def generate_multimodal_packed_mask(seq_len):
     mask = torch.zeros((seq_len, seq_len), device="cuda")
 
     # Calculate num_pack numbers where the sume is seq_len
-    pack_sizes = torch.randint(1, seq_len, (num_pack,))
+    pack_sizes = torch.randint(seq_len // 10, seq_len // 4, (num_pack,))
     pack_sizes = pack_sizes / pack_sizes.sum() * seq_len
     pack_sizes = pack_sizes.int().tolist()
+
+    mask_generators = {
+        "prefix_lm_document": generate_prefix_lm_document_mask,
+        "prefix_lm_causal": generate_prefix_lm_causal_mask,
+        "encoder_embedded": generate_encoder_embedded_mask,
+    }
 
     current_pos = 0
     for pack_size in pack_sizes:
 
+        mask_generator = torch.randint(0, len(mask_generators), (1,)).item()
+        mask_generator = mask_generators[list(mask_generators.keys())[mask_generator]]
+
         mask[
             current_pos : current_pos + pack_size, current_pos : current_pos + pack_size
-        ] = generate_encoder_embedded_mask(pack_size)
+        ] = mask_generator(pack_size)
 
         current_pos += pack_size
 
