@@ -165,6 +165,7 @@ class Gemma2bClass(LanguageModelClassBase):
         )
         self.config._attn_implementation = "flash_attention_2"
         self.config.num_key_value_heads = 4
+        self.config.cache_implementation = None
 
 
 class Gemma7bClass(LanguageModelClassBase):
@@ -174,6 +175,7 @@ class Gemma7bClass(LanguageModelClassBase):
             GemmaConfig.from_pretrained("google/gemma-1.1-7b-it"),
         )
         self.config._attn_implementation = "flash_attention_2"
+        self.config.cache_implementation = None
 
 
 class Gemma227bClass(LanguageModelClassBase):
@@ -183,6 +185,7 @@ class Gemma227bClass(LanguageModelClassBase):
             Gemma2Config.from_pretrained("google/gemma-2-27b-it"),
         )
         self.config._attn_implementation = "flash_attention_2"
+        self.config.cache_implementation = None
 
 
 class Llama1bClass(LanguageModelClassBase):
