@@ -56,9 +56,9 @@ model_names_to_test = [
 colocate_parallel_configuration = [
     # Megatron-like configuration without considering freeze
     # (llm_pp_size, vision_pp_size, audio_pp_size)
-    # (4, 2, 2),  # VLM-large
-    # (5, 1, 1),
-    # (4, 2, 2),
+    (4, 2, 2),  # VLM-large
+    (5, 1, 1),
+    (4, 2, 2),
     (4, 2, 2),  # VLM-medium
     (5, 1, 1),
     (3, 3, 3),
@@ -70,9 +70,9 @@ colocate_parallel_configuration = [
 cornstarch_parallel_configuration = [
     # Megatron-like configuration without considering freeze
     # (llm_pp_size, vision_pp_size, audio_pp_size)
-    # (5, 1, 1),  # VLM-large
-    # (5, 1, 1),
-    # (5, 1, 1),
+    (5, 1, 1),  # VLM-large
+    (5, 1, 1),
+    (5, 1, 1),
     (5, 1, 1),  # VLM-medium
     (5, 1, 1),
     (5, 1, 1),
@@ -388,7 +388,7 @@ def run_profile(
     dist.barrier()
     torch.cuda.synchronize()
 
-    num_iterations = 1
+    num_iterations = 2
     with (
         timer_manager.measure([fb_measure_name, fwd_measure_name, bwd_measure_name]),
         dcgm_manager.profile(),
@@ -397,10 +397,12 @@ def run_profile(
             print(f"Running iteration {cornstarch_class.iteration}/{num_iterations}")
             cornstarch_class.run_multimodal_model(model, optimizer, criterion, booster)
 
+        dist.barrier()
         torch.cuda.synchronize()
 
     elapsed_times = timer_manager.get_elapsed_times()
-    sm_activity_trace = dcgm_manager.get_sm_activity_trace()
+    sm_occupancy_trace = dcgm_manager.get_sm_occupancy_trace()
+    tensor_util_trace = dcgm_manager.get_tensor_core_util_trace()
 
     tp_rank = dist.get_rank(booster.plugin.tp_group)
     if tp_rank == 0:
@@ -463,8 +465,17 @@ def run_profile(
             newline="",
         ) as f:
             writer = csv.writer(f)
-            writer.writerow(["timestamp", "sm_active"])
-            writer.writerows(sm_activity_trace)
+            writer.writerow(["timestamp", "sm_occupancy"])
+            writer.writerows(sm_occupancy_trace)
+
+        with open(
+            f"pp{pp_rank}_tensor_{llm_model_name}+{vision_model_name}+{audio_model_name}.csv",
+            "w",
+            newline="",
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(["timestamp", "tensor_active"])
+            writer.writerows(tensor_util_trace)
 
     dist.barrier(device_ids=[local_rank])
     dist.destroy_process_group()
@@ -559,7 +570,7 @@ if __name__ == "__main__":
                 continue
 
             llm_pp_size, vision_pp_size, audio_pp_size = (
-                cornstarch_parallel_configuration[model_index]
+                colocate_parallel_configuration[model_index]
             )
             num_ranks = (llm_pp_size + vision_pp_size) * 2
 

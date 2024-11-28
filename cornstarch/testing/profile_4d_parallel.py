@@ -57,7 +57,7 @@ model_names_to_test = [
 colocate_parallel_configuration = [
     # Megatron-like configuration without considering freeze
     # (llm_pp_size, vision_pp_size, audio_pp_size)
-    (3, 3, 3),  # VLM-large
+    (4, 2, 2),  # VLM-large
     (5, 1, 1),
     (4, 2, 2),
     (4, 2, 2),  # VLM-medium
@@ -69,9 +69,9 @@ colocate_parallel_configuration = [
 ]
 
 cornstarch_parallel_configuration = [
-    # Freeze-location aware configuration
+    # Megatron-like configuration without considering freeze
     # (llm_pp_size, vision_pp_size, audio_pp_size)
-    (4, 2, 2),  # VLM-large
+    (5, 1, 1),  # VLM-large
     (5, 1, 1),
     (5, 1, 1),
     (5, 1, 1),  # VLM-medium
@@ -96,7 +96,7 @@ class CornstarchTestingClass:
         self.encoder_model_classes = encoder_model_classes
 
     def data(self) -> dict[str, torch.Tensor]:
-        seq_length = 2048
+        seq_length = 1024
 
         data = {}
         batch_size = self.num_microbatches * self.microbatch_size
@@ -265,8 +265,8 @@ class CornstarchTestingClass:
 
         llm_plugin = ModalParallelPlugin(
             tp_size=tp_size,
-            sp_size=1,
-            # sequence_parallelism_mode="ring_attn",
+            sp_size=2,
+            sequence_parallelism_mode="ring_attn",
             pipeline_template=self.get_megatron_style_pipeline_template(
                 model.language_model, llm_pp_size
             ),
@@ -275,8 +275,8 @@ class CornstarchTestingClass:
         encoders_plugins = {
             key: ModalParallelPlugin(
                 tp_size=tp_size,
-                sp_size=1,
-                # sequence_parallelism_mode="ring_attn",
+                sp_size=2,
+                sequence_parallelism_mode="ring_attn",
                 pipeline_template=self.get_megatron_style_pipeline_template(
                     model.get_submodule(f"{key}_encoder"), encoders_pp_size[key]
                 ),
