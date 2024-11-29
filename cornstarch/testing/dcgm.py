@@ -94,3 +94,14 @@ class DcgmContextManager:
         ]
 
         return [(field.ts, field.value) for field in data]
+
+    def get_memory_trace(self) -> list[tuple[int, float]]:
+        if self.data is None:
+            raise RuntimeError("Must call profile() first.")
+
+        assert len(self.data) == 1, "Only supports one GPU."
+        data: list[pydcgm.dcgm_field_helpers.DcgmFieldValue] = self.data[self.gpu_id][
+            "fb_used"
+        ]
+
+        return [(field.ts, field.value) for field in data]
