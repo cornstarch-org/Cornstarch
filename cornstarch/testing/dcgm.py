@@ -22,8 +22,9 @@ class DcgmContextManager:
         reader = DcgmReader(
             fieldIds=[
                 dcgm_fields.DCGM_FI_PROF_SM_OCCUPANCY,
-                dcgm_fields.DCGM_FI_PROF_PIPE_TENSOR_ACTIVE,
+                dcgm_fields.DCGM_FI_PROF_PIPE_TENSOR_ACTIVE,  # tensor core utilization
                 dcgm_fields.DCGM_FI_PROF_SM_ACTIVE,
+                dcgm_fields.DCGM_FI_DEV_FB_USED,  # memory usage
             ],
             updateFrequency=1000,  # 1ms
             fieldGroupName=str(os.getpid()),
@@ -38,6 +39,8 @@ class DcgmContextManager:
         )
 
         reader.InitializeFromHandle()
+        # Flush
+        _ = reader.GetAllGpuValuesAsFieldNameDictSinceLastCall()
 
         self.reader = reader
         self.gpu_id = gpu_id
