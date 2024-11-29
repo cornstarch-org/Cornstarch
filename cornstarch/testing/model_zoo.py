@@ -8,6 +8,7 @@ from types import MethodType
 from typing import Type
 
 import torch
+import torch.nn as nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.clip.modeling_clip import CLIPVisionConfig, CLIPVisionModel
@@ -87,6 +88,9 @@ class ModelClassBase(ABC):
 
     @abstractmethod
     def data(self, batch_size: int, **kwargs) -> dict[str, torch.Tensor]: ...
+
+    def post_init(self, model: nn.Module):
+        pass
 
 
 class LanguageModelClassBase(ModelClassBase):
@@ -415,6 +419,13 @@ class CLIPVisionClass(ImageModelClassBase):
         )
         self.config._attn_implementation = "eager"
 
+    def post_init(self, model: CLIPVisionModel):
+        model.vision_model.embeddings.register_buffer(
+            "position_ids",
+            torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
+            persistent=False,
+        )
+
 
 class EvaCLIPVision8bClass(ImageModelClassBase):
     def __init__(self):
@@ -442,6 +453,13 @@ class SiglipVisionClass(ImageModelClassBase):
             SiglipVisionConfig.from_pretrained("google/siglip-so400m-patch14-384"),
         )
         self.config._attn_implementation = "eager"
+
+    def post_init(self, model: CLIPVisionModel):
+        model.vision_model.embeddings.register_buffer(
+            "position_ids",
+            torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
+            persistent=False,
+        )
 
 
 class InternVision300mClass(ImageModelClassBase):
