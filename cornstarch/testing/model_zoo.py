@@ -5,11 +5,12 @@ import functools
 import math
 from abc import ABC, abstractmethod
 from types import MethodType
-from typing import Type
+from typing import Any, Type
 
 import torch
 import torch.nn as nn
 from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_outputs import ModelOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.clip.modeling_clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.dinov2.modeling_dinov2 import (
@@ -117,7 +118,8 @@ class ImageModelClassBase(ModelClassBase):
     ) -> dict[str, torch.Tensor]:
         data = {
             "pixel_values": torch.randn(
-                self.get_num_tokens(batch_size, image_size),
+                batch_size,
+                self.get_num_tokens(1, image_size),
                 self.config.num_channels,
                 self.config.image_size,
                 self.config.image_size,
@@ -130,13 +132,37 @@ class ImageModelClassBase(ModelClassBase):
         return data
 
     def get_num_tokens(self, batch_size: int, image_size: tuple[int, int]) -> int:
-        num_chunks = math.ceil(image_size[0] / self.config.image_size) * math.ceil(
+        num_chunks = math.floor(image_size[0] / self.config.image_size) * math.floor(
             image_size[1] / self.config.image_size
         )
         return batch_size * num_chunks
 
     def build_model(self) -> ModalEncoderModule:
-        return ModalEncoderModule(super().build_model())
+        model = super().build_model()
+
+        def preprocess_vision_callback(inputs: dict[str, Any]) -> dict[str, Any]:
+            setattr(model, "batch_size", inputs["pixel_values"].shape[0])
+            inputs["pixel_values"] = inputs["pixel_values"].view(
+                -1,
+                model.config.num_channels,
+                model.config.image_size,
+                model.config.image_size,
+            )
+            return inputs
+
+        def postprocess_projector_callback(
+            inputs: dict[str, Any], output: ModelOutput
+        ) -> ModelOutput:
+            output.hidden_states = output.hidden_states.view(
+                model.batch_size, -1, model.config.hidden_size
+            )
+            return output
+
+        return ModalEncoderModule(
+            model=model,
+            preprocess_callback=preprocess_vision_callback,
+            postprocess_projector_callback=postprocess_projector_callback,
+        )
 
 
 class AudioModelClassBase(ModelClassBase):
@@ -274,10 +300,10 @@ class Mistral7bClass(LanguageModelClassBase):
             MistralConfig.from_pretrained("mistralai/Mistral-7B-Instruct-v0.3"),
         )
         self.config._attn_implementation = "flash_attention_2"
+        self.config.use_cache = False
 
     def data(self, batch_size: int, seq_len: int) -> dict[str, torch.Tensor]:
         data = super().data(batch_size, seq_len)
-        data["use_cache"] = torch.tensor([False] * batch_size, dtype=torch.bool)
 
         return data
 
@@ -404,8 +430,8 @@ class ViT22bClass(ImageModelClassBase):
                 num_hidden_layers=48,
                 intermediate_size=24576,
                 num_attention_heads=48,
-                image_size=448,
-                patch_size=14,
+                image_size=384,
+                patch_size=16,
             ),
         )
         self.config._attn_implementation = "eager"
@@ -435,6 +461,13 @@ class EvaCLIPVision8bClass(ImageModelClassBase):
         )
         self.config._attn_implementation = "eager"
 
+    def post_init(self, model: EvaCLIPVisionModel):
+        model.vision_model.embeddings.register_buffer(
+            "position_ids",
+            torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
+            persistent=False,
+        )
+
 
 class EvaCLIPVision18bClass(ImageModelClassBase):
     def __init__(self):
@@ -443,7 +476,13 @@ class EvaCLIPVision18bClass(ImageModelClassBase):
             CLIPVisionConfig.from_pretrained("BAAI/EVA-CLIP-18B"),
         )
         self.config._attn_implementation = "eager"
-        self.config.image_size = 448
+
+    def post_init(self, model: EvaCLIPVisionModel):
+        model.vision_model.embeddings.register_buffer(
+            "position_ids",
+            torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
+            persistent=False,
+        )
 
 
 class SiglipVisionClass(ImageModelClassBase):
@@ -459,6 +498,18 @@ class SiglipVisionClass(ImageModelClassBase):
             "position_ids",
             torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
             persistent=False,
+        )
+
+    def build_model(self) -> ModalEncoderModule:
+        model: SiglipVisionModel = ModelClassBase.build_model(self)
+
+        def preprocess_vision_callback(inputs: dict[str, Any]) -> dict[str, Any]:
+            inputs["pixel_values"] = inputs["pixel_values"].squeeze(0)
+            return inputs
+
+        return ModalEncoderModule(
+            model=model,
+            preprocess_callback=preprocess_vision_callback,
         )
 
 
@@ -521,6 +572,9 @@ class PixtralVisionClass(ImageModelClassBase):
         return (self.data_shape[-1] // self.config.patch_size) * (
             self.data_shape[-2] // self.config.patch_size
         )
+
+    def build_model(self) -> ModalEncoderModule:
+        return ModalEncoderModule(ModelClassBase.build_model(self))
 
 
 class Dinov2GiantClass(ImageModelClassBase):
