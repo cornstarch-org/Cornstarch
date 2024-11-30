@@ -114,12 +114,12 @@ class LanguageModelClassBase(ModelClassBase):
 
 class ImageModelClassBase(ModelClassBase):
     def data(
-        self, batch_size: int, image_size: tuple[int, int], sp_size: int = 1
+        self, batch_size: int, image_size: tuple[int, int]
     ) -> dict[str, torch.Tensor]:
         data = {
             "pixel_values": torch.randn(
                 batch_size,
-                self.get_num_tokens(1, image_size) // sp_size,
+                self.get_num_tokens(1, image_size),
                 self.config.num_channels,
                 self.config.image_size,
                 self.config.image_size,
@@ -505,18 +505,6 @@ class SiglipVisionClass(ImageModelClassBase):
             "position_ids",
             torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
             persistent=False,
-        )
-
-    def build_model(self) -> ModalEncoderModule:
-        model: SiglipVisionModel = ModelClassBase.build_model(self)
-
-        def preprocess_vision_callback(inputs: dict[str, Any]) -> dict[str, Any]:
-            inputs["pixel_values"] = inputs["pixel_values"].squeeze(0)
-            return inputs
-
-        return ModalEncoderModule(
-            model=model,
-            preprocess_callback=preprocess_vision_callback,
         )
 
 
