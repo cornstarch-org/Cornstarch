@@ -10,7 +10,7 @@ from typing import Any, Type
 import torch
 import torch.nn as nn
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_outputs import ModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.clip.modeling_clip import CLIPVisionConfig, CLIPVisionModel
 from transformers.models.dinov2.modeling_dinov2 import (
@@ -100,7 +100,7 @@ class LanguageModelClassBase(ModelClassBase):
         data = {
             "input_ids": torch.randint(
                 200,
-                self.config.vocab_size,
+                1000,
                 (batch_size, seq_len),
                 dtype=torch.long,
                 device=device,
@@ -114,12 +114,12 @@ class LanguageModelClassBase(ModelClassBase):
 
 class ImageModelClassBase(ModelClassBase):
     def data(
-        self, batch_size: int, image_size: tuple[int, int]
+        self, batch_size: int, image_size: tuple[int, int], sp_size: int = 1
     ) -> dict[str, torch.Tensor]:
         data = {
             "pixel_values": torch.randn(
                 batch_size,
-                self.get_num_tokens(1, image_size),
+                self.get_num_tokens(1, image_size) // sp_size,
                 self.config.num_channels,
                 self.config.image_size,
                 self.config.image_size,
@@ -150,10 +150,10 @@ class ImageModelClassBase(ModelClassBase):
             )
             return inputs
 
-        def postprocess_projector_callback(
-            inputs: dict[str, Any], output: ModelOutput
-        ) -> ModelOutput:
-            output.hidden_states = output.hidden_states.view(
+        def postprocess_callback(
+            inputs: dict[str, Any], output: BaseModelOutputWithPooling
+        ) -> BaseModelOutputWithPooling:
+            output.last_hidden_state = output.last_hidden_state.view(
                 model.batch_size, -1, model.config.hidden_size
             )
             return output
@@ -161,17 +161,17 @@ class ImageModelClassBase(ModelClassBase):
         return ModalEncoderModule(
             model=model,
             preprocess_callback=preprocess_vision_callback,
-            postprocess_projector_callback=postprocess_projector_callback,
+            postprocess_module_callback=postprocess_callback,
         )
 
 
 class AudioModelClassBase(ModelClassBase):
-    def data(self, batch_size: int) -> dict[str, torch.Tensor]:
+    def data(self, batch_size: int, sp_size: int = 1) -> dict[str, torch.Tensor]:
         data = {
             "input_features": torch.randn(
                 batch_size,
                 self.config.num_mel_bins,
-                self.config.max_source_positions * 2,
+                self.config.max_source_positions * 2 // sp_size,
                 dtype=torch.bfloat16,
                 device=torch.device("cuda"),
                 requires_grad=False,
