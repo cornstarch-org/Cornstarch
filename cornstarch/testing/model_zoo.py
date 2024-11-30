@@ -140,8 +140,9 @@ class ImageModelClassBase(ModelClassBase):
     def build_model(self) -> ModalEncoderModule:
         model = super().build_model()
 
-        def preprocess_vision_callback(inputs: dict[str, Any]) -> dict[str, Any]:
-            setattr(model, "batch_size", inputs["pixel_values"].shape[0])
+        def preprocess_vision_callback(
+            inputs: dict[str, Any], model: nn.Module
+        ) -> dict[str, Any]:
             inputs["pixel_values"] = inputs["pixel_values"].view(
                 -1,
                 model.config.num_channels,
@@ -151,17 +152,23 @@ class ImageModelClassBase(ModelClassBase):
             return inputs
 
         def postprocess_callback(
-            inputs: dict[str, Any], output: BaseModelOutputWithPooling
+            inputs: dict[str, Any], output: BaseModelOutputWithPooling, model: nn.Module
         ) -> BaseModelOutputWithPooling:
+            num_tokens = self.get_num_tokens(1, (1280, 720))
+            batch_size = output.last_hidden_state.shape[0] // num_tokens
             output.last_hidden_state = output.last_hidden_state.view(
-                model.batch_size, -1, model.config.hidden_size
+                batch_size, -1, model.config.hidden_size
             )
             return output
 
         return ModalEncoderModule(
             model=model,
-            preprocess_callback=preprocess_vision_callback,
-            postprocess_module_callback=postprocess_callback,
+            preprocess_callback=functools.partial(
+                preprocess_vision_callback, model=model
+            ),
+            postprocess_module_callback=functools.partial(
+                postprocess_callback, model=model
+            ),
         )
 
 
