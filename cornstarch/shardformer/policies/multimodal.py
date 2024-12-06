@@ -94,10 +94,8 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
         model = cast(MultimodalProjector, self.model)
         held_layers = []
 
-        if config.projection_type == "linear":
+        if config.projection_type in ["linear", "mlp"]:
             held_layers.append(model.projection)
-        elif config.projection_type == "mlp":
-            held_layers.extend([model.in_proj, model.activation, model.out_proj])
         elif config.projection_type == "qformer":
             raise NotImplementedError("QFormer is not supported yet.")
 
