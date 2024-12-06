@@ -75,7 +75,7 @@ class ModelClassBase(ABC):
         self.model_class = model_class
         self.config = config
 
-    def build_model(self) -> PreTrainedModel:
+    def build_model(self, sp_size: int = 1) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.tie_word_embeddings = False
         config.use_cache = False
@@ -114,12 +114,12 @@ class LanguageModelClassBase(ModelClassBase):
 
 class ImageModelClassBase(ModelClassBase):
     def data(
-        self, batch_size: int, image_size: tuple[int, int]
+        self, batch_size: int, image_size: tuple[int, int], sp_size: int = 1
     ) -> dict[str, torch.Tensor]:
         data = {
             "pixel_values": torch.randn(
                 batch_size,
-                self.get_num_tokens(1, image_size),
+                self.get_num_tokens(1, image_size, sp_size),
                 self.config.num_channels,
                 self.config.image_size,
                 self.config.image_size,
@@ -131,14 +131,18 @@ class ImageModelClassBase(ModelClassBase):
 
         return data
 
-    def get_num_tokens(self, batch_size: int, image_size: tuple[int, int]) -> int:
-        num_chunks = math.floor(image_size[0] / self.config.image_size) * math.floor(
-            image_size[1] / self.config.image_size
+    def get_num_tokens(
+        self, batch_size: int, image_size: tuple[int, int], sp_size: int = 1
+    ) -> int:
+        num_chunks = (
+            math.floor(image_size[0] / self.config.image_size)
+            * math.floor(image_size[1] / self.config.image_size)
+            // sp_size
         )
         return batch_size * num_chunks
 
-    def build_model(self) -> ModalEncoderModule:
-        model = super().build_model()
+    def build_model(self, sp_size: int = 1) -> ModalEncoderModule:
+        model = super().build_model(sp_size)
 
         def preprocess_vision_callback(
             inputs: dict[str, Any], model: nn.Module
@@ -154,7 +158,7 @@ class ImageModelClassBase(ModelClassBase):
         def postprocess_callback(
             inputs: dict[str, Any], output: BaseModelOutputWithPooling, model: nn.Module
         ) -> BaseModelOutputWithPooling:
-            num_tokens = self.get_num_tokens(1, (1280, 720))
+            num_tokens = self.get_num_tokens(1, (1280, 720), sp_size=sp_size)
             batch_size = output.last_hidden_state.shape[0] // num_tokens
             output.last_hidden_state = output.last_hidden_state.view(
                 batch_size, -1, model.config.hidden_size
@@ -178,7 +182,7 @@ class AudioModelClassBase(ModelClassBase):
             "input_features": torch.randn(
                 batch_size,
                 self.config.num_mel_bins,
-                self.config.max_source_positions * 2 // sp_size,
+                self.config.max_source_positions * 2,
                 dtype=torch.bfloat16,
                 device=torch.device("cuda"),
                 requires_grad=False,
@@ -187,11 +191,11 @@ class AudioModelClassBase(ModelClassBase):
 
         return data
 
-    def get_num_tokens(self) -> int:
-        return self.config.max_source_positions
+    def get_num_tokens(self, sp_size: int = 1) -> int:
+        return self.config.max_source_positions // sp_size
 
-    def build_model(self) -> ModalEncoderModule:
-        return ModalEncoderModule(super().build_model())
+    def build_model(self, sp_size: int = 1) -> ModalEncoderModule:
+        return ModalEncoderModule(super().build_model(sp_size))
 
 
 class Gemma2bClass(LanguageModelClassBase):
@@ -308,11 +312,6 @@ class Mistral7bClass(LanguageModelClassBase):
         )
         self.config._attn_implementation = "flash_attention_2"
         self.config.use_cache = False
-
-    def data(self, batch_size: int, seq_len: int) -> dict[str, torch.Tensor]:
-        data = super().data(batch_size, seq_len)
-
-        return data
 
 
 class Mistral123bClass(LanguageModelClassBase):
@@ -460,6 +459,90 @@ class CLIPVisionClass(ImageModelClassBase):
         )
 
 
+class EvaCLIPVision300mClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            EvaCLIPVisionModel,
+            CLIPVisionConfig(
+                hidden_size=1024,
+                intermediate_size=1024 * 4,
+                num_hidden_layers=24,
+                num_attention_heads=16,
+                _attn_implementation="eager",
+                use_rms_norm=True,
+                post_layernorm=False,
+                q_bias=False,
+                k_bias=False,
+                v_bias=False,
+                layer_norm_eps=1e-6,
+                image_size=448,
+            ),
+        )
+
+    def post_init(self, model: EvaCLIPVisionModel):
+        model.vision_model.embeddings.register_buffer(
+            "position_ids",
+            torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
+            persistent=False,
+        )
+
+
+class EvaCLIPVision1BClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            EvaCLIPVisionModel,
+            CLIPVisionConfig(
+                hidden_size=1408,
+                intermediate_size=1408 * 4,
+                num_hidden_layers=40,
+                num_attention_heads=16,
+                _attn_implementation="eager",
+                use_rms_norm=True,
+                post_layernorm=False,
+                q_bias=False,
+                k_bias=False,
+                v_bias=False,
+                layer_norm_eps=1e-6,
+                image_size=448,
+            ),
+        )
+
+    def post_init(self, model: EvaCLIPVisionModel):
+        model.vision_model.embeddings.register_buffer(
+            "position_ids",
+            torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
+            persistent=False,
+        )
+
+
+class EvaCLIPVision4BClass(ImageModelClassBase):
+    def __init__(self):
+        super().__init__(
+            EvaCLIPVisionModel,
+            CLIPVisionConfig(
+                hidden_size=1792,
+                intermediate_size=1792 * 4,
+                num_hidden_layers=64,
+                num_attention_heads=16,
+                _attn_implementation="eager",
+                use_rms_norm=True,
+                post_layernorm=False,
+                q_bias=False,
+                k_bias=False,
+                v_bias=False,
+                layer_norm_eps=1e-6,
+                image_size=448,
+            ),
+        )
+
+    def post_init(self, model: EvaCLIPVisionModel):
+        model.vision_model.embeddings.register_buffer(
+            "position_ids",
+            torch.arange(model.vision_model.embeddings.num_positions).expand(1, -1),
+            persistent=False,
+        )
+
+
 class EvaCLIPVision8bClass(ImageModelClassBase):
     def __init__(self):
         super().__init__(
@@ -540,11 +623,14 @@ class PixtralVisionClass(ImageModelClassBase):
         self.data_shape = None
 
     def data(
-        self, batch_size: int, image_size: tuple[int, int]
+        self, batch_size: int, image_size: tuple[int, int], sp_size: int = 1
     ) -> dict[str, torch.Tensor]:
         from transformers.models.pixtral.image_processing_pixtral import (
             PixtralImageProcessor,
         )
+
+        # For pixtral, split image size by sp_size to reduce computation
+        image_size = (image_size[0], image_size[1] // sp_size)
 
         image = create_random_image(*image_size)
         processor = PixtralImageProcessor.from_pretrained(
@@ -561,15 +647,22 @@ class PixtralVisionClass(ImageModelClassBase):
             [pixel_value.unsqueeze(0) for pixel_value in inputs["pixel_values"]], dim=0
         ).repeat(batch_size, 1, 1, 1)
 
+        # split the last dimensin with sp_size and get one
+        inputs["pixel_values"] = inputs["pixel_values"]
+
         return inputs
 
-    def get_num_tokens(self, batch_size: int, image_size: tuple[int, int]) -> int:
-        return (self.data_shape[-1] // self.config.patch_size) * (
-            self.data_shape[-2] // self.config.patch_size
+    def get_num_tokens(
+        self, batch_size: int, image_size: tuple[int, int], sp_size: int = 1
+    ) -> int:
+        return (
+            (self.data_shape[-1] // self.config.patch_size)
+            * (self.data_shape[-2] // self.config.patch_size)
+            // sp_size
         )
 
-    def build_model(self) -> ModalEncoderModule:
-        return ModalEncoderModule(ModelClassBase.build_model(self))
+    def build_model(self, sp_size: int = 1) -> ModalEncoderModule:
+        return ModalEncoderModule(ModelClassBase.build_model(self, sp_size))
 
 
 class Dinov2GiantClass(ImageModelClassBase):
@@ -620,8 +713,10 @@ class Qwen2Vision7bClass(ImageModelClassBase):
         self.config.image_token_id = 44
         self.data_shape = None
 
-    def build_model(self) -> PreTrainedModel:
-        model: Qwen2VisionTransformerPretrainedModel = ModelClassBase.build_model(self)
+    def build_model(self, sp_size: int = 1) -> PreTrainedModel:
+        model: Qwen2VisionTransformerPretrainedModel = ModelClassBase.build_model(
+            self, sp_size
+        )
         # projector = model.merger
         # model.merger = Qwen2VLModel.FakeMerger()
         model.forward = MethodType(
@@ -648,11 +743,13 @@ class Qwen2Vision7bClass(ImageModelClassBase):
         )
 
     def data(
-        self, batch_size: int, image_size: tuple[int, int]
+        self, batch_size: int, image_size: tuple[int, int], sp_size: int = 1
     ) -> dict[str, torch.Tensor]:
         from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
             Qwen2VLImageProcessor,
         )
+
+        image_size = (image_size[0], image_size[1] // int(math.sqrt(sp_size)))
 
         image = create_random_image(*image_size)
         processor = Qwen2VLImageProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
@@ -667,8 +764,12 @@ class Qwen2Vision7bClass(ImageModelClassBase):
 
         return inputs
 
-    def get_num_tokens(self, batch_size: int, image_size: tuple[int, int]) -> int:
-        return self.data_shape[0] // (self.config.temporal_patch_size**2)
+    def get_num_tokens(
+        self, batch_size: int, image_size: tuple[int, int], sp_size: int = 1
+    ) -> int:
+        return self.data_shape[0] // (
+            self.config.temporal_patch_size**2 * int(math.sqrt(sp_size))
+        )
 
 
 class Qwen2AudioEncoderClass(AudioModelClassBase):
@@ -681,8 +782,8 @@ class Qwen2AudioEncoderClass(AudioModelClassBase):
         )
         self.config._attn_implementation = "eager"
 
-    def get_num_tokens(self) -> int:
-        return self.config.max_source_positions // 2
+    def get_num_tokens(self, sp_size: int = 1) -> int:
+        return self.config.max_source_positions // (2 * sp_size)
 
 
 class WhisperLargeClass(AudioModelClassBase):
@@ -692,6 +793,76 @@ class WhisperLargeClass(AudioModelClassBase):
             WhisperConfig.from_pretrained("openai/whisper-large-v3"),
         )
         self.config._attn_implementation = "eager"
+
+
+class Whisper14bClass(AudioModelClassBase):
+    def __init__(self):
+        super().__init__(
+            WhisperEncoder,
+            WhisperConfig(
+                d_model=1920,
+                encoder_attention_heads=20,
+                encoder_ffn_dim=1920 * 4,
+                encoder_layers=32,
+                _attn_implementation="eager",
+            ),
+        )
+
+
+class Whisper3bClass(AudioModelClassBase):
+    def __init__(self):
+        super().__init__(
+            WhisperEncoder,
+            WhisperConfig(
+                d_model=2560,
+                encoder_attention_heads=20,
+                encoder_ffn_dim=2560 * 4,
+                encoder_layers=40,
+                _attn_implementation="eager",
+            ),
+        )
+
+
+class Whisper5bClass(AudioModelClassBase):
+    def __init__(self):
+        super().__init__(
+            WhisperEncoder,
+            WhisperConfig(
+                d_model=2560,
+                encoder_attention_heads=32,
+                encoder_ffn_dim=2560 * 4,
+                encoder_layers=64,
+                _attn_implementation="eager",
+            ),
+        )
+
+
+class Whisper10bClass(AudioModelClassBase):
+    def __init__(self):
+        super().__init__(
+            WhisperEncoder,
+            WhisperConfig(
+                d_model=5120,
+                encoder_attention_heads=32,
+                encoder_ffn_dim=5120 * 4,
+                encoder_layers=32,
+                _attn_implementation="eager",
+            ),
+        )
+
+
+class Whisper20bClass(AudioModelClassBase):
+    def __init__(self):
+        super().__init__(
+            WhisperEncoder,
+            WhisperConfig(
+                d_model=5120,
+                encoder_attention_heads=32,
+                encoder_ffn_dim=5120 * 4,
+                encoder_layers=64,
+                _attn_implementation="eager",
+            ),
+        )
 
 
 class WhisperMediumClass(AudioModelClassBase):
@@ -748,6 +919,9 @@ model_to_class = {
     "vicuna": Vicuna7bClass,
     "vit_22b": ViT22bClass,
     "clip": CLIPVisionClass,
+    "evaclip_300m": EvaCLIPVision300mClass,
+    "evaclip_1b": EvaCLIPVision1BClass,
+    "evaclip_4b": EvaCLIPVision4BClass,
     "evaclip_8b": EvaCLIPVision8bClass,
     "evaclip_18b": EvaCLIPVision18bClass,
     "dinov2_22m": Dinov2SmallClass,
@@ -763,6 +937,11 @@ model_to_class = {
     "whisper_242m": WhisperSmallClass,
     "whisper_307m": WhisperMediumClass,
     "whisper_72m": WhisperBaseClass,
+    "whisper_1.4b": Whisper14bClass,
+    "whisper_3b": Whisper3bClass,
+    "whisper_5b": Whisper5bClass,
+    "whisper_10b": Whisper10bClass,
+    "whisper_20b": Whisper20bClass,
     "qwen2_audio": Qwen2AudioEncoderClass,
 }
 
@@ -793,6 +972,9 @@ class_to_forward_str = {
     Vicuna7bClass: "cornstarch.shardformer.modeling.llama.LlamaModelForwards.llama_model_forward",
     ViT22bClass: "cornstarch.shardformer.modeling.vit.ViTModelForwards.vit_model_forward",
     CLIPVisionClass: "cornstarch.shardformer.modeling.clip.CLIPVisionModelForwards.clip_vision_transformer_forward",
+    EvaCLIPVision300mClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
+    EvaCLIPVision1BClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
+    EvaCLIPVision4BClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
     EvaCLIPVision8bClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
     EvaCLIPVision18bClass: "cornstarch.shardformer.modeling.evaclip.EvaCLIPModelForwards.eva_clip_vision_transformer_forward",
     Dinov2SmallClass: "cornstarch.shardformer.modeling.dinov2.Dinov2ModelForwards.dinov2_encoder_forward",
@@ -808,5 +990,10 @@ class_to_forward_str = {
     WhisperBaseClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
     WhisperMediumClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
     WhisperLargeClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    Whisper14bClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    Whisper3bClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    Whisper5bClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    Whisper10bClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
+    Whisper20bClass: "cornstarch.shardformer.modeling.whisper.WhisperModelForwards.whisper_encoder_forward",
     Qwen2AudioEncoderClass: "cornstarch.shardformer.modeling.qwen2_audio.Qwen2AudioModelForwards.qwen2_audio_encoder_forward",
 }
