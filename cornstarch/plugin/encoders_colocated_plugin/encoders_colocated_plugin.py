@@ -169,13 +169,18 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # There may be multiple encoder_output_{modal_key}s here.
                 # Merge them so that we can pass them to the language model.
-                encoders_outputs = [
-                    kwargs[f"encoder_output_{modal_key}"]
-                    for modal_key in module.encoders.keys()
-                ]
-                assert all(
-                    isinstance(output, torch.Tensor) for output in encoders_outputs
+                num_tokens_per_modal = kwargs["num_tokens_per_modal"]
+                encoders_outputs = torch.split(
+                    hidden_states, num_tokens_per_modal.tolist()[0], dim=1
                 )
+
+                # encoders_outputs = [
+                #     kwargs[f"encoder_output_{modal_key}"]
+                #     for modal_key in module.encoders.keys()
+                # ]
+                # assert all(
+                #     isinstance(output, torch.Tensor) for output in encoders_outputs
+                # )
 
                 # step 2. merge encoded multimodal features into text embeddings
                 inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
@@ -290,14 +295,17 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                     )
 
             else:
-                for modal_key, encoder_module in module.encoders.items():
-                    assert f"encoder_output_{modal_key}" in kwargs
+                num_tokens_per_modal = kwargs["num_tokens_per_modal"]
+                encoders_outputs = torch.split(
+                    hidden_states, num_tokens_per_modal.tolist()[0], dim=1
+                )
 
-                    previous_stage_output: dict = kwargs.get(
-                        f"encoder_output_{modal_key}"
-                    )
+                for index, (modal_key, encoder_module) in enumerate(
+                    module.encoders.items()
+                ):
+                    previous_stage_output: dict = encoders_outputs[index]
                     encoder_outputs[modal_key] = encoder_module(
-                        **previous_stage_output,
+                        hidden_states=previous_stage_output,
                         output_attentions=output_attentions,
                         output_hidden_states=output_hidden_states,
                         return_dict=return_dict,
@@ -310,6 +318,33 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                 # Thus, instead of merging encoder outputs, we return them as is,
                 # but just with the prefix `hidden_states`.
 
+            num_tokens_per_modal = torch.tensor(
+                [
+                    [
+                        (
+                            encoder_output[0].size(1)
+                            if isinstance(encoder_output, OrderedDict)
+                            else encoder_output["hidden_states"].size(1)
+                        )
+                        for modal_key, encoder_output in encoder_outputs.items()
+                    ]
+                ],
+                device="cuda",
+            )
+            return {
+                "hidden_states": torch.cat(
+                    [
+                        (
+                            encoder_output[0]
+                            if isinstance(encoder_output, OrderedDict)
+                            else encoder_output["hidden_states"]
+                        )
+                        for encoder_output in encoder_outputs.values()
+                    ],
+                    dim=1,
+                ),
+                "num_tokens_per_modal": num_tokens_per_modal,
+            }
             return {
                 f"encoder_output_{modal_key}": (
                     encoder_output[0]
