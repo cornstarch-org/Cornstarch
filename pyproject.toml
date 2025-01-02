@@ -40,6 +40,12 @@ dev = [
     "accelerate",
 ]
 
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings",
+]
+
 [tool.ruff]
 # Never enforce `E501` (line length violations).
 ignore = ["E501"]
