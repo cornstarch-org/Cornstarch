@@ -1,0 +1,34 @@
+site_name: Cornstarch Project
+site_author: Cornstarch team
+site_description: Distributed Multimodal LLM training framework
+
+repo_name: SymbioticLab/Cornstarch
+repo_url: https://github.com/SymbioticLab/Cornstarch
+
+copyright: Copyright &copy; 2025 Cornstarch team
+
+theme:
+  name: material
+  logo: assets/images/cornstarch.svg
+  palette:
+    scheme: slate
+    primary: amber
+
+plugins:
+  - search
+  - mkdocstrings
+
+markdown_extensions:
+  - meta
+  - abbr
+  - admonition
+  - attr_list
+  - footnotes
+
+nav:
+  - Cornstarch: index.md
+  - Getting Started:
+    - Installation: getting_started/installation.md
+    - Creating a MLLM model: creating_mllm/index.md
+    - Parallelization: parallelization/index.md
+  - Source Code Reference: reference/
