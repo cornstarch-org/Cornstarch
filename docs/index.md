@@ -19,8 +19,9 @@ Cornstarch is a distributed multimodal LLM modeling framework that allows you to
 
 # Documentation Organization
 - [Getting Started](getting_started/installation.md): Instructions on installation and setup.
-- [Creating a multimodal LLM](getting_started/creating_model.md): How to create a multimodal LLM from unimodal models.
-- [Multimodal LLM Parallelization](getting_started/parallelization.md): How to parallelize a multimodal LLM training.
+- [Creating a multimodal LLM](using_cornstarch/creating_mllm.md): How to create a multimodal LLM from unimodal models.
+- [Training a multimodal LLM](using_cornstarch/training_mllm.md): How to train a multimodal LLM using Cornstarch.
+- [Multimodal LLM Parallelization](using_cornstarch/parallelization.md): How to parallelize a multimodal LLM training.
 - [Source Code Reference](references): Auto-generated source code reference.
 
 # Research Works

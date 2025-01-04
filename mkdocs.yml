@@ -10,6 +10,7 @@ copyright: Copyright &copy; 2025 Cornstarch team
 theme:
   name: material
   logo: assets/images/cornstarch.svg
+  favicon: assets/images/favicon.svg
   palette:
     scheme: slate
     primary: amber
@@ -24,11 +25,25 @@ markdown_extensions:
   - admonition
   - attr_list
   - footnotes
+  - pymdownx.highlight:
+      anchor_linenums: true
+      pygments_lang_class: true
+      linenums: true
+      use_pygments: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
 
 nav:
   - Cornstarch: index.md
-  - Getting Started:
-    - Installation: getting_started/installation.md
-    - Creating a MLLM model: creating_mllm/index.md
-    - Parallelization: parallelization/index.md
+  - Installation: getting_started/installation.md
+  - Using Cornstarch:
+    - Creating a MLLM model: using_cornstarch/creating_mllm.md
+    - Training a MLLM model: using_cornstarch/training_mllm.md
+  - Distributed Training:
+    - Overview: parallelization/index.md
+    - Using FSDP: parallelization/fsdp.md
+    - Tensor Parallelism: parallelization/tensor_parallel.md
+    - Per-Modality Pipeline Parallelism: parallelization/pipeline_parallel.md
+    - Context Parallelism: parallelization/context_parallel.md
   - Source Code Reference: reference/
