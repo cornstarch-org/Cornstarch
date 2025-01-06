@@ -42,8 +42,7 @@ nav:
     - Training a MLLM model: using_cornstarch/training_mllm.md
   - Distributed Training:
     - Overview: parallelization/index.md
-    - Using FSDP: parallelization/fsdp.md
+    - Using DDP/FSDP: parallelization/ddp_fsdp.md
     - Tensor Parallelism: parallelization/tensor_parallel.md
-    - Per-Modality Pipeline Parallelism: parallelization/pipeline_parallel.md
-    - Context Parallelism: parallelization/context_parallel.md
+    - Cornstarch Multimodal-Aware 4D Parallelism: parallelization/cornstarch_parallel.md
   - Source Code Reference: reference/
