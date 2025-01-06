@@ -67,32 +67,31 @@ def pretrain(vision_model_name_or_path: str, language_model_name_or_path: str):
 
     # Create a model
     
-    with torch.device("meta"):
-        if "clip" in vision_model_name_or_path:
-            vision_config = CLIPVisionConfig.from_pretrained(
-                vision_model_name_or_path,
-                trust_remote_code=False,
-                _attn_implementation="eager",
-                torch_dtype=torch.bfloat16,
-            )
-            vision_encoder = CLIPVisionModel(vision_config).to("cuda")
-            vision_encoder = ModalEncoderModule(vision_encoder)
-        else:
-            raise NotImplementedError
-    
-        language_config = LlamaConfig.from_pretrained(
-            language_model_name_or_path,
+    if "clip" in vision_model_name_or_path:
+        vision_config = CLIPVisionConfig.from_pretrained(
+            vision_model_name_or_path,
             trust_remote_code=False,
-            _attn_implementation="flash_attention_2",
+            _attn_implementation="eager",
             torch_dtype=torch.bfloat16,
         )
-        language_model: PreTrainedModel = LlamaForCausalLM(language_config)
+        vision_encoder = CLIPVisionModel(vision_config).to("cuda")
+        vision_encoder = ModalEncoderModule(vision_encoder)
+    else:
+        raise NotImplementedError
+
+    language_config = LlamaConfig.from_pretrained(
+        language_model_name_or_path,
+        trust_remote_code=False,
+        _attn_implementation="flash_attention_2",
+        torch_dtype=torch.bfloat16,
+    )
+    language_model: PreTrainedModel = LlamaForCausalLM(language_config).to("cuda")
 
     model: MultimodalModel = MultimodalModel(
         encoders={"vision": vision_encoder},
         language_model=language_model,
     ).to(dtype=torch.bfloat16)
-    model.to_empty(device="cuda")
+    
     model.gradient_checkpointing_enable({"use_reentrant": False})
 
     model.train(mode=True)
