@@ -14,6 +14,12 @@ theme:
   palette:
     scheme: slate
     primary: amber
+  features:
+    - content.code.copy
+    - search.suggest
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
 
 plugins:
   - search
@@ -43,6 +49,5 @@ nav:
   - Distributed Training:
     - Overview: parallelization/index.md
     - Using DDP/FSDP: parallelization/ddp_fsdp.md
-    - Tensor Parallelism: parallelization/tensor_parallel.md
-    - Cornstarch Multimodal-Aware 4D Parallelism: parallelization/cornstarch_parallel.md
+    - Using Cornstarch 4D Parallelism: parallelization/cornstarch_parallel.md
   - Source Code Reference: reference/
