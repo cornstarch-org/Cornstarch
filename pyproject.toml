@@ -20,12 +20,36 @@ dependencies = [
     "torch>=2.5.0",
     "triton>=3.0.0",
     "transformers==4.45.0",
-    "colossalai>=0.4.4",
     "loguru",
     "simple_parsing",
     "datasets",
     "click",
     "flash-attn",
+    "numpy",
+    "tqdm",
+    "psutil",
+    "packaging",
+    "pre-commit",
+    "rich",
+    "click",
+    "fabric",
+    "contexttimer",
+    "ninja",
+    "safetensors",
+    "einops",
+    "pydantic",
+    "ray",
+    "sentencepiece",
+    "google",
+    "protobuf",
+    "peft>=0.7.1,<=0.13.2",
+    "bitsandbytes>=0.39.0",
+    "rpyc==6.0.0",
+    "fastapi",
+    "uvicorn==0.29.0",
+    "galore_torch",
+    "diffusers==0.29.0",
+    "timm",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +62,12 @@ dev = [
     "pytest-mock",
     "expecttest",
     "accelerate",
+]
+
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings",
 ]
 
 [tool.ruff]
