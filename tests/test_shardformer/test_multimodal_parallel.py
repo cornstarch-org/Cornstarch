@@ -1,6 +1,7 @@
 from typing import Any, Callable
 
 import torch
+from unittest import SkipTest
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
 from torch.optim import Optimizer
@@ -93,6 +94,7 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
 
 
 @instantiate_parametrized_tests
+@SkipTest
 class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self):
@@ -180,6 +182,7 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
 
 
 @instantiate_parametrized_tests
+@SkipTest
 class VisionAudioLanguageMultimodalAnymask(CornstarchMultimodalParallelBase):
     """
     Compare AnyMask only vs AnyMask context parallelism with other types of parallelism

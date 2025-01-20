@@ -34,8 +34,10 @@ from transformers.models.llama.modeling_llama import (
 from transformers.utils.import_utils import is_torchdynamo_compiling
 
 from cornstarch.kernel.interface import convert_bit_attention_mask_to_block_mask
-from cornstarch.shardformer.layers.ring_attention_anymask import RingAttentionAnyMask
-from cornstarch.shardformer.layers.utils import repeat_attention_mask_heads
+from cornstarch.shardformer.layers.utils import (
+    repeat_attention_mask_heads,
+    ContextParallelBatchUtils,
+)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -192,10 +194,10 @@ class LlamaModelForwards:
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
             if sp_mode == "ring_attn":
-                hidden_states = RingAttentionAnyMask.split_batch(
+                hidden_states = ContextParallelBatchUtils.split_batch(
                     hidden_states, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
                 )  # shape: [B, L // sp_size, ...]
-                position_ids = RingAttentionAnyMask.split_batch(
+                position_ids = ContextParallelBatchUtils.split_batch(
                     position_ids, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
                 )  # shape: [B, L // sp_size]
             elif sp_mode == "all_to_all":
@@ -279,7 +281,7 @@ class LlamaModelForwards:
             next_cache = next_cache.to_legacy_cache()
 
         # Clear cache so that it is not used in the next forward pass
-        # RingAttentionAnyMask.clear_split_cache()
+        # ContextParallelBatchUtils.clear_split_cache()
 
         if not return_dict:
             return tuple(
@@ -364,7 +366,7 @@ class LlamaModelForwards:
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
             # labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
-            labels = RingAttentionAnyMask.split_batch(
+            labels = ContextParallelBatchUtils.split_batch(
                 labels,
                 sp_group,
                 seq_dim=1,
@@ -638,19 +640,7 @@ class LlamaAttentionForwards:
 
         attn_weights = None
         if sp_mode == "ring_attn":
-            key_states = repeat_kv(key_states, self.num_key_value_groups).contiguous()
-            value_states = repeat_kv(
-                value_states, self.num_key_value_groups
-            ).contiguous()
-
-            attn_output = RingAttentionAnyMask.attention(
-                query_states,
-                key_states,
-                value_states,
-                sp_group,
-                attention_mask,
-                dropout_p=self.attention_dropout if self.training else 0.0,
-            )
+            raise NotImplementedError("Ring Attention is not supported yet.")
         elif isinstance(attention_mask, BlockMask):
             attn_output, attn_weights = torch.compile(flex_attention, fullgraph=True)(
                 query_states,

@@ -1,12 +1,11 @@
+from __future__ import annotations
 import inspect
 from functools import cache
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
-
-__all__ = ["update_out_and_lse", "RingComm", "get_default_args"]
+import numpy as np
 
 
 @cache
@@ -77,122 +76,192 @@ def convert_bit_attention_mask_to_full_mask(
     return full_causal_mask.unsqueeze(1).expand(bsz, num_heads, seq_len, seq_len)
 
 
-@torch.jit.script
-def _update_out_and_lse(
-    out: torch.Tensor,
-    lse: torch.Tensor,
-    block_out: torch.Tensor,
-    block_lse: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-
-    block_out = block_out.to(torch.float32)
-
-    if block_lse.shape[:3] != block_out.shape[:3]:
-        # NOTE(@runyu): flash attn by tridao need transpose the last two dims
-        block_lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
-        # print("tridao's flash attn")
-    else:
-        block_lse = block_lse.unsqueeze(dim=-1)
-
-    # new_lse = lse + torch.log(1 + torch.exp(block_lse - lse))
-    # torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out
-    # For additional context and discussion, please refer to:
-    # https://github.com/zhuzilin/ring-flash-attention/pull/34#issuecomment-2076126795
-    out = out - F.sigmoid(block_lse - lse) * (out - block_out)
-    lse = lse - F.logsigmoid(lse - block_lse)
-
-    return out, lse
+SUPPORT_RING_ATTN_DISTRIBUTION_MODE = ["uniform", "zigzag", "random"]
 
 
-def update_out_and_lse(
-    out: Optional[torch.Tensor],
-    lse: Optional[torch.Tensor],
-    block_out: torch.Tensor,
-    block_lse: torch.Tensor,
-    slice_=None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    if out is None:
-        if slice_ is not None:
-            raise RuntimeError("first update_out_and_lse should not pass slice_ args")
-        out = block_out.to(torch.float32)
-        if block_lse.shape[:3] != block_out.shape[:3]:
-            lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
-            print("tridao's flash attn")
-        else:
-            lse = block_lse.unsqueeze(dim=-1)
-    elif slice_ is not None:
-        slice_out, slice_lse = out[slice_], lse[slice_]
-        slice_out, slice_lse = _update_out_and_lse(
-            slice_out, slice_lse, block_out, block_lse
-        )
-        out[slice_], lse[slice_] = slice_out, slice_lse
-    else:
-        out, lse = _update_out_and_lse(out, lse, block_out, block_lse)
-    return out, lse
+class ContextParallelBatchUtils:
+    split_batch_cache: Optional[np.ndarray] = None
 
+    @classmethod
+    def clear_split_cache(cls: ContextParallelBatchUtils):
+        cls.split_batch_cache = None
 
-@torch.jit.script
-def flatten_varlen_lse(lse, cu_seqlens):
-    new_lse = []
-    for i in range(len(cu_seqlens) - 1):
-        start, end = cu_seqlens[i], cu_seqlens[i + 1]
-        new_lse.append(lse[i, :, : end - start])
-    return torch.cat(new_lse, dim=1)
-
-
-@torch.jit.script
-def unflatten_varlen_lse(lse, cu_seqlens, max_seqlen: int):
-    num_seq = len(cu_seqlens) - 1
-    num_head = lse.shape[-2]
-    new_lse = torch.empty(
-        (num_seq, max_seqlen, num_head, 1), dtype=torch.float32, device=lse.device
-    )
-    for i in range(num_seq):
-        start, end = cu_seqlens[i], cu_seqlens[i + 1]
-        new_lse[i, : end - start] = lse[start:end]
-    return new_lse.squeeze(dim=-1).transpose(1, 2).contiguous()
-
-
-class RingComm:
-    def __init__(self, process_group: dist.ProcessGroup):
-        self._process_group = process_group
-        self._ops = []
-        self.rank = dist.get_rank(self._process_group)
-        self.world_size = dist.get_world_size(self._process_group)
-        self._reqs = None
-
-        self.send_rank = (self.rank + 1) % self.world_size
-        self.recv_rank = (self.rank - 1) % self.world_size
-
-        if process_group is not None:
-            self.send_rank = dist.get_global_rank(self._process_group, self.send_rank)
-            self.recv_rank = dist.get_global_rank(self._process_group, self.recv_rank)
-
-    def send_recv(
-        self, to_send: torch.Tensor, recv_tensor: Optional[torch.Tensor] = None
+    @staticmethod
+    def split_batch(
+        batch: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        seq_dim: int = 1,
+        is_label: bool = False,
+        ring_attn_mode: str = "uniform",
     ) -> torch.Tensor:
-        if recv_tensor is None:
-            res = torch.empty_like(to_send)
+        if batch is None:
+            return None
+
+        assert (
+            ring_attn_mode in SUPPORT_RING_ATTN_DISTRIBUTION_MODE
+        ), f"Ring attention distribution mode {ring_attn_mode} is not in the supported list {SUPPORT_RING_ATTN_DISTRIBUTION_MODE}"
+
+        if ring_attn_mode == "uniform":
+            return ContextParallelBatchUtils._split_batch_uniform(
+                batch, sp_group, seq_dim, is_label
+            )
+        elif ring_attn_mode == "zigzag":
+            return ContextParallelBatchUtils._split_batch_zigzag(
+                batch, sp_group, seq_dim, is_label
+            )
+        elif ring_attn_mode == "random":
+            return ContextParallelBatchUtils._split_batch_random(
+                batch, sp_group, seq_dim, is_label
+            )
+
+    @staticmethod
+    def _split_batch_uniform(
+        batch: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        seq_dim: int = 1,
+        is_label: bool = False,
+    ) -> torch.Tensor:
+        """
+        split them evenly by seq_dim
+        """
+
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+        if sp_size == 1:
+            return batch
+
+        seq_dim = seq_dim if seq_dim != -1 else batch[0].dim() - 1
+        seq_len = batch.shape[seq_dim]
+
+        assert (
+            seq_len % sp_size == 0
+        ), f"Sequence length {seq_len} must be divisible by {sp_size}!"
+        split_batch = batch.chunk(sp_size, dim=seq_dim)[sp_rank].contiguous()
+
+        return split_batch
+
+    @classmethod
+    def _split_batch_zigzag(
+        cls: ContextParallelBatchUtils,
+        batch: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        seq_dim: int = 1,
+        is_label: bool = False,
+    ) -> torch.Tensor:
+        """
+        split them using zigzag strategy
+        """
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+        if sp_size == 1:
+            return batch
+
+        seq_dim = seq_dim if seq_dim != -1 else batch[0].dim() - 1
+        seq_len = batch.shape[seq_dim]
+        num_elements_per_process = seq_len // sp_size
+
+        assert (
+            seq_len % (sp_size * 2) == 0
+        ), f"Sequence length {seq_len} must be divisible by {sp_size * 2}!"
+
+        if cls.split_batch_cache is not None:
+            assert cls.split_batch_cache.shape == (seq_len,), (
+                f"Zigzag split cache shape {cls.split_batch_cache.shape} "
+                f"does not match the sequence length {seq_len}"
+            )
+            assignments = cls.split_batch_cache
         else:
-            res = recv_tensor
+            indices = np.arange(seq_len)
 
-        send_op = dist.P2POp(
-            dist.isend, to_send, self.send_rank, group=self._process_group
+            first_half = indices[: seq_len // 2]
+            second_half = indices[seq_len // 2 :][::-1]
+
+            # Stack the two halves and interleave them to form the zigzag pattern
+            assignments = np.ravel(np.column_stack((first_half, second_half)))
+
+            # Cache assignments
+            cls.split_batch_cache = assignments
+
+        # Select the range of indices for the current process
+        start_idx = sp_rank * num_elements_per_process
+        end_idx = start_idx + num_elements_per_process
+        process_indices = torch.as_tensor(
+            assignments[start_idx:end_idx], dtype=torch.long, device=batch.device
+        ).detach()
+
+        slices = [slice(None)] * batch.dim()
+        slices[seq_dim] = process_indices
+
+        return batch[slices].contiguous()
+
+    @classmethod
+    def _split_batch_random(
+        cls: ContextParallelBatchUtils,
+        batch: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        seq_dim: int = 1,
+        is_label: bool = False,
+    ) -> torch.Tensor:
+        """
+        split tokens randomly. If the number of tokens is large it is magically balanced.
+
+        This uses a hash function to assign tokens to processes. The hash function is
+        `hash(token_index + random_offset) % sp_size == sp_rank`, where `hash()` is a simple
+        linear hash function.
+        To ensure even distribution, a and mod (sp_size) should be coprime, i.e. their GCD is 1.
+        """
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+        if sp_size == 1:
+            return batch
+
+        seq_dim = seq_dim if seq_dim != -1 else batch[0].dim() - 1
+        seq_len = batch.shape[seq_dim]
+
+        if cls.split_batch_cache is not None:
+            assert cls.split_batch_cache.shape == (seq_len,), (
+                f"Random split cache shape {cls.split_batch_cache.shape} "
+                f"does not match the sequence length {seq_len}"
+            )
+            assignments = cls.split_batch_cache
+        else:
+
+            def generate_coprime_a(p, mod):
+                while True:
+                    a = np.random.randint(1, p)
+                    if np.gcd(a, mod) == 1:
+                        return a
+
+            # Hash function parameters
+            p = 2**31  # Modulus
+            a = generate_coprime_a(p, sp_size)  # multiplier
+            b = np.random.randint(0, p)  # increment
+            offset = np.random.randint(0, p)
+
+            token_indices = np.arange(seq_len, dtype=np.int64)  # shape: [seq_len]
+
+            # Compute the hash for each index
+            hash_values = (
+                a * ((token_indices + offset) % p) + b
+            ) % p  # shape: [seq_len]
+
+            # Determine assignment based on hash modulo 'mod'
+            assignments = (hash_values % sp_size) == sp_rank  # shape: [seq_len]
+
+            # Cache assignments
+            cls.split_batch_cache = assignments
+
+        # Extract the indices assigned to this process
+        assigned_indices = np.flatnonzero(assignments)  # shape: [num_assigned_indices]
+        assigned_indices = torch.as_tensor(
+            assigned_indices, dtype=torch.long, device=batch.device
         )
-        recv_op = dist.P2POp(dist.irecv, res, self.recv_rank, group=self._process_group)
-        self._ops.append(send_op)
-        self._ops.append(recv_op)
-        return res
 
-    def commit(self):
-        if self._reqs is not None:
-            raise RuntimeError("commit called twice")
-        self._reqs = dist.batch_isend_irecv(self._ops)
+        # Create a slice to index of selected tokens in seq_dim
+        slices = [slice(None)] * batch.dim()
+        slices[seq_dim] = (
+            assigned_indices  # replace only the seq_dim with assigned indices
+        )
 
-    def wait(self):
-        if self._reqs is None:
-            raise RuntimeError("wait called before commit")
-        for req in self._reqs:
-            req.wait()
-        self._reqs = None
-        self._ops = []
+        # Use advanced indexing with slices to select the tokens
+        return batch[slices].contiguous()
