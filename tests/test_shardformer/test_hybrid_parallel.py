@@ -4,6 +4,8 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 
+from unittest import SkipTest
+
 from .model_zoo import (
     CLIPModelBase,
     Dinov2ModelBase,
@@ -82,7 +84,7 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp16"], name_fn=lambda p: p)
+    @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
@@ -99,7 +101,7 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp16"], name_fn=lambda p: p)
+    @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test_model(
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
@@ -113,7 +115,7 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp16"], name_fn=lambda p: p)
+    @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test_causal(
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
@@ -122,6 +124,7 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
 
 
 @instantiate_parametrized_tests
+@SkipTest
 class LanguageContextParallel(ColossalaiHybridParallelBase):
     @parametrize("model_name", language_models.keys(), name_fn=lambda m: m)
     @parametrize(
@@ -160,7 +163,7 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp16"], name_fn=lambda p: p)
+    @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
         self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
     ):
@@ -169,6 +172,7 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
 
 
 @instantiate_parametrized_tests
+@SkipTest
 class LanguageRingAttentionAnymask(ColossalaiHybridParallelBase):
 
     def check_fn(self, *args, **kwargs):

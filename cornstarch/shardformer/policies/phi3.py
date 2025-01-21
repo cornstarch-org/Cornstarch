@@ -183,7 +183,7 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="self_attn.qkv_proj",
                         target_module=FusedLinear1D_Col,
-                        kwargs=dict(n_fused=3),
+                        kwargs=dict(split_sizes=[config.hidden_size] * 3),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.o_proj",
@@ -192,7 +192,7 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="mlp.gate_up_proj",
                         target_module=FusedLinear1D_Col,
-                        kwargs=dict(n_fused=2),
+                        kwargs=dict(split_sizes=[config.intermediate_size] * 2),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.down_proj",

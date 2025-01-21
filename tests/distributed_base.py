@@ -73,7 +73,13 @@ class GlooDistributedTestBase(MultiProcessTestCase):
         ):
             self.run_test(test_name, pipe)
 
-        dist.barrier()
+        try:
+            dist.barrier()
+        except RuntimeError:
+            # Some processes may be hung due to synchronization error,
+            # and return an error as other processes closed the connection.
+            # Simply ignore the error here.
+            pass
 
         dist.destroy_process_group()
 

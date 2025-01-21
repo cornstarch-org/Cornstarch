@@ -13,6 +13,7 @@ class Qwen2VisionTransformerBase(ModelClassBase):
             Qwen2VisionTransformerPretrainedModel,
             Qwen2VLVisionConfig(
                 hidden_size=256,
+                embed_dim=64,
                 num_heads=8,
                 num_hidden_layers=4,
                 depth=4,

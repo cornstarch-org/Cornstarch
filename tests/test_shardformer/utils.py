@@ -887,7 +887,7 @@ def check_weight(
             sharded_module = getattr_(sharded_model, suffix)
             if isinstance(sharded_module, FusedLinear1D_Col):
                 sharded_weight = gather_fused_qkv_in_gpt2_style(
-                    sharded_weight, sharded_module.n_fused, tp_group
+                    sharded_weight, sharded_module.split_sizes, tp_group
                 )
             else:
                 sharded_weight_list = [
@@ -925,7 +925,7 @@ def get_grad_tensors_for_check(
             sharded_module = getattr_(sharded_model, suffix)
             if isinstance(sharded_module, FusedLinear1D_Col):
                 shard_grad = gather_fused_qkv_in_gpt2_style(
-                    shard_grad, sharded_module.n_fused, tp_group
+                    shard_grad, sharded_module.split_sizes, tp_group
                 )
             else:
                 shard_grad_list = [

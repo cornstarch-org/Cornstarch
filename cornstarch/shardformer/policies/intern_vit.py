@@ -127,7 +127,7 @@ class InternVisionModelPolicy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="attn.qkv",
                         target_module=FusedLinear1D_Col,
-                        kwargs=dict(n_fused=3),
+                        kwargs=dict(split_sizes=[config.hidden_size] * 3),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attn.proj",

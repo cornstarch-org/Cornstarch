@@ -16,10 +16,10 @@ from cornstarch.models.internlm2 import (
 from ..utils import ModelClassBase
 
 internlm2_config = InternLM2Config(
-    hidden_size=512,
+    hidden_size=256,
     intermediate_size=64,
-    num_attention_heads=16,
-    num_key_value_heads=8,
+    num_attention_heads=8,
+    num_key_value_heads=4,
     num_hidden_layers=4,
     use_cache=False,
 )

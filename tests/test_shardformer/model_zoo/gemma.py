@@ -8,10 +8,10 @@ from transformers.models.gemma import GemmaConfig, GemmaForCausalLM, GemmaModel
 from ..utils import ModelClassBase
 
 gemma_config = GemmaConfig(
-    hidden_size=512,
+    hidden_size=256,
     intermediate_size=64,
-    num_attention_heads=16,
-    num_key_value_heads=16,
+    num_attention_heads=8,
+    num_key_value_heads=8,
     num_hidden_layers=4,
     use_cache=False,
     # TODO: Gemma uses tie_word_embeddings True, in which case the tests fail.

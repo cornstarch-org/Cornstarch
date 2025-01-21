@@ -70,6 +70,10 @@ docs = [
     "mkdocstrings",
 ]
 
+colossalai = [
+    "colossalai>=0.4.5",
+]
+
 [tool.ruff]
 # Never enforce `E501` (line length violations).
 ignore = ["E501"]

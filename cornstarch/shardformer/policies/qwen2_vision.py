@@ -144,7 +144,7 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="attn.qkv",
                         target_module=FusedLinear1D_Col,
-                        kwargs=dict(n_fused=3),
+                        kwargs=dict(split_sizes=[config.embed_dim] * 3),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attn.proj",

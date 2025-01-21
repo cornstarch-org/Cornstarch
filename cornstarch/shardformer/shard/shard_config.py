@@ -14,6 +14,7 @@ class ShardConfig(ColossalShardConfig):
     sequence_parallel_process_group: Optional[dist.ProcessGroup] = None
     enable_sequence_parallelism: bool = False
     sequence_parallelism_mode: str = None
+    enable_sequence_overlap: bool = False
     ring_attention_distribution_mode: str = None
     pipeline_stage_manager: Optional[PipelineStageManager] = None
     pipeline_template: Optional[PipelineTemplate] = None
