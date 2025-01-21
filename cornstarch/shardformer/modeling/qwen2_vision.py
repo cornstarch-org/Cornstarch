@@ -37,8 +37,8 @@ class Qwen2VisionModelForwards:
 
             if hidden_states.ndim == 3:
                 # Slice-based microbatching leaves one more dimension
-                hidden_states.squeeze_(0)
-                grid_thw.squeeze_(0)
+                hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+                grid_thw = grid_thw.view(-1, grid_thw.size(-1))
 
             hidden_states = self.patch_embed(hidden_states)
             rotary_pos_emb = self.rot_pos_emb(grid_thw)

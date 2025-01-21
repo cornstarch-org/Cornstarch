@@ -1,10 +1,10 @@
+from unittest import SkipTest
+
 import torch
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-
-from unittest import SkipTest
 
 from .model_zoo import (
     CLIPModelBase,
@@ -90,6 +90,22 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
     ):
         self.set_model(vision_models[model_name]())
         self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+
+    def postprocess_data_for_sharded_model(self, data, precision):
+        if not isinstance(self.model, Qwen2VisionTransformerBase):
+            return super().postprocess_data_for_original_model(data, precision)
+
+        # Special data handling for Qwen2Vision
+        num_batch = self.num_microbatches * self.microbatch_size
+        new_data = {
+            "pixel_values": torch.stack(
+                data["hidden_states"].chunk(num_batch, dim=0), dim=0
+            ),
+            "image_grid_thw": torch.stack(
+                data["grid_thw"].chunk(num_batch, dim=0), dim=0
+            ),
+        }
+        return super().postprocess_data_for_original_model(new_data, precision)
 
 
 @instantiate_parametrized_tests

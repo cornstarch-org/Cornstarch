@@ -40,15 +40,14 @@ class Qwen2VisionTransformerBase(ModelClassBase):
         image_size = 256  # minimum pixel size
         num_grid = image_size // self.config.patch_size
         num_channels = self.config.in_channels
-        return [
-            # hidden_states
-            torch.randn(
-                num_batch,
-                num_grid**2,
-                num_channels
-                * self.config.temporal_patch_size
-                * self.config.patch_size**2,
-            ),
-            # grid_thw
-            torch.tensor([[1, num_grid, num_grid]] * num_batch),
-        ]
+
+        pixel_values = torch.randn(
+            num_grid**2,
+            num_channels * self.config.temporal_patch_size * self.config.patch_size**2,
+        )
+        image_grid_thw = torch.tensor([[1, num_grid, num_grid]])
+
+        return {
+            "hidden_states": torch.cat([pixel_values] * num_batch, dim=0),
+            "grid_thw": torch.cat([image_grid_thw] * num_batch, dim=0),
+        }
