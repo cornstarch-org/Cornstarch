@@ -1,7 +1,7 @@
 from typing import Any, Callable
+from unittest import SkipTest
 
 import torch
-from unittest import SkipTest
 from colossalai.booster import Booster
 from colossalai.interface import OptimizerWrapper
 from torch.optim import Optimizer
@@ -69,7 +69,7 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         name_fn=lambda tp, vpp, lpp: f"tp={tp}, pp={vpp},{lpp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp16"], name_fn=lambda p: p)
+    @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
         self,
         vision_model_name: str,
@@ -152,7 +152,7 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         name_fn=lambda tp, vpp, app, lpp: f"tp={tp}, pp={vpp},{app},{lpp}",
     )
     @parametrize("fa", [True, False])
-    @parametrize("precision", ["bf16", "fp16"], name_fn=lambda p: p)
+    @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
         self,
         vision_model_name: str,

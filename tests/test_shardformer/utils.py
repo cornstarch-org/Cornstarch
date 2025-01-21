@@ -860,7 +860,7 @@ def check_loss(
     atol: float = 1e-5,
     rtol: float = 1e-3,
 ):
-    assert torch.allclose(org_loss.float(), sharded_loss.float(), atol=atol, rtol=rtol)
+    assert_close(org_loss.float(), sharded_loss.float(), atol=atol, rtol=rtol)
 
 
 def check_weight(
