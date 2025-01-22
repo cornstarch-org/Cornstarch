@@ -35,7 +35,9 @@ class ModelSharder(ColossalModelSharder):
         return shared_params
 
     def _materialize(self) -> None:
-        self.model.to_empty(device=get_accelerator().get_current_device())
+        for p in self.model.parameters():
+            if p.device.type == "meta":
+                p.to_empty(device=get_accelerator().get_current_device())
         super()._materialize()
 
     @classmethod
