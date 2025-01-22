@@ -15,19 +15,8 @@ from colossalai.shardformer.layer import (
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
+    Policy,
     SubModuleReplacementDescription,
-)
-from colossalai.shardformer.policies.llama import (
-    LlamaForCausalLMPolicy as ColossalLlamaForCausalLMPolicy,
-)
-from colossalai.shardformer.policies.llama import (
-    LlamaForSequenceClassificationPolicy as ColossalLlamaForSequenceClassificationPolicy,
-)
-from colossalai.shardformer.policies.llama import (
-    LlamaModelPolicy as ColossalLlamaModelPolicy,
-)
-from colossalai.shardformer.policies.llama import (
-    LlamaPolicy as ColossalLlamaPolicy,
 )
 from torch import Tensor, nn
 from transformers import LlamaConfig, PretrainedConfig
@@ -43,14 +32,8 @@ from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
 
-__all__ = [
-    "LlamaPolicy",
-    "LlamaForCausalLMPolicy",
-    "LlamaForSequenceClassificationPolicy",
-]
 
-
-class LlamaPolicy(PipelineTemplatePolicyBase, ColossalLlamaPolicy):
+class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
         assert isinstance(
@@ -59,7 +42,7 @@ class LlamaPolicy(PipelineTemplatePolicyBase, ColossalLlamaPolicy):
         config: LlamaConfig = cast(LlamaConfig, config)
 
         modules = []
-        modules.append("embed_tokens")
+        modules.extend(["embed_tokens", "rotary_emb"])
         modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("norm")
 
@@ -80,11 +63,45 @@ class LlamaPolicy(PipelineTemplatePolicyBase, ColossalLlamaPolicy):
                 "Modules in the pipeline template do not match the modules in the model."
             )
 
-        if f"{prefix}embed_tokens" not in modules_in_template[0]:
-            raise ValueError("embed_tokens must be in the first stage.")
+        if not all(
+            module in modules_in_template[0]
+            for module in [f"{prefix}embed_tokens", f"{prefix}rotary_emb"]
+        ):
+            raise ValueError("Teh embedding layers must be in the first stage.")
 
         if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("norm must be in the last stage.")
+
+    def get_held_layers(self) -> List[nn.Module]:
+        assert self.pipeline_stage_manager is not None
+
+        module: LlamaModel
+        if self.model.__class__.__name__ == "LlamaModel":
+            module = self.model
+        else:
+            module = self.model.model
+        stage_manager = self.pipeline_stage_manager
+
+        held_layers = []
+        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+        if stage_manager.is_first_stage():
+            held_layers.extend([module.embed_tokens, module.rotary_emb])
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        held_layers.extend(module.layers[start_idx:end_idx])
+        if stage_manager.is_last_stage():
+            held_layers.append(module.norm)
+
+        return held_layers
+
+    def config_sanity_check(self):
+        pass
+
+    def preprocess(self) -> nn.Module:
+        self.tie_weight = self.tie_weight_check()
+        return self.model
+
+    def postprocess(self) -> nn.Module:
+        return self.model
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from transformers.models.llama.modeling_llama import (
@@ -261,7 +278,7 @@ class LlamaPolicy(PipelineTemplatePolicyBase, ColossalLlamaPolicy):
         return policy
 
 
-class LlamaModelPolicy(LlamaPolicy, ColossalLlamaModelPolicy):
+class LlamaModelPolicy(LlamaPolicy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
         return LlamaPolicy.get_all_modules(config)
@@ -286,13 +303,10 @@ class LlamaModelPolicy(LlamaPolicy, ColossalLlamaModelPolicy):
         return policy
 
     def get_held_layers(self) -> List[nn.Module]:
-        layers = super().get_held_layers()
-        layers.append(self.model.rotary_emb)
-
-        return layers
+        return super().get_held_layers()
 
 
-class LlamaForCausalLMPolicy(LlamaPolicy, ColossalLlamaForCausalLMPolicy):
+class LlamaForCausalLMPolicy(LlamaPolicy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> list[str]:
         modules = [f"model.{module}" for module in LlamaPolicy.get_all_modules(config)]
@@ -351,7 +365,6 @@ class LlamaForCausalLMPolicy(LlamaPolicy, ColossalLlamaForCausalLMPolicy):
         layers = super().get_held_layers()
         if stage_manager.is_last_stage():
             layers.append(self.model.lm_head)
-        layers.append(self.model.model.rotary_emb)
 
         return layers
 
@@ -369,55 +382,3 @@ class LlamaForCausalLMPolicy(LlamaPolicy, ColossalLlamaForCausalLMPolicy):
                 ]
 
         return []
-
-
-class LlamaForSequenceClassificationPolicy(
-    LlamaPolicy, ColossalLlamaForSequenceClassificationPolicy
-):
-    @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> list[str]:
-        modules = [f"model.{module}" for module in LlamaPolicy.get_all_modules(config)]
-        modules.append("score")
-        return modules
-
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-        if "score" not in template.modules_per_stage[-1]:
-            raise ValueError("score must be in the last stage.")
-
-    def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
-        from transformers.models.llama.modeling_llama import (
-            LlamaForSequenceClassification,
-        )
-
-        policy = super().module_policy()
-
-        if self.shard_config.enable_tensor_parallelism:
-            self.append_or_create_submodule_replacement(
-                description=SubModuleReplacementDescription(
-                    suffix="score",
-                    target_module=Linear1D_Col,
-                    kwargs=dict(gather_output=True),
-                ),
-                policy=policy,
-                target_key=LlamaForSequenceClassification,
-            )
-
-        self.append_or_create_method_replacement(
-            description={
-                "forward": functools.partial(
-                    LlamaModelForwards.llama_for_sequence_classification_forward,
-                    shard_config=self.shard_config,
-                ),
-            },
-            policy=policy,
-            target_key=LlamaForSequenceClassification,
-        )
-
-        return policy
-
-    def get_held_layers(self) -> List[nn.Module]:
-        layers = super().get_held_layers()
-        layers.append(self.model.model.rotary_emb)
-
-        return layers
