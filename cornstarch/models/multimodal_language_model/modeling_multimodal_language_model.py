@@ -16,10 +16,6 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 from transformers.models.auto.configuration_auto import AutoConfig
-from transformers.models.llava.modeling_llava import (
-    LlavaConfig,
-    LlavaForConditionalGeneration,
-)
 from transformers.models.llava_next.modeling_llava_next import (
     LlavaNextConfig,
     LlavaNextForConditionalGeneration,
@@ -231,86 +227,6 @@ class PretrainedVisionLanguageModel:
             pad_token_id,
             ignore_index,
         )
-
-
-class LlavaModel(PretrainedVisionLanguageModel):
-    """A class for Llava pretrained models.
-    This is only for Llava <= 1.5, not compatible with Llava 1.6 (Llava-Next)"""
-
-    def __init__(self, config: LlavaConfig):
-        self.config = config
-
-    def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
-        model: LlavaForConditionalGeneration = (
-            LlavaForConditionalGeneration.from_pretrained(
-                self.config.name_or_path, config=self.config, *args, **kwargs
-            )
-        )
-        model.vision_tower.config.output_hidden_states = True
-        vision_encoder = model.vision_tower
-        language_model = model.language_model
-        language_model.config.pad_token_id = (
-            model.config.pad_token_id if model.config.pad_token_id is not None else -1
-        )
-
-        # Create projector
-        projector = model.multi_modal_projector
-        projector_config = MultimodalProjectorConfig(
-            encoder_config=vision_encoder.config,
-            text_config=language_model.config,
-            projection_type="mlp",
-        )
-        vision_projector = MultimodalProjector(projector_config, projector)
-
-        vision_tower = ModalEncoderModule(
-            model=vision_encoder,
-            projector=vision_projector,
-            postprocess_module_callback=functools.partial(
-                self.postprocess_vision_callback, model=model
-            ),
-        )
-
-        mm_model = MultimodalModel(
-            encoders={"vision": vision_tower},
-            language_model=language_model,
-        )
-        mm_model.set_token_ids({"vision": model.config.image_token_index})
-        return mm_model
-
-    @staticmethod
-    def postprocess_vision_callback(
-        inputs: dict,
-        output: BaseModelOutput | tuple,
-        model: LlavaForConditionalGeneration,
-    ) -> BaseModelOutput | tuple:
-        config: LlavaConfig = model.config
-        vision_feature_layer = config.vision_feature_layer
-        vision_feature_select_strategy = config.vision_feature_select_strategy
-
-        if isinstance(output, ModelOutput):
-            if output.hidden_states is None:
-                # vision_tower is executed without output_hidden_states=True.
-                # Use the last_hidden_state.
-                selected_image_feature = output.last_hidden_state
-            else:
-                selected_image_feature = output.hidden_states[vision_feature_layer]
-        else:
-            if len(output) == 1 or output[1] is None:
-                selected_image_feature = output[0]
-            else:
-                selected_image_feature = output[1][vision_feature_layer]
-
-        if vision_feature_select_strategy == "default":
-            selected_image_feature = selected_image_feature[:, 1:]
-        elif vision_feature_select_strategy == "full":
-            selected_image_feature = selected_image_feature
-        else:
-            raise ValueError(
-                f"Unexpected select feature strategy: {vision_feature_select_strategy}"
-            )
-
-        output.last_hidden_state = selected_image_feature
-        return output
 
 
 class LlavaNextModel:
@@ -1044,17 +960,11 @@ class MultimodalModel(nn.Module):
             pretrained_model_id (`str`):
                 A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
             args and kwargs are passed to from_pretrained().
-
-        Currently supporting:
-            llava-hf/llava-v1.5
-            llava-hf/llava-v1.6
         """
 
         config: PretrainedConfig = AutoConfig.from_pretrained(pretrained_model_id)
 
-        if config.model_type == "llava":
-            return LlavaModel(config).from_pretrained(*args, **kwargs)
-        elif config.model_type == "llava_next":
+        if config.model_type == "llava_next":
             return LlavaNextModel(config).from_pretrained(*args, **kwargs)
         elif config.model_type == "internvl_chat":
             return InternVL2Model(config).from_pretrained(*args, **kwargs)
