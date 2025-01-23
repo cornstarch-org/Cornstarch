@@ -115,6 +115,7 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
             GemmaAttention,
             GemmaDecoderLayer,
             GemmaFlashAttention2,
+            GemmaRMSNorm,
             GemmaSdpaAttention,
         )
 
@@ -127,6 +128,13 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
         attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
+
+        # This is to avoid refererence to its weight which has been replaced by a placeholder
+        policy[GemmaRMSNorm] = ModulePolicyDescription(
+            method_replacement={
+                "extra_repr": lambda self: f"eps={self.variance_epsilon}"
+            }
+        )
 
         sp_mode = self.shard_config.sequence_parallelism_mode or None
         sp_size = self.shard_config.sequence_parallel_size or None

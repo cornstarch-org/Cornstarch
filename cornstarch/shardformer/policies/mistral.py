@@ -1,7 +1,6 @@
 import functools
 import itertools
-import warnings
-from typing import Callable, Dict, List, cast
+from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedRMSNorm,
@@ -100,6 +99,7 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
             MistralAttention,
             MistralDecoderLayer,
             MistralFlashAttention2,
+            MistralRMSNorm,
             MistralSdpaAttention,
         )
 
@@ -112,6 +112,13 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
         attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
+
+        # This is to avoid refererence to its weight which has been replaced by a placeholder
+        policy[MistralRMSNorm] = ModulePolicyDescription(
+            method_replacement={
+                "extra_repr": lambda self: f"eps={self.variance_epsilon}"
+            }
+        )
 
         sp_mode = self.shard_config.sequence_parallelism_mode or None
         sp_size = self.shard_config.sequence_parallel_size or None
