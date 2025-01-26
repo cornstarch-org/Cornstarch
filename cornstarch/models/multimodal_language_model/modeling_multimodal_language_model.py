@@ -885,15 +885,8 @@ class MultimodalModel(nn.Module):
             )
             for modal_key in self.encoders.keys()
         }
-        processor.llm_tokenizer.add_special_tokens(
-            {"additional_special_tokens": list(tokens.values())}
-        )
 
-        self.token_ids = {
-            modal_key: processor.llm_tokenizer.convert_tokens_to_ids(token)
-            for modal_key, token in tokens.items()
-        }
-        processor.set_tokens(tokens)
+        self.token_ids = processor.set_modality_tokens(tokens)
         self.language_model.resize_token_embeddings(len(processor.llm_tokenizer))
 
     def merge_encoder_outputs(
@@ -973,14 +966,17 @@ class MultimodalModel(nn.Module):
         return inputs_embeds, attention_mask
 
     def create_bitfield_attention_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
-        causal_bit = 1 << 63
+        causal_bit = 1 << 62
         modal_bits = {
             modal_key: (1 << (i + 1))
             for i, modal_key in enumerate(self.token_ids.keys())
         }
+        text_bit = causal_bit | 1
+        for modal_bit in modal_bits:
+            text_bit |= modal_bits[modal_bit]
 
         attention_mask = torch.full_like(
-            input_ids, causal_bit | 1, dtype=torch.int64, device=input_ids.device
+            input_ids, text_bit, dtype=torch.int64, device=input_ids.device
         )
         for modal_key, token_id in self.token_ids.items():
             attention_mask[input_ids == token_id] = modal_bits[modal_key]

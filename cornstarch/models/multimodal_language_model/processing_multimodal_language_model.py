@@ -60,14 +60,21 @@ class MultimodalProcessor:
                 "The key in encoder_processors is not in num_feature_calculation_funcs.",
             )
 
-    def set_tokens(self, tokens: dict[str, int]):
+    def set_modality_tokens(self, tokens: dict[str, str]) -> dict[str, int]:
         """
-        Set the tokens for each modality.
-        Args:
-            tokens (dict[str, int])
-                A dictionary of modal_key to the token for the modality.
+        Add the tokens as special tokens and return the corresponding token IDs.
         """
         self.tokens = tokens
+        self.llm_tokenizer.add_special_tokens(
+            {"additional_special_tokens": list(tokens.values())}
+        )
+
+        token_ids = {
+            modal_key: self.llm_tokenizer.convert_tokens_to_ids(token)
+            for modal_key, token in tokens.items()
+        }
+
+        return token_ids
 
     def __call__(
         self,
