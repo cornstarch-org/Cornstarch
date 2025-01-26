@@ -33,557 +33,404 @@ from cornstarch.models.internvl2.modeling_internvl_chat import (
     InternVLChatModel,
 )
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
+from cornstarch.models.multimodal_language_model.processing_multimodal_language_model import (
+    MultimodalProcessor,
+)
 
 logger = logging.get_logger(__name__)
 
 
-def inject_modal_outputs_to_inputs_embeds(
-    encoder_inputs: dict[str, dict],
-    encoder_outputs: dict[str, BaseModelOutput | tuple],
-    token_ids: dict[str, int],
-    input_ids: torch.Tensor,
-    inputs_embeds: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    labels: Optional[torch.Tensor] = None,
-    ignore_index: int = -100,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Based on token_ids, injects the outputs of the encoders to the input embeds.
-    inputs_embeds must already have placeholders for the encoder outputs; unlike prepend_modal_output_to_inputs_embeds,
-    which simply prepend the outputs to the inputs_embeds so that
-    inputs_embeds does not need to have placeholders for the encoder outputs.
-
-    It supports two types of attention_mask:
-    - if 2D attention mask is given, it is used as is.
-      this will be updated as a causal mask in model forward
-    - if nothing is given, it creates a bit attention mask where
-      attention information is stored in bits.
-    """
-    assert encoder_inputs.keys() == encoder_outputs.keys(), (
-        "The keys of encoder_inputs and encoder_outputs must be the same. "
-        f"Got {encoder_inputs.keys()} and {encoder_outputs.keys()}."
-    )
-
-    bit_attention_mask = torch.zeros(
-        inputs_embeds.shape[:2], dtype=torch.long, device=inputs_embeds.device
-    )
-
-    for index, (modal_name, key) in enumerate(token_ids.items()):
-        # output[0] == output.last_hidden_state
-        modal_embeds = encoder_outputs[modal_name][0]
-        modal_mask = input_ids == key
-        inputs_embeds = inputs_embeds.masked_scatter(
-            modal_mask.unsqueeze(-1).expand_as(inputs_embeds), modal_embeds
-        )
-
-        # set bit attention_mask
-        bit_attention_mask |= modal_mask * (1 << index)
-
-    # 0s in the bit_attention_mask at this moment are the positions of llm tokens
-    llm_mask = bit_attention_mask == 0
-    bit_attention_mask = bit_attention_mask.masked_fill(
-        llm_mask, (1 << 62) | ((1 << len(token_ids)) - 1)
-    )
-
-    if attention_mask is None:
-        # Create bit attention mask
-        attention_mask = bit_attention_mask
-        setattr(attention_mask, "cornstarch_is_bitattention", True)
-        setattr(attention_mask, "cornstarch_num_encoders", len(encoder_outputs))
-    else:
-        assert attention_mask.ndim in [2, 3], (
-            "The attention mask must have 2 or 3 dimensions. "
-            f"Got {attention_mask.ndim} dimensions."
-        )
-        setattr(attention_mask, "cornstarch_is_bitattention", False)
-
-    position_ids = (
-        torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
-        .unsqueeze(0)
-        .expand(inputs_embeds.shape[:2])
-    )
-
-    if labels is not None and (labels.shape[1] == input_ids.shape[1]):
-        # labels are not padded
-        new_labels = torch.full(
-            inputs_embeds.shape[:2], ignore_index, device=labels.device
-        )
-        llm_labels = torch.masked_select(labels, llm_mask)
-        new_labels = new_labels.masked_scatter(llm_mask, llm_labels)
-        labels = new_labels
-
-    return inputs_embeds, attention_mask, position_ids, labels
-
-
-def prepend_modal_output_to_inputs_embeds(
-    encoder_inputs: dict[str, dict],
-    encoder_outputs: dict[str, BaseModelOutput | tuple],
-    input_ids: torch.Tensor,
-    inputs_embeds: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    labels: Optional[torch.Tensor] = None,
-    ignore_index: int = -100,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    assert encoder_inputs.keys() == encoder_outputs.keys(), (
-        "The keys of encoder_inputs and encoder_outputs must be the same. "
-        f"Got {encoder_inputs.keys()} and {encoder_outputs.keys()}."
-    )
-
-    # Prepend all values of encoder_outputs to inputs_embeds
-    # output[0] == output.last_hidden_state
-    all_modal_embeds = [
-        encoder_outputs[modal_name][0] for modal_name in encoder_outputs.keys()
-    ]
-    all_modal_embeds.append(inputs_embeds)
-    inputs_embeds = torch.cat(all_modal_embeds, dim=1)
-
-    if attention_mask is None:
-        num_modal_outputs = len(all_modal_embeds) - 1
-        # Prefill text attention mask with (1 << 62 | sum(1 << i for i in range(num_modal_outputs)))
-        bit_attention_mask = torch.full(
-            input_ids.shape,
-            (1 << 62) | ((1 << num_modal_outputs) - 1),
-            dtype=torch.long,
-            device=inputs_embeds.device,
-        )
-
-        per_encoder_bit_attention_mask: list[torch.Tensor] = []
-        # Prepend encoder bit attention mask
-        for index, modal_output in enumerate(encoder_outputs.values()):
-            bit_value = 1 << index
-            modal_mask = torch.full(
-                modal_output[0].shape[:2],
-                bit_value,
-                dtype=torch.long,
-                device=inputs_embeds.device,
-            )
-            per_encoder_bit_attention_mask.append(modal_mask)
-
-        bit_attention_mask = torch.cat(
-            per_encoder_bit_attention_mask + [bit_attention_mask], dim=1
-        )
-
-        attention_mask = bit_attention_mask
-        setattr(attention_mask, "cornstarch_is_bitattention", True)
-        setattr(attention_mask, "cornstarch_num_encoders", len(encoder_outputs))
-    else:
-        if attention_mask.ndim == 2:
-            attention_mask = torch.ones_like(
-                inputs_embeds[:, :, 0], dtype=torch.long, device=inputs_embeds.device
-            )
-        else:
-            pass
-
-        setattr(attention_mask, "cornstarch_is_bitattention", False)
-
-    position_ids = (
-        torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
-        .unsqueeze(0)
-        .expand(inputs_embeds.shape[:2])
-    )
-
-    if labels is not None and (labels.shape[1] == input_ids.shape[1]):
-        # labels are not padded
-        new_labels = torch.full(
-            inputs_embeds.shape[:2], ignore_index, device=labels.device
-        )
-        new_labels[:, -labels.shape[1] :] = labels
-        labels = new_labels
-
-    return inputs_embeds, attention_mask, position_ids, labels
-
-
-class PretrainedVisionLanguageModel:
-    def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
-        pass
-
-    def preprocess_vision_callback(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        return inputs
-
-    def postprocess_vision_callback(
-        self, model: PreTrainedModel, inputs: dict, output: BaseModelOutput | tuple
-    ) -> BaseModelOutput | tuple:
-        return output
-
-    def postprocess_projector_callback(
-        self,
-        model: PreTrainedModel,
-        inputs: dict,
-        output: BaseModelOutput | tuple,
-        input_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels: torch.Tensor,
-        pad_token_id: int = -1,
-        ignore_index: int = -100,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return prepend_modal_output_to_inputs_embeds(
-            inputs,
-            output,
-            input_ids,
-            inputs_embeds,
-            attention_mask,
-            labels,
-            pad_token_id,
-            ignore_index,
-        )
-
-
-class LlavaNextModel:
-    """A class for Llava-Next (1.6) pretrained models.
-
-    Code borrowed from https://github.com/huggingface/transformers/blob/v4.42.3/src/transformers/models/llava_next/modeling_llava_next.py
-    """
-
-    def __init__(self, config: LlavaNextConfig):
-        self.config = config
-
-    def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
-        model: LlavaNextForConditionalGeneration = (
-            LlavaNextForConditionalGeneration.from_pretrained(
-                self.config.name_or_path, config=self.config, *args, **kwargs
-            )
-        )
-
-        model.vision_tower.config.output_hidden_states = True
-        vision_encoder = model.vision_tower
-        language_model = model.language_model
-        language_model.config.pad_token_id = (
-            model.config.pad_token_id if model.config.pad_token_id is not None else -1
-        )
-
-        # Create projector
-        projector = model.multi_modal_projector
-        projector_config = MultimodalProjectorConfig(
-            encoder_config=vision_encoder.config,
-            text_config=language_model.config,
-            projection_type="mlp",
-        )
-        vision_projector = MultimodalProjector(projector_config, projector)
-
-        vision_tower = ModalEncoderModule(
-            model=vision_encoder,
-            projector=vision_projector,
-            additional_args=["image_sizes"],
-            preprocess_callback=functools.partial(
-                self.preprocess_vision_callback, model=model
-            ),
-            postprocess_module_callback=functools.partial(
-                self.postprocess_vision_callback,
-                vision_feature_layer=self.config.vision_feature_layer,
-                vision_feature_select_strategy=self.config.vision_feature_select_strategy,
-            ),
-            postprocess_projector_callback=functools.partial(
-                self.postprocess_projector_callback,
-                model=model,
-                vision_feature_select_strategy=self.config.vision_feature_select_strategy,
-            ),
-        )
-
-        mm_model = MultimodalModel(
-            encoders={"vision": vision_tower},
-            language_model=language_model,
-        )
-        mm_model.set_token_ids({"vision": model.config.image_token_index})
-        mm_model.image_newline = model.image_newline
-        return mm_model
-
-    @staticmethod
-    def preprocess_vision_callback(
-        inputs: dict[str, Any], model: LlavaNextForConditionalGeneration
-    ) -> dict[str, Any]:
-        pixel_values = inputs["pixel_values"]
-        image_sizes = inputs["image_sizes"]
-
-        # ! infer image_num_patches from image_sizes
-        image_num_patches = [
-            image_size_to_num_patches(
-                image_size=imsize,
-                grid_pinpoints=model.config.image_grid_pinpoints,
-                patch_size=model.config.vision_config.image_size,
-            )
-            for imsize in image_sizes
-        ]
-
-        # figure out if pixel_values is concatenated or stacked
-        if pixel_values.dim() == 5:
-            # stacking when input is (batch_size, num_patches, num_channels, height, width)
-            _pixel_values_list = [
-                pix_val[:num_patch]
-                for pix_val, num_patch in zip(pixel_values, image_num_patches)
-            ]
-            pixel_values = torch.cat(_pixel_values_list, dim=0)
-        elif pixel_values.dim() != 4:
-            # otherwise has to be stacked from list of (num_patches, num_channels, height, width)
-            raise ValueError(
-                f"pixel_values of shape {pixel_values.shape}, expect to be of 4 or 5 dimensions"
-            )
-
-        inputs["pixel_values"] = pixel_values
-        return inputs
-
-    @staticmethod
-    def postprocess_vision_callback(
-        inputs: dict,
-        output: BaseModelOutput | tuple,
-        vision_feature_layer: Optional[int] = None,
-        vision_feature_select_strategy: Optional[str] = None,
-    ) -> BaseModelOutput | tuple:
-        if isinstance(output, ModelOutput):
-            if output.hidden_states is None:
-                # vision_tower is executed without output_hidden_states=True.
-                # Use the last_hidden_state.
-                selected_image_feature = output.last_hidden_state
-            else:
-                selected_image_feature = output.hidden_states[vision_feature_layer]
-        else:
-            if len(output) == 1 or output[1] is None:
-                selected_image_feature = output[0]
-            else:
-                selected_image_feature = output[1][vision_feature_layer]
-
-        if vision_feature_select_strategy == "default":
-            selected_image_feature = selected_image_feature[:, 1:]
-        elif vision_feature_select_strategy == "full":
-            selected_image_feature = selected_image_feature
-        else:
-            raise ValueError(
-                f"Unexpected select feature strategy: {vision_feature_select_strategy}"
-            )
-
-        output.last_hidden_state = selected_image_feature
-        return output
-
-    @staticmethod
-    def postprocess_projector_callback(
-        inputs: dict,
-        output: BaseModelOutput | tuple,
-        model: LlavaNextForConditionalGeneration,
-        vision_feature_select_strategy: Optional[str] = None,
-    ) -> BaseModelOutput | tuple:
-        pixel_values = inputs.get("pixel_values", None)
-
-        if pixel_values is not None:
-            image_sizes = inputs["image_sizes"]
-            image_num_patches = [
-                image_size_to_num_patches(
-                    image_size=imsize,
-                    grid_pinpoints=model.config.image_grid_pinpoints,
-                    patch_size=model.config.vision_config.image_size,
-                )
-                for imsize in image_sizes
-            ]
-
-            # output[0] == output.last_hidden_state
-            image_features = output[0]
-            image_features = torch.split(image_features, image_num_patches, dim=0)
-
-            # NOTE we only support multimodal_patch_merge_type == "spatial_unpad"
-            image_features, _ = model.pack_image_features(
-                image_features,
-                image_sizes,
-                vision_feature_select_strategy=vision_feature_select_strategy,
-                image_newline=model.image_newline,
-            )
-
-            if isinstance(output, ModelOutput):
-                output.last_hidden_state = image_features
-            else:
-                output = (image_features,) + output[1:]
-
-        return output
-
-
-class InternVL2Model(PretrainedVisionLanguageModel):
-    """A class for InternVL2 pretrained models."""
-
-    def __init__(self, config: InternVLChatConfig):
-        self.config = config
-
-    def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
-        model: InternVLChatModel = InternVLChatModel.from_pretrained(
-            self.config.name_or_path, config=self.config, *args, **kwargs
-        )
-        vision_encoder = model.vision_model
-        language_model = model.language_model
-
-        # Create a projector
-        projector = model.mlp1
-        projector_config = MultimodalProjectorConfig(
-            encoder_config=vision_encoder.config,
-            text_config=language_model.config,
-            projection_type="mlp",
-        )
-        vision_projector = MultimodalProjector(projector_config, projector)
-
-        vision_encoder = ModalEncoderModule(
-            model=vision_encoder,
-            projector=vision_projector,
-            postprocess_module_callback=functools.partial(
-                self.postprocess_vision_callback, model=model
-            ),
-        )
-
-        mm_model = MultimodalModel(
-            encoders={"vision": vision_encoder},
-            language_model=language_model,
-        )
-
-        mm_model.chat = MethodType(InternVLChatModel.chat, model)
-        mm_model.batch_chat = MethodType(InternVLChatModel.batch_chat, model)
-        model.generate = MethodType(
-            functools.partial(MultimodalModel.generate, add_input_ids=False), mm_model
-        )
-
-        # TOOD (insujang): this doesn't work as expected,
-        # since img_context_token_id is set during chat() or batch_chat().
-        mm_model.set_token_ids({"vision": model.img_context_token_id})
-
-        return mm_model
-
-    @staticmethod
-    def postprocess_vision_callback(
-        inputs: dict,
-        output: BaseModelOutput | tuple,
-        model: InternVLChatModel,
-    ) -> BaseModelOutput | tuple:
-        if model.select_layer == -1:
-            vit_embeds = output.last_hidden_state
-        else:
-            vit_embeds = output.hidden_states[model.select_layer]
-        vit_embeds = vit_embeds[:, 1:, :]
-
-        h = w = int(vit_embeds.shape[1] ** 0.5)
-        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-        vit_embeds = model.pixel_shuffle(
-            vit_embeds, scale_factor=model.downsample_ratio
-        )
-        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
-
-        output.last_hidden_state = vit_embeds
-
-        return output
-
-
-class Qwen2VLModel(PretrainedVisionLanguageModel):
-    """A class for QWen2VL pretrained models."""
-
-    @staticmethod
-    def vision_transformer_forward(
-        self: Qwen2VisionTransformerPretrainedModel,
-        original_forward: Callable,
-        hidden_states: torch.Tensor,
-        grid_thw: torch.Tensor,
-        return_dict: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-    ) -> BaseModelOutput:
-        """
-        Wrapper function for the forward method of Qwen2VL vision transformer.
-        This is for backward compatibility of a few additional HF arguments.
-        """
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
-        hidden_states = original_forward(hidden_states, grid_thw)
-
-        if not return_dict:
-            return (hidden_states,)
-
-        return BaseModelOutput(last_hidden_state=hidden_states)
-
-    class FakeMerger(nn.Module):
-        """Merger is merged into Qwen2VisionTransformer.
-
-        As Cornstarch manages them separately, we need to fake the merger layer
-        in the vision transformer.
-        This does nothing in forward.
-        """
-
-        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-            return hidden_states
-
-    def __init__(self, config: Qwen2VLConfig):
-        self.config = config
-
-    def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
-        model: Qwen2VLForConditionalGeneration = (
-            Qwen2VLForConditionalGeneration.from_pretrained(
-                self.config.name_or_path, config=self.config, *args, **kwargs
-            )
-        )
-
-        vision_encoder = model.visual
-        vision_encoder.main_input_name = "pixel_values"
-
-        # Qwen2VL vision encoder has an embedded MLP layer. Split it.
-        projector = vision_encoder.merger
-        vision_encoder.merger = self.FakeMerger()
-        vision_encoder.forward = MethodType(
-            functools.partial(
-                Qwen2VLModel.vision_transformer_forward,
-                original_forward=vision_encoder.forward,
-            ),
-            vision_encoder,
-        )
-        projector_config = MultimodalProjectorConfig(
-            encoder_config=vision_encoder.config,
-            text_config=model.config,
-            projection_type="mlp",
-        )
-        vision_projector = MultimodalProjector(projector_config, projector)
-
-        vision_encoder = ModalEncoderModule(
-            model=vision_encoder,
-            projector=vision_projector,
-            additional_args=[
-                "pixel_values",
-                "pixel_values_videos",
-                "image_grid_thw",
-                "video_grid_thw",
-            ],
-            preprocess_callback=functools.partial(
-                self.preprocess_vision_callback, visual_dtype=model.visual.get_dtype()
-            ),
-            postprocess_module_callback=self.postprocess_vision_callback,
-        )
-
-        delattr(model, "visual")
-        mm_model = MultimodalModel(
-            encoders={"vision": vision_encoder},
-            language_model=model,
-        )
-        mm_model.set_token_ids({"vision": model.config.image_token_id})
-
-        return mm_model
-
-    @staticmethod
-    def preprocess_vision_callback(
-        inputs: dict[str, Any], visual_dtype: torch.dtype
-    ) -> dict[str, Any]:
-        new_inputs = {}
-
-        if "pixel_values" in inputs:
-            new_inputs["hidden_states"] = inputs["pixel_values"]
-            new_inputs["grid_thw"] = inputs["image_grid_thw"]
-        if "pixel_values_videos" in inputs:
-            new_inputs["hidden_states"] = inputs["pixel_values_videos"]
-            new_inputs["grid_thw"] = inputs["video_grid_thw"]
-
-        new_inputs["hidden_states"] = new_inputs["hidden_states"].to(visual_dtype)
-        return new_inputs
-
-    @staticmethod
-    def postprocess_vision_callback(
-        inputs: dict,
-        output: torch.Tensor,
-    ) -> BaseModelOutput | tuple:
-        if isinstance(output, torch.Tensor):
-            if output.ndim == 2:
-                # Add batch dimension here
-                output.unsqueeze_(0)
-            return (output,)
-        return output
+# class PretrainedVisionLanguageModel:
+#     def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
+#         pass
+
+#     def preprocess_vision_callback(self, inputs: dict[str, Any]) -> dict[str, Any]:
+#         return inputs
+
+#     def postprocess_vision_callback(
+#         self, model: PreTrainedModel, inputs: dict, output: BaseModelOutput | tuple
+#     ) -> BaseModelOutput | tuple:
+#         return output
+
+#     def postprocess_projector_callback(
+#         self,
+#         model: PreTrainedModel,
+#         inputs: dict,
+#         output: BaseModelOutput | tuple,
+#         input_ids: torch.Tensor,
+#         inputs_embeds: torch.Tensor,
+#         attention_mask: torch.Tensor,
+#         labels: torch.Tensor,
+#         pad_token_id: int = -1,
+#         ignore_index: int = -100,
+#     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+#         return prepend_modal_output_to_inputs_embeds(
+#             inputs,
+#             output,
+#             input_ids,
+#             inputs_embeds,
+#             attention_mask,
+#             labels,
+#             pad_token_id,
+#             ignore_index,
+#         )
+
+
+# class LlavaNextModel:
+#     """A class for Llava-Next (1.6) pretrained models.
+
+#     Code borrowed from https://github.com/huggingface/transformers/blob/v4.42.3/src/transformers/models/llava_next/modeling_llava_next.py
+#     """
+
+#     def __init__(self, config: LlavaNextConfig):
+#         self.config = config
+
+#     def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
+#         model: LlavaNextForConditionalGeneration = (
+#             LlavaNextForConditionalGeneration.from_pretrained(
+#                 self.config.name_or_path, config=self.config, *args, **kwargs
+#             )
+#         )
+
+#         model.vision_tower.config.output_hidden_states = True
+#         vision_encoder = model.vision_tower
+#         language_model = model.language_model
+#         language_model.config.pad_token_id = (
+#             model.config.pad_token_id if model.config.pad_token_id is not None else -1
+#         )
+
+#         # Create projector
+#         projector = model.multi_modal_projector
+#         projector_config = MultimodalProjectorConfig(
+#             encoder_config=vision_encoder.config,
+#             text_config=language_model.config,
+#             projection_type="mlp",
+#         )
+#         vision_projector = MultimodalProjector(projector_config, projector)
+
+#         vision_tower = ModalEncoderModule(
+#             model=vision_encoder,
+#             projector=vision_projector,
+#             additional_args=["image_sizes"],
+#             preprocess_callback=functools.partial(
+#                 self.preprocess_vision_callback, model=model
+#             ),
+#             postprocess_module_callback=functools.partial(
+#                 self.postprocess_vision_callback,
+#                 vision_feature_layer=self.config.vision_feature_layer,
+#                 vision_feature_select_strategy=self.config.vision_feature_select_strategy,
+#             ),
+#             postprocess_projector_callback=functools.partial(
+#                 self.postprocess_projector_callback,
+#                 model=model,
+#                 vision_feature_select_strategy=self.config.vision_feature_select_strategy,
+#             ),
+#         )
+
+#         mm_model = MultimodalModel(
+#             encoders={"vision": vision_tower},
+#             language_model=language_model,
+#         )
+#         mm_model.set_token_ids({"vision": model.config.image_token_index})
+#         mm_model.image_newline = model.image_newline
+#         return mm_model
+
+#     @staticmethod
+#     def preprocess_vision_callback(
+#         inputs: dict[str, Any], model: LlavaNextForConditionalGeneration
+#     ) -> dict[str, Any]:
+#         pixel_values = inputs["pixel_values"]
+#         image_sizes = inputs["image_sizes"]
+
+#         # ! infer image_num_patches from image_sizes
+#         image_num_patches = [
+#             image_size_to_num_patches(
+#                 image_size=imsize,
+#                 grid_pinpoints=model.config.image_grid_pinpoints,
+#                 patch_size=model.config.vision_config.image_size,
+#             )
+#             for imsize in image_sizes
+#         ]
+
+#         # figure out if pixel_values is concatenated or stacked
+#         if pixel_values.dim() == 5:
+#             # stacking when input is (batch_size, num_patches, num_channels, height, width)
+#             _pixel_values_list = [
+#                 pix_val[:num_patch]
+#                 for pix_val, num_patch in zip(pixel_values, image_num_patches)
+#             ]
+#             pixel_values = torch.cat(_pixel_values_list, dim=0)
+#         elif pixel_values.dim() != 4:
+#             # otherwise has to be stacked from list of (num_patches, num_channels, height, width)
+#             raise ValueError(
+#                 f"pixel_values of shape {pixel_values.shape}, expect to be of 4 or 5 dimensions"
+#             )
+
+#         inputs["pixel_values"] = pixel_values
+#         return inputs
+
+#     @staticmethod
+#     def postprocess_vision_callback(
+#         inputs: dict,
+#         output: BaseModelOutput | tuple,
+#         vision_feature_layer: Optional[int] = None,
+#         vision_feature_select_strategy: Optional[str] = None,
+#     ) -> BaseModelOutput | tuple:
+#         if isinstance(output, ModelOutput):
+#             if output.hidden_states is None:
+#                 # vision_tower is executed without output_hidden_states=True.
+#                 # Use the last_hidden_state.
+#                 selected_image_feature = output.last_hidden_state
+#             else:
+#                 selected_image_feature = output.hidden_states[vision_feature_layer]
+#         else:
+#             if len(output) == 1 or output[1] is None:
+#                 selected_image_feature = output[0]
+#             else:
+#                 selected_image_feature = output[1][vision_feature_layer]
+
+#         if vision_feature_select_strategy == "default":
+#             selected_image_feature = selected_image_feature[:, 1:]
+#         elif vision_feature_select_strategy == "full":
+#             selected_image_feature = selected_image_feature
+#         else:
+#             raise ValueError(
+#                 f"Unexpected select feature strategy: {vision_feature_select_strategy}"
+#             )
+
+#         output.last_hidden_state = selected_image_feature
+#         return output
+
+#     @staticmethod
+#     def postprocess_projector_callback(
+#         inputs: dict,
+#         output: BaseModelOutput | tuple,
+#         model: LlavaNextForConditionalGeneration,
+#         vision_feature_select_strategy: Optional[str] = None,
+#     ) -> BaseModelOutput | tuple:
+#         pixel_values = inputs.get("pixel_values", None)
+
+#         if pixel_values is not None:
+#             image_sizes = inputs["image_sizes"]
+#             image_num_patches = [
+#                 image_size_to_num_patches(
+#                     image_size=imsize,
+#                     grid_pinpoints=model.config.image_grid_pinpoints,
+#                     patch_size=model.config.vision_config.image_size,
+#                 )
+#                 for imsize in image_sizes
+#             ]
+
+#             # output[0] == output.last_hidden_state
+#             image_features = output[0]
+#             image_features = torch.split(image_features, image_num_patches, dim=0)
+
+#             # NOTE we only support multimodal_patch_merge_type == "spatial_unpad"
+#             image_features, _ = model.pack_image_features(
+#                 image_features,
+#                 image_sizes,
+#                 vision_feature_select_strategy=vision_feature_select_strategy,
+#                 image_newline=model.image_newline,
+#             )
+
+#             if isinstance(output, ModelOutput):
+#                 output.last_hidden_state = image_features
+#             else:
+#                 output = (image_features,) + output[1:]
+
+#         return output
+
+
+# class InternVL2Model(PretrainedVisionLanguageModel):
+#     """A class for InternVL2 pretrained models."""
+
+#     def __init__(self, config: InternVLChatConfig):
+#         self.config = config
+
+#     def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
+#         model: InternVLChatModel = InternVLChatModel.from_pretrained(
+#             self.config.name_or_path, config=self.config, *args, **kwargs
+#         )
+#         vision_encoder = model.vision_model
+#         language_model = model.language_model
+
+#         # Create a projector
+#         projector = model.mlp1
+#         projector_config = MultimodalProjectorConfig(
+#             encoder_config=vision_encoder.config,
+#             text_config=language_model.config,
+#             projection_type="mlp",
+#         )
+#         vision_projector = MultimodalProjector(projector_config, projector)
+
+#         vision_encoder = ModalEncoderModule(
+#             model=vision_encoder,
+#             projector=vision_projector,
+#             postprocess_module_callback=functools.partial(
+#                 self.postprocess_vision_callback, model=model
+#             ),
+#         )
+
+#         mm_model = MultimodalModel(
+#             encoders={"vision": vision_encoder},
+#             language_model=language_model,
+#         )
+
+#         mm_model.chat = MethodType(InternVLChatModel.chat, model)
+#         mm_model.batch_chat = MethodType(InternVLChatModel.batch_chat, model)
+#         model.generate = MethodType(
+#             functools.partial(MultimodalModel.generate, add_input_ids=False), mm_model
+#         )
+
+#         # TOOD (insujang): this doesn't work as expected,
+#         # since img_context_token_id is set during chat() or batch_chat().
+#         mm_model.set_token_ids({"vision": model.img_context_token_id})
+
+#         return mm_model
+
+#     @staticmethod
+#     def postprocess_vision_callback(
+#         inputs: dict,
+#         output: BaseModelOutput | tuple,
+#         model: InternVLChatModel,
+#     ) -> BaseModelOutput | tuple:
+#         if model.select_layer == -1:
+#             vit_embeds = output.last_hidden_state
+#         else:
+#             vit_embeds = output.hidden_states[model.select_layer]
+#         vit_embeds = vit_embeds[:, 1:, :]
+
+#         h = w = int(vit_embeds.shape[1] ** 0.5)
+#         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+#         vit_embeds = model.pixel_shuffle(
+#             vit_embeds, scale_factor=model.downsample_ratio
+#         )
+#         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
+
+#         output.last_hidden_state = vit_embeds
+
+#         return output
+
+
+# class Qwen2VLModel(PretrainedVisionLanguageModel):
+#     """A class for QWen2VL pretrained models."""
+
+#     @staticmethod
+#     def vision_transformer_forward(
+#         self: Qwen2VisionTransformerPretrainedModel,
+#         original_forward: Callable,
+#         hidden_states: torch.Tensor,
+#         grid_thw: torch.Tensor,
+#         return_dict: Optional[bool] = None,
+#         output_hidden_states: Optional[bool] = None,
+#     ) -> BaseModelOutput:
+#         """
+#         Wrapper function for the forward method of Qwen2VL vision transformer.
+#         This is for backward compatibility of a few additional HF arguments.
+#         """
+#         return_dict = (
+#             return_dict if return_dict is not None else self.config.use_return_dict
+#         )
+
+#         hidden_states = original_forward(hidden_states, grid_thw)
+
+#         if not return_dict:
+#             return (hidden_states,)
+
+#         return BaseModelOutput(last_hidden_state=hidden_states)
+
+#     class FakeMerger(nn.Module):
+#         """Merger is merged into Qwen2VisionTransformer.
+
+#         As Cornstarch manages them separately, we need to fake the merger layer
+#         in the vision transformer.
+#         This does nothing in forward.
+#         """
+
+#         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+#             return hidden_states
+
+#     def __init__(self, config: Qwen2VLConfig):
+#         self.config = config
+
+#     def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
+#         model: Qwen2VLForConditionalGeneration = (
+#             Qwen2VLForConditionalGeneration.from_pretrained(
+#                 self.config.name_or_path, config=self.config, *args, **kwargs
+#             )
+#         )
+
+#         vision_encoder = model.visual
+#         vision_encoder.main_input_name = "pixel_values"
+
+#         # Qwen2VL vision encoder has an embedded MLP layer. Split it.
+#         projector = vision_encoder.merger
+#         vision_encoder.merger = self.FakeMerger()
+#         vision_encoder.forward = MethodType(
+#             functools.partial(
+#                 Qwen2VLModel.vision_transformer_forward,
+#                 original_forward=vision_encoder.forward,
+#             ),
+#             vision_encoder,
+#         )
+#         projector_config = MultimodalProjectorConfig(
+#             encoder_config=vision_encoder.config,
+#             text_config=model.config,
+#             projection_type="mlp",
+#         )
+#         vision_projector = MultimodalProjector(projector_config, projector)
+
+#         vision_encoder = ModalEncoderModule(
+#             model=vision_encoder,
+#             projector=vision_projector,
+#             additional_args=[
+#                 "pixel_values",
+#                 "pixel_values_videos",
+#                 "image_grid_thw",
+#                 "video_grid_thw",
+#             ],
+#             preprocess_callback=functools.partial(
+#                 self.preprocess_vision_callback, visual_dtype=model.visual.get_dtype()
+#             ),
+#             postprocess_module_callback=self.postprocess_vision_callback,
+#         )
+
+#         delattr(model, "visual")
+#         mm_model = MultimodalModel(
+#             encoders={"vision": vision_encoder},
+#             language_model=model,
+#         )
+#         mm_model.set_token_ids({"vision": model.config.image_token_id})
+
+#         return mm_model
+
+#     @staticmethod
+#     def preprocess_vision_callback(
+#         inputs: dict[str, Any], visual_dtype: torch.dtype
+#     ) -> dict[str, Any]:
+#         new_inputs = {}
+
+#         if "pixel_values" in inputs:
+#             new_inputs["hidden_states"] = inputs["pixel_values"]
+#             new_inputs["grid_thw"] = inputs["image_grid_thw"]
+#         if "pixel_values_videos" in inputs:
+#             new_inputs["hidden_states"] = inputs["pixel_values_videos"]
+#             new_inputs["grid_thw"] = inputs["video_grid_thw"]
+
+#         new_inputs["hidden_states"] = new_inputs["hidden_states"].to(visual_dtype)
+#         return new_inputs
+
+#     @staticmethod
+#     def postprocess_vision_callback(
+#         inputs: dict,
+#         output: torch.Tensor,
+#     ) -> BaseModelOutput | tuple:
+#         if isinstance(output, torch.Tensor):
+#             if output.ndim == 2:
+#                 # Add batch dimension here
+#                 output.unsqueeze_(0)
+#             return (output,)
+#         return output
 
 
 class MultimodalProjector(PreTrainedModel):
@@ -829,6 +676,7 @@ class MultimodalModel(nn.Module):
         self,
         encoders: dict[str, ModalEncoderModule],
         language_model: PreTrainedModel,
+        preprocess_llm_callback: Optional[Callable] = None,
         init_projector_type: str = "linear",
         init_activation: str = "gelu",
     ):
@@ -948,30 +796,31 @@ class MultimodalModel(nn.Module):
         self.add_module("language_model", language_model)
 
         self.token_ids: dict[str, int] = None
+        self.preprocess_llm_callback = preprocess_llm_callback
 
-    @classmethod
-    def from_pretrained_multimodal_model(
-        cls: MultimodalModel, pretrained_model_id: str, *args, **kwargs
-    ) -> MultimodalModel:
-        """
-        Instantiate a cornstarch model from a pretrained multimodal model.
+    # @classmethod
+    # def from_pretrained_multimodal_model(
+    #     cls: MultimodalModel, pretrained_model_id: str, *args, **kwargs
+    # ) -> MultimodalModel:
+    #     """
+    #     Instantiate a cornstarch model from a pretrained multimodal model.
 
-        Args:
-            pretrained_model_id (`str`):
-                A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
-            args and kwargs are passed to from_pretrained().
-        """
+    #     Args:
+    #         pretrained_model_id (`str`):
+    #             A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
+    #         args and kwargs are passed to from_pretrained().
+    #     """
 
-        config: PretrainedConfig = AutoConfig.from_pretrained(pretrained_model_id)
+    #     config: PretrainedConfig = AutoConfig.from_pretrained(pretrained_model_id)
 
-        if config.model_type == "llava_next":
-            return LlavaNextModel(config).from_pretrained(*args, **kwargs)
-        elif config.model_type == "internvl_chat":
-            return InternVL2Model(config).from_pretrained(*args, **kwargs)
-        elif config.model_type == "qwen2_vl":
-            return Qwen2VLModel(config).from_pretrained(*args, **kwargs)
-        else:
-            raise NotImplementedError
+    #     if config.model_type == "llava_next":
+    #         return LlavaNextModel(config).from_pretrained(*args, **kwargs)
+    #     elif config.model_type == "internvl_chat":
+    #         return InternVL2Model(config).from_pretrained(*args, **kwargs)
+    #     elif config.model_type == "qwen2_vl":
+    #         return Qwen2VLModel(config).from_pretrained(*args, **kwargs)
+    #     else:
+    #         raise NotImplementedError
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         for encoder in self.encoders.values():
@@ -985,82 +834,158 @@ class MultimodalModel(nn.Module):
                 gradient_checkpointing_kwargs
             )
 
-    def train(self, mode: bool = True) -> MultimodalModel:
-        for encoder in self.encoders.values():
-            encoder.train(mode)
+    def train(
+        self, encoders_mode: dict[str, tuple[bool, bool]], llm_mode: bool = True
+    ) -> MultimodalModel:
+        """
+        Set the training mode for the model components.
+
+        Args:
+            encoders_mode: dict[str, tuple[bool, bool]]
+                A dictionary of encoder key -> (encoder_mode, projector_mode).
+            llm_mode: bool
+                The training mode for the language model.
+        """
+        for encoder_key, (encoder_mode, projector_mode) in encoders_mode.items():
+            if encoder_key not in self.encoders:
+                continue
+
+            encoder = self.encoders[encoder_key]
+            encoder.module.train(encoder_mode)
+            for p in encoder.module.parameters():
+                p.requires_grad_(encoder_mode)
+
+            encoder.projector.train(projector_mode)
+            for p in encoder.projector.parameters():
+                p.requires_grad_(projector_mode)
 
         if self.language_model is not None:
-            self.language_model.train(mode)
+            self.language_model.train(llm_mode)
+            for p in self.language_model.parameters():
+                p.requires_grad_(llm_mode)
 
-    def set_token_ids(self, token_ids: dict[str, int]):
-        self.token_ids = token_ids
+    def set_modality_tokens(
+        self, processor: MultimodalProcessor, predefined_tokens: dict[str, str] = {}
+    ):
+        """
+        Add modality tokens to the tokenizer, and store token IDs into the model
+        so that later we can replace those tokens with modality encoder outputs.
+
+        By default the modality tokens are added as `<modal_key>`.
+        If user wants to use different tokens, they can pass predefined_tokens as a dictionary
+        (modal_key to custom token).
+        If the inputs in user dataset already use "<image>" for "vision" modality,
+        they can pass predefined_tokens={"vision": "<image>"}.
+        """
+        tokens = {
+            modal_key: (
+                predefined_tokens[modal_key]
+                if modal_key in predefined_tokens
+                else f"<{modal_key}>"
+            )
+            for modal_key in self.encoders.keys()
+        }
+        processor.llm_tokenizer.add_special_tokens(
+            {"additional_special_tokens": list(tokens.values())}
+        )
+
+        self.token_ids = {
+            modal_key: processor.llm_tokenizer.convert_tokens_to_ids(token)
+            for modal_key, token in tokens.items()
+        }
+        processor.set_tokens(tokens)
+        self.language_model.resize_token_embeddings(len(processor.llm_tokenizer))
 
     def merge_encoder_outputs(
         self,
-        encoder_inputs: dict[str, dict],
-        encoder_outputs: dict[str, BaseModelOutput | tuple],
+        encoders_outputs: dict[str, BaseModelOutput | tuple],
         input_ids: torch.Tensor,
         inputs_embeds: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        inject = self.token_ids is not None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Based on token_ids, merge the outputs of the encoders to the input embeds.
+        inputs_embeds must already have placeholders for the encoder outputs, otherwise
+        it will raise a ValueError.
 
-        if attention_mask is not None:
-            # 2d causal mask or full attention mask is used.
-            assert attention_mask.ndim in [2, 3], (
-                "Attention mask should be 2d (batch_size, seq_len) or 3d (batech_size, seq_len, seq_len), "
-                f"got {attention_mask.ndim}."
+        Arguments:
+            encoders_inputs: dict[str, dict]
+                A dictionary of encoder key -> corresponding encoder inputs.
+            encoders_outputs: dict[str, BaseModelOutput | tuple]
+                A dictionary of encoder key -> corresponding encoder outputs.
+            input_ids: torch.Tensor
+                The input for the LLM. This must have placeholders for the encoder outputs.
+            inputs_embeds: torch.Tensor
+                The input embeddings for the LLM. This can be generated by calling
+                `llm.get_input_embeddings()(input_ids)`.
+
+        Returns:
+            torch.Tensor: The merged input embeddings.
+            torch.Tensor: A generated bitfield attention mask.
+        """
+        if self.token_ids is None:
+            raise ValueError(
+                "token_ids must be set before merging encoder outputs."
+                "Call `MultimodalModel.set_modality_tokens()` to set token ids."
             )
 
-            total_seq_length = inputs_embeds.shape[1] + sum(
-                output[0].shape[1] for output in encoder_outputs.values()
-            )
-            if attention_mask.ndim == 2:
-                # check attention_mask shape is equal to input_ids shape
-                assert attention_mask.shape == inputs_embeds.shape[
-                    :2
-                ] or attention_mask.shape == inputs_embeds.shape[:2] + (
-                    total_seq_length,
-                ), (
-                    f"2d attention mask shape {attention_mask.shape} should be equal to either"
-                    f"inputs_embeds shape {inputs_embeds.shape[:2]} or total_seq_length {total_seq_length}."
+        for modal_key, output in encoders_outputs.items():
+            output: torch.Tensor = output[0]
+
+            if len(output.shape) != 2:
+                warnings.filterwarnings(
+                    "once",
+                    f"{modal_key} encoder output shape {output[0].shape} should be 2d (num_features, hidden_size). "
+                    "Add postprocess_projector_callback to the encoder module to convert the shape. "
+                    "For most encocders that Cornstarch support already has the shape conversion implementation; "
+                    "you can see how the conversion is done in the source code.",
+                    category=UserWarning,
                 )
-            if attention_mask.ndim == 3:
-                assert attention_mask.shape[1] == attention_mask.shape[2]
-                # if full attention maks is given, it must include
-                # the full attention mask "after" merging happens.
+                output = output.view(-1, output.shape[-1])
+            if output.shape[-1] != inputs_embeds.shape[-1]:
+                raise ValueError(
+                    f"Expected encoder output hidden_size {output.shape[-1]} to be equal to inputs_embeds hidden_size {inputs_embeds.shape[-1]}."
+                )
 
-                if inject:
-                    # No seq_length different expected.
-                    assert (
-                        attention_mask.shape[1] == inputs_embeds.shape[1]
-                    ), f"3d attention mask seq_length {attention_mask.shape[1]} should be equal to inputs_embeds seq_length {inputs_embeds.shape[1]}."
-                else:
-                    # expect attention mask to already be prepended.
-                    assert (
-                        attention_mask.shape[1] == total_seq_length
-                    ), f"3d attention mask seq_length {attention_mask.shape[1]} should be equal to total_seq_length {total_seq_length}."
+            if modal_key not in self.token_ids:
+                raise ValueError(
+                    f"Token ID for {modal_key} is not set. "
+                    "Call `MultimodalModel.set_modality_tokens()` to set token ids."
+                )
 
-        if inject:
-            return inject_modal_outputs_to_inputs_embeds(
-                encoder_inputs=encoder_inputs,
-                encoder_outputs=encoder_outputs,
-                token_ids=self.token_ids,
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
+            token_id = self.token_ids[modal_key]
+            num_modal_tokens = (input_ids == token_id).sum().item()
+            num_modal_features = output.shape[0]
+            if num_modal_tokens != num_modal_features:
+                raise ValueError(
+                    f"Number of {modal_key} tokens {num_modal_tokens} should be equal to number of {modal_key} features {num_modal_features}."
+                )
+
+            modal_mask = (
+                (input_ids == token_id)
+                .unsqueeze(-1)
+                .expand_as(inputs_embeds)
+                .to(inputs_embeds.device)
             )
-        else:
-            return prepend_modal_output_to_inputs_embeds(
-                encoder_inputs=encoder_inputs,
-                encoder_outputs=encoder_outputs,
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
+            inputs_embeds = inputs_embeds.masked_scatter(modal_mask, output)
+
+        attention_mask = self.create_bitfield_attention_mask(input_ids)
+
+        return inputs_embeds, attention_mask
+
+    def create_bitfield_attention_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        causal_bit = 1 << 63
+        modal_bits = {
+            modal_key: (1 << (i + 1))
+            for i, modal_key in enumerate(self.token_ids.keys())
+        }
+
+        attention_mask = torch.full_like(
+            input_ids, causal_bit | 1, dtype=torch.int64, device=input_ids.device
+        )
+        for modal_key, token_id in self.token_ids.items():
+            attention_mask[input_ids == token_id] = modal_bits[modal_key]
+
+        return attention_mask
 
     def forward(
         self,
@@ -1169,15 +1094,11 @@ class MultimodalModel(nn.Module):
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         # step 3. merge encoder outputs to llm inputs_embeds
-        inputs_embeds, attention_mask, position_ids, labels = (
-            self.merge_encoder_outputs(
-                encoder_inputs=encoders_inputs,
-                encoder_outputs=encoders_outputs,
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
+        inputs_embeds, attention_mask = self.merge_encoder_outputs(
+            encoder_outputs=encoders_outputs,
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
         )
 
         # step 4. run llm with merged inputs_embeds
@@ -1193,6 +1114,22 @@ class MultimodalModel(nn.Module):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        language_model_inputs.update(kwargs)
+
+        if self.preprocess_llm_callback is not None:
+            # filter out inputs that the preprocess_llm_callback doesn't accept
+            callback_arguments = list(
+                inspect.signature(self.preprocess_llm_callback).parameters.keys()
+            )
+
+            callback_inputs = {
+                key: value
+                for key, value in language_model_inputs.items()
+                if key in callback_arguments
+            }
+
+            callback_outputs = self.preprocess_llm_callback(**callback_inputs)
+            language_model_inputs.update(callback_outputs)
 
         # remove inputs that the language model doesn't accept
         language_model_arguments = list(
