@@ -1,13 +1,14 @@
 import copy
 import inspect
-import warnings
 from typing import Callable, Union
 
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.tokenization_utils import PreTrainedTokenizer
-from transformers.utils import TensorType
+from transformers.utils import TensorType, logging
+
+logger = logging.get_logger(__name__)
 
 
 class MultimodalProcessor:
@@ -55,8 +56,7 @@ class MultimodalProcessor:
 
         # check all the keys in the encoder_processors are in num_feature_calculation_funcs
         if set(encoder_processors.keys()) - set(num_feature_calculation_funcs.keys()):
-            warnings.filterwarnings(
-                "once",
+            logger.warning_once(
                 "The key in encoder_processors is not in num_feature_calculation_funcs.",
             )
 

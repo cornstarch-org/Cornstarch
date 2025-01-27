@@ -45,6 +45,7 @@ nav:
   - Installation: getting_started/installation.md
   - Using Cornstarch:
     - Creating a MLLM model: using_cornstarch/creating_mllm.md
+    - Preprocessing inputs: using_cornstarch/preprocessing_inputs.md
     - Training a MLLM model: using_cornstarch/training_mllm.md
   - Distributed Training:
     - Overview: parallelization/index.md
