@@ -3,6 +3,7 @@ import functools
 import inspect
 from typing import Callable, Union
 
+import numpy as np
 from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
@@ -27,8 +28,8 @@ def default_num_feature_calculation_func_audio_static(
 def default_num_feature_calculation_func_vision_static(
     inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[int]:
-    num_features = (config.image_size // config.patch_size) ** 2 + 1
-    return [num_features] * inputs["pixel_values"].shape[0]
+    num_features = (config.image_size // config.patch_size) ** 2
+    return [num_features] * outputs["pixel_values"].shape[0]
 
 
 def default_num_feature_calculation_func_pixtral(
@@ -51,7 +52,8 @@ def default_num_feature_calculation_func_pixtral(
     for batch_image_size in outputs["image_sizes"]:
         batch_num_image_tokens = []
         for image_size in batch_image_size:
-            batch_num_image_tokens.append(_num_image_tokens(image_size, patch_size))
+            num_tokens = np.prod(_num_image_tokens(image_size, patch_size))
+            batch_num_image_tokens.append(num_tokens)
         num_image_tokens.append(batch_num_image_tokens)
 
     return num_image_tokens
@@ -193,8 +195,8 @@ class MultimodalProcessor:
 
     def __call__(
         self,
-        encoder_inputs: dict[str, dict],
-        llm_inputs: dict,
+        encoder_inputs: dict[str, dict] = {},
+        llm_inputs: dict = {},
         return_tensors: str | TensorType = TensorType.PYTORCH,
         **kwargs,
     ) -> BatchFeature:
@@ -209,7 +211,6 @@ class MultimodalProcessor:
         if not isinstance(text, list):
             text = [text]
 
-        num_features: dict[str, int] = {}
         for modal_key, encoder_input in encoder_inputs.items():
             if modal_key not in self.num_feature_calculation_funcs:
                 raise ValueError(
@@ -238,17 +239,27 @@ class MultimodalProcessor:
             )
             result.update(processor_result)
 
-            num_features[modal_key] = self.num_feature_calculation_funcs[modal_key](
+            num_features_list = self.num_feature_calculation_funcs[modal_key](
                 processor_inputs, processor_result
             )
 
+            # if num_features is a 2d array (list of num features per batch), flatten it.
+            if isinstance(num_features_list[0], list):
+                num_features_list = [
+                    num_feature
+                    for batch_num_features in num_features_list
+                    for num_feature in batch_num_features
+                ]
+
+            index = 0
             for i in range(len(text)):
                 while self.tokens[modal_key] in text[i]:
                     text[i] = text[i].replace(
                         self.tokens[modal_key],
-                        "<|placeholder|>" * num_features[modal_key],
+                        "<|placeholder|>" * num_features_list[index],
                         1,
                     )
+                    index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.tokens[modal_key])
 
         # Filter kwargs for the tokenizer
