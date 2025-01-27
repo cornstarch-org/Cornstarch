@@ -1,7 +1,8 @@
 import copy
 import inspect
-from typing import Callable, Union
+from typing import Any, Callable, Union
 
+from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_processing_utils import BaseImageProcessor
@@ -9,6 +10,78 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import TensorType, logging
 
 logger = logging.get_logger(__name__)
+
+
+def default_num_feature_calculation_func_audio_static(
+    config: PretrainedConfig, inputs: dict, outputs: dict
+) -> list[int]:
+    num_features = config.max_source_positions
+    return [num_features] * inputs["raw_speech"].shape[0]
+
+
+def default_num_feature_calculation_func_vision_static(
+    config: PretrainedConfig, inputs: dict, outputs: dict
+) -> list[int]:
+    num_features = (config.image_size // config.patch_size) ** 2 + 1
+    return [num_features] * inputs["pixel_values"].shape[0]
+
+
+def default_num_feature_calculation_func_pixtral(
+    config: PretrainedConfig, inputs: dict, outputs: dict
+) -> list[list[int]]:
+    # output has "image_sizes", which has already been rescaled.
+    # Use pixtral image processing functions to get the number of image tokens
+    from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
+    from transformers.models.pixtral.image_processing_pixtral import _num_image_tokens
+
+    config: PixtralVisionConfig = config
+    patch_size = (
+        config.patch_size
+        if isinstance(config.patch_size, (tuple, list))
+        else (config.patch_size, config.patch_size)
+    )
+
+    num_image_tokens = []
+
+    for batch_image_size in outputs["image_sizes"]:
+        batch_num_image_tokens = []
+        for image_size in batch_image_size:
+            batch_num_image_tokens.append(_num_image_tokens(image_size, patch_size))
+        num_image_tokens.append(batch_num_image_tokens)
+
+    return num_image_tokens
+
+
+def default_num_feature_calculation_func_qwen2vl(
+    image_processor: Any, inputs: dict, outputs: dict
+) -> list[int]:
+    from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
+        Qwen2VLImageProcessor,
+    )
+
+    image_processor: Qwen2VLImageProcessor = image_processor
+
+    image_grid_thw = outputs.get("image_grid_thw", None)
+    if image_grid_thw is None:
+        return None
+
+    merge_length = image_processor.merge_size**2
+    num_image_tokens = [
+        image_grid_thw[i].prod() // merge_length for i in range(len(image_grid_thw))
+    ]
+
+    return num_image_tokens
+
+
+processor_type_to_num_feature_calculation_func = {
+    "ViTImageProcessor": default_num_feature_calculation_func_vision_static,
+    "CLIPImageProcessor": default_num_feature_calculation_func_vision_static,
+    "SiglipImageProcessor": default_num_feature_calculation_func_vision_static,
+    "BitImageProcessor": default_num_feature_calculation_func_vision_static,
+    "PixtralImageProcessor": default_num_feature_calculation_func_pixtral,
+    "Qwen2VLImageProcessor": default_num_feature_calculation_func_qwen2vl,
+    "WhisperFeatureExtractor": default_num_feature_calculation_func_audio_static,
+}
 
 
 class MultimodalProcessor:
@@ -32,7 +105,9 @@ class MultimodalProcessor:
             str, Union[BaseImageProcessor, SequenceFeatureExtractor]
         ],
         llm_tokenizer: PreTrainedTokenizer,
-        num_feature_calculation_funcs: dict[str, Callable[[dict], int]] = {},
+        num_feature_calculation_funcs: dict[
+            str, Callable[[dict, dict], list[int] | list[list[int]]]
+        ] = {},
     ):
         """
         MultimodalModelProcessor is a class that processes text, images, and any other multimodal inputs.
@@ -42,13 +117,29 @@ class MultimodalProcessor:
                 The encoder processor can be an image processor or a feature extractor.
             llm_tokenizer (PreTrainedTokenizer)
                 The tokenizer used to tokenize the text inputs.
-            num_feature_calculation_funcs (dict[str, Callable[[dict], int]])
+            num_feature_calculation_funcs (dict[str, Callable[[dict, dict], list[int | list[int]]])
                 A dictionary of modal_key to a function that calculates the number of features for the encoder.
                 When inputs are processed, the number of features is precalculated and
                 corresponding modality tokens are added to the input.
                 For this purpose, the processor needs to know how many modality tokens should be added.
-                The callable function should take a dictionary of the modality encoder inputs and return the number of features.
+                The callable function should take a dictionary of the modality encoder inputs
+                and a dictionary of the modality encoder outputs,
+                and return a list of the number of features (one per image for global batch),
+                or a list of the list of the number of features (one per image for per batch).
         """
+
+        # Set the default num_feature_calculation_funcs
+        for modal_key, processor in encoder_processors.items():
+            processor_type = type(processor).__name__
+            if processor_type in processor_type_to_num_feature_calculation_func:
+                num_feature_calculation_funcs[modal_key] = (
+                    processor_type_to_num_feature_calculation_func[processor_type]
+                )
+            else:
+                logger.warning(
+                    f"num_feature_calculation_func for {modal_key} is not provided by Cornstarch."
+                )
+
         self.encoder_processors = encoder_processors
         self.llm_tokenizer = llm_tokenizer
         self.num_feature_calculation_funcs = num_feature_calculation_funcs
@@ -124,7 +215,7 @@ class MultimodalProcessor:
             result.update(processor_result)
 
             num_features[modal_key] = self.num_feature_calculation_funcs[modal_key](
-                processor_inputs
+                processor_inputs, processor_result
             )
 
             for i in range(len(text)):
