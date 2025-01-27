@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import functools
 import inspect
-import warnings
 from types import MethodType
 from typing import Any, Callable, Optional, Union
 
@@ -752,7 +751,7 @@ class MultimodalModel(nn.Module):
 
             if language_model is not None:
                 if modal_module.projector is None:
-                    warnings.warn(
+                    logger.warning(
                         f"A projector for {modal_key} encoder is not given, "
                         "while it is required in multimodal with a language model. "
                         f"Creating a {init_projector_type} projector layer for the encoder. "
@@ -925,13 +924,11 @@ class MultimodalModel(nn.Module):
             output: torch.Tensor = output[0]
 
             if len(output.shape) != 2:
-                warnings.filterwarnings(
-                    "once",
+                logger.warning_once(
                     f"{modal_key} encoder output shape {output[0].shape} should be 2d (num_features, hidden_size). "
                     "Add postprocess_projector_callback to the encoder module to convert the shape. "
                     "For most encocders that Cornstarch support already has the shape conversion implementation; "
                     "you can see how the conversion is done in the source code.",
-                    category=UserWarning,
                 )
                 output = output.view(-1, output.shape[-1])
             if output.shape[-1] != inputs_embeds.shape[-1]:
