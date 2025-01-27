@@ -32,9 +32,6 @@ from cornstarch.models.internvl2.modeling_internvl_chat import (
     InternVLChatModel,
 )
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
-from cornstarch.models.multimodal_language_model.processing_multimodal_language_model import (
-    MultimodalProcessor,
-)
 
 logger = logging.get_logger(__name__)
 
@@ -863,30 +860,16 @@ class MultimodalModel(nn.Module):
             for p in self.language_model.parameters():
                 p.requires_grad_(llm_mode)
 
-    def set_modality_tokens(
-        self, processor: MultimodalProcessor, predefined_tokens: dict[str, str] = {}
-    ):
+    def set_modality_token_ids(self, token_ids: dict[str, int]):
         """
-        Add modality tokens to the tokenizer, and store token IDs into the model
-        so that later we can replace those tokens with modality encoder outputs.
+        Store modality token ids to the model, so that later
+        it can replace the tokens with modality encoder outputs.
 
-        By default the modality tokens are added as `<modal_key>`.
-        If user wants to use different tokens, they can pass predefined_tokens as a dictionary
-        (modal_key to custom token).
-        If the inputs in user dataset already use "<image>" for "vision" modality,
-        they can pass predefined_tokens={"vision": "<image>"}.
+        MultimodalProcessor is responsible for calling this function.
+        Do not call manually.
         """
-        tokens = {
-            modal_key: (
-                predefined_tokens[modal_key]
-                if modal_key in predefined_tokens
-                else f"<{modal_key}>"
-            )
-            for modal_key in self.encoders.keys()
-        }
-
-        self.token_ids = processor.set_modality_tokens(tokens)
-        self.language_model.resize_token_embeddings(len(processor.llm_tokenizer))
+        self.token_ids = token_ids
+        self.language_model.resize_token_embeddings(len(token_ids))
 
     def merge_encoder_outputs(
         self,

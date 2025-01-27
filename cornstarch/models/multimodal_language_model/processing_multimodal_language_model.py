@@ -1,6 +1,7 @@
 import copy
+import functools
 import inspect
-from typing import Any, Callable, Union
+from typing import Callable, Union
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
@@ -9,25 +10,29 @@ from transformers.image_processing_utils import BaseImageProcessor
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import TensorType, logging
 
+from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
+    MultimodalModel,
+)
+
 logger = logging.get_logger(__name__)
 
 
 def default_num_feature_calculation_func_audio_static(
-    config: PretrainedConfig, inputs: dict, outputs: dict
+    inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[int]:
     num_features = config.max_source_positions
     return [num_features] * inputs["raw_speech"].shape[0]
 
 
 def default_num_feature_calculation_func_vision_static(
-    config: PretrainedConfig, inputs: dict, outputs: dict
+    inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[int]:
     num_features = (config.image_size // config.patch_size) ** 2 + 1
     return [num_features] * inputs["pixel_values"].shape[0]
 
 
 def default_num_feature_calculation_func_pixtral(
-    config: PretrainedConfig, inputs: dict, outputs: dict
+    inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[list[int]]:
     # output has "image_sizes", which has already been rescaled.
     # Use pixtral image processing functions to get the number of image tokens
@@ -53,19 +58,17 @@ def default_num_feature_calculation_func_pixtral(
 
 
 def default_num_feature_calculation_func_qwen2vl(
-    image_processor: Any, inputs: dict, outputs: dict
+    inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[int]:
-    from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
-        Qwen2VLImageProcessor,
-    )
+    from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLVisionConfig
 
-    image_processor: Qwen2VLImageProcessor = image_processor
+    config: Qwen2VLVisionConfig = config
 
     image_grid_thw = outputs.get("image_grid_thw", None)
     if image_grid_thw is None:
         return None
 
-    merge_length = image_processor.merge_size**2
+    merge_length = config.spatial_merge_size**2
     num_image_tokens = [
         image_grid_thw[i].prod() // merge_length for i in range(len(image_grid_thw))
     ]
@@ -105,9 +108,11 @@ class MultimodalProcessor:
             str, Union[BaseImageProcessor, SequenceFeatureExtractor]
         ],
         llm_tokenizer: PreTrainedTokenizer,
+        model: MultimodalModel,
         num_feature_calculation_funcs: dict[
             str, Callable[[dict, dict], list[int] | list[list[int]]]
         ] = {},
+        predefined_tokens: dict[str, str] = {},
     ):
         """
         MultimodalModelProcessor is a class that processes text, images, and any other multimodal inputs.
@@ -126,14 +131,18 @@ class MultimodalProcessor:
                 and a dictionary of the modality encoder outputs,
                 and return a list of the number of features (one per image for global batch),
                 or a list of the list of the number of features (one per image for per batch).
+            predefined_tokens (dict[str, str])
+                A dictionary of modal_key to the token. This will override the default token for the corresponding modality encoders.
+                By default the token for a modal_key is `<modal_key>`.
         """
-
         # Set the default num_feature_calculation_funcs
         for modal_key, processor in encoder_processors.items():
             processor_type = type(processor).__name__
             if processor_type in processor_type_to_num_feature_calculation_func:
-                num_feature_calculation_funcs[modal_key] = (
-                    processor_type_to_num_feature_calculation_func[processor_type]
+                encoder = model.encoders[modal_key]
+                num_feature_calculation_funcs[modal_key] = functools.partial(
+                    processor_type_to_num_feature_calculation_func[processor_type],
+                    config=encoder.module.config,
                 )
             else:
                 logger.warning(
@@ -143,7 +152,8 @@ class MultimodalProcessor:
         self.encoder_processors = encoder_processors
         self.llm_tokenizer = llm_tokenizer
         self.num_feature_calculation_funcs = num_feature_calculation_funcs
-        self.tokens: dict[str, int] = None
+        self.tokens: dict[str, str] = None
+        self._set_modality_tokens(model, predefined_tokens)
 
         # check all the keys in the encoder_processors are in num_feature_calculation_funcs
         if set(encoder_processors.keys()) - set(num_feature_calculation_funcs.keys()):
@@ -151,21 +161,35 @@ class MultimodalProcessor:
                 "The key in encoder_processors is not in num_feature_calculation_funcs.",
             )
 
-    def set_modality_tokens(self, tokens: dict[str, str]) -> dict[str, int]:
+    def _set_modality_tokens(
+        self, model: MultimodalModel, predefined_tokens: dict[str, str]
+    ):
         """
-        Add the tokens as special tokens and return the corresponding token IDs.
+        Add the tokens as special tokens.
+
+        By default the modality tokens are added as `<modal_key>`.
+        If user wants to use different tokens, they can pass
+        predefined_tokens as a dictionary of modal_key to the token.
+        This will override the token for the corresponding modality encoders.
         """
-        self.tokens = tokens
+        tokens = {
+            modal_key: (
+                predefined_tokens[modal_key]
+                if modal_key in predefined_tokens
+                else f"<{modal_key}>"
+            )
+            for modal_key in self.encoder_processors.keys()
+        }
+
         self.llm_tokenizer.add_special_tokens(
             {"additional_special_tokens": list(tokens.values())}
         )
-
         token_ids = {
             modal_key: self.llm_tokenizer.convert_tokens_to_ids(token)
             for modal_key, token in tokens.items()
         }
-
-        return token_ids
+        model.set_modality_token_ids(token_ids)
+        self.tokens = tokens
 
     def __call__(
         self,

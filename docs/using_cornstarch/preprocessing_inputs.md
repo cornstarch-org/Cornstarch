@@ -86,6 +86,18 @@ MultimodalProcessor(
 )
 ```
 
+Cornstarch provides processor inputs and processor outputs as two dictionaries as the input of the function:
+
+``` py
+inputs = # input to the modality encoder processor as a dictionary
+outputs = # output of the modality encoder processor as a dictionary
+num_features = callback(inputs, outputs)
+```
+
+where `num_features` should be either
+- `list[int]`: a list of the number of features, one per modality input, across the entire batch, or
+- `list[list[int]]`: a list of the lists of the number of features, one per modality input per batch.
+
 !!! note
     For modality encoders that Cornstarch officially supports, calculation functions are automatically set.
 
@@ -96,24 +108,17 @@ MultimodalProcessor(
 The tokenizer does not know which special tokens should be used for modality encoders.
 At the same time, the LLM in `MultimodalModel` does not know which token IDs should be replaced with the modality encoder outputs when merging them, either.
 
-Cornstarch provides an interface `MultimodalModel.set_modality_tokens()` to register special modality tokens to the `MultimodalProcessor` and store token indices into the model.
+For this reason, `MultimodalProcessor`, unlike processors that are independent from models in HuggingFace transformers, requires to take `MultimodalModel` to add such interaction:
 
-``` py hl_lines="15"
-mm_model = MultimodalModel(
-    encoders={
-        "vision": ...,
-        "audio": ...,
-    },
-    ...
-)
-mm_processor = MultimodalProcessor(
-    encoder_processors={
-        "vision": ...,
-        "audio": ...,
-    },
-    ...
-)
-mm_model.set_modality_tokens(mm_processor)
+``` py
+class MultimodalProcessor:
+    def __init__(
+        self,
+        ...
+        model: MultimodalModel,
+        num_features_calculation_funcs: dict[str, Callable] = {},
+        predefined_tokens: dict[str, str] = {},
+    ):
 ```
 
 By default, Cornstarch registers `<modal_key>` special tokens to the tokenizer:
@@ -126,11 +131,11 @@ mm_processor.llm_tokenizer.special_tokens_map
  'additional_special_tokens': ['<vision>', '<audio>']} # Since we have "vision" and "audio" as modality keys, these two tokens are registered
 ```
 
-When your dataset already includes its own special token, you can override the token by providing `predefined_tokens` to `set_modality_tokens()`.
+When your dataset already includes its own special token, you can override the token by providing `predefined_tokens`.
 The following example registers `<image>` instead of `<vision>` for the vision encoder:
 
 ``` py hl_lines="7"
-mm_modal.set_modality_tokens(mm_processor, predefined_tokens={"vision": "<image>"})
+mm_processor = MultimodalProcessor(..., predefined_tokens={"vision": "<image>"})
 
 mm_processor.llm_tokenizer.special_tokens_map
 {'bos_token': '<|begin_of_text|>',
