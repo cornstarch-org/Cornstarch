@@ -8,8 +8,6 @@ from typing import Any, Callable, Optional, Union
 import torch
 import torch.nn as nn
 from transformers.activations import get_activation
-from transformers.cache_utils import Cache
-from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import (
     BaseModelOutput,
     CausalLMOutputWithPast,
@@ -29,10 +27,6 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 )
 from transformers.utils import logging
 
-from cornstarch.models.internvl2.modeling_internvl_chat import (
-    InternVLChatConfig,
-    InternVLChatModel,
-)
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 logger = logging.get_logger(__name__)
@@ -198,196 +192,125 @@ class LlavaNextModel:
         return output
 
 
-# class InternVL2Model(PretrainedVisionLanguageModel):
-#     """A class for InternVL2 pretrained models."""
+class Qwen2VLModel:
+    """A class for QWen2VL pretrained models."""
 
-#     def __init__(self, config: InternVLChatConfig):
-#         self.config = config
+    @staticmethod
+    def vision_transformer_forward(
+        self: Qwen2VisionTransformerPretrainedModel,
+        original_forward: Callable,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        return_dict: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+    ) -> BaseModelOutput:
+        """
+        Wrapper function for the forward method of Qwen2VL vision transformer.
+        This is for backward compatibility of a few additional HF arguments.
+        """
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
-#     def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
-#         model: InternVLChatModel = InternVLChatModel.from_pretrained(
-#             self.config.name_or_path, config=self.config, *args, **kwargs
-#         )
-#         vision_encoder = model.vision_model
-#         language_model = model.language_model
+        hidden_states = original_forward(hidden_states, grid_thw)
 
-#         # Create a projector
-#         projector = model.mlp1
-#         projector_config = MultimodalProjectorConfig(
-#             encoder_config=vision_encoder.config,
-#             text_config=language_model.config,
-#             projection_type="mlp",
-#         )
-#         vision_projector = MultimodalProjector(projector_config, projector)
+        if not return_dict:
+            return (hidden_states,)
 
-#         vision_encoder = ModalEncoderModule(
-#             model=vision_encoder,
-#             projector=vision_projector,
-#             postprocess_module_callback=functools.partial(
-#                 self.postprocess_vision_callback, model=model
-#             ),
-#         )
+        return BaseModelOutput(last_hidden_state=hidden_states)
 
-#         mm_model = MultimodalModel(
-#             encoders={"vision": vision_encoder},
-#             language_model=language_model,
-#         )
+    class FakeMerger(nn.Module):
+        """Merger is merged into Qwen2VisionTransformer.
 
-#         mm_model.chat = MethodType(InternVLChatModel.chat, model)
-#         mm_model.batch_chat = MethodType(InternVLChatModel.batch_chat, model)
-#         model.generate = MethodType(
-#             functools.partial(MultimodalModel.generate, add_input_ids=False), mm_model
-#         )
+        As Cornstarch manages them separately, we need to fake the merger layer
+        in the vision transformer.
+        This does nothing in forward.
+        """
 
-#         # TOOD (insujang): this doesn't work as expected,
-#         # since img_context_token_id is set during chat() or batch_chat().
-#         mm_model.set_token_ids({"vision": model.img_context_token_id})
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            return hidden_states
 
-#         return mm_model
+    def __init__(self, config: Qwen2VLConfig):
+        self.config = config
 
-#     @staticmethod
-#     def postprocess_vision_callback(
-#         inputs: dict,
-#         output: BaseModelOutput | tuple,
-#         model: InternVLChatModel,
-#     ) -> BaseModelOutput | tuple:
-#         if model.select_layer == -1:
-#             vit_embeds = output.last_hidden_state
-#         else:
-#             vit_embeds = output.hidden_states[model.select_layer]
-#         vit_embeds = vit_embeds[:, 1:, :]
+    def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
+        model: Qwen2VLForConditionalGeneration = (
+            Qwen2VLForConditionalGeneration.from_pretrained(
+                self.config.name_or_path, config=self.config, *args, **kwargs
+            )
+        )
 
-#         h = w = int(vit_embeds.shape[1] ** 0.5)
-#         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-#         vit_embeds = model.pixel_shuffle(
-#             vit_embeds, scale_factor=model.downsample_ratio
-#         )
-#         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
+        vision_encoder = model.visual
+        vision_encoder.main_input_name = "pixel_values"
 
-#         output.last_hidden_state = vit_embeds
+        # Qwen2VL vision encoder has an embedded MLP layer. Split it.
+        projector = vision_encoder.merger
+        vision_encoder.merger = self.FakeMerger()
+        vision_encoder.forward = MethodType(
+            functools.partial(
+                Qwen2VLModel.vision_transformer_forward,
+                original_forward=vision_encoder.forward,
+            ),
+            vision_encoder,
+        )
+        projector_config = MultimodalProjectorConfig(
+            encoder_config=vision_encoder.config,
+            text_config=model.config,
+            projection_type="mlp",
+        )
+        vision_projector = MultimodalProjector(projector_config, projector)
 
-#         return output
+        vision_encoder = ModalEncoderModule(
+            model=vision_encoder,
+            projector=vision_projector,
+            additional_args=[
+                "pixel_values",
+                "pixel_values_videos",
+                "image_grid_thw",
+                "video_grid_thw",
+            ],
+            preprocess_callback=functools.partial(
+                self.preprocess_vision_callback, visual_dtype=model.visual.get_dtype()
+            ),
+            postprocess_module_callback=self.postprocess_vision_callback,
+        )
 
+        delattr(model, "visual")
+        mm_model = MultimodalModel(
+            encoders={"vision": vision_encoder},
+            language_model=model,
+        )
+        mm_model.set_modality_token_ids({"vision": model.config.image_token_id})
 
-# class Qwen2VLModel(PretrainedVisionLanguageModel):
-#     """A class for QWen2VL pretrained models."""
+        return mm_model
 
-#     @staticmethod
-#     def vision_transformer_forward(
-#         self: Qwen2VisionTransformerPretrainedModel,
-#         original_forward: Callable,
-#         hidden_states: torch.Tensor,
-#         grid_thw: torch.Tensor,
-#         return_dict: Optional[bool] = None,
-#         output_hidden_states: Optional[bool] = None,
-#     ) -> BaseModelOutput:
-#         """
-#         Wrapper function for the forward method of Qwen2VL vision transformer.
-#         This is for backward compatibility of a few additional HF arguments.
-#         """
-#         return_dict = (
-#             return_dict if return_dict is not None else self.config.use_return_dict
-#         )
+    @staticmethod
+    def preprocess_vision_callback(
+        inputs: dict[str, Any], visual_dtype: torch.dtype
+    ) -> dict[str, Any]:
+        new_inputs = {}
 
-#         hidden_states = original_forward(hidden_states, grid_thw)
+        if "pixel_values" in inputs:
+            new_inputs["hidden_states"] = inputs["pixel_values"]
+            new_inputs["grid_thw"] = inputs["image_grid_thw"]
+        if "pixel_values_videos" in inputs:
+            new_inputs["hidden_states"] = inputs["pixel_values_videos"]
+            new_inputs["grid_thw"] = inputs["video_grid_thw"]
 
-#         if not return_dict:
-#             return (hidden_states,)
+        new_inputs["hidden_states"] = new_inputs["hidden_states"].to(visual_dtype)
+        return new_inputs
 
-#         return BaseModelOutput(last_hidden_state=hidden_states)
-
-#     class FakeMerger(nn.Module):
-#         """Merger is merged into Qwen2VisionTransformer.
-
-#         As Cornstarch manages them separately, we need to fake the merger layer
-#         in the vision transformer.
-#         This does nothing in forward.
-#         """
-
-#         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-#             return hidden_states
-
-#     def __init__(self, config: Qwen2VLConfig):
-#         self.config = config
-
-#     def from_pretrained(self, *args, **kwargs) -> MultimodalModel:
-#         model: Qwen2VLForConditionalGeneration = (
-#             Qwen2VLForConditionalGeneration.from_pretrained(
-#                 self.config.name_or_path, config=self.config, *args, **kwargs
-#             )
-#         )
-
-#         vision_encoder = model.visual
-#         vision_encoder.main_input_name = "pixel_values"
-
-#         # Qwen2VL vision encoder has an embedded MLP layer. Split it.
-#         projector = vision_encoder.merger
-#         vision_encoder.merger = self.FakeMerger()
-#         vision_encoder.forward = MethodType(
-#             functools.partial(
-#                 Qwen2VLModel.vision_transformer_forward,
-#                 original_forward=vision_encoder.forward,
-#             ),
-#             vision_encoder,
-#         )
-#         projector_config = MultimodalProjectorConfig(
-#             encoder_config=vision_encoder.config,
-#             text_config=model.config,
-#             projection_type="mlp",
-#         )
-#         vision_projector = MultimodalProjector(projector_config, projector)
-
-#         vision_encoder = ModalEncoderModule(
-#             model=vision_encoder,
-#             projector=vision_projector,
-#             additional_args=[
-#                 "pixel_values",
-#                 "pixel_values_videos",
-#                 "image_grid_thw",
-#                 "video_grid_thw",
-#             ],
-#             preprocess_callback=functools.partial(
-#                 self.preprocess_vision_callback, visual_dtype=model.visual.get_dtype()
-#             ),
-#             postprocess_module_callback=self.postprocess_vision_callback,
-#         )
-
-#         delattr(model, "visual")
-#         mm_model = MultimodalModel(
-#             encoders={"vision": vision_encoder},
-#             language_model=model,
-#         )
-#         mm_model.set_token_ids({"vision": model.config.image_token_id})
-
-#         return mm_model
-
-#     @staticmethod
-#     def preprocess_vision_callback(
-#         inputs: dict[str, Any], visual_dtype: torch.dtype
-#     ) -> dict[str, Any]:
-#         new_inputs = {}
-
-#         if "pixel_values" in inputs:
-#             new_inputs["hidden_states"] = inputs["pixel_values"]
-#             new_inputs["grid_thw"] = inputs["image_grid_thw"]
-#         if "pixel_values_videos" in inputs:
-#             new_inputs["hidden_states"] = inputs["pixel_values_videos"]
-#             new_inputs["grid_thw"] = inputs["video_grid_thw"]
-
-#         new_inputs["hidden_states"] = new_inputs["hidden_states"].to(visual_dtype)
-#         return new_inputs
-
-#     @staticmethod
-#     def postprocess_vision_callback(
-#         inputs: dict,
-#         output: torch.Tensor,
-#     ) -> BaseModelOutput | tuple:
-#         if isinstance(output, torch.Tensor):
-#             if output.ndim == 2:
-#                 # Add batch dimension here
-#                 output.unsqueeze_(0)
-#             return (output,)
-#         return output
+    @staticmethod
+    def postprocess_vision_callback(
+        inputs: dict,
+        output: torch.Tensor,
+    ) -> BaseModelOutput | tuple:
+        if isinstance(output, torch.Tensor):
+            if output.ndim == 2:
+                # Add batch dimension here
+                output.unsqueeze_(0)
+            return (output,)
+        return output
 
 
 class MultimodalProjector(PreTrainedModel):
@@ -772,12 +695,10 @@ class MultimodalModel(nn.Module):
 
         if config.model_type == "llava_next":
             return LlavaNextModel(config).from_pretrained(*args, **kwargs)
-        # elif config.model_type == "internvl_chat":
-        #     return InternVL2Model(config).from_pretrained(*args, **kwargs)
-        # elif config.model_type == "qwen2_vl":
-        #     return Qwen2VLModel(config).from_pretrained(*args, **kwargs)
-        # else:
-        #     raise NotImplementedError
+        elif config.model_type == "qwen2_vl":
+            return Qwen2VLModel(config).from_pretrained(*args, **kwargs)
+        else:
+            raise NotImplementedError
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         for encoder in self.encoders.values():
