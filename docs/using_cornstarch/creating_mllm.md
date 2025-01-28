@@ -128,6 +128,12 @@ merged_input = merge(postprocessed_module_outputs, language_inputs_embedding)
 output = language_model(merged_input)
 ```
 
+Inputs and outputs of each callback are as follows:
+
+- `preprocess_callback(inputs: dict[str, Any]) -> dict[str, Any]`: gets the inputs of the modality encoder as a dictionary. Returns a modified dictionary which will be used as actual inputs of the modality encoder.
+- `postprocess_encoder_callback(inputs: dict[str, Any], output: BaseModelOutput | tuple) -> BaseModelOutput | tuple`: gets the inputs and the output of the modality encoder. The output is either `BaseModelOutput` or `tuple`, depending on the encoder configuration `return_dict`. Returns a modified output which will be forwarded to a projector.
+- `postprocess_projector_callback(inputs: dict[str, Any], output: BaseModelOutput | tuple) -> BaseModelOutput | tuple`: gets the inputs of the modality encoder, and the output of the projector. The output is either `BaseModelOutput` or `tuple`, depending on the encoder configuration `return_dict`. Returns a modified output which will be forwarded to the LLM.
+
 ### A Llava-Next example of utilizing callback interface
 
 The original [`LlavaNextForConditionalGeneration.forward()`](https://github.com/huggingface/transformers/blob/5d7739f15a6e50de416977fe2cc9cb516d67edda/src/transformers/models/llava_next/modeling_llava_next.py#L346) is implemented as follows:
