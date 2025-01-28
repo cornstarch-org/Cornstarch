@@ -43,11 +43,8 @@ def temp_directory():
 
 @pytest.mark.parametrize(
     "model_name, model_cls",
-    [
-        ("llava-hf/llava-1.5-7b-hf", LlavaForConditionalGeneration),
-        ("llava-hf/llava-v1.6-vicuna-7b-hf", LlavaNextForConditionalGeneration),
-    ],
-    ids=["llava-1.5-7b-hf", "llava-v1.6-vicuna-7b-hf"],
+    [("llava-hf/llava-v1.6-vicuna-7b-hf", LlavaNextForConditionalGeneration)],
+    ids=["llava-v1.6-vicuna-7b-hf"],
 )
 @pytest.mark.parametrize("batch_size", [1, 2], ids=lambda x: f"bs{x}")
 def test_llava_model_generation(
@@ -66,13 +63,13 @@ def test_llava_model_generation(
         MultimodalModel.from_pretrained_multimodal_model(
             pretrained_model_id=model_name,
             cache_dir=temp_directory,
-        ).to(dtype=torch.float16, device="cuda")
+        ).to(dtype=torch.bfloat16, device="cuda")
     )
-    cornstarch_model.train(mode=False)
+    cornstarch_model.train(encoders_mode={"vision": (False, False)}, llm_mode=False)
 
     hf_model: PreTrainedModel = model_cls.from_pretrained(
         model_name, cache_dir=temp_directory
-    ).to(dtype=torch.float16, device="cuda")
+    ).to(dtype=torch.bfloat16, device="cuda")
     hf_model.train(mode=False)
 
     processor = AutoProcessor.from_pretrained(model_name, cache_dir=temp_directory)
@@ -84,8 +81,8 @@ def test_llava_model_generation(
 
     # llava text generation
     inputs = processor(
-        prompts[:batch_size], images[:batch_size], padding=True, return_tensors="pt"
-    ).to(dtype=torch.float16, device="cuda")
+        images[:batch_size], prompts[:batch_size], padding=True, return_tensors="pt"
+    ).to(dtype=torch.bfloat16, device="cuda")
 
     hf_output = hf_model.generate(
         **inputs,
