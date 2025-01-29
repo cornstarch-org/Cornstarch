@@ -8,7 +8,8 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_processing_utils import BaseImageProcessor
-from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers.models.pixtral.processing_pixtral import BatchMixFeature
+from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer
 from transformers.utils import TensorType, logging
 
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
@@ -23,6 +24,13 @@ def default_num_feature_calculation_func_audio_static(
 ) -> list[int]:
     num_features = config.max_source_positions
     return [num_features] * inputs["raw_speech"].shape[0]
+
+
+def default_num_feature_calculation_func_vision_clip(
+    inputs: dict, outputs: dict, config: PretrainedConfig
+) -> list[int]:
+    num_features = (config.image_size // config.patch_size) ** 2 + 1
+    return [num_features] * outputs["pixel_values"].shape[0]
 
 
 def default_num_feature_calculation_func_vision_static(
@@ -80,7 +88,7 @@ def default_num_feature_calculation_func_qwen2vl(
 
 processor_type_to_num_feature_calculation_func = {
     "ViTImageProcessor": default_num_feature_calculation_func_vision_static,
-    "CLIPImageProcessor": default_num_feature_calculation_func_vision_static,
+    "CLIPImageProcessor": default_num_feature_calculation_func_vision_clip,
     "SiglipImageProcessor": default_num_feature_calculation_func_vision_static,
     "BitImageProcessor": default_num_feature_calculation_func_vision_static,
     "PixtralImageProcessor": default_num_feature_calculation_func_pixtral,
@@ -190,7 +198,7 @@ class MultimodalProcessor:
             modal_key: self.llm_tokenizer.convert_tokens_to_ids(token)
             for modal_key, token in tokens.items()
         }
-        model.set_modality_token_ids(token_ids)
+        model.set_modality_token_ids(token_ids, len(self.llm_tokenizer))
         self.tokens = tokens
 
     def __call__(
@@ -275,10 +283,15 @@ class MultimodalProcessor:
         )
         result.update(text_inputs)
 
-        return BatchFeature(data={**result})
+        return BatchMixFeature(data={**result})
 
     def batch_decode(self, *args, **kwargs):
         return self.llm_tokenizer.batch_decode(*args, **kwargs)
 
     def decode(self, *args, **kwargs):
         return self.llm_tokenizer.decode(*args, **kwargs)
+
+    def apply_chat_template(
+        self, *args, **kwargs
+    ) -> Union[str, list[int], list[str], list[list[int]], BatchEncoding]:
+        return self.llm_tokenizer.apply_chat_template(*args, **kwargs)

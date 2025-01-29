@@ -19,11 +19,11 @@ classifiers = [
 dependencies = [
     "torch>=2.5.0",
     "triton>=3.0.0",
-    "transformers==4.45.0",
+    "transformers==4.47.1",
     "loguru",
     "simple_parsing",
     "datasets",
-    "click",
+    "tyro",
     "flash-attn",
     "numpy",
     "tqdm",

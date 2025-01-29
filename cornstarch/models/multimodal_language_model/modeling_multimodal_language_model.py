@@ -361,12 +361,12 @@ class MultimodalProjector(PreTrainedModel):
         self.post_init()
 
     def forward(
-        self, inputs_embeds: torch.Tensor, return_dict: bool = True
+        self, hidden_states: torch.Tensor, return_dict: bool = True
     ) -> Union[ModelOutput, tuple]:
         if self.gradient_checkpointing and self.training:
-            outputs = self._gradient_checkpointing_func(self.projection, inputs_embeds)
+            outputs = self._gradient_checkpointing_func(self.projection, hidden_states)
         else:
-            outputs = self.projection(inputs_embeds)
+            outputs = self.projection(hidden_states)
 
         if not return_dict:
             return tuple(outputs)
@@ -486,7 +486,6 @@ class ModalEncoderModule(ModalModuleBase):
         return_dict: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        *args,
         **kwargs,
     ) -> ModelOutput | tuple:
         return_dict = (
@@ -505,18 +504,18 @@ class ModalEncoderModule(ModalModuleBase):
             else self.module.config.output_hidden_states
         )
 
-        # Merge args to kwargs
-        module_params = list(inspect.signature(self.module.forward).parameters.keys())
-        args_dict = {param_name: arg for param_name, arg in zip(module_params, args)}
-        kwargs.update(args_dict)
-
         # Call preprocess callback
         kwargs = self.preprocess_callback(inputs=kwargs)
 
-        outputs: BaseModelOutput = self.module(
+        # Merge args to kwargs
+        module_params = list(inspect.signature(self.module.forward).parameters.keys())
+
+        outputs: BaseModelOutput | tuple | torch.Tensor = self.module(
             # Filter out additional arguments
             **{k: v for k, v in kwargs.items() if k in module_params}
         )
+        if isinstance(outputs, torch.Tensor):
+            outputs = BaseModelOutput(last_hidden_state=outputs)
         outputs = self.postprocess_module_callback(inputs=kwargs, output=outputs)
 
         if self.projector is None:
@@ -713,7 +712,7 @@ class MultimodalModel(nn.Module):
             )
 
     def train(
-        self, encoders_mode: dict[str, tuple[bool, bool]], llm_mode: bool = True
+        self, encoders_mode: dict[str, tuple[bool, bool]] = None, llm_mode: bool = True
     ) -> MultimodalModel:
         """
         Set the training mode for the model components.
@@ -724,6 +723,11 @@ class MultimodalModel(nn.Module):
             llm_mode: bool
                 The training mode for the language model.
         """
+        if encoders_mode is None:
+            encoders_mode = {
+                encoder_key: (llm_mode, llm_mode) for encoder_key in self.encoders
+            }
+
         for encoder_key, (encoder_mode, projector_mode) in encoders_mode.items():
             if encoder_key not in self.encoders:
                 continue
@@ -742,7 +746,9 @@ class MultimodalModel(nn.Module):
             for p in self.language_model.parameters():
                 p.requires_grad_(llm_mode)
 
-    def set_modality_token_ids(self, token_ids: dict[str, int]):
+    def set_modality_token_ids(
+        self, token_ids: dict[str, int], new_num_tokens: int = 0
+    ):
         """
         Store modality token ids to the model, so that later
         it can replace the tokens with modality encoder outputs.
@@ -751,7 +757,8 @@ class MultimodalModel(nn.Module):
         Do not call manually.
         """
         self.token_ids = token_ids
-        self.language_model.resize_token_embeddings()
+        if new_num_tokens > 0:
+            self.language_model.resize_token_embeddings(new_num_tokens)
 
     def merge_encoder_outputs(
         self,
@@ -788,13 +795,13 @@ class MultimodalModel(nn.Module):
         for modal_key, output in encoders_outputs.items():
             output: torch.Tensor = output[0]
 
-            if len(output.shape) != 2:
-                logger.warning_once(
-                    f"{modal_key} encoder output shape {output[0].shape} should be 2d (num_features, hidden_size). "
-                    "Add postprocess_projector_callback to the encoder module to convert the shape. "
-                    "For most encocders that Cornstarch support already has the shape conversion implementation; "
-                    "you can see how the conversion is done in the source code.",
-                )
+            if output.ndim != 2:
+                # logger.warning_once(
+                #     f"{modal_key} encoder output shape {output.shape} should be 2d (num_features, hidden_size). "
+                #     "Add postprocess_projector_callback to the encoder module to convert the shape. "
+                #     "For most encoders that Cornstarch support already has the shape conversion implementation; "
+                #     "you can see how the conversion is done in the source code.",
+                # )
                 output = output.view(-1, output.shape[-1])
             if output.shape[-1] != inputs_embeds.shape[-1]:
                 raise ValueError(
