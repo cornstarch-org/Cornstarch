@@ -116,6 +116,7 @@ expected_language_module_layers = {
     ],
     "meta-llama/Meta-Llama-3-8B": [
         "model.embed_tokens",
+        "model.rotary_emb",
         "model.layers.0",
         "model.layers.1",
         "model.layers.2",

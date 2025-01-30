@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import inspect
 import random
 from contextlib import contextmanager, nullcontext
@@ -272,15 +274,10 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     encoders_inputs[modal_key] = encoder_inputs
                     encoders_outputs_dict[modal_key] = (encoder_outputs,)
 
-                inputs_embeds, attention_mask, position_ids, labels = (
-                    module.merge_encoder_outputs(
-                        encoder_inputs=encoders_inputs,
-                        encoder_outputs=encoders_outputs_dict,
-                        input_ids=input_ids,
-                        inputs_embeds=inputs_embeds,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                    )
+                inputs_embeds, attention_mask = module.merge_encoder_outputs(
+                    encoders_outputs=encoders_outputs_dict,
+                    input_ids=input_ids,
+                    inputs_embeds=inputs_embeds,
                 )
 
                 # step 4. run llm with merged inputs_embeds
@@ -322,6 +319,23 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     return_dict=return_dict,
                 )
 
+            language_model_inputs.update(kwargs)
+
+            if module.preprocess_llm_callback is not None:
+                # filter out inputs that the preprocess_llm_callback doesn't accept
+                callback_arguments = list(
+                    inspect.signature(module.preprocess_llm_callback).parameters.keys()
+                )
+
+                callback_inputs = {
+                    key: value
+                    for key, value in language_model_inputs.items()
+                    if key in callback_arguments
+                }
+
+                callback_outputs = module.preprocess_llm_callback(**callback_inputs)
+                language_model_inputs.update(callback_outputs)
+
             # remove inputs that the language model doesn't accept
             language_model_arguments = list(
                 inspect.signature(module.language_model.forward).parameters.keys()
@@ -331,6 +345,9 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     language_model_inputs.pop(key)
 
             result = module.language_model(**language_model_inputs)
+
+            # bitfield attention mask cannot be generated in the following stages.
+            # Add attention mask to the result.
             if isinstance(result, dict):
                 result["attention_mask"] = attention_mask
             return result
@@ -426,6 +443,18 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
     def _hook_context(self):
         return nullcontext()
 
+    def train(
+        self, encoders_mode: dict[str, tuple[bool, bool]] = None, llm_mode=True
+    ) -> MultimodalParallelModule:
+        self.module.train(encoders_mode, llm_mode)
+        return self
+
+    def set_modality_token_ids(
+        self, token_ids: dict[str, int], new_num_tokens: int = 0
+    ):
+        module: MultimodalModel = self.module
+        module.set_modality_token_ids(token_ids, new_num_tokens)
+
 
 class MultimodalParallelPlugin(HybridParallelPlugin):
     """Plugin for multimodal language model.
@@ -437,7 +466,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self,
         encoder_plugins: dict[str, ModalParallelPlugin] = None,
         language_model_plugin: ModalParallelPlugin | None = None,
-        precision: str = "fp16",
+        precision: str = None,
         enable_fused_normalization: bool = False,
         enable_flash_attention: bool = False,
         enable_jit_fused: bool = False,

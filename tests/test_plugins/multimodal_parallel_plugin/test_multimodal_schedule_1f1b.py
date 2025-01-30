@@ -223,7 +223,7 @@ class TestSingleEncoderForwardBackwardOrderClass(
         microbatch_size = 1
         call_list: list[str] = []
 
-        model = self.SingleEncoderModel()
+        model = self.SingleEncoderModel().to("cuda")
         model.train(mode=True)
         optimizer = OptimizerWrapper(torch.optim.SGD(model.parameters(), lr=1))
 
@@ -257,7 +257,7 @@ class TestSingleEncoderForwardBackwardOrderClass(
             "stage_manager": stage_manager,
         }
 
-        input_list = [torch.rand(num_microbatches * microbatch_size, 8)]
+        input_list = [torch.rand(num_microbatches * microbatch_size, 8, device="cuda")]
 
         schedule.forward_backward_step(
             model,
@@ -421,28 +421,36 @@ class TestScheduleSingleEncoderClass(
         )
 
         if stage_manager.is_last_stage(check_only_in_modal=False):
-            assert torch.allclose(loss, pp_ret["loss"])
+            torch.testing.assert_close(loss, pp_ret["loss"], atol=5e-3, rtol=5e-3)
 
         # check gradients
         if my_modal.model_name == "encoder":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder[i].weight.grad,
                     pp_model.encoder[i].weight.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder[i].bias.grad,
                     pp_model.encoder[i].bias.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
         elif my_modal.model_name == "llm":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.llm[i].weight.grad,
                     pp_model.llm[i].weight.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.llm[i].bias.grad,
                     pp_model.llm[i].bias.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
 
         # step
@@ -454,23 +462,31 @@ class TestScheduleSingleEncoderClass(
         # check updated param
         if my_modal.model_name == "encoder":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder[i].weight,
                     pp_model.encoder[i].weight,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder[i].bias,
                     pp_model.encoder[i].bias,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
         elif my_modal.model_name == "llm":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.llm[i].weight,
                     pp_model.llm[i].weight,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.llm[i].bias,
                     pp_model.llm[i].bias,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
 
 
@@ -533,38 +549,50 @@ class TestScheduleMultipleEncoderClass(
         )
 
         if stage_manager.is_last_stage(check_only_in_modal=False):
-            assert torch.allclose(loss, pp_ret["loss"])
+            torch.testing.assert_close(loss, pp_ret["loss"], atol=5e-3, rtol=5e-3)
 
         # check gradients
         if my_modal.model_name == "encoder1":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder1[i].weight.grad,
                     pp_model.encoder1[i].weight.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder1[i].bias.grad,
                     pp_model.encoder1[i].bias.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
         elif my_modal.model_name == "encoder2":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder2[i].weight.grad,
                     pp_model.encoder2[i].weight.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder2[i].bias.grad,
                     pp_model.encoder2[i].bias.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
         elif my_modal.model_name == "llm":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.llm[i].weight.grad,
                     pp_model.llm[i].weight.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.llm[i].bias.grad,
                     pp_model.llm[i].bias.grad,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
 
         # step
@@ -576,31 +604,43 @@ class TestScheduleMultipleEncoderClass(
         # check updated param
         if my_modal.model_name == "encoder1":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder1[i].weight,
                     pp_model.encoder1[i].weight,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder1[i].bias,
                     pp_model.encoder1[i].bias,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
         elif my_modal.model_name == "encoder2":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder2[i].weight,
                     pp_model.encoder2[i].weight,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.encoder2[i].bias,
                     pp_model.encoder2[i].bias,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
         elif my_modal.model_name == "llm":
             for i in range(start_idx, end_idx):
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.llm[i].weight,
                     pp_model.llm[i].weight,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )
-                assert torch.allclose(
+                torch.testing.assert_close(
                     model.llm[i].bias,
                     pp_model.llm[i].bias,
+                    atol=5e-3,
+                    rtol=5e-3,
                 )

@@ -562,7 +562,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         precision: str,
         run_original_model: bool = True,
         run_sharded_model: bool = True,
-    ):
+    ) -> tuple[nn.Module, ModelWrapper, Optimizer, OptimizerWrapper, Booster]:
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16
 
@@ -589,9 +589,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             precision=precision,
         )
 
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
-
         org_loss, org_output, sharded_loss, sharded_output = (
             self.run_forward_backward_with_multimodal_plugin(
                 org_model=org_model,
@@ -607,7 +604,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         )
 
         # checking correctness can only be done when running both models
-        if run_original_model and run_original_model:
+        if run_original_model and run_sharded_model:
             self.check_fn(
                 booster=booster,
                 org_model=org_model,
@@ -619,6 +616,8 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 org_loss=org_loss,
                 sharded_loss=sharded_loss,
             )
+
+        return org_model, sharded_model, org_optimizer, sharded_optimizer, booster
 
     @staticmethod
     def postprocess_callback(inputs: dict, output: BaseModelOutput) -> BaseModelOutput:
@@ -707,6 +706,9 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
             sharded_model, sharded_optimizer, self.llm.loss_fn
         )
+
+        org_model.gradient_checkpointing_enable()
+        sharded_model.unwrap().gradient_checkpointing_enable()
 
         return (
             org_model,
