@@ -15,6 +15,9 @@ from transformers.utils import TensorType, logging
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
     MultimodalModel,
 )
+from cornstarch.plugin.multimodal_parallel_plugin.multimodal_parallel_plugin import (
+    MultimodalParallelModule,
+)
 
 logger = logging.get_logger(__name__)
 
@@ -24,13 +27,6 @@ def default_num_feature_calculation_func_audio_static(
 ) -> list[int]:
     num_features = config.max_source_positions
     return [num_features] * inputs["raw_speech"].shape[0]
-
-
-def default_num_feature_calculation_func_vision_clip(
-    inputs: dict, outputs: dict, config: PretrainedConfig
-) -> list[int]:
-    num_features = (config.image_size // config.patch_size) ** 2 + 1
-    return [num_features] * outputs["pixel_values"].shape[0]
 
 
 def default_num_feature_calculation_func_vision_static(
@@ -88,7 +84,7 @@ def default_num_feature_calculation_func_qwen2vl(
 
 processor_type_to_num_feature_calculation_func = {
     "ViTImageProcessor": default_num_feature_calculation_func_vision_static,
-    "CLIPImageProcessor": default_num_feature_calculation_func_vision_clip,
+    "CLIPImageProcessor": default_num_feature_calculation_func_vision_static,
     "SiglipImageProcessor": default_num_feature_calculation_func_vision_static,
     "BitImageProcessor": default_num_feature_calculation_func_vision_static,
     "PixtralImageProcessor": default_num_feature_calculation_func_pixtral,
@@ -172,7 +168,9 @@ class MultimodalProcessor:
             )
 
     def _set_modality_tokens(
-        self, model: MultimodalModel, predefined_tokens: dict[str, str]
+        self,
+        model: MultimodalModel | MultimodalParallelModule,
+        predefined_tokens: dict[str, str],
     ):
         """
         Add the tokens as special tokens.
@@ -182,6 +180,10 @@ class MultimodalProcessor:
         predefined_tokens as a dictionary of modal_key to the token.
         This will override the token for the corresponding modality encoders.
         """
+        assert isinstance(
+            model, (MultimodalModel, MultimodalParallelModule)
+        ), "model should be an instance of MultimodalModel or MultimodalParallelModule."
+
         tokens = {
             modal_key: (
                 predefined_tokens[modal_key]
@@ -198,7 +200,9 @@ class MultimodalProcessor:
             modal_key: self.llm_tokenizer.convert_tokens_to_ids(token)
             for modal_key, token in tokens.items()
         }
+
         model.set_modality_token_ids(token_ids, len(self.llm_tokenizer))
+
         self.tokens = tokens
 
     def __call__(

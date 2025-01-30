@@ -792,7 +792,7 @@ class MultimodalModel(nn.Module):
         """
         if self.token_ids is None:
             raise ValueError(
-                "token_ids must be set before merging encoder outputs."
+                "token_ids must be set before merging encoder outputs. "
                 "Call `MultimodalModel.set_modality_tokens()` to set token ids."
             )
 
