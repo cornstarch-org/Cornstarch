@@ -7,27 +7,19 @@ for the model that colossalai does not support.
 
 Run:
 torchrun (dist configs) run_llm_hybrid.py --model_name_or_path meta-llama/Meta-Llama-3-8B
+
 For single-node multi-GPU training: torchrun --standalone --nproc-per-node=N
 For multi-node training: torchrun --master-addr <ip> --master-port <port> --nproc-per-node=N
 (need to run on all nodes)
-
-Supported models: llama, gemma, gemma2, phi3, qwen2, mistral, mixtral
-Example model
-llama: meta-llama/Meta-Llama-3-8B
-gemma: google/gemma-7b
-gemma2: google/gemma-2-9b
-phi3: microsoft/Phi-3-mini-4k-instruct
-qwen2: Qwen/Qwen2-7B-Instruct
-mistral: mistralai/Mistral-7B-Instruct-v0.3
-mixtral: mistralai/Mixtral-8x7B-Instruct-v0.1
 """
 
 import functools
+from typing import Literal
 
-import click
-import colossalai
 import datasets
 import torch
+import torch.distributed as dist
+import tyro
 from colossalai.booster import Booster
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelPlugin
 from colossalai.cluster import DistCoordinator
@@ -37,6 +29,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
+    AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
@@ -46,8 +39,18 @@ from transformers import (
 
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
 
+model_names: dict[str, str] = {
+    "gemma2": "google/gemma-2-2b-it",
+    "llama": "meta-llama/Llama-3.2-1B-Instruct",
+    "phi3": "microsoft/Phi-3-mini-4k-instruct",
+    "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
+    "qwen2": "Qwen/Qwen2.5-3B-Instruct",
+}
 
-def tokenize_batch_for_pretrain(batch, tokenizer: PreTrainedTokenizer):
+
+def tokenize_batch_for_pretrain(
+    batch, tokenizer: PreTrainedTokenizer
+) -> dict[str, torch.Tensor]:
     texts = [sample["text"] for sample in batch]
     data = tokenizer(
         texts,
@@ -55,30 +58,34 @@ def tokenize_batch_for_pretrain(batch, tokenizer: PreTrainedTokenizer):
         padding=True,
         truncation=True,
     )
-    data = {k: v.cuda() for k, v in data.items()}
+    data = {k: v.to("cuda") for k, v in data.items()}
     data["labels"] = data["input_ids"].clone()
     return data
 
 
-@click.command
-@click.option(
-    "--model_name_or_path",
-    type=str,
-    required=True,
-    help="Model name from HF hub or local path.",
-    default="meta-llama/Meta-Llama-3-8B",
-)
-def pretrain(model_name_or_path: str):
-    colossalai.launch_from_torch()
+def pretrain(model_name: Literal["gemma2", "llama", "phi3", "mistral", "qwen2"]):
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(f"cuda:{dist.get_rank() % torch.cuda.device_count()}")
+
+    model_path = model_names[model_name]
 
     # Get model from HF hub
-    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
-        model_name_or_path,
-        trust_remote_code=False,
-        _attn_implementation="eager",
-    ).to(dtype=torch.bfloat16, device=torch.device("cuda"))
-    model.train(mode=True)
-    model.gradient_checkpointing_enable()
+    config = AutoConfig.from_pretrained(
+        model_path, _attn_implementation="flash_attention_2"
+    )
+
+    with torch.device("meta"):
+        model: PreTrainedModel = AutoModelForCausalLM.from_config(config).to(
+            dtype=torch.bfloat16
+        )
+        model.train(mode=True)
+        model.gradient_checkpointing_enable()
+
+    # materialize the model
+    with torch.no_grad():
+        model.to_empty(device="cuda")
+        for p in model.parameters():
+            p.random_(0, 1)
 
     # Get a custom sharding policy from Cornstarch.
     # Because colossalai HybridParallelPlugin finds the policy within its own policy list,
@@ -104,7 +111,7 @@ def pretrain(model_name_or_path: str):
     booster = Booster(plugin=plugin)
 
     # tokenizer, dataset, and dataloader
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
     tokenizer.pad_token = tokenizer.eos_token
 
     dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1")["train"]
@@ -166,4 +173,4 @@ def pretrain(model_name_or_path: str):
 
 
 if __name__ == "__main__":
-    pretrain()
+    tyro.cli(pretrain)

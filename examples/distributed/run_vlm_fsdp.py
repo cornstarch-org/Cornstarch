@@ -1,222 +1,162 @@
 """
-An example of pretraining a vision language model (VLM) using Pytorch FullyShardedDataParallel (FSDP).
+An example of pretraining a vision-language model (VLM) using FullyShardedDataParallel (FSDP).
 
-This relies on existing colossalai APIs (TorchFSDPPlugin).
-Cornstarch is used only for generating a `MultimodalModel`.
+Run:
+torchrun (dist configs) run_vlm_ddp.py --vision-encoder_name <vision_encoder_name> --llm-name <llm_name> [--llava-dataset-file-path <llava_dataset_file_path>]
+
+For single-node multi-GPU training: torchrun --standalone --nproc-per-node=N
+For multi-node training: torchrun --master-addr <ip> --master-port <port> --nproc-per-node=N
+(need to run on all nodes)
+
+--llava-dataset-file-path is optional. If not given, a fake dataset will be used.
 """
 
 import functools
+import sys
 from pathlib import Path
+from typing import Literal, Optional
 
-import click
-import colossalai
 import torch
 import torch.distributed as dist
-import torch.nn as nn
-from colossalai.booster import Booster
-from colossalai.booster.plugin.torch_fsdp_plugin import TorchFSDPPlugin
-from colossalai.cluster import DistCoordinator
+import tyro
 from datasets import load_dataset
-from PIL import Image
-from torch.distributed.fsdp.api import BackwardPrefetch, ShardingStrategy
-from torch.distributed.fsdp.wrap import ModuleWrapPolicy
-from torch.optim import Adam
+from torch.distributed._composable.fsdp import fully_shard
+from torch.optim.adam import Adam
 from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
+    AutoConfig,
+    AutoImageProcessor,
     AutoModelForCausalLM,
     AutoTokenizer,
-    PreTrainedModel,
     get_linear_schedule_with_warmup,
-)
-from transformers.models.clip import CLIPImageProcessor
-from transformers.models.clip.modeling_clip import (
-    CLIPEncoderLayer,
-    CLIPVisionModel,
-)
-from transformers.models.llama.modeling_llama import (
-    LlamaDecoderLayer,
 )
 
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
-    MultimodalModelProcessor,
-    MultimodalProjector,
+    MultimodalProcessor,
 )
 
-
-def collate_fn_llava_pretrain(
-    batches: list[dict], processor: MultimodalModelProcessor, dataset_dir: Path
-):
-    images = []
-    texts = []
-
-    for batch in batches:
-        assert set(["image", "id", "conversations"]) == set(batch.keys())
-        assert (
-            isinstance(batch["conversations"], list)
-            and len(batch["conversations"]) == 2
-        )
-        for conversation in batch["conversations"]:
-            assert ["from", "value"] == list(conversation.keys())
-        # assert "<image>" in batch["conversations"][0]["value"]
-        batch["conversations"][0]["value"].replace("<image>", "")
-
-        image = Image.open(f"{dataset_dir}/{batch['image']}")
-        images.append(image)
-
-        texts.append(
-            f"{batch['conversations'][0]['value']} "
-            f"{batch['conversations'][1]['value']}"
-        )
-
-    data = processor(images=images, text=texts, return_tensors="pt", padding=True)
-    data = {k: v.to("cuda") for k, v in data.items()}
-    data["labels"] = data["input_ids"].clone()
-    return data
-
-
-@click.command
-@click.option(
-    "--vision_model_name_or_path",
-    type=str,
-    required=True,
-    help="Vision model name from HF hub or local path.",
-    default="openai/clip-vit-base-patch32",
+sys.path.append(Path(__file__).parent.joinpath("..").as_posix())
+from commons import (
+    collate_fn,
+    collate_fn_llava_pretrain,
+    model_names,
+    vision_encoder_classes,
 )
-@click.option(
-    "--language_model_name_or_path",
-    type=str,
-    required=True,
-    help="Language model name from HF hub or local path.",
-    default="meta-llama/Meta-Llama-3-8B",
-)
-@click.option(
-    "--dataset_file_path", type=Path, required=True, help="Path to the main dataset."
-)
-@click.option("--output_dir", type=Path, required=True, help="Path to save the model.")
+from fake_dataset import FakeDataset
+
+
 def pretrain(
-    vision_model_name_or_path: str,
-    language_model_name_or_path: str,
-    dataset_file_path: Path,
-    output_dir: Path,
+    vision_encoder_name: Literal["clip", "siglip", "pixtral", "qwen2_vision"],
+    llm_name: Literal["gemma2", "llama", "phi3", "mistral"],
+    llava_dataset_file_path: Optional[Path] = None,
 ):
-    colossalai.launch_from_torch()
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(f"cuda:{dist.get_rank() % torch.cuda.device_count()}")
+
+    vision_encoder_path = model_names[vision_encoder_name]
+    llm_path = model_names[llm_name]
+    print(f"Pretraining a VLM with {vision_encoder_path} + {llm_path}.")
 
     # Create a model
-    if "clip" in vision_model_name_or_path:
-        vision_encoder = CLIPVisionModel.from_pretrained(
-            vision_model_name_or_path,
-            trust_remote_code=False,
-            _attn_implementation="eager",
-            torch_dtype=torch.bfloat16,
+    with torch.device("meta"):
+        vision_config = AutoConfig.from_pretrained(vision_encoder_path)
+        vision_encoder = vision_encoder_classes[vision_encoder_name](
+            vision_config.vision_config
         )
-        vision_encoder = ModalEncoderModule(vision_encoder)
-    else:
-        raise NotImplementedError
-    language_model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
-        language_model_name_or_path,
-        trust_remote_code=False,
-        _attn_implementation="flash_attention_2",
-        torch_dtype=torch.bfloat16,
-    )
 
-    model = MultimodalModel(
-        encoders={"vision": vision_encoder},
-        language_model=language_model,
-    ).to(dtype=torch.bfloat16, device="cuda")
-    vision_encoder.train(module=False, projector=True)
-    language_model.train(mode=False)
-    model.gradient_checkpointing_enable()
+        llm_config = AutoConfig.from_pretrained(llm_path)
+        language_model = AutoModelForCausalLM.from_config(llm_config)
+
+        if vision_encoder_name == "qwen2_vision":
+            # Qwen2 vision encoder is not designed as a standalone model,
+            # but used in Qwen2VL, which has a preprocessing procedure for the input.
+            # pixel_values -> hidden_states, image_grid_thw -> grid_thw
+            vision_encoder = ModalEncoderModule(
+                model=vision_encoder,
+                additional_args=["pixel_values", "image_grid_thw"],
+                preprocess_callback=lambda inputs: {
+                    "hidden_states": inputs["pixel_values"],
+                    "grid_thw": inputs["image_grid_thw"],
+                },
+            )
+        else:
+            vision_encoder = ModalEncoderModule(vision_encoder)
+
+        model = MultimodalModel(
+            encoders={"vision": vision_encoder},
+            language_model=language_model,
+        ).to(dtype=torch.bfloat16)
+
+    model.gradient_checkpointing_enable({"use_reentrant": False})
+    model.train()
 
     # Create a processor
-    image_processor = CLIPImageProcessor.from_pretrained(vision_model_name_or_path)
-    text_processor = AutoTokenizer.from_pretrained(
-        language_model_name_or_path, use_fast=True
+    image_processor = AutoImageProcessor.from_pretrained(vision_encoder_path)
+    tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=True)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    processor = MultimodalProcessor(
+        encoder_processors={"vision": image_processor},
+        llm_tokenizer=tokenizer,
+        model=model,
+        predefined_tokens={"vision": "<image>"},
     )
-    processor = MultimodalModelProcessor(
-        tokenizer=text_processor,
-        image_processor=image_processor,
+
+    if llava_dataset_file_path:
+        dataset = load_dataset("json", data_files=llava_dataset_file_path.as_posix())[
+            "train"
+        ]
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=4,
+            shuffle=True,
+            drop_last=True,
+            collate_fn=functools.partial(
+                collate_fn_llava_pretrain,
+                processor=processor,
+                dataset_dir=llava_dataset_file_path.parent,
+            ),
+        )
+    else:
+        print("No dataset is provided. Using a fake data iterator.")
+        dataset = FakeDataset(image_size=(720, 480))
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=4,
+            collate_fn=functools.partial(collate_fn, processor=processor),
+        )
+
+    # find ModuleList from all submodules of model.
+    for module in model.modules():
+        if not isinstance(module, torch.nn.ModuleList):
+            continue
+        for submodule in module:
+            fully_shard(submodule)
+    fully_shard(model)
+
+    # materialize the model
+    model.to_empty(device="cuda")
+
+    optimizer = Adam(
+        [p for p in model.parameters() if p.requires_grad], lr=1e-5, fused=True
     )
-
-    # This pad token will be used in callback to replace image token
-    language_model.config.pad_token_id = text_processor.pad_token_id
-
-    """
-    Examples of loading some datasets:
-    1. liuhaotian/llava-pretrain
-        tree -L 1 /path/to/datasets/liuhaotian___llava-pretrain
-        liuhaotian___llava-pretrain/
-        |-- 00000
-        |-- 00001
-        |-- 00002
-        ...
-        |-- 00658
-        |-- 00659
-        |-- blip_laion_cc_sbu_558k.json
-
-        dataset_dir = /path/to/datasets/liuhaotian___llava-pretrain
-        dataset_file_name = blip_laion_cc_sbu_558k.json
-    """
-
-    plugin = TorchFSDPPlugin(
-        process_group=dist.group.WORLD,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
-        auto_wrap_policy=ModuleWrapPolicy(
-            [
-                MultimodalProjector,
-                CLIPEncoderLayer,
-                LlamaDecoderLayer,
-                nn.Embedding,
-            ]
-        ),
-        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
-    )
-    plugin.fsdp_kwargs["forward_prefetch"] = True
-
-    microbatch_size = 16
-
-    booster = Booster(plugin=plugin)
-
-    optimizer = Adam(model.parameters())
     optimizer.zero_grad()
 
-    dataset = load_dataset("json", data_files=str(dataset_file_path))["train"]
-    dataloader = plugin.prepare_dataloader(
-        dataset,
-        batch_size=microbatch_size,
-        shuffle=True,
-        drop_last=True,
-        collate_fn=functools.partial(
-            collate_fn_llava_pretrain,
-            processor=processor,
-            dataset_dir=dataset_file_path.parent,
-        ),
-    )
-
     total_steps = len(dataloader)
-    warmup_fraction = 0.1
-    num_warmup_steps = int(total_steps * warmup_fraction)
+    num_warmup_steps = int(total_steps * 0.1)
     lr_scheduler: LambdaLR = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=num_warmup_steps,
         num_training_steps=total_steps,
     )
 
-    model, optimizer, criterion, *_ = booster.boost(
-        model=model,
-        optimizer=optimizer,
-        criterion=lambda outputs, inputs: outputs.loss,
-    )
-
-    coordinator = DistCoordinator()
-    optimizer.zero_grad()
-
     dataloader_iter = iter(dataloader)
     with tqdm(
         range(total_steps),
-        disable=not (coordinator.is_master()),
     ) as pbar:
         for item in pbar:
             inputs = next(dataloader_iter)
@@ -224,20 +164,12 @@ def pretrain(
             loss = outputs.loss
             loss.backward()
 
-            if coordinator.is_master():
-                pbar.set_postfix({"loss": loss.item()})
+            pbar.set_postfix({"loss": loss.item()})
 
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
 
-    booster.save_model(
-        model,
-        output_dir / f"{vision_model_name_or_path}-{language_model_name_or_path}",
-        shard=True,
-        use_safetensors=True,
-    )
-
 
 if __name__ == "__main__":
-    pretrain()
+    tyro.cli(pretrain)

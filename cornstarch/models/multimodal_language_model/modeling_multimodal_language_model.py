@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
+from colossalai.accelerator import get_accelerator
 from transformers.activations import get_activation
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -758,6 +759,9 @@ class MultimodalModel(nn.Module):
         """
         self.token_ids = token_ids
         if new_num_tokens > 0:
+            embeddings = self.language_model.get_input_embeddings()
+            if next(embeddings.parameters()).is_meta:
+                embeddings.to_empty(device=get_accelerator().get_current_device())
             self.language_model.resize_token_embeddings(new_num_tokens)
 
     def merge_encoder_outputs(
