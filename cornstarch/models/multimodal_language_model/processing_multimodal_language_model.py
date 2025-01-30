@@ -15,9 +15,6 @@ from transformers.utils import TensorType, logging
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
     MultimodalModel,
 )
-from cornstarch.plugin.multimodal_parallel_plugin.multimodal_parallel_plugin import (
-    MultimodalParallelModule,
-)
 
 logger = logging.get_logger(__name__)
 
@@ -169,7 +166,7 @@ class MultimodalProcessor:
 
     def _set_modality_tokens(
         self,
-        model: MultimodalModel | MultimodalParallelModule,
+        model: MultimodalModel,
         predefined_tokens: dict[str, str],
     ):
         """
@@ -180,10 +177,6 @@ class MultimodalProcessor:
         predefined_tokens as a dictionary of modal_key to the token.
         This will override the token for the corresponding modality encoders.
         """
-        assert isinstance(
-            model, (MultimodalModel, MultimodalParallelModule)
-        ), "model should be an instance of MultimodalModel or MultimodalParallelModule."
-
         tokens = {
             modal_key: (
                 predefined_tokens[modal_key]
