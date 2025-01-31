@@ -747,6 +747,35 @@ class MultimodalModel(nn.Module):
             for p in self.language_model.parameters():
                 p.requires_grad_(llm_mode)
 
+    # def resize_llm_token_embeddings_(self, new_num_tokens: int):
+    #     """
+    #     Adopted from transformers.modeling_utils.PreTrainedModel.resize_token_embeddings,
+    #     but pads the embeddings inplace instead of creating a new tensor.
+    #     """
+    #     embeddings: nn.Embedding = self.language_model.get_input_embeddings()
+    #     new_embeddings = self.language_model._get_resized_embeddings(
+    #         embeddings, new_num_tokens, mean_resizing=False
+    #     )
+    #     embeddings.weight.data = new_embeddings.weight.data
+
+    #     # if word embeddings are not tied, make sure that lm head is resized as well
+    #     if (
+    #         self.language_model.get_output_embeddings() is not None
+    #         and not self.language_model.config.tie_word_embeddings
+    #     ):
+    #         lm_head: nn.Linear = self.language_model.get_output_embeddings()
+    #         if isinstance(lm_head, nn.Embedding):
+    #             new_lm_head = self.language_model._get_resized_embeddings(
+    #                 lm_head, new_num_tokens, mean_resizing=False
+    #             )
+    #         else:
+    #             new_lm_head = self.language_model._get_resized_lm_head(
+    #                 lm_head, new_num_tokens, mean_resizing=False
+    #             )
+    #             lm_head.in_features = new_lm_head.in_features
+    #             lm_head.out_features = new_lm_head.out_features
+    #         lm_head.weight.data = new_lm_head.weight.data
+
     def set_modality_token_ids(
         self, token_ids: dict[str, int], new_num_tokens: int = 0
     ):
@@ -758,11 +787,17 @@ class MultimodalModel(nn.Module):
         Do not call manually.
         """
         self.token_ids = token_ids
-        if new_num_tokens > 0:
-            embeddings = self.language_model.get_input_embeddings()
-            if next(embeddings.parameters()).is_meta:
-                embeddings.to_empty(device=get_accelerator().get_current_device())
-            self.language_model.resize_token_embeddings(new_num_tokens)
+        # if new_num_tokens > 0:
+        #     embeddings = self.language_model.get_input_embeddings()
+        #     if next(embeddings.parameters()).is_meta:
+        #         embeddings.to_empty(device=get_accelerator().get_current_device())
+
+        #     # HF's resize_token_embeddings() creates a totally new tensor,
+        #     # ending up having different IDs from the original tensor.
+        #     # This breaks tied embeddings logic in colossalai, and creates errors
+        #     # in distributed execution.
+        #     # self.language_model.resize_token_embeddings(new_num_tokens)
+        #     self.resize_llm_token_embeddings_(new_num_tokens)
 
     def merge_encoder_outputs(
         self,
@@ -960,9 +995,19 @@ class MultimodalModel(nn.Module):
             encoders_outputs[modal_key] = encoder_module(**args)
 
         # step 2. merge encoded multimodal features into text embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        # mask out special tokens from input_ids to avoid out of index error
+        # and use it as an input to embedding.
+        token_mask = torch.isin(
+            input_ids,
+            torch.tensor(list(self.token_ids.values())).to(input_ids.device),
+        )
+        input_ids_masked = input_ids.clone()
+        input_ids_masked[token_mask] = 0
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids_masked)
 
         # step 3. merge encoder outputs to llm inputs_embeds
+        # the original, not masked input_ids should be given to merge encoder_outputs
+        # to the locations special tokens exist.
         inputs_embeds, attention_mask = self.merge_encoder_outputs(
             encoders_outputs=encoders_outputs,
             input_ids=input_ids,
@@ -970,13 +1015,15 @@ class MultimodalModel(nn.Module):
         )
 
         # step 4. run llm with merged inputs_embeds
+        labels_masked = labels.clone()
+        labels_masked[token_mask] = -100
         language_model_inputs = dict(
             input_ids=None,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            labels=labels,
+            labels=labels_masked,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,

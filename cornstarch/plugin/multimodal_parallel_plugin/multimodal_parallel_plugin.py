@@ -232,6 +232,13 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         assert "decoder" not in self.my_modal_name, "TODO: decoder forward"
 
         if self.my_modal_name == "language_model":
+            token_mask = torch.isin(
+                input_ids,
+                torch.tensor(list(self.module.token_ids.values())).to(input_ids.device),
+            )
+            labels_masked = labels.clone()
+            labels_masked[token_mask] = -100
+
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # Forward in the first stage of the language model
                 num_tokens_per_encoder_outputs = getattr(
@@ -243,20 +250,13 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 )
 
                 # Split merged encoder outputs into separate modal features
-                encoders_outputs = hidden_states.split(
-                    num_tokens_per_encoder_outputs, dim=1
-                )
-
-                # step 2. merge encoded multimodal features into text embeddings
-                inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
-
-                # step 3. merge encoder outputs to llm inputs_embeds
                 encoders_inputs: dict[str, dict] = {}
                 # merging functions accept either BaseModelOutput or tuple of tensors,
                 # and the first tensor (last_hidden_state) is merged.
-                encoders_outputs_dict: dict[str, tuple[torch.Tensor]] = {}
+                encoders_outputs: dict[str, tuple[torch.Tensor]] = {}
                 for modal_key, encoder_outputs in zip(
-                    module.encoders.keys(), encoders_outputs
+                    module.encoders.keys(),
+                    hidden_states.split(num_tokens_per_encoder_outputs, dim=1),
                 ):
                     encoder_module: ModalEncoderModule = getattr(
                         module, f"{modal_key}_encoder"
@@ -272,10 +272,20 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                             encoder_inputs[additional_arg] = kwargs[additional_arg]
 
                     encoders_inputs[modal_key] = encoder_inputs
-                    encoders_outputs_dict[modal_key] = (encoder_outputs,)
+                    encoders_outputs[modal_key] = (encoder_outputs,)
 
+                # step 2. merge encoded multimodal features into text embeddings
+                # mask out special tokens from input_ids to avoid out of index error
+                # and use it as an input to embedding.
+                input_ids_masked = input_ids.clone()
+                input_ids_masked[token_mask] = 0
+                inputs_embeds = module.language_model.get_input_embeddings()(
+                    input_ids_masked
+                )
+
+                # step 3. merge encoder outputs to llm inputs_embeds
                 inputs_embeds, attention_mask = module.merge_encoder_outputs(
-                    encoders_outputs=encoders_outputs_dict,
+                    encoders_outputs=encoders_outputs,
                     input_ids=input_ids,
                     inputs_embeds=inputs_embeds,
                 )
@@ -289,7 +299,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds,
                     hidden_states=None,
-                    labels=labels,
+                    labels=labels_masked,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
@@ -312,7 +322,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     past_key_values=past_key_values,
                     inputs_embeds=None,
                     hidden_states=hidden_states,
-                    labels=labels,
+                    labels=labels_masked,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,

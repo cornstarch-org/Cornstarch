@@ -393,6 +393,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
     num_microbatches: int = 4
     microbatch_size: int = 1
+    token_ids: dict[str, int]
 
     def set_model(self, encoders: dict[str, ModelClassBase], llm: ModelClassBase):
         self.encoders = encoders
@@ -621,7 +622,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
     @staticmethod
     def postprocess_callback(inputs: dict, output: BaseModelOutput) -> BaseModelOutput:
-        # Cut number of tokens to make ring attention happy
+        # Cut number of tokens to make merging outputs easier
         output.last_hidden_state = output.last_hidden_state[:, :32, :]
         return output
 
@@ -662,6 +663,17 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 },
                 language_model=llm,
             ).to("cuda")
+
+            num_existing_tokens = llm.get_input_embeddings().weight.shape[0]
+            self.token_ids = {
+                encoder_name: num_existing_tokens + encoder_index
+                for encoder_index, encoder_name in enumerate(encoders)
+            }
+            org_model.set_modality_token_ids(
+                token_ids=self.token_ids,
+                new_num_tokens=num_existing_tokens + len(encoders),
+            )
+
             sharded_model = copy.deepcopy(org_model)
         if use_lazy_init:
             ctx.materialize(org_model)
