@@ -23,7 +23,7 @@ def default_num_feature_calculation_func_audio_static(
     inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[int]:
     num_features = config.max_source_positions
-    return [num_features] * inputs["raw_speech"].shape[0]
+    return [num_features] * outputs["input_features"].shape[0]
 
 
 def default_num_feature_calculation_func_vision_static(
