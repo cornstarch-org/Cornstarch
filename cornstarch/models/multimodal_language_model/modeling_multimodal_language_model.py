@@ -7,7 +7,6 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
-from colossalai.accelerator import get_accelerator
 from transformers.activations import get_activation
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -28,6 +27,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 )
 from transformers.utils import logging
 
+from cornstarch.kernel.interface import create_bitfield_attention_mask
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 logger = logging.get_logger(__name__)
@@ -829,27 +829,9 @@ class MultimodalModel(nn.Module):
             )
             inputs_embeds = inputs_embeds.masked_scatter(modal_mask, output)
 
-        attention_mask = self.create_bitfield_attention_mask(input_ids)
+        attention_mask = create_bitfield_attention_mask(input_ids, self.token_ids)
 
         return inputs_embeds, attention_mask
-
-    def create_bitfield_attention_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
-        causal_bit = 1 << 62
-        modal_bits = {
-            modal_key: (1 << (i + 1))
-            for i, modal_key in enumerate(self.token_ids.keys())
-        }
-        text_bit = causal_bit | 1
-        for modal_bit in modal_bits:
-            text_bit |= modal_bits[modal_bit]
-
-        attention_mask = torch.full_like(
-            input_ids, text_bit, dtype=torch.int64, device=input_ids.device
-        )
-        for modal_key, token_id in self.token_ids.items():
-            attention_mask[input_ids == token_id] = modal_bits[modal_key]
-
-        return attention_mask
 
     def forward(
         self,
