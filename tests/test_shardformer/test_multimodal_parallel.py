@@ -40,7 +40,7 @@ audio_models = dict(
 )
 
 causal_lms = dict(
-    gemma2=Gemma2ForCausalLMBase,
+    # gemma2=Gemma2ForCausalLMBase,
     llama=LlamaForCausalLMBase,
     mistral=MistralForCausalLMBase,
     phi3=Phi3ForCausalLMBase,

@@ -747,35 +747,6 @@ class MultimodalModel(nn.Module):
             for p in self.language_model.parameters():
                 p.requires_grad_(llm_mode)
 
-    # def resize_llm_token_embeddings_(self, new_num_tokens: int):
-    #     """
-    #     Adopted from transformers.modeling_utils.PreTrainedModel.resize_token_embeddings,
-    #     but pads the embeddings inplace instead of creating a new tensor.
-    #     """
-    #     embeddings: nn.Embedding = self.language_model.get_input_embeddings()
-    #     new_embeddings = self.language_model._get_resized_embeddings(
-    #         embeddings, new_num_tokens, mean_resizing=False
-    #     )
-    #     embeddings.weight.data = new_embeddings.weight.data
-
-    #     # if word embeddings are not tied, make sure that lm head is resized as well
-    #     if (
-    #         self.language_model.get_output_embeddings() is not None
-    #         and not self.language_model.config.tie_word_embeddings
-    #     ):
-    #         lm_head: nn.Linear = self.language_model.get_output_embeddings()
-    #         if isinstance(lm_head, nn.Embedding):
-    #             new_lm_head = self.language_model._get_resized_embeddings(
-    #                 lm_head, new_num_tokens, mean_resizing=False
-    #             )
-    #         else:
-    #             new_lm_head = self.language_model._get_resized_lm_head(
-    #                 lm_head, new_num_tokens, mean_resizing=False
-    #             )
-    #             lm_head.in_features = new_lm_head.in_features
-    #             lm_head.out_features = new_lm_head.out_features
-    #         lm_head.weight.data = new_lm_head.weight.data
-
     def set_modality_token_ids(
         self, token_ids: dict[str, int], new_num_tokens: int = 0
     ):
@@ -787,17 +758,6 @@ class MultimodalModel(nn.Module):
         Do not call manually.
         """
         self.token_ids = token_ids
-        # if new_num_tokens > 0:
-        #     embeddings = self.language_model.get_input_embeddings()
-        #     if next(embeddings.parameters()).is_meta:
-        #         embeddings.to_empty(device=get_accelerator().get_current_device())
-
-        #     # HF's resize_token_embeddings() creates a totally new tensor,
-        #     # ending up having different IDs from the original tensor.
-        #     # This breaks tied embeddings logic in colossalai, and creates errors
-        #     # in distributed execution.
-        #     # self.language_model.resize_token_embeddings(new_num_tokens)
-        #     self.resize_llm_token_embeddings_(new_num_tokens)
 
     def merge_encoder_outputs(
         self,

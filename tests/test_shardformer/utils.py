@@ -843,8 +843,8 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         )
 
     def postprocess_data_for_original_model(
-        self, data: list[torch.Tensor | dict[str, torch.Tensor]], precision: torch.dtype
-    ) -> list | dict:
+        self, data: dict[str, torch.Tensor], precision: torch.dtype
+    ) -> dict:
         assert isinstance(data, list) or isinstance(data, dict)
         if isinstance(data, list):
             new_data = []
@@ -859,11 +859,33 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                     v = v.to(dtype=precision)
                 new_data[k] = v.clone().to("cuda")
 
+        """
+        Inject encoder tokens to the input_ids for the multimodal model.
+        """
+        input_ids: torch.Tensor = new_data["input_ids"]
+        encoder_tokens: list[torch.Tensor] = []
+        for modal_key in self.encoders.keys():
+            # num_encoder_tokens is a list[int] type, a list of number of tokens for each batch.
+            # Implement a 2D tensor with the shape of (batch_size, num_encoder_tokens)
+            encoder_tokens.append(
+                torch.full(
+                    (input_ids.shape[0], 32),
+                    fill_value=self.token_ids[modal_key],
+                    dtype=torch.long,
+                    device=input_ids.device,
+                )
+            )
+
+        # prepend it to input_ids
+        input_ids = torch.cat(encoder_tokens + [input_ids], dim=1)
+        new_data["input_ids"] = input_ids
+        new_data["labels"] = input_ids
+
         return new_data
 
     def postprocess_data_for_sharded_model(
-        self, data: list[torch.Tensor | dict[str, torch.Tensor]], precision: torch.dtype
-    ) -> list | dict:
+        self, data: dict[str, torch.Tensor], precision: torch.dtype
+    ) -> dict:
         return self.postprocess_data_for_original_model(data, precision)
 
     def run_forward_backward_with_multimodal_plugin(

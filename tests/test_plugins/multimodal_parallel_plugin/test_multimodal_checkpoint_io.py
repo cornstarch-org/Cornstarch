@@ -53,37 +53,6 @@ class CornstarchCheckpointTestBase(CornstarchMultimodalParallelBase):
     def world_size(self) -> int:
         return 16
 
-    def postprocess_data_for_sharded_model(
-        self,
-        data: dict,
-        precision: torch.dtype,
-    ):
-        """
-        Inject encoder tokens to the input_ids for the multimodal model.
-        """
-        data = super().postprocess_data_for_sharded_model(data, precision)
-
-        input_ids: torch.Tensor = data["input_ids"]
-        encoder_tokens: list[torch.Tensor] = []
-        for modal_key in self.encoders.keys():
-            # num_encoder_tokens is a list[int] type, a list of number of tokens for each batch.
-            # Implement a 2D tensor with the shape of (batch_size, num_encoder_tokens)
-            encoder_tokens.append(
-                torch.full(
-                    (input_ids.shape[0], 32),
-                    fill_value=self.token_ids[modal_key],
-                    dtype=torch.long,
-                    device=input_ids.device,
-                )
-            )
-
-        # prepend it to input_ids
-        input_ids = torch.cat(encoder_tokens + [input_ids], dim=1)
-        data["input_ids"] = input_ids
-        data["labels"] = input_ids
-
-        return data
-
     def build_model_from_multimodal_plugin(
         self, tp_size: int, module_pp_size: dict[str, int]
     ) -> tuple[MultimodalParallelModule, OptimizerWrapper, Callable, Booster]:
