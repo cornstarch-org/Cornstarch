@@ -699,6 +699,9 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
 
         A vision encoder and a projector can be loaded separately, as they are individual modules.
         If a checkpoint includes multiple modules, same path can be used for multiple modules.
+
+        If a model is lazy initialized with `from_pretrained()`, the path is already stored in the model.
+        The path given to `from_pretrained()` will be used and the corresponding path in the checkpoint dictionary will be ignored.
         """
         assert isinstance(model, MultimodalParallelModule), (
             f"model should be an instance of MultimodalParallelModule, "
@@ -734,41 +737,45 @@ class MultimodalParallelCheckpointIO(CheckpointIO):
                             module, str(target_index_file_path), strict
                         )
 
+        def get_checkpoint_path(
+            module: PreTrainedModel | ModalModuleBase, module_name: str
+        ) -> Optional[Path]:
+            path = getattr(module, "_pretrained", None)
+            if path is None and checkpoint is not None:
+                path = checkpoint.get(module_name, None)
+
+            if path is None:
+                if strict:
+                    raise ValueError(
+                        f"checkpoint path for {module_name} is not provided in the checkpoint dictionary."
+                    )
+
+                return None
+
+            return Path(path)
+
         language_model = getattr(model.module, "language_model")
-        if language_model is not None:
-            assert "language_model" in checkpoint, (
-                f"language_model should be in the checkpoint, " f"but got {checkpoint}."
+        language_model_path = get_checkpoint_path(language_model, "language_model")
+        if language_model_path is not None:
+            load_module(language_model, language_model_path)
+
+        for modal_key, encoder_module in model.module.encoders.items():
+            assert isinstance(encoder_module, ModalEncoderModule), (
+                f"encoder_module should be an instance of ModalEncoderModule, "
+                f"but got {type(encoder_module)}."
             )
-            load_module(language_model, Path(checkpoint.pop("language_model")))
 
-        for encoder_name, encoder_module in model.module.encoders.items():
-            if strict:
-                assert f"{encoder_name}_encoder.module" in checkpoint, (
-                    f"{encoder_name}_encoder.module should be in the checkpoint, "
-                    f"but got {checkpoint}."
-                )
-                assert f"{encoder_name}_encoder.projector" in checkpoint, (
-                    f"{encoder_name}_encoder.projector should be in the checkpoint, "
-                    f"but got {checkpoint}."
-                )
-
-            if f"{encoder_name}_encoder.module" in checkpoint:
-                load_module(
-                    getattr(encoder_module, "module"),
-                    Path(checkpoint.pop(f"{encoder_name}_encoder.module")),
-                )
-
-            if f"{encoder_name}_encoder.projector" in checkpoint:
-                load_module(
-                    getattr(encoder_module, "projector"),
-                    Path(checkpoint.pop(f"{encoder_name}_encoder.projector")),
-                )
-
-        if strict and len(checkpoint) > 0:
-            raise ValueError(
-                f"Failed to load checkpoint from {checkpoint}. "
-                f"Unmatched keys: {list(checkpoint.keys())}"
+            encoder_module_path = get_checkpoint_path(
+                encoder_module.module, f"{modal_key}.module"
             )
+            if encoder_module_path is not None:
+                load_module(encoder_module.module, Path(encoder_module_path))
+
+            projector_path = get_checkpoint_path(
+                encoder_module.projector, f"{modal_key}.projector"
+            )
+            if projector_path is not None:
+                load_module(encoder_module.projector, Path(projector_path))
 
         # Update master params if mixed-precision training is enabled.
         model.update_master_params()

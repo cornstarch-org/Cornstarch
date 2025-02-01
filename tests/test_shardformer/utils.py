@@ -629,21 +629,40 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         return output
 
     def build_model_from_pretrained(
-        self, encoder_paths: dict[str, tuple[Path, Path]], language_model_path: Path
+        self,
+        encoder_paths: dict[str, tuple[Path, Path]],
+        language_model_path: Path,
+        use_flash_attention: bool = False,
     ) -> MultimodalModel:
         encoders: dict[str, ModalEncoderModule] = {}
         for modal_key, (module_path, projector_path) in encoder_paths.items():
-            encoder = self.encoders[modal_key].model_class.from_pretrained(
-                module_path, torch_dtype=torch.bfloat16
-            )
-            projector = MultimodalProjector.from_pretrained(
-                projector_path, torch_dtype=torch.bfloat16
-            )
+            if module_path is not None:
+                encoder = self.encoders[modal_key].model_class.from_pretrained(
+                    module_path,
+                    torch_dtype=torch.bfloat16,
+                    _attn_implementation=(
+                        "flash_attention_2" if use_flash_attention else "eager"
+                    ),
+                )
+            else:
+                encoder = self.encoders[modal_key].model_fn(
+                    use_flash_attention=use_flash_attention
+                )
+
+            if projector_path is not None:
+                projector = MultimodalProjector.from_pretrained(
+                    projector_path, torch_dtype=torch.bfloat16
+                )
+            else:
+                projector = None
             encoders[modal_key] = ModalEncoderModule(encoder, projector)
 
-        llm = self.llm.model_class.from_pretrained(
-            language_model_path, torch_dtype=torch.bfloat16
-        )
+        if language_model_path is not None:
+            llm = self.llm.model_class.from_pretrained(
+                language_model_path, torch_dtype=torch.bfloat16
+            )
+        else:
+            llm = self.llm.model_fn(use_flash_attention=use_flash_attention)
 
         model = MultimodalModel(
             encoders=encoders,

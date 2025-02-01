@@ -9,7 +9,11 @@ import torch.distributed as dist
 from colossalai.booster import Booster
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.lazy import LazyInitContext, LazyTensor
-from colossalai.testing.comparison import assert_close_loose, check_state_dict_equal
+from colossalai.testing.comparison import (
+    assert_close_loose,
+    assert_not_equal,
+    check_state_dict_equal,
+)
 from torch.testing._internal.common_distributed import TEST_SKIPS
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -271,11 +275,13 @@ class MultimodalCheckpointIOClass(CornstarchCheckpointTestBase):
 
     @parametrize("tp_size", [1, 2])
     @parametrize("vision_pp_size, language_pp_size", [(1, 1), (2, 2), (1, 3)])
+    @parametrize("load_projector", [True, False], name_fn=lambda f: f"lp_{f}")
     def test_load_lazy_init_model(
         self,
         tp_size: int,
         vision_pp_size: int,
         language_pp_size: int,
+        load_projector: bool,
     ):
         self.set_model(
             encoders={"vision": CLIPModelBase()},
@@ -304,7 +310,7 @@ class MultimodalCheckpointIOClass(CornstarchCheckpointTestBase):
                     encoder_paths={
                         "vision": (
                             vision_encoder_ckpth_path,
-                            vision_projector_ckpt_path,
+                            vision_projector_ckpt_path if load_projector else None,
                         )
                     },
                     language_model_path=language_model_ckpth_path,
@@ -330,14 +336,7 @@ class MultimodalCheckpointIOClass(CornstarchCheckpointTestBase):
 
             assert all(not isinstance(p, LazyTensor) for p in lazy_model.parameters())
 
-            booster.load_model(
-                lazy_model,
-                {
-                    "language_model": lazy_model.module.language_model._pretrained,
-                    "vision_encoder.module": lazy_model.module.vision_encoder.module._pretrained,
-                    "vision_encoder.projector": lazy_model.module.vision_encoder.projector._pretrained,
-                },
-            )
+            booster.load_model(lazy_model, checkpoint=None, strict=False)
 
             dist.barrier()
 
@@ -358,3 +357,20 @@ class MultimodalCheckpointIOClass(CornstarchCheckpointTestBase):
         assert list(org_vision_params.keys()) == list(lazy_vision_params.keys())
         for k in org_vision_params.keys():
             assert_close_loose(org_vision_params[k], lazy_vision_params[k], atol=1e-3)
+
+        org_projector_params = dict(
+            model.module.vision_encoder.projector.named_parameters()
+        )
+        lazy_projector_params = dict(
+            lazy_model.module.vision_encoder.projector.named_parameters()
+        )
+
+        assert list(org_vision_params.keys()) == list(lazy_vision_params.keys())
+        if load_projector:
+            for k in org_projector_params.keys():
+                assert_close_loose(
+                    org_projector_params[k], lazy_projector_params[k], atol=1e-3
+                )
+        else:
+            for k in org_projector_params.keys():
+                assert_not_equal(org_projector_params[k], lazy_projector_params[k])
