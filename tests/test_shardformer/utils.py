@@ -2,6 +2,7 @@ import copy
 import re
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, Callable, Optional
 from unittest.mock import patch
 
@@ -36,6 +37,7 @@ from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
+    MultimodalProjector,
 )
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin import (
@@ -626,6 +628,120 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         output.last_hidden_state = output.last_hidden_state[:, :32, :]
         return output
 
+    def build_model_from_pretrained(
+        self, encoder_paths: dict[str, tuple[Path, Path]], language_model_path: Path
+    ) -> MultimodalModel:
+        encoders: dict[str, ModalEncoderModule] = {}
+        for modal_key, (module_path, projector_path) in encoder_paths.items():
+            encoder = self.encoders[modal_key].model_class.from_pretrained(
+                module_path, torch_dtype=torch.bfloat16
+            )
+            projector = MultimodalProjector.from_pretrained(
+                projector_path, torch_dtype=torch.bfloat16
+            )
+            encoders[modal_key] = ModalEncoderModule(encoder, projector)
+
+        llm = self.llm.model_class.from_pretrained(
+            language_model_path, torch_dtype=torch.bfloat16
+        )
+
+        model = MultimodalModel(
+            encoders=encoders,
+            language_model=llm,
+        ).to(dtype=torch.bfloat16)
+
+        num_existing_tokens = llm.get_input_embeddings().weight.shape[0]
+        self.token_ids = {
+            encoder_name: num_existing_tokens + encoder_index
+            for encoder_index, encoder_name in enumerate(encoders)
+        }
+        model.set_modality_token_ids(self.token_ids)
+        model.gradient_checkpointing_enable()
+
+        return model
+
+    def build_model_from_config(
+        self, use_flash_attention: bool = False
+    ) -> MultimodalModel:
+        encoders: dict[str, ModalEncoderModule] = {}
+        for modal_key, model_base in self.encoders.items():
+            encoder = model_base.model_fn(use_flash_attention)
+            encoders[modal_key] = ModalEncoderModule(
+                encoder,
+                postprocess_module_callback=self.postprocess_callback,
+            )
+
+        llm = self.llm.model_fn(use_flash_attention)
+
+        model = MultimodalModel(
+            encoders=encoders,
+            language_model=llm,
+        ).to(dtype=torch.bfloat16)
+
+        num_existing_tokens = llm.get_input_embeddings().weight.shape[0]
+        self.token_ids = {
+            encoder_name: num_existing_tokens + encoder_index
+            for encoder_index, encoder_name in enumerate(encoders)
+        }
+        model.set_modality_token_ids(token_ids=self.token_ids)
+        model.gradient_checkpointing_enable()
+
+        return model
+
+    def parallelize_model(
+        self,
+        model: MultimodalModel,
+        tp_size: int,
+        module_pp_size: dict[str, int],
+        llm_sp_mode: str | None,
+        test_config: dict[str, Any],
+        precision: torch.dtype,
+    ) -> tuple[
+        MultimodalParallelModule,
+        OptimizerWrapper,
+        Callable,
+        Booster,
+    ]:
+        plugins: dict[str, ModalParallelPlugin] = {}
+        for modal_name, pp_size in module_pp_size.items():
+            if modal_name == "llm":
+                llm_plugin = ModalParallelPlugin(
+                    tp_size=tp_size,
+                    sp_size=2 if llm_sp_mode is not None else 1,
+                    sequence_parallelism_mode=llm_sp_mode,
+                    pipeline_template=self.get_pipeline_template(
+                        model.language_model, pp_size
+                    ),
+                )
+            else:
+                plugins[modal_name] = ModalParallelPlugin(
+                    tp_size=tp_size,
+                    pipeline_template=self.get_pipeline_template(
+                        model.get_submodule(f"{modal_name}_encoder"), pp_size
+                    ),
+                )
+
+        plugin = MultimodalParallelPlugin(
+            encoder_plugins=plugins,
+            language_model_plugin=llm_plugin,
+            **test_config,
+        )
+        if precision == torch.bfloat16:
+            model.to(dtype=precision)
+            plugin.precision = None
+        else:
+            # Do not cast org_model for fp16 here, as it will be casted in
+            # torch.autocast amp
+            plugin.precision = "fp16"
+        booster = Booster(plugin=plugin)
+
+        optimizer = Adam(model.parameters(), lr=1e-3)
+        model, optimizer, criterion, _, _ = booster.boost(
+            model, optimizer, self.llm.loss_fn
+        )
+
+        return model, optimizer, criterion, booster
+
     def build_model_from_multimodal_plugin(
         self,
         tp_size: int,
@@ -646,81 +762,17 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
-            encoders: dict[str, PreTrainedModel] = {}
-
-            for encoder_name, model_base in self.encoders.items():
-                encoders[encoder_name] = model_base.model_fn(use_flash_attention)
-
-            llm = self.llm.model_fn(use_flash_attention)
-
-            org_model = MultimodalModel(
-                encoders={
-                    encoder_name: ModalEncoderModule(
-                        module,
-                        postprocess_module_callback=self.postprocess_callback,
-                    )
-                    for encoder_name, module in encoders.items()
-                },
-                language_model=llm,
-            ).to("cuda")
-
-            num_existing_tokens = llm.get_input_embeddings().weight.shape[0]
-            self.token_ids = {
-                encoder_name: num_existing_tokens + encoder_index
-                for encoder_index, encoder_name in enumerate(encoders)
-            }
-            org_model.set_modality_token_ids(
-                token_ids=self.token_ids,
-                new_num_tokens=num_existing_tokens + len(encoders),
-            )
-
+            org_model = self.build_model_from_config(use_flash_attention)
             sharded_model = copy.deepcopy(org_model)
+
         if use_lazy_init:
             ctx.materialize(org_model)
 
         org_optimizer = Adam(org_model.parameters(), lr=1e-3)
-        sharded_optimizer = Adam(sharded_model.parameters(), lr=1e-3)
 
-        plugins: dict[str, ModalParallelPlugin] = {}
-        for modal_name, pp_size in module_pp_size.items():
-            if modal_name == "llm":
-                llm_plugin = ModalParallelPlugin(
-                    tp_size=tp_size,
-                    sp_size=2 if llm_sp_mode is not None else 1,
-                    sequence_parallelism_mode=llm_sp_mode,
-                    pipeline_template=self.get_pipeline_template(
-                        org_model.language_model, pp_size
-                    ),
-                )
-            else:
-                plugins[modal_name] = ModalParallelPlugin(
-                    tp_size=tp_size,
-                    pipeline_template=self.get_pipeline_template(
-                        org_model.get_submodule(f"{modal_name}_encoder"), pp_size
-                    ),
-                )
-
-        plugin = MultimodalParallelPlugin(
-            encoder_plugins=plugins,
-            language_model_plugin=llm_plugin,
-            **test_config,
+        sharded_model, sharded_optimizer, criterion, booster = self.parallelize_model(
+            sharded_model, tp_size, module_pp_size, llm_sp_mode, test_config, precision
         )
-        if precision == torch.bfloat16:
-            org_model.to(dtype=precision)
-            sharded_model.to(dtype=precision)
-            plugin.precision = None
-        else:
-            # Do not cast org_model for fp16 here, as it will be casted in
-            # torch.autocast amp
-            plugin.precision = "fp16"
-        booster = Booster(plugin=plugin)
-
-        sharded_model, sharded_optimizer, criterion, _, _ = booster.boost(
-            sharded_model, sharded_optimizer, self.llm.loss_fn
-        )
-
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
 
         return (
             org_model,
