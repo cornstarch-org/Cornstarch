@@ -695,7 +695,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         model = MultimodalModel(
             encoders=encoders,
             language_model=llm,
-        ).to(dtype=torch.bfloat16)
+        ).to(dtype=torch.bfloat16, device="cuda")
 
         num_existing_tokens = llm.get_input_embeddings().weight.shape[0]
         self.token_ids = {
