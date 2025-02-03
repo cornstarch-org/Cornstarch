@@ -2,9 +2,11 @@ import math
 
 import pytest
 import torch
+import triton
+import triton.language as tl
 from einops import rearrange, repeat
 
-from cornstarch.kernel.attention import flash_attn_func
+from cornstarch.kernel.attention import flash_attn_func, get_submask_from_bitfield_mask
 
 
 def construct_local_mask(
@@ -100,10 +102,6 @@ def reference_attention(
     return attn_output.transpose(1, 2).contiguous()
 
 
-def get_mask(seqlen_q: int, seqlen_k: int, device: torch.device) -> torch.Tensor:
-    return torch.randint(0, 2, (seqlen_q, seqlen_k), device=device)
-
-
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
 @pytest.mark.parametrize("head_dim", [32, 64, 128])
 @pytest.mark.parametrize("seqlen", [(256, 256), (1024, 256), (256, 1024), (1024, 1024)])
@@ -153,7 +151,7 @@ def test_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int, int]):
         .requires_grad_(True)
     )
 
-    mask = get_mask(seqlen_q, seqlen_k, device)
+    mask = torch.randint(0, 2, (seqlen_q, seqlen_k), device=device)
 
     reference_out = reference_attention(q, k, v, mask)
     triton_out = flash_attn_func(q, k, v, None, False, mask)
@@ -163,6 +161,167 @@ def test_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int, int]):
     dq, dk, dv = torch.autograd.grad(triton_out, (q, k, v), g)
 
     torch.testing.assert_close(reference_out, triton_out, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(dq_ref, dq, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(dk_ref, dk, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(dv_ref, dv, rtol=5e-3, atol=5e-3)
+
+
+@triton.jit
+def func_wrapper(
+    bitfield_mask, output_buffer, batch_size: tl.constexpr, seq_len: tl.constexpr
+):
+    offs_m = tl.arange(0, 64)
+    offs_n = tl.arange(0, 64)
+
+    output = get_submask_from_bitfield_mask(
+        tl.load(bitfield_mask + offs_n),
+        offs_m,
+        offs_n,
+        batch_size,
+        seq_len,
+        64,
+        64,
+    )
+
+    output_ptrs = output_buffer + offs_m[:, None] + offs_n[None, :]
+    tl.store(output_ptrs, output)
+
+
+@pytest.mark.parametrize("type", ["causal", "one_modality", "two_modalities"])
+@pytest.mark.parametrize("size", ["small", "large"])
+@pytest.mark.parametrize("batch_size", [1])
+def test_get_submask_from_bitfield_mask(type: str, size: str, batch_size: int):
+    bitfield_mask: torch.Tensor
+    expected_submask: torch.Tensor
+    device = torch.device("cuda")
+
+    if type == "causal":
+        if size == "small":
+            bitfield_mask = torch.full(
+                (batch_size, 64), (1 << 62) | 1, device=device, dtype=torch.int64
+            )
+            expected_submask = torch.tril(
+                torch.ones((batch_size, 64, 64), dtype=torch.bool, device=device),
+                diagonal=0,
+            )
+        else:
+            bitfield_mask = torch.full(
+                (batch_size, 256), (1 << 62) | 1, device=device, dtype=torch.int64
+            )
+            expected_submask = torch.tril(
+                torch.ones((batch_size, 64, 64), dtype=torch.bool, device=device),
+                diagonal=0,
+            )
+
+    seq_len = 64 if size == "small" else 256
+    grid = lambda META: (triton.cdiv(seq_len, 64), batch_size)
+    submask = torch.empty(
+        (batch_size, seq_len, seq_len), dtype=torch.bool, device=device
+    )
+    func_wrapper[grid](bitfield_mask, submask, batch_size, seq_len)
+    torch.testing.assert_close(submask, expected_submask)
+
+
+@pytest.mark.parametrize("head_dim", [32, 64, 128])
+@pytest.mark.parametrize("seqlen", [64, 256, 1024])
+def test_bitfield_attention(head_dim: int, seqlen: int):
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    batch_size = 2
+    num_heads = 12
+
+    torch.random.manual_seed(0)
+
+    q = (
+        torch.randn(
+            batch_size,
+            seqlen,
+            num_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        .normal_(mean=0, std=0.5)
+        .requires_grad_(True)
+    )
+    k = (
+        torch.randn(
+            batch_size,
+            seqlen,
+            num_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        .normal_(mean=0, std=0.5)
+        .requires_grad_(True)
+    )
+    v = (
+        torch.randn(
+            batch_size,
+            seqlen,
+            num_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        .normal_(mean=0, std=0.5)
+        .requires_grad_(True)
+    )
+
+    # create a bitfield attention mask
+    def get_bitfield_attention_mask() -> torch.Tensor:
+        text_bit = (1 << 62) | 1 | (1 << 1) | (1 << 2)
+
+        attention_mask = torch.full(
+            (batch_size, seqlen),
+            text_bit,
+            dtype=torch.int64,
+            device=device,
+        )
+        attention_mask[:, 12:24] = 1 << 1
+        attention_mask[:, 36:56] = 1 << 2
+
+        return attention_mask
+
+    def convert_bitfield_attention_mask_to_full_mask(bitfield_mask: torch.Tensor):
+        batch_size, seqlen = bitfield_mask.shape
+        causal_mask = torch.tril(
+            torch.ones((seqlen, seqlen), dtype=torch.bool, device=device), diagonal=0
+        )
+
+        bitfield_attention_modality_bits = (bitfield_mask & ((1 << 62) - 1)).unsqueeze(
+            -1
+        )
+        is_causal = ((bitfield_mask & (1 << 62)) > 0).unsqueeze(-1)
+        is_text_token = ((bitfield_mask & 1) > 0).unsqueeze(-1)
+
+        causal_check = (is_causal & causal_mask) | (is_causal == False)
+
+        same_text_token_check = (bitfield_attention_modality_bits & 1) > 0
+        modality_bit_check = (
+            bitfield_attention_modality_bits == bitfield_mask.unsqueeze(1)
+        )
+
+        return causal_check & ((is_text_token == True) & same_text_token_check) | (
+            (is_text_token == False) & modality_bit_check
+        )
+
+    mask = get_bitfield_attention_mask()
+
+    full_mask = convert_bitfield_attention_mask_to_full_mask(mask)
+    reference_out = reference_attention(q, k, v, full_mask[0])
+
+    # without materializing the full mask,
+    # our Triton implementation accepts the bitfield mask directly
+    # and internally materializes the mask in a tiled fashion
+    triton_out = flash_attn_func(q, k, v, None, False, mask)
+    torch.testing.assert_close(reference_out, triton_out, rtol=5e-3, atol=5e-3)
+
+    g = torch.randn_like(reference_out)
+    dq_ref, dk_ref, dv_ref = torch.autograd.grad(reference_out, (q, k, v), g)
+    dq, dk, dv = torch.autograd.grad(triton_out, (q, k, v), g)
+
     torch.testing.assert_close(dq_ref, dq, rtol=5e-3, atol=5e-3)
     torch.testing.assert_close(dk_ref, dk, rtol=5e-3, atol=5e-3)
     torch.testing.assert_close(dv_ref, dv, rtol=5e-3, atol=5e-3)

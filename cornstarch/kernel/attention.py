@@ -63,13 +63,50 @@ def is_block_masked_out(mask):
 
 @triton.jit
 def get_submask_from_bitfield_mask(
-    bitfield_mask, out_mask_buffer, offs_m, offs_n, seqlen_k
+    bitfield_mask: tl.tensor,
+    offs_m,
+    offs_n,
+    batch_size: tl.constexpr,
+    seq_len: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
-    pass
-    # restore the bitfield mask to the original mask
+    """
+    Given full bitfield mask, materialize the submask for the current block.
 
-    # offs_m[:, None] -> (BLOCK_M, 1); offs_n[None, :] -> (1, BLOCK_N)
-    # offs_m + offs_n -> (BLOCK_M, BLOCK_N)
+    Args:
+        - bitfield_mask: tl.tensor (batch_size, seq_len)
+        - out_mask_buffer: tl.tensor (BLOCK_M, BLOCK_N)
+        - offs_m: tl.tensor (BLOCK_M,)
+        - offs_n: tl.tensor (BLOCK_N,)
+        - batch_size: int
+        - seq_len: int
+        - BLOCK_M: int
+        - BLOCK_N: int
+
+    Returns:
+        - out_mask_buffer: tl.tensor (BLOCK_M, BLOCK_N)
+    """
+    arange_tensor = tl.arange(0, BLOCK_N)
+    causal_mask = arange_tensor[:, None] >= arange_tensor[None, :]
+
+    bitfield_attention_modality_bits = (bitfield_mask & ((1 << 62) - 1))[:, None]
+
+    is_causal = ((bitfield_mask & (1 << 62)) > 0)[:, None]
+    is_text_token = ((bitfield_mask & 1) > 0)[:, None]
+
+    causal_check = (is_causal & causal_mask) | (is_causal == False)
+
+    same_text_token_check = (is_text_token == True) & (
+        (bitfield_attention_modality_bits & 1) > 0
+    )
+    modality_bit_check = bitfield_attention_modality_bits == bitfield_mask[None, :]
+
+    out_mask_buffer = causal_check & same_text_token_check | (
+        (is_text_token == False) & modality_bit_check
+    )
+
+    return out_mask_buffer & ((offs_m[:, None] < seq_len) & (offs_n[None, :] < seq_len))
 
 
 @triton.jit
@@ -102,7 +139,7 @@ def _fwd_kernel(
     K,
     V,
     Bias,
-    mask,
+    bitfield_mask,
     Out,
     Lse,
     TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
@@ -219,9 +256,23 @@ def _fwd_kernel(
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
-        # [BLOCK_M, BLOCK_N]
-        block_mask = get_mask(mask, offs_m, start_n + offs_n, seqlen_k)
-        if not is_block_masked_out(block_mask):
+        # TODO: consider batch
+        bitfield_mask = tl.load(
+            bitfield_mask + offs_n,
+            mask=offs_n < seqlen_k,
+            other=0,
+        )
+        block_full_mask = get_submask_from_bitfield_mask(
+            bitfield_mask,
+            offs_m,
+            offs_n,
+            1,  # batch_size. TODO: generalize it
+            seqlen_k,
+            BLOCK_M,
+            BLOCK_N,
+        )
+        # block_full_mask = get_mask(bitfield_mask, offs_m, start_n + offs_n, seqlen_k)
+        if not is_block_masked_out(block_full_mask):
             # -- compute qk ----
             if (
                 EVEN_N & EVEN_M
@@ -254,7 +305,7 @@ def _fwd_kernel(
             if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
                 qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
 
-            qk += tl.where(block_mask, 0, float("-inf"))
+            qk += tl.where(block_full_mask, 0, float("-inf"))
 
             # if IS_CAUSAL:
             #     # set the attention scores for invalid positions (future tokens) to -inf
