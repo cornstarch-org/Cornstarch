@@ -173,13 +173,15 @@ BLOCK_SIZE: tl.constexpr = 64
 def func_wrapper(
     bitfield_mask,
     output_buffer,
-    q_range: tuple[tl.constexpr, tl.constexpr],
-    kv_range: tuple[tl.constexpr, tl.constexpr],
+    q_range_start: tl.constexpr,
+    q_range_end: tl.constexpr,
+    kv_range_start: tl.constexpr,
+    kv_range_end: tl.constexpr,
     stride_bamb: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    offs_m = tl.arange(q_range[0], q_range[1])
-    offs_n = tl.arange(kv_range[0], kv_range[1])
+    offs_m = tl.arange(q_range_start, q_range_end)
+    offs_n = tl.arange(kv_range_start, kv_range_end)
     off_b = tl.program_id(1)  # blockIdx.y
 
     output = get_submask_from_bitfield_mask(
@@ -236,8 +238,10 @@ def test_get_submask_from_bitfield_mask(type: str, size: str, batch_size: int):
             func_wrapper[grid](
                 bitfield_mask,
                 submask,
-                (i, i + BLOCK_SIZE),
-                (j, j + BLOCK_SIZE),
+                i,
+                i + BLOCK_SIZE,
+                j,
+                j + BLOCK_SIZE,
                 bitfield_mask.stride(0),
                 BLOCK_SIZE,
             )
