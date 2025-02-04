@@ -226,6 +226,70 @@ def test_get_submask_from_bitfield_mask(type: str, size: str, batch_size: int):
                 torch.ones((256, 256), dtype=torch.bool, device=device),
                 diagonal=0,
             )
+    elif type == "one_modality":
+        if size == "small":
+            bitfield_mask = torch.full(
+                (batch_size, 64),
+                (1 << 62) | 1 | (1 << 1),
+                device=device,
+                dtype=torch.int64,
+            )
+            bitfield_mask[:, 12:24] = 1 << 1
+            expected_submask = torch.tril(
+                torch.ones((64, 64), dtype=torch.bool, device=device),
+                diagonal=0,
+            )
+            expected_submask[12:24, :] = False
+            expected_submask[12:24, 12:24] = True
+        else:
+            bitfield_mask = torch.full(
+                (batch_size, 256),
+                (1 << 62) | 1 | (1 << 1),
+                device=device,
+                dtype=torch.int64,
+            )
+            bitfield_mask[:, 48:150] = 1 << 1
+            expected_submask = torch.tril(
+                torch.ones((256, 256), dtype=torch.bool, device=device),
+                diagonal=0,
+            )
+            expected_submask[48:150, :] = False
+            expected_submask[48:150, 48:150] = True
+    else:
+        if size == "small":
+            bitfield_mask = torch.full(
+                (batch_size, 64),
+                (1 << 62) | 1 | (1 << 1) | (1 << 2),
+                device=device,
+                dtype=torch.int64,
+            )
+            bitfield_mask[:, 12:24] = 1 << 1
+            bitfield_mask[:, 36:56] = 1 << 2
+            expected_submask = torch.tril(
+                torch.ones((64, 64), dtype=torch.bool, device=device),
+                diagonal=0,
+            )
+            expected_submask[12:24, :] = False
+            expected_submask[12:24, 12:24] = True
+            expected_submask[36:56, :] = False
+            expected_submask[36:56, 36:56] = True
+        else:
+            bitfield_mask = torch.full(
+                (batch_size, 256),
+                (1 << 62) | 1 | (1 << 1) | (1 << 2),
+                device=device,
+                dtype=torch.int64,
+            )
+            bitfield_mask[:, 48:120] = 1 << 1
+            bitfield_mask[:, 164:200] = 1 << 2
+            expected_submask = torch.tril(
+                torch.ones((256, 256), dtype=torch.bool, device=device),
+                diagonal=0,
+            )
+            expected_submask[48:120, :] = False
+            expected_submask[48:120, 48:120] = True
+            expected_submask[164:200, :] = False
+            expected_submask[164:200, 164:200] = True
 
     # Call the kernel "per block" manually to simulate submask creation.
     seq_len = 64 if size == "small" else 256
@@ -233,7 +297,9 @@ def test_get_submask_from_bitfield_mask(type: str, size: str, batch_size: int):
 
     for i in range(0, seq_len, BLOCK_SIZE):
         for j in range(0, seq_len, BLOCK_SIZE):
-            submask = torch.empty((64, 64), dtype=torch.bool, device=device)
+            submask = torch.empty(
+                (BLOCK_SIZE, BLOCK_SIZE), dtype=torch.bool, device=device
+            )
 
             func_wrapper[grid](
                 bitfield_mask,

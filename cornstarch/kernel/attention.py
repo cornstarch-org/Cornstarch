@@ -91,17 +91,20 @@ def get_submask_from_bitfield_mask(
     is_text_token = ((q_bitfield_mask & 1) > 0)[:, None]
 
     q_modality_bits = (q_bitfield_mask & ((1 << 62) - 1))[:, None]
-    kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1))[:, None]
+    kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1))[None, :]
 
     return (
-        causal_mask
-        & (is_text_token == True)
-        & ((q_modality_bits & kv_modality_bits[None, :]) > 0)
-    ) | (
-        (is_text_token == False)
-        & (kv_modality_bits == q_bitfield_mask[None, :])
-        & (q_bitfield_mask > 0)
-    )
+        (
+            causal_mask
+            & (is_text_token == True)
+            & ((q_modality_bits & kv_modality_bits) > 0)
+        )
+        | (
+            (is_text_token == False)
+            & (kv_modality_bits == q_modality_bits)
+            & (q_bitfield_mask > 0)
+        )
+    )[None, :, :]
 
 
 @triton.jit
