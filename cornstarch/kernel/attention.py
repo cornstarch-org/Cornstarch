@@ -63,50 +63,45 @@ def is_block_masked_out(mask):
 
 @triton.jit
 def get_submask_from_bitfield_mask(
-    bitfield_mask: tl.tensor,
+    q_bitfield_mask: tl.tensor,
+    kv_bitfield_mask: tl.tensor,
     offs_m,
     offs_n,
-    batch_size: tl.constexpr,
-    seq_len: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
 ):
     """
     Given full bitfield mask, materialize the submask for the current block.
+
+    q_bitfield_mask is used to check whether the query tokens are text tokens.
+    For text tokens, all previous tokens are attended to, even for non-text tokens.
+    For non-text tokens, only tokens with the same modality bit are attended to.
 
     Args:
         - bitfield_mask: tl.tensor (batch_size, seq_len)
         - out_mask_buffer: tl.tensor (BLOCK_M, BLOCK_N)
         - offs_m: tl.tensor (BLOCK_M,)
         - offs_n: tl.tensor (BLOCK_N,)
-        - batch_size: int
-        - seq_len: int
         - BLOCK_M: int
         - BLOCK_N: int
 
     Returns:
         - out_mask_buffer: tl.tensor (BLOCK_M, BLOCK_N)
     """
-    arange_tensor = tl.arange(0, BLOCK_N)
-    causal_mask = arange_tensor[:, None] >= arange_tensor[None, :]
+    causal_mask = offs_m[:, None] >= offs_n[None, :]
 
-    bitfield_attention_modality_bits = (bitfield_mask & ((1 << 62) - 1))[:, None]
+    is_text_token = ((q_bitfield_mask & 1) > 0)[:, None]
 
-    is_causal = ((bitfield_mask & (1 << 62)) > 0)[:, None]
-    is_text_token = ((bitfield_mask & 1) > 0)[:, None]
+    q_modality_bits = (q_bitfield_mask & ((1 << 62) - 1))[:, None]
+    kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1))[:, None]
 
-    causal_check = (is_causal & causal_mask) | (is_causal == False)
-
-    same_text_token_check = (is_text_token == True) & (
-        (bitfield_attention_modality_bits & 1) > 0
+    return (
+        causal_mask
+        & (is_text_token == True)
+        & ((q_modality_bits & kv_modality_bits[None, :]) > 0)
+    ) | (
+        (is_text_token == False)
+        & (kv_modality_bits == q_bitfield_mask[None, :])
+        & (q_bitfield_mask > 0)
     )
-    modality_bit_check = bitfield_attention_modality_bits == bitfield_mask[None, :]
-
-    out_mask_buffer = causal_check & same_text_token_check | (
-        (is_text_token == False) & modality_bit_check
-    )
-
-    return out_mask_buffer & ((offs_m[:, None] < seq_len) & (offs_n[None, :] < seq_len))
 
 
 @triton.jit
@@ -144,6 +139,7 @@ def _fwd_kernel(
     Lse,
     TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale,
+    stride_bamb,
     stride_qb,
     stride_qh,
     stride_qm,
@@ -179,9 +175,6 @@ def _fwd_kernel(
     off_hb = tl.program_id(1)  # blockIdx.y
     off_b = off_hb // nheads  # batch
     off_h = off_hb % nheads  # head
-    # off_b = tl.program_id(1)
-    # off_h = tl.program_id(2)
-    # off_hb = off_b * nheads + off_h
     # initialize offsets
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
@@ -257,17 +250,22 @@ def _fwd_kernel(
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
         # TODO: consider batch
-        bitfield_mask = tl.load(
-            bitfield_mask + offs_n,
+        q_bitfield_mask = tl.load(
+            bitfield_mask + off_b * stride_bamb + offs_m,
+            mask=offs_m < seqlen_q,
+            other=0,
+        )  # [BLOCK_M]
+        kv_bitfield_mask = tl.load(
+            bitfield_mask + off_b * stride_bamb + offs_n,
             mask=offs_n < seqlen_k,
             other=0,
-        )
+        )  # [BLOCK_N]
+
         block_full_mask = get_submask_from_bitfield_mask(
-            bitfield_mask,
+            q_bitfield_mask,
+            kv_bitfield_mask,
             offs_m,
             offs_n,
-            1,  # batch_size. TODO: generalize it
-            seqlen_k,
             BLOCK_M,
             BLOCK_N,
         )
@@ -1057,6 +1055,7 @@ def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None, mask=None):
         lse,
         tmp,
         softmax_scale,
+        mask.stride(0),
         q.stride(0),
         q.stride(2),
         q.stride(1),

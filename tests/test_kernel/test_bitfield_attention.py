@@ -166,24 +166,36 @@ def test_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int, int]):
     torch.testing.assert_close(dv_ref, dv, rtol=5e-3, atol=5e-3)
 
 
+BLOCK_SIZE: tl.constexpr = 64
+
+
 @triton.jit
 def func_wrapper(
-    bitfield_mask, output_buffer, batch_size: tl.constexpr, seq_len: tl.constexpr
+    bitfield_mask,
+    output_buffer,
+    q_range: tuple[tl.constexpr, tl.constexpr],
+    kv_range: tuple[tl.constexpr, tl.constexpr],
+    stride_bamb: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
-    offs_m = tl.arange(0, 64)
-    offs_n = tl.arange(0, 64)
+    offs_m = tl.arange(q_range[0], q_range[1])
+    offs_n = tl.arange(kv_range[0], kv_range[1])
+    off_b = tl.program_id(1)  # blockIdx.y
 
     output = get_submask_from_bitfield_mask(
+        tl.load(bitfield_mask + offs_m),
         tl.load(bitfield_mask + offs_n),
         offs_m,
         offs_n,
-        batch_size,
-        seq_len,
-        64,
-        64,
     )
 
-    output_ptrs = output_buffer + offs_m[:, None] + offs_n[None, :]
+    # We expect output buffer already targets the correct block
+    output_ptrs = (
+        output_buffer
+        + off_b * stride_bamb
+        + tl.arange(0, BLOCK_SIZE)[None, :, None] * BLOCK_SIZE
+        + tl.arange(0, BLOCK_SIZE)[None, None, :]
+    )
     tl.store(output_ptrs, output)
 
 
@@ -201,7 +213,7 @@ def test_get_submask_from_bitfield_mask(type: str, size: str, batch_size: int):
                 (batch_size, 64), (1 << 62) | 1, device=device, dtype=torch.int64
             )
             expected_submask = torch.tril(
-                torch.ones((batch_size, 64, 64), dtype=torch.bool, device=device),
+                torch.ones((64, 64), dtype=torch.bool, device=device),
                 diagonal=0,
             )
         else:
@@ -209,17 +221,29 @@ def test_get_submask_from_bitfield_mask(type: str, size: str, batch_size: int):
                 (batch_size, 256), (1 << 62) | 1, device=device, dtype=torch.int64
             )
             expected_submask = torch.tril(
-                torch.ones((batch_size, 64, 64), dtype=torch.bool, device=device),
+                torch.ones((256, 256), dtype=torch.bool, device=device),
                 diagonal=0,
             )
 
+    # Call the kernel "per block" manually to simulate submask creation.
     seq_len = 64 if size == "small" else 256
-    grid = lambda META: (triton.cdiv(seq_len, 64), batch_size)
-    submask = torch.empty(
-        (batch_size, seq_len, seq_len), dtype=torch.bool, device=device
-    )
-    func_wrapper[grid](bitfield_mask, submask, batch_size, seq_len)
-    torch.testing.assert_close(submask, expected_submask)
+    grid = lambda META: (1, batch_size)
+
+    for i in range(0, seq_len, BLOCK_SIZE):
+        for j in range(0, seq_len, BLOCK_SIZE):
+            submask = torch.empty((64, 64), dtype=torch.bool, device=device)
+
+            func_wrapper[grid](
+                bitfield_mask,
+                submask,
+                (i, i + BLOCK_SIZE),
+                (j, j + BLOCK_SIZE),
+                bitfield_mask.stride(0),
+                BLOCK_SIZE,
+            )
+            torch.testing.assert_close(
+                submask, expected_submask[i : i + BLOCK_SIZE, j : j + BLOCK_SIZE]
+            )
 
 
 @pytest.mark.parametrize("head_dim", [32, 64, 128])
@@ -298,12 +322,14 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
 
         causal_check = (is_causal & causal_mask) | (is_causal == False)
 
-        same_text_token_check = (bitfield_attention_modality_bits & 1) > 0
+        same_text_token_check = (is_causal & causal_mask) & (
+            (bitfield_attention_modality_bits & 1) > 0
+        )
         modality_bit_check = (
             bitfield_attention_modality_bits == bitfield_mask.unsqueeze(1)
         )
 
-        return causal_check & ((is_text_token == True) & same_text_token_check) | (
+        return ((is_text_token == True) & same_text_token_check) | (
             (is_text_token == False) & modality_bit_check
         )
 
