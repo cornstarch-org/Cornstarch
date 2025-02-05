@@ -50,6 +50,7 @@ than CUDA forward + backward.
 """
 
 import math
+from typing import Optional
 
 import torch
 import triton
@@ -58,7 +59,7 @@ import triton.language as tl
 
 @triton.jit
 def is_block_masked_out(mask):
-    return not tl.sum(mask) > 0
+    return tl.sum(mask) == 0
 
 
 @triton.jit
@@ -91,14 +92,21 @@ def get_submask_from_bitfield_mask(
     q_modality_bits = (q_bitfield_mask & ((1 << 62) - 1))[:, None]
     kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1))[None, :]
 
-    return (
-        causal_mask
-        & (is_text_token == True)
-        & ((q_modality_bits & kv_modality_bits) > 0)
-    ) | (
-        (is_text_token == False)
-        & (kv_modality_bits == q_modality_bits)
-        & (q_bitfield_mask > 0)
+    return tl.where(
+        (
+            (
+                causal_mask
+                & (is_text_token == True)
+                & ((q_modality_bits & kv_modality_bits) > 0)
+            )
+            | (
+                (is_text_token == False)
+                & (kv_modality_bits == q_modality_bits)
+                & (q_bitfield_mask > 0)
+            )
+        ),
+        1,
+        0,
     )
 
 
@@ -269,9 +277,8 @@ def _fwd_kernel(
 
         if not is_block_masked_out(block_mask):
             # -- compute qk ----
-            if (
-                EVEN_N & EVEN_M
-            ):  # If we just do "if EVEN_N", there seems to be some race condition
+            if EVEN_N & EVEN_M:
+                # If we just do "if EVEN_N", there seems to be some race condition
                 if EVEN_HEADDIM:
                     k = tl.load(k_ptrs + start_n * stride_kn)
                 else:
@@ -302,9 +309,6 @@ def _fwd_kernel(
 
             qk += tl.where(block_mask, 0, float("-inf"))
 
-            # if IS_CAUSAL:
-            #     # set the attention scores for invalid positions (future tokens) to -inf
-            #     qk += tl.where(offs_m[:, None] >= (start_n + offs_n)[None, :], 0, float("-inf"))
             if BIAS_TYPE != "none":
                 if BIAS_TYPE == "vector":
                     if EVEN_N:
@@ -346,9 +350,8 @@ def _fwd_kernel(
             acc_o_scale = tl.load(t_ptrs)  # store and load from TMP for stability
             acc_o = acc_o * acc_o_scale[:, None]  # [BLOCK_M, BLOCK_HEADDIM]
             # update acc_o
-            if (
-                EVEN_N & EVEN_M
-            ):  # If we just do "if EVEN_N", there seems to be some race condition
+            if EVEN_N & EVEN_M:
+                # If we just do "if EVEN_N", there seems to be some race condition
                 if EVEN_HEADDIM:
                     v = tl.load(
                         v_ptrs + start_n * stride_vn
@@ -1019,12 +1022,20 @@ def _bwd_kernel(
         )
 
 
-def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None, mask=None):
+def _flash_attn_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    mask: torch.Tensor = None,
+):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
     assert k.shape == (batch, seqlen_k, nheads, d)
     assert v.shape == (batch, seqlen_k, nheads, d)
+    assert mask.shape == (batch, seqlen_k)
     assert d <= 128, "FlashAttention only support head dimensions up to 128"
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
