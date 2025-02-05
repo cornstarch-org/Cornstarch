@@ -196,8 +196,8 @@ def func_wrapper(
     output_ptrs = (
         output_buffer
         + off_b * stride_outb
-        + tl.arange(0, BLOCK_SIZE)[None, :, None] * BLOCK_SIZE
-        + tl.arange(0, BLOCK_SIZE)[None, None, :]
+        + tl.arange(0, BLOCK_SIZE)[:, None] * BLOCK_SIZE
+        + tl.arange(0, BLOCK_SIZE)[None, :]
     )
     tl.store(output_ptrs, output)
 
@@ -372,6 +372,7 @@ def test_get_submask_from_bitfield_mask(type: str, size: str):
                 i + BLOCK_SIZE,
                 j,
                 j + BLOCK_SIZE,
+                0,
                 0,
                 BLOCK_SIZE,
             )

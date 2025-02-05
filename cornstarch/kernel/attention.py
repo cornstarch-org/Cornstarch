@@ -76,12 +76,10 @@ def get_submask_from_bitfield_mask(
     For non-text tokens, only tokens with the same modality bit are attended to.
 
     Args:
-        - bitfield_mask: tl.tensor (batch_size, seq_len)
-        - out_mask_buffer: tl.tensor (BLOCK_M, BLOCK_N)
-        - offs_m: tl.tensor (BLOCK_M,)
-        - offs_n: tl.tensor (BLOCK_N,)
-        - BLOCK_M: int
-        - BLOCK_N: int
+        - q_bitfield_mask: tl.tensor (seqlen_q)
+        - kv_bitfield_mask: tl.tensor (seqlen_kv)
+        - offs_m: tl.tensor (seqlen_q,)
+        - offs_n: tl.tensor (seqlen_kv,)
 
     Returns:
         - out_mask_buffer: tl.tensor (BLOCK_M, BLOCK_N)
@@ -94,17 +92,14 @@ def get_submask_from_bitfield_mask(
     kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1))[None, :]
 
     return (
-        (
-            causal_mask
-            & (is_text_token == True)
-            & ((q_modality_bits & kv_modality_bits) > 0)
-        )
-        | (
-            (is_text_token == False)
-            & (kv_modality_bits == q_modality_bits)
-            & (q_bitfield_mask > 0)
-        )
-    )[None, :, :]
+        causal_mask
+        & (is_text_token == True)
+        & ((q_modality_bits & kv_modality_bits) > 0)
+    ) | (
+        (is_text_token == False)
+        & (kv_modality_bits == q_modality_bits)
+        & (q_bitfield_mask > 0)
+    )
 
 
 @triton.jit
@@ -254,26 +249,24 @@ def _fwd_kernel(
 
         # TODO: consider batch
         q_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_bamb + offs_m,
+            bitfield_mask + off_b * stride_bamb + (start_m + tl.arange(0, BLOCK_M)),
             mask=offs_m < seqlen_q,
             other=0,
         )  # [BLOCK_M]
         kv_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_bamb + offs_n,
+            bitfield_mask + off_b * stride_bamb + (start_n + tl.arange(0, BLOCK_N)),
             mask=offs_n < seqlen_k,
             other=0,
         )  # [BLOCK_N]
 
-        block_full_mask = get_submask_from_bitfield_mask(
+        block_mask = get_submask_from_bitfield_mask(
             q_bitfield_mask,
             kv_bitfield_mask,
             offs_m,
             offs_n,
-            BLOCK_M,
-            BLOCK_N,
         )
-        # block_full_mask = get_mask(bitfield_mask, offs_m, start_n + offs_n, seqlen_k)
-        if not is_block_masked_out(block_full_mask):
+        # block_mask = get_mask(bitfield_mask, offs_m, start_n + offs_n, seqlen_k)
+        if not is_block_masked_out(block_mask):
             # -- compute qk ----
             if (
                 EVEN_N & EVEN_M
@@ -306,7 +299,7 @@ def _fwd_kernel(
             if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
                 qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
 
-            qk += tl.where(block_full_mask, 0, float("-inf"))
+            qk += tl.where(block_mask, 0, float("-inf"))
 
             # if IS_CAUSAL:
             #     # set the attention scores for invalid positions (future tokens) to -inf
