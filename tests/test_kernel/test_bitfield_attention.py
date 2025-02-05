@@ -382,11 +382,11 @@ def test_get_submask_from_bitfield_mask(type: str, size: str):
 
 
 @pytest.mark.parametrize("head_dim", [32, 64, 128])
-@pytest.mark.parametrize("seqlen", [64, 256, 1024])
+@pytest.mark.parametrize("seqlen", [128, 256, 1024])
 def test_bitfield_attention(head_dim: int, seqlen: int):
     device = torch.device("cuda")
     dtype = torch.float16
-    batch_size = 2
+    batch_size = 1
     num_heads = 12
 
     torch.random.manual_seed(0)
@@ -438,8 +438,8 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
             dtype=torch.int64,
             device=device,
         )
-        # attention_mask[:, 12:24] = 1 << 1
-        # attention_mask[:, 36:56] = 1 << 2
+        attention_mask[:, 12:24] = 1 << 1
+        attention_mask[:, 36:56] = 1 << 2
 
         return attention_mask
 

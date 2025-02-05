@@ -111,14 +111,14 @@ def get_mask(mask, offs_m, offs_n, seqlen_k):
 
 
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
-# @triton.autotune(
-#     configs=[
-#         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=4, num_stages=1),
-#         # This config has a race condition when EVEN_M == False, disabling it for now.
-#         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
-#     ],
-#     key=['CACHE_KEY_SEQLEN_Q', 'CACHE_KEY_SEQLEN_K', 'BIAS_TYPE', 'BLOCK_HEADDIM']
-# )
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=1),
+        # This config has a race condition when EVEN_M == False, disabling it for now.
+        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
+    ],
+    key=["CACHE_KEY_SEQLEN_Q", "CACHE_KEY_SEQLEN_K", "BIAS_TYPE", "BLOCK_HEADDIM"],
+)
 @triton.heuristics(
     {
         "EVEN_M": lambda args: args["seqlen_q"] % args["BLOCK_M"] == 0,
@@ -266,7 +266,7 @@ def _fwd_kernel(
             offs_m,
             offs_n,
         )
-        # block_mask = get_mask(bitfield_mask, offs_m, start_n + offs_n, seqlen_k)
+
         if not is_block_masked_out(block_mask):
             # -- compute qk ----
             if (
@@ -508,11 +508,12 @@ def _bwd_store_dk_dv(
 @triton.jit
 def _bwd_kernel_one_col_block(
     start_n,
+    off_b,
     Q,
     K,
     V,
     Bias,
-    mask,
+    bitfield_mask,
     DO,
     DQ,
     DK,
@@ -520,6 +521,7 @@ def _bwd_kernel_one_col_block(
     LSE,
     D,
     softmax_scale,
+    stride_bamb,
     stride_qm,
     stride_kn,
     stride_vn,
@@ -617,14 +619,29 @@ def _bwd_kernel_one_col_block(
                 mask=(offs_n[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
                 other=0.0,
             )
+
+    kv_bitfield_mask = tl.load(
+        bitfield_mask + off_b * stride_bamb + start_n + tl.arange(0, BLOCK_N),
+    )
+
     # loop over rows
     num_block_m = tl.cdiv(seqlen_q, BLOCK_M)
     for start_m in range(begin_m, num_block_m * BLOCK_M, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         offs_m_curr = start_m + offs_m
 
+        q_bitfield_mask = tl.load(
+            bitfield_mask + off_b * stride_bamb + start_m + tl.arange(0, BLOCK_M),
+        )
+
         # [BLOCK_M, BLOCK_N]
-        block_mask = get_mask(mask, offs_m_curr, offs_n, seqlen_k)
+        block_mask = get_submask_from_bitfield_mask(
+            q_bitfield_mask,
+            kv_bitfield_mask,
+            offs_m_curr,
+            offs_n,
+        )
+
         if not is_block_masked_out(block_mask):
             # load q, k, v, do on-chip
             # Same bug as below. Otherwise gives wrong result for headdim=40, seqlen=(128, 117)
@@ -856,7 +873,7 @@ def _bwd_kernel(
     K,
     V,
     Bias,
-    mask,
+    bitfield_mask,
     DO,
     DQ,
     DK,
@@ -864,6 +881,7 @@ def _bwd_kernel(
     LSE,
     D,
     softmax_scale,
+    stride_bamb,
     stride_qb,
     stride_qh,
     stride_qm,
@@ -920,16 +938,19 @@ def _bwd_kernel(
     # pointer to row-wise quantities in value-like data
     D += off_hb * seqlen_q_rounded
     LSE += off_hb * seqlen_q_rounded
+
     if not SEQUENCE_PARALLEL:
         num_block_n = tl.cdiv(seqlen_k, BLOCK_N)
         for start_n in range(0, num_block_n):
+
             _bwd_kernel_one_col_block(
                 start_n,
+                off_b,
                 Q,
                 K,
                 V,
                 Bias,
-                mask,
+                bitfield_mask,
                 DO,
                 DQ,
                 DK,
@@ -937,6 +958,7 @@ def _bwd_kernel(
                 LSE,
                 D,
                 softmax_scale,
+                stride_bamb,
                 stride_qm,
                 stride_kn,
                 stride_vn,
@@ -961,11 +983,12 @@ def _bwd_kernel(
         start_n = tl.program_id(0)
         _bwd_kernel_one_col_block(
             start_n,
+            off_b,
             Q,
             K,
             V,
             Bias,
-            mask,
+            bitfield_mask,
             DO,
             DQ,
             DK,
@@ -973,6 +996,7 @@ def _bwd_kernel(
             LSE,
             D,
             softmax_scale,
+            stride_bamb,
             stride_qm,
             stride_kn,
             stride_vn,
@@ -1077,10 +1101,10 @@ def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None, mask=None):
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type,
         BLOCK_HEADDIM,
-        BLOCK_M=BLOCK,
-        BLOCK_N=BLOCK,
-        num_warps=num_warps,
-        num_stages=1,
+        # BLOCK_M=BLOCK,
+        # BLOCK_N=BLOCK,
+        # num_warps=num_warps,
+        # num_stages=1,
     )
     return o, lse, softmax_scale  # softmax_scale could have been updated
 
@@ -1178,6 +1202,7 @@ def _flash_attn_backward(
         lse,
         delta,
         softmax_scale,
+        mask.stride(0),
         q.stride(0),
         q.stride(2),
         q.stride(1),
@@ -1212,8 +1237,9 @@ def _flash_attn_backward(
         bias_type,
         BLOCK_HEADDIM,
         # SEQUENCE_PARALLEL=False,
-        # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        # num_warps=num_warps,
+        # BLOCK_M=64,
+        # BLOCK_N=64,
+        # num_warps=4,
         # num_stages=1,
     )
     dq.copy_(dq_accum)
