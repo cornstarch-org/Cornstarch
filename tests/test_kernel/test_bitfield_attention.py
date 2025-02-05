@@ -178,6 +178,7 @@ def func_wrapper(
     kv_range_start: tl.constexpr,
     kv_range_end: tl.constexpr,
     stride_bamb: tl.constexpr,
+    stride_outb: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offs_m = tl.arange(q_range_start, q_range_end)
@@ -185,8 +186,8 @@ def func_wrapper(
     off_b = tl.program_id(1)  # blockIdx.y
 
     output = get_submask_from_bitfield_mask(
-        tl.load(bitfield_mask + offs_m),
-        tl.load(bitfield_mask + offs_n),
+        tl.load(bitfield_mask + off_b * stride_bamb + offs_m),
+        tl.load(bitfield_mask + off_b * stride_bamb + offs_n),
         offs_m,
         offs_n,
     )
@@ -194,20 +195,83 @@ def func_wrapper(
     # We expect output buffer already targets the correct block
     output_ptrs = (
         output_buffer
-        + off_b * stride_bamb
+        + off_b * stride_outb
         + tl.arange(0, BLOCK_SIZE)[None, :, None] * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, None, :]
     )
     tl.store(output_ptrs, output)
 
 
-@pytest.mark.parametrize("type", ["causal", "one_modality", "two_modalities"])
 @pytest.mark.parametrize("size", ["small", "large"])
-@pytest.mark.parametrize("batch_size", [1])
-def test_get_submask_from_bitfield_mask(type: str, size: str, batch_size: int):
+def test_get_submask_from_bitfield_mask_multibatch(size: str):
     bitfield_mask: torch.Tensor
     expected_submask: torch.Tensor
     device = torch.device("cuda")
+    batch_size = 2
+
+    seq_len = 64 if size == "small" else 256
+    bitfield_mask = torch.full(
+        (batch_size, seq_len),
+        (1 << 62) | 1 | (1 << 1) | (1 << 2),
+        device=device,
+        dtype=torch.int64,
+    )
+    expected_submask = torch.tril(
+        torch.ones((batch_size, seq_len, seq_len), dtype=torch.bool, device=device),
+        diagonal=0,
+    )
+
+    if size == "small":
+        bitfield_mask[0, 12:24] = 1 << 1
+        bitfield_mask[1, 4:16] = 1 << 1
+        bitfield_mask[1, 36:56] = 1 << 2
+        expected_submask[0, 12:24, :] = False
+        expected_submask[0, 12:24, 12:24] = True
+        expected_submask[1, 4:16, :] = False
+        expected_submask[1, 4:16, 4:16] = True
+        expected_submask[1, 36:56, :] = False
+        expected_submask[1, 36:56, 36:56] = True
+    else:
+        bitfield_mask[0, 50:150] = 1 << 1
+        bitfield_mask[1, 48:120] = 1 << 1
+        bitfield_mask[1, 164:200] = 1 << 2
+        expected_submask[0, 50:150, :] = False
+        expected_submask[0, 50:150, 50:150] = True
+        expected_submask[1, 48:120, :] = False
+        expected_submask[1, 48:120, 48:120] = True
+        expected_submask[1, 164:200, :] = False
+        expected_submask[1, 164:200, 164:200] = True
+
+    grid = lambda META: (1, batch_size)
+    for i in range(0, seq_len, BLOCK_SIZE):
+        for j in range(0, seq_len, BLOCK_SIZE):
+            submask = torch.empty(
+                (batch_size, BLOCK_SIZE, BLOCK_SIZE), dtype=torch.bool, device=device
+            )
+
+            func_wrapper[grid](
+                bitfield_mask,
+                submask,
+                i,
+                i + BLOCK_SIZE,
+                j,
+                j + BLOCK_SIZE,
+                bitfield_mask.stride(0),
+                submask.stride(0),
+                BLOCK_SIZE,
+            )
+            torch.testing.assert_close(
+                submask, expected_submask[:, i : i + BLOCK_SIZE, j : j + BLOCK_SIZE]
+            )
+
+
+@pytest.mark.parametrize("type", ["causal", "one_modality", "two_modalities"])
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_get_submask_from_bitfield_mask(type: str, size: str):
+    bitfield_mask: torch.Tensor
+    expected_submask: torch.Tensor
+    device = torch.device("cuda")
+    batch_size = 1
 
     if type == "causal":
         if size == "small":
@@ -308,7 +372,7 @@ def test_get_submask_from_bitfield_mask(type: str, size: str, batch_size: int):
                 i + BLOCK_SIZE,
                 j,
                 j + BLOCK_SIZE,
-                bitfield_mask.stride(0),
+                0,
                 BLOCK_SIZE,
             )
             torch.testing.assert_close(
