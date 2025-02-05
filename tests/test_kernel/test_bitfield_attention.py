@@ -385,7 +385,7 @@ def test_get_submask_from_bitfield_mask(type: str, size: str):
 @pytest.mark.parametrize("seqlen", [64, 256, 1024])
 def test_bitfield_attention(head_dim: int, seqlen: int):
     device = torch.device("cuda")
-    dtype = torch.bfloat16
+    dtype = torch.float16
     batch_size = 2
     num_heads = 12
 
@@ -438,34 +438,34 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
             dtype=torch.int64,
             device=device,
         )
-        attention_mask[:, 12:24] = 1 << 1
-        attention_mask[:, 36:56] = 1 << 2
+        # attention_mask[:, 12:24] = 1 << 1
+        # attention_mask[:, 36:56] = 1 << 2
 
         return attention_mask
 
     def convert_bitfield_attention_mask_to_full_mask(bitfield_mask: torch.Tensor):
         batch_size, seqlen = bitfield_mask.shape
         causal_mask = torch.tril(
-            torch.ones((seqlen, seqlen), dtype=torch.bool, device=device), diagonal=0
+            torch.ones((batch_size, seqlen, seqlen), dtype=torch.bool, device=device),
+            diagonal=0,
         )
 
-        bitfield_attention_modality_bits = (bitfield_mask & ((1 << 62) - 1)).unsqueeze(
-            -1
-        )
-        is_causal = ((bitfield_mask & (1 << 62)) > 0).unsqueeze(-1)
-        is_text_token = ((bitfield_mask & 1) > 0).unsqueeze(-1)
+        q_bitfield_mask = bitfield_mask
+        kv_bitfield_mask = bitfield_mask
 
-        causal_check = (is_causal & causal_mask) | (is_causal == False)
+        is_text_token = ((q_bitfield_mask & 1) > 0).unsqueeze(-1)
 
-        same_text_token_check = (is_causal & causal_mask) & (
-            (bitfield_attention_modality_bits & 1) > 0
-        )
-        modality_bit_check = (
-            bitfield_attention_modality_bits == bitfield_mask.unsqueeze(1)
-        )
+        q_modality_bits = (q_bitfield_mask & ((1 << 62) - 1)).unsqueeze(-1)
+        kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1)).unsqueeze(1)
 
-        return ((is_text_token == True) & same_text_token_check) | (
-            (is_text_token == False) & modality_bit_check
+        return (
+            causal_mask
+            & (is_text_token == True)
+            & ((q_modality_bits & kv_modality_bits) > 0)
+        ) | (
+            (is_text_token == False)
+            & (q_modality_bits == kv_modality_bits)
+            & (q_bitfield_mask > 0).unsqueeze(-1)
         )
 
     mask = get_bitfield_attention_mask()

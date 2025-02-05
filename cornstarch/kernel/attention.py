@@ -244,17 +244,18 @@ def _fwd_kernel(
     # loop over k, v and update accumulator
     # end_n = seqlen_k if not IS_CAUSAL else tl.minimum((start_m + 1) * BLOCK_M, seqlen_k) # if causal, only do end of BLOCK_M, else the whole N
     end_n = seqlen_k
+
+    q_bitfield_mask = tl.load(
+        bitfield_mask + off_b * stride_bamb + start_m + tl.arange(0, BLOCK_M),
+        mask=offs_m < seqlen_q,
+        other=0,
+    )  # [BLOCK_M]
+
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
-        # TODO: consider batch
-        q_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_bamb + (start_m + tl.arange(0, BLOCK_M)),
-            mask=offs_m < seqlen_q,
-            other=0,
-        )  # [BLOCK_M]
         kv_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_bamb + (start_n + tl.arange(0, BLOCK_N)),
+            bitfield_mask + off_b * stride_bamb + start_n + tl.arange(0, BLOCK_N),
             mask=offs_n < seqlen_k,
             other=0,
         )  # [BLOCK_N]
