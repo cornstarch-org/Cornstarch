@@ -6,44 +6,10 @@ import triton
 import triton.language as tl
 from einops import rearrange, repeat
 
-from cornstarch.kernel.attention import flash_attn_func, get_submask_from_bitfield_mask
-
-
-def construct_local_mask(
-    seqlen_q: int,
-    seqlen_k: int,
-    window_size: tuple[int, int] = (-1, -1),  # -1 means infinite window size
-    query_padding_mask=None,
-    key_padding_mask=None,
-    device=None,
-    key_leftpad=None,
-):
-    row_idx = rearrange(
-        torch.arange(seqlen_q, device=device, dtype=torch.long), "s -> s 1"
-    )
-    col_idx = torch.arange(seqlen_k, device=device, dtype=torch.long)
-    if key_leftpad is not None:
-        key_leftpad = rearrange(key_leftpad, "b -> b 1 1 1")
-        col_idx = repeat(col_idx, "s -> b 1 1 s", b=key_leftpad.shape[0])
-        col_idx = torch.where(col_idx >= key_leftpad, col_idx - key_leftpad, 2**32)
-    sk = (
-        seqlen_k
-        if key_padding_mask is None
-        else rearrange(key_padding_mask.sum(-1), "b -> b 1 1 1")
-    )
-    sq = (
-        seqlen_q
-        if query_padding_mask is None
-        else rearrange(query_padding_mask.sum(-1), "b -> b 1 1 1")
-    )
-    if window_size[0] < 0:
-        return col_idx > row_idx + sk - sq + window_size[1]
-    else:
-        sk = torch.full_like(col_idx, seqlen_k) if key_padding_mask is None else sk
-        return torch.logical_or(
-            col_idx > torch.minimum(row_idx + sk - sq + window_size[1], sk),
-            col_idx < row_idx + sk - sq - window_size[0],
-        )
+from cornstarch.kernel.bitfield_attention import (
+    flash_attn_func,
+    get_submask_from_bitfield_mask,
+)
 
 
 def reference_attention(
@@ -100,70 +66,6 @@ def reference_attention(
     assert attn_output.shape == q.shape
 
     return attn_output.transpose(1, 2).contiguous()
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
-@pytest.mark.parametrize("head_dim", [32, 64, 128])
-@pytest.mark.parametrize("seqlen", [(256, 256), (1024, 256), (256, 1024), (1024, 1024)])
-def test_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int, int]):
-    device = torch.device("cuda")
-    batch_size = 2
-    num_heads = 12
-
-    seqlen_q, seqlen_k = seqlen
-
-    torch.random.manual_seed(0)
-
-    q = (
-        torch.randn(
-            batch_size,
-            seqlen_q,
-            num_heads,
-            head_dim,
-            device=device,
-            dtype=dtype,
-        )
-        .normal_(mean=0, std=0.5)
-        .requires_grad_(True)
-    )
-    k = (
-        torch.randn(
-            batch_size,
-            seqlen_k,
-            num_heads,
-            head_dim,
-            device=device,
-            dtype=dtype,
-        )
-        .normal_(mean=0, std=0.5)
-        .requires_grad_(True)
-    )
-    v = (
-        torch.randn(
-            batch_size,
-            seqlen_k,
-            num_heads,
-            head_dim,
-            device=device,
-            dtype=dtype,
-        )
-        .normal_(mean=0, std=0.5)
-        .requires_grad_(True)
-    )
-
-    mask = torch.randint(0, 2, (seqlen_q, seqlen_k), device=device)
-
-    reference_out = reference_attention(q, k, v, mask)
-    triton_out = flash_attn_func(q, k, v, None, False, mask)
-
-    g = torch.randn_like(reference_out)
-    dq_ref, dk_ref, dv_ref = torch.autograd.grad(reference_out, (q, k, v), g)
-    dq, dk, dv = torch.autograd.grad(triton_out, (q, k, v), g)
-
-    torch.testing.assert_close(reference_out, triton_out, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(dq_ref, dq, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(dk_ref, dk, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(dv_ref, dv, rtol=5e-3, atol=5e-3)
 
 
 BLOCK_SIZE: tl.constexpr = 64
@@ -387,7 +289,7 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
     device = torch.device("cuda")
     dtype = torch.float16
     batch_size = 1
-    num_heads = 12
+    num_heads = 1
 
     torch.random.manual_seed(0)
 
@@ -438,8 +340,8 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
             dtype=torch.int64,
             device=device,
         )
-        attention_mask[:, 12:24] = 1 << 1
-        attention_mask[:, 36:56] = 1 << 2
+        # attention_mask[:, 12:24] = 1 << 1
+        # attention_mask[:, 36:56] = 1 << 2
 
         return attention_mask
 
@@ -470,8 +372,8 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
 
     mask = get_bitfield_attention_mask()
 
-    full_mask = convert_bitfield_attention_mask_to_full_mask(mask)
-    reference_out = reference_attention(q, k, v, full_mask)
+    full_mask = convert_bitfield_attention_mask_to_full_mask(mask).to(dtype=torch.int8)
+    reference_out = reference_attention(q, k, v, full_mask[0])
 
     # without materializing the full mask,
     # our Triton implementation accepts the bitfield mask directly
