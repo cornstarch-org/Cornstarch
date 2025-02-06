@@ -4,7 +4,6 @@ import pytest
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange, repeat
 
 from cornstarch.kernel.bitfield_attention import (
     flash_attn_func,
@@ -51,7 +50,7 @@ def reference_attention(
         # using pattern of "q k -> 1 1 q k" and add it to attn_weights
         # Expand to match the dimensions of attn_weights and attention_mask
         attn_weights = attn_weights + torch.where(
-            attention_mask.expand(q.shape[0], q.shape[1], -1, -1) == 0,
+            attention_mask.unsqueeze(1).expand(-1, attn_weights.shape[1], -1, -1) == 0,
             float("-inf"),
             0.0,
         )
@@ -289,7 +288,7 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
     device = torch.device("cuda")
     dtype = torch.float16
     batch_size = 1
-    num_heads = 1
+    num_heads = 12
 
     torch.random.manual_seed(0)
 
@@ -331,7 +330,7 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
     )
 
     # create a bitfield attention mask
-    def get_bitfield_attention_mask() -> torch.Tensor:
+    def get_bitfield_attention_mask() -> tuple[torch.Tensor, torch.Tensor]:
         text_bit = (1 << 62) | 1 | (1 << 1) | (1 << 2)
 
         attention_mask = torch.full(
@@ -340,45 +339,28 @@ def test_bitfield_attention(head_dim: int, seqlen: int):
             dtype=torch.int64,
             device=device,
         )
-        # attention_mask[:, 12:24] = 1 << 1
-        # attention_mask[:, 36:56] = 1 << 2
+        attention_mask[:, 12:24] = 1 << 1
+        attention_mask[:, 36:56] = 1 << 2
 
-        return attention_mask
-
-    def convert_bitfield_attention_mask_to_full_mask(bitfield_mask: torch.Tensor):
-        batch_size, seqlen = bitfield_mask.shape
-        causal_mask = torch.tril(
+        full_mask = torch.tril(
             torch.ones((batch_size, seqlen, seqlen), dtype=torch.bool, device=device),
             diagonal=0,
         )
+        full_mask[:, 12:24, :] = False
+        full_mask[:, 12:24, 12:24] = True
+        full_mask[:, 36:56, :] = False
+        full_mask[:, 36:56, 36:56] = True
 
-        q_bitfield_mask = bitfield_mask
-        kv_bitfield_mask = bitfield_mask
+        return attention_mask, full_mask
 
-        is_text_token = ((q_bitfield_mask & 1) > 0).unsqueeze(-1)
+    bitfield_mask, full_mask = get_bitfield_attention_mask()
 
-        q_modality_bits = (q_bitfield_mask & ((1 << 62) - 1)).unsqueeze(-1)
-        kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1)).unsqueeze(1)
-
-        return (
-            causal_mask
-            & (is_text_token == True)
-            & ((q_modality_bits & kv_modality_bits) > 0)
-        ) | (
-            (is_text_token == False)
-            & (q_modality_bits == kv_modality_bits)
-            & (q_bitfield_mask > 0).unsqueeze(-1)
-        )
-
-    mask = get_bitfield_attention_mask()
-
-    full_mask = convert_bitfield_attention_mask_to_full_mask(mask).to(dtype=torch.int8)
-    reference_out = reference_attention(q, k, v, full_mask[0])
+    reference_out = reference_attention(q, k, v, full_mask)
 
     # without materializing the full mask,
     # our Triton implementation accepts the bitfield mask directly
     # and internally materializes the mask in a tiled fashion
-    triton_out = flash_attn_func(q, k, v, None, False, mask)
+    triton_out = flash_attn_func(q, k, v, None, None, bitfield_mask)
     torch.testing.assert_close(reference_out, triton_out, rtol=5e-3, atol=5e-3)
 
     g = torch.randn_like(reference_out)

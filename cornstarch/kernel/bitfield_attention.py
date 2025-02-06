@@ -110,18 +110,10 @@ def get_submask_from_bitfield_mask(
     )
 
 
-@triton.jit
-def get_mask(mask, offs_m, offs_n, seqlen_k):
-    # offs_m[:, None] -> (BLOCK_M, 1); offs_n[None, :] -> (1, BLOCK_N)
-    # offs_m + offs_n -> (BLOCK_M, BLOCK_N)
-    mask_ptrs = mask + offs_m[:, None] * seqlen_k + offs_n[None, :]
-    return tl.load(mask_ptrs)
-
-
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=1),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=4, num_stages=1),
         # This config has a race condition when EVEN_M == False, disabling it for now.
         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
     ],
@@ -145,7 +137,7 @@ def _fwd_kernel(
     Lse,
     TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale,
-    stride_bamb,
+    stride_maskb,
     stride_qb,
     stride_qh,
     stride_qm,
@@ -249,30 +241,28 @@ def _fwd_kernel(
                 mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
                 other=0.0,
             )
+
+    q_bitfield_mask = tl.load(
+        bitfield_mask + off_b * stride_maskb + offs_m,
+        mask=offs_m < seqlen_q,
+        other=0,
+    )
+
     # loop over k, v and update accumulator
     # end_n = seqlen_k if not IS_CAUSAL else tl.minimum((start_m + 1) * BLOCK_M, seqlen_k) # if causal, only do end of BLOCK_M, else the whole N
     end_n = seqlen_k
-
-    q_bitfield_mask = tl.load(
-        bitfield_mask + off_b * stride_bamb + start_m + tl.arange(0, BLOCK_M),
-        mask=offs_m < seqlen_q,
-        other=0,
-    )  # [BLOCK_M]
-
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
+        offs_n_curr = start_n + offs_n
 
         kv_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_bamb + start_n + tl.arange(0, BLOCK_N),
-            mask=offs_n < seqlen_k,
+            bitfield_mask + off_b * stride_maskb + offs_n_curr,
+            mask=offs_n_curr < seqlen_k,
             other=0,
-        )  # [BLOCK_N]
+        )
 
         block_mask = get_submask_from_bitfield_mask(
-            q_bitfield_mask,
-            kv_bitfield_mask,
-            offs_m,
-            offs_n,
+            q_bitfield_mask, kv_bitfield_mask, offs_m, offs_n_curr
         )
 
         if not is_block_masked_out(block_mask):
@@ -524,7 +514,7 @@ def _bwd_kernel_one_col_block(
     LSE,
     D,
     softmax_scale,
-    stride_bamb,
+    stride_maskb,
     stride_qm,
     stride_kn,
     stride_vn,
@@ -624,7 +614,9 @@ def _bwd_kernel_one_col_block(
             )
 
     kv_bitfield_mask = tl.load(
-        bitfield_mask + off_b * stride_bamb + start_n + tl.arange(0, BLOCK_N),
+        bitfield_mask + off_b * stride_maskb + offs_n,
+        mask=offs_n < seqlen_k,
+        other=0,
     )
 
     # loop over rows
@@ -634,15 +626,13 @@ def _bwd_kernel_one_col_block(
         offs_m_curr = start_m + offs_m
 
         q_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_bamb + start_m + tl.arange(0, BLOCK_M),
+            bitfield_mask + off_b * stride_maskb + offs_m_curr,
+            mask=offs_m_curr < seqlen_q,
+            other=0,
         )
 
-        # [BLOCK_M, BLOCK_N]
         block_mask = get_submask_from_bitfield_mask(
-            q_bitfield_mask,
-            kv_bitfield_mask,
-            offs_m_curr,
-            offs_n,
+            q_bitfield_mask, kv_bitfield_mask, offs_m_curr, offs_n
         )
 
         if not is_block_masked_out(block_mask):
@@ -856,12 +846,7 @@ def init_to_zero(name):
         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False}, num_warps=4, num_stages=1, pre_hook=init_to_zero('DQ')),
         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True}, num_warps=4, num_stages=1, pre_hook=init_to_zero('DQ')),
     ],
-    key=[
-        "CACHE_KEY_SEQLEN_Q",
-        "CACHE_KEY_SEQLEN_K",
-        "BIAS_TYPE",
-        "BLOCK_HEADDIM",
-    ],
+    key=["CACHE_KEY_SEQLEN_Q", "CACHE_KEY_SEQLEN_K", "BIAS_TYPE", "BLOCK_HEADDIM"],
 )
 @triton.heuristics(
     {
@@ -884,7 +869,7 @@ def _bwd_kernel(
     LSE,
     D,
     softmax_scale,
-    stride_bamb,
+    stride_maskb,
     stride_qb,
     stride_qh,
     stride_qm,
@@ -941,11 +926,9 @@ def _bwd_kernel(
     # pointer to row-wise quantities in value-like data
     D += off_hb * seqlen_q_rounded
     LSE += off_hb * seqlen_q_rounded
-
     if not SEQUENCE_PARALLEL:
         num_block_n = tl.cdiv(seqlen_k, BLOCK_N)
         for start_n in range(0, num_block_n):
-
             _bwd_kernel_one_col_block(
                 start_n,
                 off_b,
@@ -961,7 +944,7 @@ def _bwd_kernel(
                 LSE,
                 D,
                 softmax_scale,
-                stride_bamb,
+                stride_maskb,
                 stride_qm,
                 stride_kn,
                 stride_vn,
@@ -999,7 +982,7 @@ def _bwd_kernel(
             LSE,
             D,
             softmax_scale,
-            stride_bamb,
+            stride_maskb,
             stride_qm,
             stride_kn,
             stride_vn,
@@ -1121,18 +1104,18 @@ def _flash_attn_forward(
 
 
 def _flash_attn_backward(
-    do,
-    q,
-    k,
-    v,
-    o,
-    lse,
-    dq,
-    dk,
-    dv,
-    bias=None,
-    softmax_scale=None,
-    mask=None,
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    lse: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    mask: torch.Tensor = None,
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
@@ -1248,9 +1231,8 @@ def _flash_attn_backward(
         bias_type,
         BLOCK_HEADDIM,
         # SEQUENCE_PARALLEL=False,
-        # BLOCK_M=64,
-        # BLOCK_N=64,
-        # num_warps=4,
+        # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+        # num_warps=num_warps,
         # num_stages=1,
     )
     dq.copy_(dq_accum)
