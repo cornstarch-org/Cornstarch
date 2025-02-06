@@ -1336,7 +1336,7 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=ctx.softmax_scale,
             )
-        return dq, dkv, None, None, None
+        return dq, dkv, None, None
 
 
 flash_attn_kvpacked_func = FlashAttnKVPackedFunc.apply
@@ -1386,7 +1386,7 @@ class FlashAttnFunc(torch.autograd.Function):
                 softmax_scale=ctx.softmax_scale,
                 mask=mask,
             )
-        return dq, dk, dv, None, None, None, None
+        return dq, dk, dv, None, None, None
 
 
 flash_attn_func = FlashAttnFunc.apply
