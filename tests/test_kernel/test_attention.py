@@ -156,17 +156,17 @@ def test_my_flash_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int
     )
 
     # 1. Random mask
-    mask = torch.randint(0, 2, (batch_size, seqlen_q, seqlen_k), device=device)
+    # mask = torch.randint(0, 2, (batch_size, seqlen_q, seqlen_k), device=device, dtype=torch.int64)
 
     # 2. Causal mask
     # mask = torch.tril(
-    #     torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int8),
+    #     torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int64),
     #     diagonal=0,
     # )
 
     # 3. Multimodal mask
     # mask = torch.tril(
-    #     torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int8),
+    #     torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int64),
     #     diagonal=0,
     # )
     # mask[:, 12:24, :] = 0
@@ -175,7 +175,7 @@ def test_my_flash_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int
     # mask[:, 36:56, 36:56] = 1
 
     # 4. Full mask
-    # mask = torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int32)
+    mask = torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int64)
 
     reference_out = reference_attention(q, k, v, mask)
     triton_out = my_flash_attn_func_triton(q, k, v, None, False, None, mask)
