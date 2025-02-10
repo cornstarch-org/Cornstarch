@@ -685,7 +685,9 @@ def _bwd_kernel_one_col_block(
             # Also wrong for headdim=64.
             if not (EVEN_M & EVEN_HEADDIM):
                 tl.debug_barrier()
-            lse_i = tl.load(LSE + offs_m_curr)  # [BLOCK_M]
+            lse_i = tl.load(
+                LSE + offs_m_curr, mask=(offs_m_curr < seqlen_q), other=0.0
+            )  # [BLOCK_M]
             if BIAS_TYPE == "none":
                 p = tl.exp(qk * softmax_scale - lse_i[:, None])  # [BLOCK_M, BLOCK_N]
             else:
@@ -729,7 +731,9 @@ def _bwd_kernel_one_col_block(
                 tl.debug_barrier()
             # compute ds = p * (dp - delta[:, None])
             # Putting the subtraction after the dp matmul (instead of before) is slightly faster
-            Di = tl.load(D + offs_m_curr)  # [BLOCK_M]
+            Di = tl.load(
+                D + offs_m_curr, mask=offs_m_curr < seqlen_q, other=0.0
+            )  # [BLOCK_M]
             # Converting ds to q.dtype here reduces register pressure and makes it much faster
             # for BLOCK_HEADDIM=128
             # p = softmax(qk), dp = dot(do, vT), Di: log-sum-exp

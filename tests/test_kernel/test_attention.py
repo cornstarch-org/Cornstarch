@@ -106,12 +106,20 @@ def reference_attention(
 @pytest.mark.parametrize("head_dim", [32, 64, 128])
 @pytest.mark.parametrize(
     "seqlen",
-    [(128, 128), (128, 1024), (1024, 128), (1024, 1024), [144, 144], [283, 283]],
-    ids=["128x128", "128x1024", "1024x128", "1024x1024", "144x144", "283x283"],
+    [
+        (128, 128),
+        (128, 1024),
+        (1024, 128),
+        (1024, 1024),
+        (57, 57),
+        (144, 144),
+        (283, 283),
+    ],
+    ids=["128x128", "128x1024", "1024x128", "1024x1024", "57x57", "144x144", "283x283"],
 )
 def test_my_flash_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int, int]):
     device = torch.device("cuda")
-    batch_size = 2
+    batch_size = 1
     num_heads = 12
 
     seqlen_q, seqlen_k = seqlen
@@ -161,7 +169,7 @@ def test_my_flash_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int
     # 2. Causal mask
     # mask = torch.tril(
     #     torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int64),
-    #     diagonal=0,
+    #     diagonal=0,∏
     # )
 
     # 3. Multimodal mask

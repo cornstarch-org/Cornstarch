@@ -54,11 +54,15 @@ def is_block_masked_out(mask):
 
 
 @triton.jit
-def get_mask(mask, offs_m, offs_n, seqlen_k):
+def get_mask(mask, offs_m, offs_n, seqlen_q, seqlen_k):
     # offs_m[:, None] -> (BLOCK_M, 1); offs_n[None, :] -> (1, BLOCK_N)
     # offs_m + offs_n -> (BLOCK_M, BLOCK_N)
     mask_ptrs = mask + offs_m[:, None] * seqlen_k + offs_n[None, :]
-    return tl.load(mask_ptrs)
+    return tl.load(
+        mask_ptrs,
+        mask=(offs_m[:, None] < seqlen_q) and (offs_n[None, :] < seqlen_k),
+        other=0,
+    )
 
 
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
@@ -209,7 +213,7 @@ def _fwd_kernel(
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
         block_mask = get_mask(
-            mask + off_b * stride_maskb, offs_m, start_n + offs_n, seqlen_k
+            mask + off_b * stride_maskb, offs_m, start_n + offs_n, seqlen_q, seqlen_k
         )  # [BLOCK_M, BLOCK_N]
 
         if not is_block_masked_out(block_mask):
@@ -572,7 +576,7 @@ def _bwd_kernel_one_col_block(
         offs_m_curr = start_m + offs_m
 
         block_mask = get_mask(
-            mask + off_b * stride_maskb, offs_m_curr, offs_n, seqlen_k
+            mask + off_b * stride_maskb, offs_m_curr, offs_n, seqlen_q, seqlen_k
         )  # [BLOCK_M, BLOCK_N]
 
         if not is_block_masked_out(block_mask):
@@ -625,7 +629,9 @@ def _bwd_kernel_one_col_block(
             # Also wrong for headdim=64.
             if not (EVEN_M & EVEN_HEADDIM):
                 tl.debug_barrier()
-            lse_i = tl.load(LSE + offs_m_curr)  # [BLOCK_M]
+            lse_i = tl.load(
+                LSE + offs_m_curr, mask=(offs_m_curr < seqlen_q), other=0.0
+            )  # [BLOCK_M]
             if BIAS_TYPE == "none":
                 p = tl.exp(qk * softmax_scale - lse_i[:, None])  # [BLOCK_M, BLOCK_N]
             else:
@@ -669,7 +675,9 @@ def _bwd_kernel_one_col_block(
                 tl.debug_barrier()
             # compute ds = p * (dp - delta[:, None])
             # Putting the subtraction after the dp matmul (instead of before) is slightly faster
-            Di = tl.load(D + offs_m_curr)  # [BLOCK_M]
+            Di = tl.load(
+                D + offs_m_curr, mask=offs_m_curr < seqlen_q, other=0.0
+            )  # [BLOCK_M]
             # Converting ds to q.dtype here reduces register pressure and makes it much faster
             # for BLOCK_HEADDIM=128
             # p = softmax(qk), dp = dot(do, vT), Di: log-sum-exp
