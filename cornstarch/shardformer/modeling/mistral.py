@@ -11,7 +11,6 @@ from colossalai.shardformer.layer._operation import (
     split_forward_gather_backward,
 )
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from torch.nn.attention.flex_attention import BlockMask, flex_attention
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import (
@@ -27,13 +26,9 @@ from transformers.models.mistral.modeling_mistral import (
     repeat_kv,
 )
 
-from cornstarch.kernel.interface import convert_bit_attention_mask_to_block_mask
-from cornstarch.shardformer.layers.utils import (
-    repeat_attention_mask_heads,
-    ContextParallelBatchUtils,
-)
-
-flex_attention = torch.compile(flex_attention, fullgraph=True)
+from cornstarch.kernel.bitfield_attention import bitfield_attn_func
+from cornstarch.kernel.interface import create_bitfield_attention_mask
+from cornstarch.shardformer.layers.utils import ContextParallelBatchUtils
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -130,37 +125,21 @@ class MistralModelForwards:
             attn_mask = attention_mask
         else:
             # non ring attention (either all-to-all or non sequence parallel)
-            if attention_mask.ndim == 2:
-                if getattr(attention_mask, "cornstarch_is_bitattention", False):
-                    # BitAttentionMask for anymask
-                    num_heads = (
-                        self.config.num_attention_heads
-                        // shard_config.tensor_parallel_size
-                    )
-                    attn_mask = convert_bit_attention_mask_to_block_mask(
-                        attention_mask, num_heads
-                    )
-                else:
-                    # causal mask
-                    attn_mask = self._update_causal_mask(
-                        attention_mask,
-                        hidden_states,
-                        cache_position,
-                        past_key_values,
-                        use_cache,
-                        output_attentions,
-                    )
-            elif attention_mask.ndim == 3:  # anymask
-                assert (
-                    self.config._attn_implementation != "flash_attention_2"
-                ), "Flash Attention 2 does not support AnyMask. Use either `sdpa` or `eager`."
-                num_heads = (
-                    self.config.num_attention_heads // shard_config.tensor_parallel_size
-                )
-                attn_mask = repeat_attention_mask_heads(attention_mask, num_heads)
+            if attention_mask is None:
+                attn_mask = create_bitfield_attention_mask(input_ids, token_ids={})
+
+            elif attention_mask.dtype == torch.int64:
+                attn_mask = attention_mask
+
             else:
-                raise ValueError(
-                    f"Unsupported attention mask dimension: {attention_mask.ndim}"
+                # causal mask
+                attn_mask = self._update_causal_mask(
+                    attention_mask,
+                    hidden_states,
+                    cache_position,
+                    past_key_values,
+                    use_cache,
+                    output_attentions,
                 )
 
         # Support SP + PP. Later stages have already received the split input.
@@ -477,22 +456,18 @@ class MistralAttentionForwards:
         attn_weights = None
         if sp_mode == "ring_attn":
             raise NotImplementedError("Ring Attention is not supported yet.")
-        elif isinstance(attention_mask, BlockMask):
-            attn_output, attn_weights = flex_attention(
-                query_states,
-                key_states,
-                value_states,
-                block_mask=attention_mask,
-                enable_gqa=True,
-                return_lse=True,
-                kernel_options={
-                    "BLOCK_M": 64,
-                    "BLOCK_N": 64,
-                    "BLOCK_M1": 32,
-                    "BLOCK_N1": 64,
-                    "BLOCK_M2": 64,
-                    "BLOCK_N2": 32,
-                },
+        elif attention_mask is not None and attention_mask.dtype == torch.int64:
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
+            # to be able to avoid many of these transpose/reshape/view.
+            query_states = query_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
+
+            attn_output = bitfield_attn_func(
+                query_states, key_states, value_states, None, None, attention_mask
             )
         elif self.config._attn_implementation == "flash_attention_2":
             if isinstance(past_key_value, StaticCache):
@@ -523,6 +498,7 @@ class MistralAttentionForwards:
                 use_top_left_mask=self._flash_attn_uses_top_left_mask,
                 is_causal=self.is_causal,
             )
+
         elif self.config._attn_implementation == "sdpa":
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
