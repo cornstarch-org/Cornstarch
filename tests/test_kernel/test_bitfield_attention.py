@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 
 from cornstarch.kernel.bitfield_attention import (
-    flash_attn_func,
+    bitfield_attn_func,
     get_submask_from_bitfield_mask,
 )
 
@@ -362,7 +362,7 @@ def test_bitfield_attention(head_dim: int, seqlen: int, batch_size: int):
     # without materializing the full mask,
     # our Triton implementation accepts the bitfield mask directly
     # and internally materializes the mask in a tiled fashion
-    triton_out = flash_attn_func(q, k, v, None, None, bitfield_mask)
+    triton_out = bitfield_attn_func(q, k, v, None, None, bitfield_mask)
     torch.testing.assert_close(reference_out, triton_out, rtol=5e-3, atol=5e-3)
 
     g = torch.randn_like(reference_out)

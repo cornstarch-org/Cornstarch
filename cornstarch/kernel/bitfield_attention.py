@@ -1022,7 +1022,10 @@ def _flash_attn_forward(
     _, seqlen_k, _, _ = k.shape
     assert k.shape == (batch, seqlen_k, nheads, d)
     assert v.shape == (batch, seqlen_k, nheads, d)
-    assert mask.shape == (batch, seqlen_k)
+    assert mask.shape == (
+        batch,
+        seqlen_k,
+    ), f"Expected mask shape ({batch}, {seqlen_k}), but got {mask.shape}"
     assert d <= 128, "FlashAttention only support head dimensions up to 128"
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
@@ -1290,7 +1293,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         return dqkv, None, None, None
 
 
-flash_attn_qkvpacked_func = FlashAttnQKVPackedFunc.apply
+bitfield_attn_qkvpacked_func = FlashAttnQKVPackedFunc.apply
 
 
 class FlashAttnKVPackedFunc(torch.autograd.Function):
@@ -1343,7 +1346,7 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
         return dq, dkv, None, None
 
 
-flash_attn_kvpacked_func = FlashAttnKVPackedFunc.apply
+bitfield_attn_kvpacked_func = FlashAttnKVPackedFunc.apply
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -1393,4 +1396,4 @@ class FlashAttnFunc(torch.autograd.Function):
         return dq, dk, dv, None, None, None
 
 
-flash_attn_func = FlashAttnFunc.apply
+bitfield_attn_func = FlashAttnFunc.apply
