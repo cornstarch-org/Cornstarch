@@ -204,13 +204,15 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         self,
         tp_size: int,
         pp_size: int,
-        fa: bool,
+        attention: str,
         precision: str,
         sp_mode: str | None = None,
         ring_attn_mode: str | None = "zigzag",
     ):
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16
+
+        assert attention in ["bam", "fa", "eager"]
 
         test_config = dict(
             tp_size=tp_size,
@@ -219,7 +221,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
             num_microbatches=self.num_microbatches,
             microbatch_size=self.microbatch_size,
             initial_scale=1,
-            enable_flash_attention=fa,
+            enable_flash_attention=(attention == "fa"),
         )
         if sp_mode is not None:
             torch._dynamo.config.optimize_ddp = False
@@ -263,6 +265,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 output_transform_fn=lambda x: x,
                 booster=booster,
                 precision=precision,
+                use_bitfield_attention_mask=(attention == "bam"),
             )
         )
 
@@ -346,6 +349,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         output_transform_fn: Callable,
         booster: Booster,
         precision: torch.dtype,
+        use_bitfield_attention_mask: bool,
     ):
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
@@ -356,6 +360,8 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
+        if use_bitfield_attention_mask:
+            shard_test_data.pop("attention_mask", None)
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()

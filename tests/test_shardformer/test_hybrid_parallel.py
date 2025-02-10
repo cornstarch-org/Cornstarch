@@ -83,13 +83,18 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("fa", [True, False])
+    @parametrize("attention", ["bam", "fa", "eager"], name_fn=lambda a: a)
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
-        self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
+        self,
+        model_name: str,
+        tp_size: int,
+        pp_size: int,
+        attention: str,
+        precision: str,
     ):
         self.set_model(vision_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, attention, precision)
 
     def postprocess_data_for_sharded_model(self, data, precision):
         if not isinstance(self.model, Qwen2VisionTransformerBase):
@@ -116,13 +121,18 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("fa", [True, False])
+    @parametrize("attention", ["bam", "fa", "eager"], name_fn=lambda a: a)
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test_model(
-        self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
+        self,
+        model_name: str,
+        tp_size: int,
+        pp_size: int,
+        attention: str,
+        precision: str,
     ):
         self.set_model(language_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, attention, precision)
 
     @parametrize("model_name", causal_lms.keys(), name_fn=lambda m: m)
     @parametrize(
@@ -130,13 +140,18 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("fa", [True, False])
+    @parametrize("attention", ["bam", "fa", "eager"], name_fn=lambda a: a)
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test_causal(
-        self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
+        self,
+        model_name: str,
+        tp_size: int,
+        pp_size: int,
+        attention: str,
+        precision: str,
     ):
         self.set_model(causal_lms[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
+        self.run_hybrid_parallel(tp_size, pp_size, attention, precision)
 
 
 @instantiate_parametrized_tests
@@ -167,7 +182,7 @@ class LanguageContextParallel(ColossalaiHybridParallelBase):
         sp_mode: str,
     ):
         self.set_model(causal_lms[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, False, "bf16", sp_mode)
+        self.run_hybrid_parallel(tp_size, pp_size, "bam", "bf16", sp_mode)
 
 
 @instantiate_parametrized_tests
@@ -178,46 +193,15 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("fa", [True, False])
+    @parametrize("attention", ["bam", "fa", "eager"], name_fn=lambda a: a)
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
-        self, model_name: str, tp_size: int, pp_size: int, fa: bool, precision: str
+        self,
+        model_name: str,
+        tp_size: int,
+        pp_size: int,
+        attention: str,
+        precision: str,
     ):
         self.set_model(audio_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, fa, precision)
-
-
-@instantiate_parametrized_tests
-@SkipTest
-class LanguageRingAttentionAnymask(ColossalaiHybridParallelBase):
-
-    def check_fn(self, *args, **kwargs):
-        """
-        Currently forward pass does not generate the correct output for the model.
-        TODO(insujang) remove this override to properly check its correctness.
-        """
-        pass
-
-    def postprocess_data_for_sharded_model(
-        self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
-    ) -> dict:
-        data = super().postprocess_data_for_sharded_model(data, precision)
-        attention_mask = data["attention_mask"]
-        batch_size, seq_len = attention_mask.shape
-        data["attention_mask"] = torch.tril(
-            torch.ones(batch_size, seq_len, seq_len, dtype=torch.bool, device="cuda")
-        )
-        return data
-
-    @parametrize("model_name", language_models.keys(), name_fn=lambda m: m)
-    @parametrize(
-        "tp_size, pp_size",
-        [(4, 1), (1, 1), (2, 2), (1, 4)],
-        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
-    )
-    @parametrize("ring_attn_mode", ["uniform", "zigzag", "random"], name_fn=lambda x: x)
-    def test(self, model_name: str, tp_size: int, pp_size: int, ring_attn_mode: str):
-        self.set_model(causal_lms[model_name]())
-        self.run_hybrid_parallel(
-            tp_size, pp_size, False, "bf16", "ring_attn", ring_attn_mode
-        )
+        self.run_hybrid_parallel(tp_size, pp_size, attention, precision)
