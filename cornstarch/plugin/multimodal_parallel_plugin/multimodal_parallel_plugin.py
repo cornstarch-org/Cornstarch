@@ -241,22 +241,14 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # Forward in the first stage of the language model
-                num_tokens_per_encoder_outputs = getattr(
-                    hidden_states, "_cornstarch_shape"
-                )
-                assert len(num_tokens_per_encoder_outputs) == len(module.encoders), (
-                    f"Expected to have {len(module.encoders)} hidden states, "
-                    f"got {len(hidden_states)}."
-                )
 
-                # Split merged encoder outputs into separate modal features
                 encoders_inputs: dict[str, dict] = {}
                 # merging functions accept either BaseModelOutput or tuple of tensors,
                 # and the first tensor (last_hidden_state) is merged.
                 encoders_outputs: dict[str, tuple[torch.Tensor]] = {}
-                for modal_key, encoder_outputs in zip(
-                    module.encoders.keys(),
-                    hidden_states.split(num_tokens_per_encoder_outputs, dim=1),
+
+                for encoder_outputs, modal_key in zip(
+                    hidden_states, module.encoders.keys()
                 ):
                     encoder_module: ModalEncoderModule = getattr(
                         module, f"{modal_key}_encoder"
@@ -307,12 +299,6 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 )
             else:
                 assert inputs_embeds is None
-                setattr(
-                    attention_mask,
-                    "cornstarch_is_bitattention",
-                    torch.any(attention_mask > 1),
-                )
-                setattr(attention_mask, "cornstarch_num_encoders", len(module.encoders))
 
                 language_model_inputs = dict(
                     input_ids=None,

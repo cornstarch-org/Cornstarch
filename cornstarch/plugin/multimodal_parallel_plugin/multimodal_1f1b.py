@@ -20,6 +20,7 @@ from colossalai.pipeline.schedule._utils import (
     model_forward,
     retain_grad,
     to_device,
+    tree_map,
     tree_map_hf,
 )
 from colossalai.pipeline.schedule.one_f_one_b import (
@@ -521,76 +522,37 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         self.last_batch_size: Optional[int] = None
         self.microbatch_offset: Optional[int] = None
 
-    def _merge_tensors(self, tensors_list: list, out_shapes: bool) -> Any:
+    def _merge_tensors(
+        self, tensors_list: list[dict[str, torch.Tensor]], out_shapes: bool
+    ) -> dict[str, list[torch.Tensor]]:
         assert isinstance(tensors_list, list)
 
         if len(tensors_list) == 0:
             return None
 
         assert all(isinstance(tensors, dict) for tensors in tensors_list)
-        tensors_list: list[dict[str, Any]] = tensors_list
-        # 1. Collect all unique keys
-        all_keys = set()
-        for tensors in tensors_list:
-            all_keys.update(tensors.keys())
 
-        # 2. create a dictionary with all keys and initialize with empty lists
-        output_tensors = {key: [] for key in all_keys}
-        output_tensors_shape = {f"{key}_shape": [] for key in all_keys}
+        objects: dict[str, list[torch.Tensor]] = {}
+        for tensor_dict in tensors_list:
+            for key, tensor in tensor_dict.items():
+                if key not in objects:
+                    objects[key] = []
+                objects[key].append(tensor)
 
-        # 3. Populate the new dictionary with values from the original list of dictionaries
-        for tensors in tensors_list:
-            for key in all_keys:
-                data = tensors.get(key, None)
-                if data is None:
-                    output_tensors[key].append(
-                        torch.empty(0, device=get_accelerator().get_current_device())
-                    )
-                    output_tensors_shape[f"{key}_shape"].append(
-                        torch.zeros([1], device=get_accelerator().get_current_device())
-                    )
-                else:
-                    output_tensors[key].append(data)
-                    output_tensors_shape[f"{key}_shape"].append(data.shape[1])
+        return objects
 
-        # 4. Convert the list to a tensor
-        for key in all_keys:
-            output_tensors[key] = torch.cat(output_tensors[key], dim=1)
+    def _split_tensors(
+        self, tensors_dict: dict[str, list[torch.Tensor]]
+    ) -> list[dict[str, torch.Tensor]]:
+        assert len(tensors_dict) > 0
 
-        if out_shapes:
-            for key, tensor in output_tensors.items():
-                setattr(
-                    tensor, "_cornstarch_shape", output_tensors_shape[f"{key}_shape"]
-                )
+        objects: list[dict[str, torch.Tensor]] = [
+            {} for _ in range(max(len(v) for v in tensors_dict.values()))
+        ]
 
-        return output_tensors
-
-    def _split_tensor(self, object: Any, split_shape: list[int]) -> list[Any]:
-        assert len(split_shape) > 0
-
-        if isinstance(object, torch.Tensor):
-            objects = torch.split(object, split_shape, dim=1)
-        elif isinstance(object, list):
-            assert all(isinstance(obj, torch.Tensor) for obj in object)
-            object: list[torch.Tensor] = object
-            objects = [
-                torch.split(obj, shape, dim=1)
-                for obj, shape in zip(object, split_shape)
-            ]
-            objects = [objects[:, i] for i in range(len(objects))]
-        elif isinstance(object, dict):
-            assert all(isinstance(obj, torch.Tensor) for obj in object.values())
-            object: dict[str, torch.Tensor] = object
-            objects = {
-                key: torch.split(tensor, split_shape[key], dim=1)
-                for key, tensor in object.items()
-            }
-            objects = [
-                {key: value for key, value in zip(objects.keys(), values)}
-                for values in zip(*objects.values())
-            ]
-        else:
-            raise ValueError(f"Unsupported type of object: {type(object)}")
+        for key, tensors in tensors_dict.items():
+            for i, tensor in enumerate(tensors):
+                objects[i][key] = tensor
 
         return objects
 
@@ -636,23 +598,8 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
             if num_ranks_to_send > 1:
-                if isinstance(input_tensor, torch.Tensor):
-                    input_tensor_shapes = getattr(input_tensor, "_cornstarch_shape")
-                elif isinstance(input_tensor, list):
-                    input_tensor_shapes = [
-                        getattr(obj, "_cornstarch_shape") for obj in input_tensor
-                    ]
-                elif isinstance(input_tensor, dict):
-                    input_tensor_shapes = {
-                        key: getattr(value, "_cornstarch_shape")
-                        for key, value in input_tensor.items()
-                    }
-                else:
-                    raise ValueError(
-                        f"Unsupported type of input_tensor: {type(input_tensor)}"
-                    )
                 self.comm.send_backward(
-                    self._split_tensor(input_tensor_grad, input_tensor_shapes),
+                    self._split_tensors(input_tensor_grad),
                     is_broadcast=False,
                 )
             else:
@@ -695,23 +642,8 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
             num_ranks_to_send = len(self.stage_manager.get_prev_ranks())
             if num_ranks_to_send > 1:
-                if isinstance(input_tensor, torch.Tensor):
-                    input_tensor_shapes = getattr(input_tensor, "_cornstarch_shape")
-                elif isinstance(input_tensor, list):
-                    input_tensor_shapes = [
-                        getattr(obj, "_cornstarch_shape") for obj in input_tensor
-                    ]
-                elif isinstance(input_tensor, dict):
-                    input_tensor_shapes = {
-                        key: getattr(value, "_cornstarch_shape")
-                        for key, value in input_tensor.items()
-                    }
-                else:
-                    raise ValueError(
-                        f"Unsupported type of input_tensor: {type(input_tensor)}"
-                    )
                 input_tensors = self.comm.send_backward_recv_forward(
-                    self._split_tensor(input_tensor_grad, input_tensor_shapes),
+                    self._split_tensors(input_tensor_grad),
                     send_first=send_first,
                     is_broadcast=False,
                 )
@@ -764,6 +696,54 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             return loss
         else:
             return output_obj
+
+    def backward_step(
+        self,
+        optimizer: OptimizerWrapper,
+        input_obj: Optional[dict],
+        output_obj: Union[dict, torch.Tensor],
+        output_obj_grad: Optional[dict],
+    ) -> Optional[dict]:
+        """Backward one step of the pipeline
+
+        Args:
+            optimizer (OptimizerWrapper): Optimizer to update the model
+            input_obj (Optional[dict]): Output of the previous stage. If it is the first stage, the `input_obj` is None.
+            output_obj (Union[dict, torch.Tensor]): Output of the current stage. If it is the last stage, the output is the loss (Tensor).
+            output_obj_grad (dict): Gradient of the `output_obj`. If it is the last stage, the `output_obj_grad` is None.
+
+        Returns:
+            Optional[dict]: Gradient of the `input_obj`. If it is the first stage, the `input_obj_grad` is None.
+        """
+
+        # Retain the grad on the input_obj.
+        tree_map(retain_grad, input_obj)
+        # Backward pass.
+        if output_obj_grad is None:
+            optimizer.backward(output_obj)
+        else:
+            keys = output_obj.get("backward_tensor_keys", output_obj_grad.keys())
+            tensors_to_backward = []
+            grads_to_backward = []
+            for k in keys:
+                tensors_to_backward.append(output_obj[k])
+                grads_to_backward.append(output_obj_grad[k])
+            if len(tensors_to_backward) == 1:
+                optimizer.backward_by_grad(tensors_to_backward[0], grads_to_backward[0])
+            else:
+                optimizer.backward_by_grad(tensors_to_backward, grads_to_backward)
+
+        # Collect the grad of the input_obj.
+        input_obj_grad = None
+        if input_obj is not None:
+            input_obj_grad = {}
+            for k, v in input_obj.items():
+                if isinstance(v, torch.Tensor) and v.grad is not None:
+                    input_obj_grad[k] = v.grad
+                elif isinstance(v, list):
+                    input_obj_grad[k] = [item.grad for item in v]
+
+        return input_obj_grad
 
     def run_forward_backward(
         self,
