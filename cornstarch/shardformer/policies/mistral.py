@@ -47,7 +47,7 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
         config: MistralConfig = cast(MistralConfig, config)
 
         modules = []
-        modules.append("embed_tokens")
+        modules.extend(["embed_tokens", "rotary_emb"])
         modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("norm")
 
@@ -68,8 +68,11 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
                 "Modules in the pipeline template do not match the modules in the model."
             )
 
-        if f"{prefix}embed_tokens" not in modules_in_template[0]:
-            raise ValueError("embed_tokens must be in the first stage.")
+        if not all(
+            module in modules_in_template[0]
+            for module in [f"{prefix}embed_tokens", f"{prefix}rotary_emb"]
+        ):
+            raise ValueError("Teh embedding layers must be in the first stage.")
 
         if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("norm must be in the last stage.")
@@ -87,7 +90,7 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
         held_layers = []
         layers_per_stage = stage_manager.distribute_layers(len(module.layers))
         if stage_manager.is_first_stage():
-            held_layers.append(module.embed_tokens)
+            held_layers.extend([module.embed_tokens, module.rotary_emb])
         start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.layers[start_idx:end_idx])
         if stage_manager.is_last_stage():
@@ -98,19 +101,10 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
         from transformers.models.mistral.modeling_mistral import (
             MistralAttention,
             MistralDecoderLayer,
-            MistralFlashAttention2,
             MistralRMSNorm,
-            MistralSdpaAttention,
         )
 
         config: MistralConfig = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": MistralAttention,
-            "sdpa": MistralSdpaAttention,
-            "flash_attention_2": MistralFlashAttention2,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
 
         # This is to avoid refererence to its weight which has been replaced by a placeholder
@@ -164,7 +158,7 @@ class MistralPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement["num_heads"] = num_q_heads
         attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
 
-        policy[attn_cls] = ModulePolicyDescription(
+        policy[MistralAttention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
                 "forward": functools.partial(

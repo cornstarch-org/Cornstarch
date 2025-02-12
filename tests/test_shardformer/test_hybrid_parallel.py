@@ -83,7 +83,15 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("attention", ["bam", "fa", "eager"], name_fn=lambda a: a)
+    @parametrize(
+        "attention",
+        ["bitfield_attention", "flash_attention_2", "eager"],
+        name_fn=lambda x: {
+            "bitfield_attention": "bam",
+            "flash_attention_2": "fa",
+            "eager": "eager",
+        }[x],
+    )
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
         self,
@@ -121,7 +129,15 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("attention", ["bam", "fa", "eager"], name_fn=lambda a: a)
+    @parametrize(
+        "attention",
+        ["bitfield_attention", "flash_attention_2", "eager"],
+        name_fn=lambda x: {
+            "bitfield_attention": "bam",
+            "flash_attention_2": "fa",
+            "eager": "eager",
+        }[x],
+    )
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test_model(
         self,
@@ -140,7 +156,15 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("attention", ["bam", "fa", "eager"], name_fn=lambda a: a)
+    @parametrize(
+        "attention",
+        ["bitfield_attention", "flash_attention_2", "eager"],
+        name_fn=lambda x: {
+            "bitfield_attention": "bam",
+            "flash_attention_2": "fa",
+            "eager": "eager",
+        }[x],
+    )
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test_causal(
         self,
@@ -155,37 +179,6 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
 
 
 @instantiate_parametrized_tests
-@SkipTest
-class LanguageContextParallel(ColossalaiHybridParallelBase):
-    @parametrize("model_name", language_models.keys(), name_fn=lambda m: m)
-    @parametrize(
-        "tp_size, pp_size",
-        [(4, 1), (1, 1), (2, 2), (1, 4)],
-        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
-    )
-    def test_model(self, model_name: str, tp_size: int, pp_size: int):
-        self.set_model(language_models[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, True, "bf16", "all_to_all")
-
-    @parametrize("model_name", causal_lms.keys(), name_fn=lambda m: m)
-    @parametrize(
-        "tp_size, pp_size",
-        [(4, 1), (1, 1), (2, 2), (1, 4)],
-        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
-    )
-    @parametrize("sp_mode", ["all_to_all", "ring_attn"], name_fn=lambda x: x)
-    def test_causal(
-        self,
-        model_name: str,
-        tp_size: int,
-        pp_size: int,
-        sp_mode: str,
-    ):
-        self.set_model(causal_lms[model_name]())
-        self.run_hybrid_parallel(tp_size, pp_size, "bam", "bf16", sp_mode)
-
-
-@instantiate_parametrized_tests
 class AudioHybridParallel(ColossalaiHybridParallelBase):
     @parametrize("model_name", audio_models.keys(), name_fn=lambda m: m)
     @parametrize(
@@ -193,7 +186,15 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
         [(4, 1), (1, 1), (2, 2), (1, 4)],
         name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
     )
-    @parametrize("attention", ["bam", "fa", "eager"], name_fn=lambda a: a)
+    @parametrize(
+        "attention",
+        ["bitfield_attention", "flash_attention_2", "eager"],
+        name_fn=lambda x: {
+            "bitfield_attention": "bam",
+            "flash_attention_2": "fa",
+            "eager": "eager",
+        }[x],
+    )
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
         self,

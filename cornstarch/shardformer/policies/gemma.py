@@ -40,7 +40,7 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
         config: GemmaConfig = cast(GemmaConfig, config)
 
         modules = []
-        modules.append("embed_tokens")
+        modules.extend(["embed_tokens", "rotary_emb"])
         modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("norm")
 
@@ -62,8 +62,11 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
                 f"Expected: {modules}, Got: {modules_in_template}"
             )
 
-        if f"{prefix}embed_tokens" not in modules_in_template[0]:
-            raise ValueError("embed_tokens must be in the first stage.")
+        if not all(
+            module in modules_in_template[0]
+            for module in [f"{prefix}embed_tokens", f"{prefix}rotary_emb"]
+        ):
+            raise ValueError("Teh embedding layers must be in the first stage.")
 
         if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("norm must be in the last stage.")
@@ -89,43 +92,23 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        if stage_manager.is_interleave:
-            assert stage_manager.num_model_chunks is not None
-            layers_per_stage = stage_manager.distribute_layers(len(module.layers))
-            stage_indices = stage_manager.get_stage_index(layers_per_stage)
-            if stage_manager.is_first_stage(ignore_chunk=True):
-                held_layers.append(module.embed_tokens)
-            for start_idx, end_idx in stage_indices:
-                held_layers.extend(module.layers[start_idx:end_idx])
-            if stage_manager.is_last_stage(ignore_chunk=True):
-                held_layers.append(module.norm)
-
-        else:
-            layers_per_stage = stage_manager.distribute_layers(len(module.layers))
-            if stage_manager.is_first_stage():
-                held_layers.append(module.embed_tokens)
-            start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
-            held_layers.extend(module.layers[start_idx:end_idx])
-            if stage_manager.is_last_stage():
-                held_layers.append(module.norm)
+        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+        if stage_manager.is_first_stage():
+            held_layers.extend([module.embed_tokens, module.rotary_emb])
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        held_layers.extend(module.layers[start_idx:end_idx])
+        if stage_manager.is_last_stage():
+            held_layers.append(module.norm)
         return held_layers
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from transformers.models.gemma.modeling_gemma import (
             GemmaAttention,
             GemmaDecoderLayer,
-            GemmaFlashAttention2,
             GemmaRMSNorm,
-            GemmaSdpaAttention,
         )
 
         config: GemmaConfig = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": GemmaAttention,
-            "spda": GemmaSdpaAttention,
-            "flash_attention_2": GemmaFlashAttention2,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
 
@@ -194,7 +177,7 @@ class GemmaPolicy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
-        policy[attn_cls] = ModulePolicyDescription(
+        policy[GemmaAttention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
                 "forward": functools.partial(

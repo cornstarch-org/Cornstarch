@@ -34,6 +34,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 
+from cornstarch.kernel.interface import create_bitfield_attention_mask
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
@@ -67,10 +68,10 @@ class ModelClassBase(ABC):
     @abstractmethod
     def data_gen_fn(self, num_batch: int) -> dict: ...
 
-    def model_fn(self, fa: bool) -> PreTrainedModel:
+    def model_fn(self) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
-        config._attn_implementation = "flash_attention_2" if fa else "eager"
+        config._attn_implementation = "eager"
         return self.model_class(config)
 
 
@@ -80,7 +81,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
     @property
     def world_size(self) -> int:
-        return 16
+        return 8
 
     def set_model(self, model: ModelClassBase):
         self.model = model
@@ -212,8 +213,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16
 
-        assert attention in ["bam", "fa", "eager"]
-
         test_config = dict(
             tp_size=tp_size,
             pp_size=pp_size,
@@ -221,7 +220,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
             num_microbatches=self.num_microbatches,
             microbatch_size=self.microbatch_size,
             initial_scale=1,
-            enable_flash_attention=(attention == "fa"),
+            attention=attention,
         )
         if sp_mode is not None:
             torch._dynamo.config.optimize_ddp = False
@@ -265,7 +264,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 output_transform_fn=lambda x: x,
                 booster=booster,
                 precision=precision,
-                use_bitfield_attention_mask=(attention == "bam"),
             )
         )
 
@@ -293,14 +291,16 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         Callable,
         Booster,
     ]:
+        attention: str = test_config.pop("attention")
+        test_config["enable_flash_attention"] = attention == "flash_attention_2"
         use_lazy_init: bool = test_config.pop("use_lazy_init", False)
-        use_flash_attention: bool = test_config["enable_flash_attention"]
         sp_mode: str = test_config.get("sequence_parallelism_mode", None)
 
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
-            org_model = self.model.model_fn(use_flash_attention).to(device="cuda")
+            org_model = self.model.model_fn().to(device="cuda")
             sharded_model = copy.deepcopy(org_model)
+            sharded_model.config._attn_implementation = attention
         if use_lazy_init:
             ctx.materialize(org_model)
 
@@ -349,7 +349,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         output_transform_fn: Callable,
         booster: Booster,
         precision: torch.dtype,
-        use_bitfield_attention_mask: bool,
     ):
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
@@ -360,8 +359,10 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
-        if use_bitfield_attention_mask:
-            shard_test_data.pop("attention_mask", None)
+        if sharded_model.unwrap().config._attn_implementation == "bitfield_attention":
+            shard_test_data["attention_mask"] = create_bitfield_attention_mask(
+                shard_test_data["input_ids"]
+            )
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()
@@ -567,7 +568,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         tp_size: int,
         modal_pp_size: dict[str, int],
         llm_sp_mode: str | None,
-        fa: bool,
         precision: str,
         run_original_model: bool = True,
         run_sharded_model: bool = True,
@@ -579,7 +579,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             num_microbatches=self.num_microbatches,
             microbatch_size=self.microbatch_size,
             initial_scale=1,
-            enable_flash_attention=fa,
+            enable_flash_attention=False,
             precision=precision,
         )
 
@@ -916,6 +916,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         for model_base in self.encoders.values():
             data.update(model_base.data_gen_fn(batch_size))
         data.update(self.llm.data_gen_fn(batch_size))
+        data.pop("attention_mask", None)
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)

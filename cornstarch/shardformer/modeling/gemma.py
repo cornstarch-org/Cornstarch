@@ -1,8 +1,7 @@
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 from colossalai.shardformer.layer import dist_cross_entropy
 from colossalai.shardformer.layer._operation import (
     all_to_all_comm,
@@ -11,21 +10,23 @@ from colossalai.shardformer.layer._operation import (
 )
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_flash_attention_utils import _flash_attention_forward
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.gemma.modeling_gemma import (
     GemmaAttention,
     GemmaForCausalLM,
     GemmaModel,
+    KwargsForCausalLM,
     apply_rotary_pos_emb,
+    eager_attention_forward,
     logger,
-    repeat_kv,
 )
+from transformers.processing_utils import Unpack
 
-from cornstarch.kernel.bitfield_attention import bitfield_attn_func
 from cornstarch.kernel.interface import create_bitfield_attention_mask
 from cornstarch.shardformer.layers.utils import ContextParallelBatchUtils
 
@@ -46,6 +47,7 @@ class GemmaModelForwards:
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
@@ -94,19 +96,18 @@ class GemmaModelForwards:
             )
             hidden_states = hidden_states * normalizer
 
-        # kept for BC (non `Cache` `past_key_values` inputs)
-        return_legacy_cache = False  # noqa: F841
-        if use_cache and not isinstance(past_key_values, Cache):
-            return_legacy_cache = True  # noqa: F841
-            if past_key_values is None:
-                past_key_values = DynamicCache()
-            else:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-                logger.warning_once(
-                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
-                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
-                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
-                )
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
+
+        if cache_position is None:
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
+            )
 
         if cache_position is None:
             past_seen_tokens = (
@@ -120,6 +121,10 @@ class GemmaModelForwards:
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
+
+        if position_embeddings is None:
+            # create position embeddings to be shared across the decoder layers
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
@@ -165,9 +170,6 @@ class GemmaModelForwards:
                     hidden_states, 1, sp_group, 1 / sp_size
                 )
 
-        # decoder layers
-        next_decoder_cache = None
-
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
@@ -188,6 +190,7 @@ class GemmaModelForwards:
                     output_attentions,
                     use_cache,
                     cache_position,
+                    position_embeddings,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -198,12 +201,10 @@ class GemmaModelForwards:
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attentions += (layer_outputs[1],)
@@ -213,6 +214,7 @@ class GemmaModelForwards:
                 "hidden_states": hidden_states,
                 "cache_position": cache_position,
                 "position_ids": position_ids,
+                "position_embeddings": position_embeddings,
             }
             if output_hidden_states:
                 outputs["all_hidden_states"] = all_hidden_states
@@ -221,6 +223,7 @@ class GemmaModelForwards:
             return outputs
 
         hidden_states = self.norm(hidden_states)
+
         if shard_config.enable_sequence_parallelism and (
             (not shard_config.parallel_output) or force_sp_gather
         ):
@@ -230,30 +233,16 @@ class GemmaModelForwards:
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        next_cache = next_decoder_cache if use_cache else None
-        if return_legacy_cache:
-            next_cache = next_cache.to_legacy_cache()
-
         # Clear cache so that it is not used in the next forward pass
         ContextParallelBatchUtils.clear_split_cache()
 
-        if not return_dict:
-            return tuple(
-                v
-                for v in [
-                    hidden_states,
-                    next_cache,
-                    all_hidden_states,
-                    all_self_attentions,
-                ]
-                if v is not None
-            )
-        return BaseModelOutputWithPast(
+        output = BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
+            past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
         )
+        return output if return_dict else output.to_tuple()
 
     @staticmethod
     def gemma_for_causal_lm_forward(
@@ -270,10 +259,12 @@ class GemmaModelForwards:
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
+        **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -319,11 +310,13 @@ class GemmaModelForwards:
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            position_embeddings=position_embeddings,
             hidden_states=hidden_states,
             all_hidden_states=all_hidden_states,
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
+            **kwargs,
         )
 
         stage_manager = shard_config.pipeline_stage_manager
@@ -365,15 +358,15 @@ class GemmaAttentionForwards:
     def forward(
         self: GemmaAttention,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
         past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         shard_config: Optional[ShardConfig] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        output_attentions = False
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
 
         if shard_config is not None and shard_config.enable_sequence_parallelism:
             sp_mode: str = shard_config.sequence_parallelism_mode
@@ -391,8 +384,6 @@ class GemmaAttentionForwards:
             sp_size = None
             sp_group = None
 
-        bsz, q_len, _ = hidden_states.size()
-
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -402,19 +393,13 @@ class GemmaAttentionForwards:
             query_states = all_to_all_comm(query_states, sp_group)
             key_states = all_to_all_comm(key_states, sp_group)
             value_states = all_to_all_comm(value_states, sp_group)
-            bsz, q_len, _ = query_states.size()
+            input_shape[1] = hidden_shape[1] = query_states.shape[1]
 
-        query_states = query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
+        query_states = query_states.view(hidden_shape).transpose(1, 2)
+        key_states = key_states.view(hidden_shape).transpose(1, 2)
+        value_states = value_states.view(hidden_shape).transpose(1, 2)
 
-        cos, sin = self.rotary_emb(value_states, position_ids)
+        cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin
         )
@@ -426,116 +411,38 @@ class GemmaAttentionForwards:
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-        # ==========
-        # Common qkv computation part is done, now we can call the specific attention function
-        # ==========
-
-        attn_weights = None
-        if sp_mode == "ring_attn":
-            raise NotImplementedError("Ring Attention is not supported yet")
-        elif attention_mask is not None and attention_mask.dtype == torch.int64:
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-            # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
-            # to be able to avoid many of these transpose/reshape/view.
-            query_states = query_states.transpose(1, 2)
-            key_states = key_states.transpose(1, 2)
-            value_states = value_states.transpose(1, 2)
-
-            attn_output = bitfield_attn_func(
-                query_states, key_states, value_states, None, None, attention_mask
-            )
-        elif self.config._attn_implementation == "flash_attention_2":
-            # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
-            # to be able to avoid many of these transpose/reshape/view.
-            query_states = query_states.transpose(1, 2)
-            key_states = key_states.transpose(1, 2)
-            value_states = value_states.transpose(1, 2)
-
-            dropout_rate = self.attention_dropout if self.training else 0.0
-
-            attn_output = _flash_attention_forward(
-                query_states,
-                key_states,
-                value_states,
-                attention_mask,
-                q_len,
-                position_ids=position_ids,
-                dropout=dropout_rate,
-                sliding_window=getattr(self, "sliding_window", None),
-                is_causal=self.is_causal,
-                use_top_left_mask=self._flash_attn_uses_top_left_mask,
-            )
-
-        elif self.config._attn_implementation == "sdpa":
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-            causal_mask = attention_mask
-            if attention_mask is not None:
-                causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
-
-            # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-            # Reference: https://github.com/pytorch/pytorch/issues/112577.
-            if query_states.device.type == "cuda" and causal_mask is not None:
-                query_states = query_states.contiguous()
-                key_states = key_states.contiguous()
-                value_states = value_states.contiguous()
-
-            # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-            # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-            is_causal = True if causal_mask is None and q_len > 1 else False
-
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=causal_mask,
-                dropout_p=self.attention_dropout if self.training else 0.0,
-                is_causal=is_causal,
-            )
-
-            attn_output = attn_output.transpose(1, 2).contiguous()
-        else:
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-            attn_weights = (
-                torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
-            )
-
-            if attention_mask is not None:  # no matter the length, we just slice it
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-                attn_weights = attn_weights + causal_mask
-
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(
-                attn_weights, dim=-1, dtype=torch.float32
-            ).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(
-                attn_weights, p=self.attention_dropout, training=self.training
-            )
-            attn_output = torch.matmul(attn_weights, value_states)
-
-            if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-                raise ValueError(
-                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                    f" {attn_output.size()}"
+        attention_interface: Callable = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            if self.config._attn_implementation == "sdpa" and kwargs.get(
+                "output_attentions", False
+            ):
+                logger.warning_once(
+                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
                 )
+            else:
+                attention_interface = ALL_ATTENTION_FUNCTIONS[
+                    self.config._attn_implementation
+                ]
 
-            attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
 
         # sp: all-to-all communication when introducing ulysses context parallelism
-        attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
         if sp_mode == "all_to_all":
             attn_output = all_to_all_comm(
                 attn_output, sp_group, scatter_dim=1, gather_dim=2
             )
 
         attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights

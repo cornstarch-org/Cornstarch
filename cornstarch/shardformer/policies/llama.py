@@ -107,19 +107,10 @@ class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
         from transformers.models.llama.modeling_llama import (
             LlamaAttention,
             LlamaDecoderLayer,
-            LlamaFlashAttention2,
             LlamaRMSNorm,
-            LlamaSdpaAttention,
         )
 
         config: LlamaConfig = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": LlamaAttention,
-            "flash_attention_2": LlamaFlashAttention2,
-            "sdpa": LlamaSdpaAttention,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
 
         # This is to avoid refererence to its weight which has been replaced by a placeholder
@@ -176,7 +167,7 @@ class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
         if num_kv_heads:
             attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
 
-        policy[attn_cls] = ModulePolicyDescription(
+        policy[LlamaAttention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
                 "forward": functools.partial(

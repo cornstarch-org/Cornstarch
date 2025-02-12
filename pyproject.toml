@@ -19,7 +19,7 @@ classifiers = [
 dependencies = [
     "torch>=2.5.0",
     "triton>=3.0.0",
-    "transformers==4.47.1",
+    "transformers>=4.48.0",
     "loguru",
     "simple_parsing",
     "datasets",

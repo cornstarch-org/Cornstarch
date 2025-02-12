@@ -41,7 +41,7 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
         config: Gemma2Config = cast(Gemma2Config, config)
 
         modules = []
-        modules.append("embed_tokens")
+        modules.extend(["embed_tokens", "rotary_emb"])
         modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("norm")
 
@@ -90,44 +90,23 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        if stage_manager.is_interleave:
-            assert stage_manager.num_model_chunks is not None
-            layers_per_stage = stage_manager.distribute_layers(len(module.layers))
-            stage_indices = stage_manager.get_stage_index(layers_per_stage)
-            if stage_manager.is_first_stage():
-                held_layers.append(module.embed_tokens)
-            for start_idx, end_idx in stage_indices:
-                held_layers.extend(module.layers[start_idx:end_idx])
-            if stage_manager.is_last_stage():
-                held_layers.append(module.norm)
-
-        else:
-            layers_per_stage = stage_manager.distribute_layers(len(module.layers))
-            if stage_manager.is_first_stage():
-                held_layers.append(module.embed_tokens)
-            start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
-            held_layers.extend(module.layers[start_idx:end_idx])
-            if stage_manager.is_last_stage():
-                held_layers.append(module.norm)
+        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+        if stage_manager.is_first_stage():
+            held_layers.extend([module.embed_tokens, module.rotary_emb])
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        held_layers.extend(module.layers[start_idx:end_idx])
+        if stage_manager.is_last_stage():
+            held_layers.append(module.norm)
         return held_layers
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from transformers.models.gemma2.modeling_gemma2 import (
             Gemma2Attention,
             Gemma2DecoderLayer,
-            Gemma2FlashAttention2,
             Gemma2RMSNorm,
-            Gemma2SdpaAttention,
         )
 
         config: Gemma2Config = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": Gemma2Attention,
-            "sdpa": Gemma2SdpaAttention,
-            "flash_attention_2": Gemma2FlashAttention2,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
 
         # This is to avoid refererence to its weight which has been replaced by a placeholder
@@ -195,7 +174,7 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
-        policy[attn_cls] = ModulePolicyDescription(
+        policy[Gemma2Attention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
                 "forward": functools.partial(

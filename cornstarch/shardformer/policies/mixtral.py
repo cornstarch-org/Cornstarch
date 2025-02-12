@@ -21,12 +21,7 @@ from colossalai.shardformer.policies.base_policy import (
 from torch import Tensor, nn
 from transformers import PretrainedConfig
 from transformers.models.mixtral.configuration_mixtral import MixtralConfig
-from transformers.models.mixtral.modeling_mixtral import (
-    MixtralAttention,
-    MixtralFlashAttention2,
-    MixtralModel,
-    MixtralSdpaAttention,
-)
+from transformers.models.mixtral.modeling_mixtral import MixtralModel
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.mixtral import (
@@ -50,7 +45,7 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
         config: MixtralConfig = cast(MixtralConfig, config)
 
         modules = []
-        modules.append("embed_tokens")
+        modules.extend(["embed_tokens", "rotary_emb"])
         modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("norm")
 
@@ -71,8 +66,11 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
                 "Modules in the pipeline template do not match the modules in the model."
             )
 
-        if f"{prefix}embed_tokens" not in modules_in_template[0]:
-            raise ValueError("embed_tokens must be in the first stage.")
+        if not all(
+            module in modules_in_template[0]
+            for module in [f"{prefix}embed_tokens", f"{prefix}rotary_emb"]
+        ):
+            raise ValueError("Teh embedding layers must be in the first stage.")
 
         if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("norm must be in the last stage.")
@@ -101,7 +99,7 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
         layers_per_stage = stage_manager.distribute_layers(len(module.layers))
 
         if stage_manager.is_first_stage():
-            held_layers.append(module.embed_tokens)
+            held_layers.extend([module.embed_tokens, module.rotary_emb])
         start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.layers[start_idx:end_idx])
         if stage_manager.is_last_stage():
@@ -111,20 +109,13 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from transformers.models.mixtral.modeling_mixtral import (
+            MixtralAttention,
             MixtralBlockSparseTop2MLP,
             MixtralDecoderLayer,
-            MixtralModel,
             MixtralRMSNorm,
         )
 
         config: MixtralConfig = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": MixtralAttention,
-            "sdpa": MixtralSdpaAttention,
-            "flash_attention_2": MixtralFlashAttention2,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
 
         # This is to avoid refererence to its weight which has been replaced by a placeholder
@@ -179,7 +170,7 @@ class MixtralPolicy(PipelineTemplatePolicyBase, Policy):
         if num_kv_heads:
             attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
 
-        policy[attn_cls] = ModulePolicyDescription(
+        policy[MixtralAttention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
                 "forward": functools.partial(

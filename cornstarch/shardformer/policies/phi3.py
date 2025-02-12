@@ -40,7 +40,7 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
         config: Phi3Config = cast(Phi3Config, config)
 
         modules = []
-        modules.extend(["embed_tokens", "embed_dropout"])
+        modules.extend(["embed_tokens", "rotary_emb"])
         modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("norm")
 
@@ -61,9 +61,9 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
 
         if not all(
             module in modules_in_template[0]
-            for module in [f"{prefix}embed_tokens", f"{prefix}embed_dropout"]
+            for module in [f"{prefix}embed_tokens", f"{prefix}rotary_emb"]
         ):
-            raise ValueError("The embedding layers must be in the first stage.")
+            raise ValueError("Teh embedding layers must be in the first stage.")
 
         if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("The norm layer must be in the last stage.")
@@ -81,7 +81,7 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
         held_layers = []
         layers_per_stage = stage_manager.distribute_layers(len(module.layers))
         if stage_manager.is_first_stage():
-            held_layers.extend([module.embed_tokens, module.embed_dropout])
+            held_layers.extend([module.embed_tokens, module.rotary_emb])
         start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.layers[start_idx:end_idx])
         if stage_manager.is_last_stage():
@@ -102,19 +102,10 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
         from transformers.models.phi3.modeling_phi3 import (
             Phi3Attention,
             Phi3DecoderLayer,
-            Phi3FlashAttention2,
             Phi3RMSNorm,
-            Phi3SdpaAttention,
         )
 
         config: Phi3Config = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": Phi3Attention,
-            "sdpa": Phi3SdpaAttention,
-            "flash_attention_2": Phi3FlashAttention2,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
 
         # This is to avoid refererence to its weight which has been replaced by a placeholder
@@ -168,7 +159,7 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement["num_heads"] = num_q_heads
         attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
 
-        policy[attn_cls] = ModulePolicyDescription(
+        policy[Phi3Attention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
                 "forward": functools.partial(
