@@ -128,6 +128,7 @@ class SiglipVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
             attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
                 not is_flash_attn_greater_or_equal("2.1.0")
             )
+            attention_attribute_replacement["is_causal"] = False
 
             policy[attn_cls] = ModulePolicyDescription(
                 attribute_replacement=attention_attribute_replacement,

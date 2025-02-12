@@ -39,7 +39,7 @@ class InternVisonModelBase(ModelClassBase):
 
     # InternVision FlashAttention does not support torch.autocast AMP.
     # Use eager implementation and compare against ColoAttention.
-    def model_fn(self, fa: bool) -> InternVisionModel:
+    def model_fn(self) -> InternVisionModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
         config._attn_implementation = "eager"

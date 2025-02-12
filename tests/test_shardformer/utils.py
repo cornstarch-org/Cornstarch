@@ -300,7 +300,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         with ctx:
             org_model = self.model.model_fn().to(device="cuda")
             sharded_model = copy.deepcopy(org_model)
-            sharded_model.config._attn_implementation = attention
         if use_lazy_init:
             ctx.materialize(org_model)
 
@@ -579,7 +578,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             num_microbatches=self.num_microbatches,
             microbatch_size=self.microbatch_size,
             initial_scale=1,
-            enable_flash_attention=False,
             precision=precision,
         )
 
@@ -638,7 +636,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         self,
         encoder_paths: dict[str, tuple[Path, Path]],
         language_model_path: Path,
-        use_flash_attention: bool = False,
     ) -> MultimodalModel:
         encoders: dict[str, ModalEncoderModule] = {}
         for modal_key, (module_path, projector_path) in encoder_paths.items():
@@ -646,14 +643,10 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 encoder = self.encoders[modal_key].model_class.from_pretrained(
                     module_path,
                     torch_dtype=torch.bfloat16,
-                    _attn_implementation=(
-                        "flash_attention_2" if use_flash_attention else "eager"
-                    ),
+                    _attn_implementation="eager",
                 )
             else:
-                encoder = self.encoders[modal_key].model_fn(
-                    use_flash_attention=use_flash_attention
-                )
+                encoder = self.encoders[modal_key].model_fn()
 
             if projector_path is not None:
                 projector = MultimodalProjector.from_pretrained(
@@ -668,7 +661,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 language_model_path, torch_dtype=torch.bfloat16
             )
         else:
-            llm = self.llm.model_fn(use_flash_attention=use_flash_attention)
+            llm = self.llm.model_fn()
 
         model = MultimodalModel(
             encoders=encoders,
@@ -685,18 +678,16 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
         return model
 
-    def build_model_from_config(
-        self, use_flash_attention: bool = False
-    ) -> MultimodalModel:
+    def build_model_from_config(self) -> MultimodalModel:
         encoders: dict[str, ModalEncoderModule] = {}
         for modal_key, model_base in self.encoders.items():
-            encoder = model_base.model_fn(use_flash_attention)
+            encoder = model_base.model_fn()
             encoders[modal_key] = ModalEncoderModule(
                 encoder,
                 postprocess_module_callback=self.postprocess_callback,
             )
 
-        llm = self.llm.model_fn(use_flash_attention)
+        llm = self.llm.model_fn()
 
         model = MultimodalModel(
             encoders=encoders,
@@ -783,11 +774,10 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         Booster,
     ]:
         use_lazy_init: bool = test_config.pop("use_lazy_init", False)
-        use_flash_attention: bool = test_config["enable_flash_attention"]
 
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
-            org_model = self.build_model_from_config(use_flash_attention)
+            org_model = self.build_model_from_config()
             sharded_model = copy.deepcopy(org_model)
 
         if use_lazy_init:

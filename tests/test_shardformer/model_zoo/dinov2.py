@@ -28,7 +28,7 @@ class Dinov2ModelBase(ModelClassBase):
 
     # HF does not provide Dinov2 flash attention yet.
     # Use SDPA implementation and compare against ColoAttention.
-    def model_fn(self, fa: bool) -> PreTrainedModel:
+    def model_fn(self) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
         config._attn_implementation = "sdpa"

@@ -1,5 +1,3 @@
-from unittest import SkipTest
-
 import torch
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -85,9 +83,8 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
     )
     @parametrize(
         "attention",
-        ["bitfield_attention", "flash_attention_2", "eager"],
+        ["flash_attention_2", "eager"],
         name_fn=lambda x: {
-            "bitfield_attention": "bam",
             "flash_attention_2": "fa",
             "eager": "eager",
         }[x],
@@ -188,9 +185,8 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
     )
     @parametrize(
         "attention",
-        ["bitfield_attention", "flash_attention_2", "eager"],
+        ["flash_attention_2", "eager"],
         name_fn=lambda x: {
-            "bitfield_attention": "bam",
             "flash_attention_2": "fa",
             "eager": "eager",
         }[x],

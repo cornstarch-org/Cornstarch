@@ -38,7 +38,7 @@ class EvaCLIPModelBase(ModelClassBase):
 
     # HF does not provide EvaCLIP flash attention yet.
     # Use eager implementation and compare against ColoAttention.
-    def model_fn(self, fa: bool) -> EvaCLIPVisionModel:
+    def model_fn(self) -> EvaCLIPVisionModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
         config._attn_implementation = "eager"

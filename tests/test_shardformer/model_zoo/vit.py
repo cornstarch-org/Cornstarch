@@ -39,7 +39,7 @@ class ViTModelBase(ModelClassBase):
 
     # ViT does not support FlashAttention.
     # Use eager implementation
-    def model_fn(self, fa: bool) -> PreTrainedModel:
+    def model_fn(self) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
         config._attn_implementation = "eager"
