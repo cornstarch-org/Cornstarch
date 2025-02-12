@@ -61,7 +61,7 @@ class GlooDistributedTestBase(MultiProcessTestCase):
 
         with (
             torch.backends.cudnn.flags(
-                enabled=True, deterministic=True, benchmark=True
+                enabled=False, deterministic=True, benchmark=False
             ),
             patch.object(dist, "batch_isend_irecv", new=batch_isend_irecv_gloo),
             patch.object(dist, "all_to_all", new=all_to_all_gloo),
@@ -71,6 +71,7 @@ class GlooDistributedTestBase(MultiProcessTestCase):
                 return_value=(torch.device("cuda"), False),
             ),
         ):
+            torch.use_deterministic_algorithms(mode=True)
             self.run_test(test_name, pipe)
 
         try:

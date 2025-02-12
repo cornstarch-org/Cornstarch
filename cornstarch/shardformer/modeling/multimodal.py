@@ -47,36 +47,14 @@ class ModalModulePipelineForwards:
 
         if stage_manager.is_first_stage(check_only_in_modal=True):
             # Call preprocess callback
-            kwargs = self.preprocess_callback(kwargs)
+            kwargs = self.preprocess_callback(inputs=kwargs)
 
         # Filter out additional arguments
         kwargs = {k: v for k, v in kwargs.items() if k in module_params}
 
-        outputs: BaseModelOutput | dict = self.module(
-            return_dict=return_dict,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            **kwargs,
-        )
+        outputs: BaseModelOutput | dict | tuple | torch.Tensor = self.module(**kwargs)
 
-        if stage_manager.is_last_stage(check_only_in_modal=True):
-            outputs = self.postprocess_module_callback(kwargs, outputs)
-
-            if isinstance(outputs, torch.Tensor):
-                outputs = (outputs,)
-
-            assert isinstance(outputs, (tuple, ModelOutput)), (
-                f"Expected the model to return a tuple or ModelOutput, "
-                f"but got: {type(outputs)}"
-            )
-
-            if self.projector is None:
-                return outputs
-
-            # `postprocess_projector_callback`` cannot be called here, since we do not have language model data.
-            # It will be called from `MultimodalModel`.
-            return self.projector(outputs[0], return_dict=return_dict)
-        else:
+        if not stage_manager.is_last_stage(check_only_in_modal=True):
             assert isinstance(outputs, dict), (
                 f"Expected the model to return a dictionary, "
                 f"but got: {type(outputs)}"
@@ -86,6 +64,24 @@ class ModalModulePipelineForwards:
                 f"but got: {list(outputs.keys())}"
             )
             return outputs
+
+        if isinstance(outputs, torch.Tensor):
+            outputs = BaseModelOutput(last_hidden_state=outputs)
+
+        outputs = self.postprocess_module_callback(inputs=kwargs, output=outputs)
+
+        assert isinstance(outputs, (tuple, ModelOutput)), (
+            f"Expected the model to return a tuple or ModelOutput, "
+            f"but got: {type(outputs)}"
+        )
+
+        if self.projector is None:
+            return outputs
+
+        outputs = self.projector(outputs[0], return_dict=return_dict)
+
+        # Call postprocess projector callback
+        return self.postprocess_projector_callback(inputs=kwargs, output=outputs)
 
     @staticmethod
     def modal_decoder_module_forward(

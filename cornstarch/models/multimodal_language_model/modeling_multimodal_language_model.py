@@ -7,13 +7,18 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
+from colossalai.shardformer.policies.auto_policy import _fullname
 from transformers.activations import get_activation
 from transformers.modeling_outputs import (
     BaseModelOutput,
     CausalLMOutputWithPast,
     ModelOutput,
 )
-from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
+from transformers.modeling_utils import (
+    ALL_ATTENTION_FUNCTIONS,
+    PretrainedConfig,
+    PreTrainedModel,
+)
 from transformers.models.auto.configuration_auto import AutoConfig
 from transformers.models.llava_next.modeling_llava_next import (
     LlavaNextConfig,
@@ -27,10 +32,18 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 )
 from transformers.utils import logging
 
-from cornstarch.kernel.interface import create_bitfield_attention_mask
+from cornstarch.kernel.interface import (
+    bitfield_attention_forward,
+    create_bitfield_attention_mask,
+)
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
+from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+from cornstarch.shardformer.shard.shard_config import ShardConfig
+from cornstarch.shardformer.shard.shardformer import ShardFormer
 
 logger = logging.get_logger(__name__)
+
+ALL_ATTENTION_FUNCTIONS.update({"bitfield_attention": bitfield_attention_forward})
 
 
 class LlavaNextModel:
@@ -487,6 +500,7 @@ class ModalEncoderModule(ModalModuleBase):
         return_dict: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        *args,
         **kwargs,
     ) -> ModelOutput | tuple:
         return_dict = (
@@ -505,16 +519,19 @@ class ModalEncoderModule(ModalModuleBase):
             else self.module.config.output_hidden_states
         )
 
+        # Merge args to kwargs
+        module_params = list(inspect.signature(self.module.forward).parameters.keys())
+        args_dict = {param_name: arg for param_name, arg in zip(module_params, args)}
+        kwargs.update(args_dict)
+
         # Call preprocess callback
         kwargs = self.preprocess_callback(inputs=kwargs)
 
-        # Merge args to kwargs
-        module_params = list(inspect.signature(self.module.forward).parameters.keys())
+        # Filter out additional arguments
+        kwargs = {k: v for k, v in kwargs.items() if k in module_params}
 
-        outputs: BaseModelOutput | tuple | torch.Tensor = self.module(
-            # Filter out additional arguments
-            **{k: v for k, v in kwargs.items() if k in module_params}
-        )
+        outputs: BaseModelOutput | tuple | torch.Tensor = self.module(**kwargs)
+
         if isinstance(outputs, torch.Tensor):
             outputs = BaseModelOutput(last_hidden_state=outputs)
         outputs = self.postprocess_module_callback(inputs=kwargs, output=outputs)
@@ -672,6 +689,20 @@ class MultimodalModel(nn.Module):
                 inspect.signature(modal_module.module.forward).parameters.keys()
             )
 
+        shard_config = ShardConfig(
+            enable_flash_attention=False,
+            enable_sequence_parallelism=False,
+            enable_tensor_parallelism=False,
+            pipeline_stage_manager=None,
+        )
+        shardformer = ShardFormer(shard_config)
+
+        policy = get_autopolicy(_fullname(language_model))
+        policy.set_model(language_model)
+        policy.set_shard_config(shard_config)
+
+        language_model, _ = shardformer.optimize(language_model, policy)
+        language_model.config._attn_implementation = "bitfield_attention"
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
@@ -794,14 +825,14 @@ class MultimodalModel(nn.Module):
         for modal_key, output in encoders_outputs.items():
             output: torch.Tensor = output[0]
 
-            if output.ndim != 2:
+            if output.ndim > 2:
                 # logger.warning_once(
                 #     f"{modal_key} encoder output shape {output.shape} should be 2d (num_features, hidden_size). "
                 #     "Add postprocess_projector_callback to the encoder module to convert the shape. "
                 #     "For most encoders that Cornstarch support already has the shape conversion implementation; "
                 #     "you can see how the conversion is done in the source code.",
                 # )
-                output = output.view(-1, output.shape[-1])
+                output = output.reshape(-1, output.shape[-1])
             if output.shape[-1] != inputs_embeds.shape[-1]:
                 raise ValueError(
                     f"Expected encoder output hidden_size {output.shape[-1]} to be equal to inputs_embeds hidden_size {inputs_embeds.shape[-1]}."
@@ -838,6 +869,7 @@ class MultimodalModel(nn.Module):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[tuple[tuple[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -941,7 +973,7 @@ class MultimodalModel(nn.Module):
         # and use it as an input to embedding.
         token_mask = torch.isin(
             input_ids,
-            torch.tensor(list(self.token_ids.values())).to(input_ids.device),
+            torch.tensor(list(self.token_ids.values()), device=input_ids.device),
         )
         input_ids_masked = input_ids.clone()
         input_ids_masked[token_mask] = 0
@@ -963,6 +995,7 @@ class MultimodalModel(nn.Module):
             input_ids=None,
             attention_mask=attention_mask,
             position_ids=position_ids,
+            position_embeddings=position_embeddings,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             labels=labels_masked,

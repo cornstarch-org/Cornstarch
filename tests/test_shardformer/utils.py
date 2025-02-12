@@ -130,6 +130,8 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 org_loss, sharded_loss, atol=self.model.atol, rtol=self.model.rtol
             )
 
+        dist.barrier()
+
         tp_group: dist.ProcessGroup = booster.plugin.tp_group
         sharded_model: PreTrainedModel = sharded_model.unwrap()
 
@@ -174,6 +176,8 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 )
             )
 
+        dist.barrier()
+
         # Update parameters
         org_optim.step()
         sharded_optim.step()
@@ -198,6 +202,8 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 atol=self.model.atol,
                 rtol=self.model.rtol,
             )
+
+        dist.barrier()
 
         check_all_grad_tensors(grads_to_check)
 
@@ -427,6 +433,8 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         if stage_manager.is_last_stage(check_only_in_modal=False):
             check_loss(org_loss, sharded_loss, atol=self.llm.atol, rtol=self.llm.rtol)
 
+        dist.barrier()
+
         tp_group: dist.ProcessGroup = plugin.tp_group
         sharded_model: MultimodalModel = sharded_model.unwrap()
 
@@ -512,6 +520,8 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                     )
                 )
 
+        dist.barrier()
+
         # Update parameters
         org_optim.step()
         sharded_optim.step()
@@ -559,6 +569,8 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                     atol=self.encoders[encoder_name].atol,
                     rtol=self.encoders[encoder_name].rtol,
                 )
+
+        dist.barrier()
 
         check_all_grad_tensors(grads_to_check)
 
@@ -906,6 +918,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         for model_base in self.encoders.values():
             data.update(model_base.data_gen_fn(batch_size))
         data.update(self.llm.data_gen_fn(batch_size))
+        # MultimodalModel automatically generates it after merging encoder outputs
         data.pop("attention_mask", None)
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)

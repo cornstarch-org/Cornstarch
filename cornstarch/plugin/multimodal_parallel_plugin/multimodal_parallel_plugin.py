@@ -131,56 +131,6 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
         super().__init__(module)
 
-    def prepare_inputs_for_llm_first_stage(
-        self,
-        input_ids: torch.LongTensor,
-        hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ) -> tuple[torch.FloatTensor, torch.Tensor, torch.LongTensor]:
-        module: MultimodalModel = self.module
-        # Forward in the first stage of the language model
-        num_tokens_per_encoder_outputs = getattr(hidden_states, "_cornstarch_shape")
-        assert len(num_tokens_per_encoder_outputs) == len(module.encoders), (
-            f"Expected to have {len(module.encoders)} hidden states, "
-            f"got {len(hidden_states)}."
-        )
-
-        # Split merged encoder outputs into separate modal features
-        encoders_outputs = hidden_states.split(num_tokens_per_encoder_outputs, dim=1)
-
-        inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
-
-        # merge encoded multimodal features into text embeddings
-        for modal_key, encoder_outputs in reversed(
-            list(zip(module.encoders.keys(), encoders_outputs))
-        ):
-            encoder_module: ModalEncoderModule = getattr(module, f"{modal_key}_encoder")
-            encoder_inputs = {
-                arg: kwargs[arg]
-                for arg in module.encoders_args[modal_key]
-                if arg in kwargs
-            }
-
-            for additional_arg in encoder_module.additional_args:
-                if additional_arg in kwargs:
-                    encoder_inputs[additional_arg] = kwargs[additional_arg]
-
-            inputs_embeds, attention_mask, position_ids, labels = (
-                encoder_module.postprocess_projector_callback(
-                    encoder_inputs,
-                    (encoder_outputs,),
-                    input_ids,
-                    inputs_embeds,
-                    attention_mask,
-                    labels,
-                    pad_token_id=module.language_model.config.pad_token_id,
-                )
-            )
-
-        return inputs_embeds, attention_mask, labels
-
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -207,6 +157,9 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             # Does not support CLIP-like encoder only multimodal model yet
             raise NotImplementedError
 
+        if "decoder" in self.my_modal_name:
+            raise NotImplementedError("Decoder forward is not implemented yet.")
+
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -229,12 +182,12 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             )
             use_cache = False
 
-        assert "decoder" not in self.my_modal_name, "TODO: decoder forward"
-
         if self.my_modal_name == "language_model":
             token_mask = torch.isin(
                 input_ids,
-                torch.tensor(list(self.module.token_ids.values())).to(input_ids.device),
+                torch.tensor(
+                    list(self.module.token_ids.values()), device=input_ids.device
+                ),
             )
             labels_masked = labels.clone()
             labels_masked[token_mask] = -100
@@ -242,7 +195,6 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # Forward in the first stage of the language model
 
-                encoders_inputs: dict[str, dict] = {}
                 # merging functions accept either BaseModelOutput or tuple of tensors,
                 # and the first tensor (last_hidden_state) is merged.
                 encoders_outputs: dict[str, tuple[torch.Tensor]] = {}
@@ -253,17 +205,6 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     encoder_module: ModalEncoderModule = getattr(
                         module, f"{modal_key}_encoder"
                     )
-                    encoder_inputs = {
-                        arg: kwargs[arg]
-                        for arg in module.encoders_args[modal_key]
-                        if arg in kwargs
-                    }
-
-                    for additional_arg in encoder_module.additional_args:
-                        if additional_arg in kwargs:
-                            encoder_inputs[additional_arg] = kwargs[additional_arg]
-
-                    encoders_inputs[modal_key] = encoder_inputs
                     encoders_outputs[modal_key] = (encoder_outputs,)
 
                 # step 2. merge encoded multimodal features into text embeddings

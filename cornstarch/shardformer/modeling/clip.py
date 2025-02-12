@@ -26,6 +26,7 @@ class CLIPVisionModelForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        interpolate_pos_encoding: Optional[bool] = False,
         hidden_states: Optional[torch.FloatTensor] = None,
         encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
@@ -64,7 +65,9 @@ class CLIPVisionModelForwards:
             if pixel_values is None:
                 raise ValueError("You have to specify pixel_values")
 
-            hidden_states = self.embeddings(pixel_values)
+            hidden_states = self.embeddings(
+                pixel_values, interpolate_pos_encoding=interpolate_pos_encoding
+            )
             hidden_states = self.pre_layrnorm(hidden_states)
 
         if stage_manager is not None:
@@ -135,6 +138,7 @@ class CLIPVisionModelForwards:
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        interpolate_pos_encoding: bool = False,
         hidden_states: Optional[torch.FloatTensor] = None,
         encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
@@ -146,6 +150,7 @@ class CLIPVisionModelForwards:
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            interpolate_pos_encoding=interpolate_pos_encoding,
             hidden_states=hidden_states,
             encoder_states=encoder_states,
             all_attentions=all_attentions,
