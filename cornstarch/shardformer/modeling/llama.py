@@ -105,10 +105,9 @@ class LlamaModelForwards:
                 device=hidden_states.device,
             )
 
-        if position_ids is None:
+        if stage_manager is None or stage_manager.is_first_stage():
             position_ids = cache_position.unsqueeze(0)
 
-        if position_embeddings is None:
             # create position embeddings to be shared across the decoder layers
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
@@ -135,13 +134,12 @@ class LlamaModelForwards:
             # Do nothing. Our RingAttention implementation converts attention mask automatically.
             attn_mask = attention_mask
         else:
-            # non ring attention (either all-to-all or non sequence parallel)
-            if attention_mask is None:
-                attn_mask = create_bitfield_attention_mask(input_ids, token_ids={})
-
-            elif attention_mask.dtype == torch.int64 and (attention_mask > 1).any():
-                attn_mask = attention_mask
-
+            if self.config._attn_implementation == "bitfield_attention":
+                attn_mask = (
+                    attention_mask
+                    if attention_mask is not None
+                    else create_bitfield_attention_mask(input_ids, token_ids={})
+                )
             else:
                 # causal mask
                 attn_mask = self._update_causal_mask(

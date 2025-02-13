@@ -20,10 +20,7 @@ from transformers.models.clip.configuration_clip import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPVisionTransformer
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.clip import (
-    CLIPAttentionForwards,
-    CLIPVisionModelForwards,
-)
+from cornstarch.shardformer.modeling.clip import CLIPVisionModelForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -123,13 +120,7 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
 
         policy[attn_cls] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
-            method_replacement={
-                "forward": (
-                    CLIPAttentionForwards.flash_attention_forward
-                    if config._attn_implementation == "flash_attention_2"
-                    else CLIPAttentionForwards.sdpa_forward
-                )
-            },
+            method_replacement={"forward": CLIPAttention.forward},
         )
 
         if self.shard_config.enable_flash_attention:
@@ -139,9 +130,7 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
 
             policy[attn_cls] = ModulePolicyDescription(
                 attribute_replacement=attention_attribute_replacement,
-                method_replacement={
-                    "forward": CLIPAttentionForwards.flash_attention_forward
-                },
+                method_replacement={"forward": CLIPFlashAttention2.forward},
             )
 
             policy[CLIPVisionTransformer] = ModulePolicyDescription(

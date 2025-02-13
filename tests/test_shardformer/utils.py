@@ -13,6 +13,7 @@ from colossalai.booster.plugin import HybridParallelPlugin
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelModule
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.lazy import LazyInitContext
+from colossalai.pipeline.schedule._utils import get_micro_batch
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer._utils import getattr_
 from colossalai.shardformer.layer.qkv_fused_linear import (
@@ -924,9 +925,14 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         org_loss, org_output = None, None
         if run_original_model:
             org_model.train()
-            org_output = org_model(**unshard_test_data)
-            org_loss = criterion(org_output).to(precision)
-            org_loss.backward()
+
+            accum_loss = torch.scalar_tensor(0, device="cuda")
+            for i in range(self.num_microbatches):
+                input = get_micro_batch(unshard_test_data, i, self.microbatch_size)
+                org_output = org_model(**input)
+                org_loss = criterion(org_output) / self.num_microbatches
+                org_loss.backward()
+                accum_loss.add_(org_loss.data)
 
         sharded_loss, sharded_output = None, None
         if run_sharded_model:
@@ -942,7 +948,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             )
             sharded_loss = sharded_output["loss"]
 
-        return org_loss, org_output, sharded_loss, sharded_output
+        return accum_loss, org_output, sharded_loss, sharded_output
 
 
 def check_output_hidden_state(

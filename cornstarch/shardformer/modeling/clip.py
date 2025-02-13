@@ -2,20 +2,15 @@ from typing import Optional, Tuple, Union
 
 import torch
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from transformers.modeling_flash_attention_utils import (
-    _flash_attention_forward,
-)
 from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPooling,
 )
 from transformers.models.clip.modeling_clip import (
-    CLIPAttention,
     CLIPVisionModel,
     CLIPVisionTransformer,
     logger,
 )
-from transformers.pytorch_utils import is_torch_greater_or_equal_than_2_2
 
 
 class CLIPVisionModelForwards:
@@ -156,110 +151,3 @@ class CLIPVisionModelForwards:
             all_attentions=all_attentions,
             shard_config=shard_config,
         )
-
-
-class CLIPAttentionForwards:
-    @staticmethod
-    def sdpa_forward(
-        self: CLIPAttention,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        causal_attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = False,
-        shard_config: Optional[ShardConfig] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # CLIP text model uses both `causal_attention_mask` and `attention_mask`
-        if attention_mask is not None and causal_attention_mask is not None:
-            attn_mask = attention_mask + causal_attention_mask
-        elif causal_attention_mask is not None:
-            attn_mask = causal_attention_mask
-        else:
-            attn_mask = attention_mask
-
-        bsz, tgt_len, _ = hidden_states.size()
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(
-            bsz, tgt_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, tgt_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, tgt_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if (
-            not is_torch_greater_or_equal_than_2_2
-            and query_states.device.type == "cuda"
-            and attn_mask is not None
-        ):
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-
-        # CLIP text model uses both `causal_attention_mask` and `attention_mask` sequentially.
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-            scale=self.scale,
-        )
-
-        attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
-
-        attn_output = self.out_proj(attn_output)
-
-        return attn_output, None
-
-    @staticmethod
-    def flash_attention_forward(
-        self: CLIPAttention,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        causal_attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = False,
-        shard_config: Optional[ShardConfig] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        batch_size, q_len, _ = hidden_states.size()
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        # [batch_size, tgt_len, embed_dim] -> [batch_size, tgt_len, num_heads, head_dim]
-        query_states = query_states.view(
-            batch_size, q_len, self.num_heads, self.head_dim
-        )
-        key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim)
-        value_states = value_states.view(
-            batch_size, q_len, self.num_heads, self.head_dim
-        )
-
-        dropout_rate = self.dropout if self.training else 0.0
-
-        attn_output = _flash_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            q_len,
-            dropout=dropout_rate,
-            is_causal=causal_attention_mask is not None,
-            use_top_left_mask=self._flash_attn_uses_top_left_mask,
-        )
-        # sp: all-to-all communication when introducing ulysses context parallelism
-        attn_output = attn_output.reshape(
-            batch_size, q_len, self.embed_dim
-        ).contiguous()
-        attn_output = self.out_proj(attn_output)
-
-        return attn_output, None

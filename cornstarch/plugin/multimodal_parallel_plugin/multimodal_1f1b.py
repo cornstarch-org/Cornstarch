@@ -689,8 +689,9 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         output_obj = model_forward(model, micro_batch, input_obj)
         if self.stage_manager.is_last_stage(check_only_in_modal=False):
             loss = criterion(output_obj, micro_batch) / self.num_microbatches
+
             if accum_loss is not None:
-                accum_loss.add_(loss.detach())
+                accum_loss.add_(loss.data)
             if outputs is not None:
                 outputs.append(tree_map_hf(detach, output_obj))
             return loss

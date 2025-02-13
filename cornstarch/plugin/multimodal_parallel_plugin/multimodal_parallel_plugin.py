@@ -185,9 +185,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         if self.my_modal_name == "language_model":
             token_mask = torch.isin(
                 input_ids,
-                torch.tensor(
-                    list(self.module.token_ids.values()), device=input_ids.device
-                ),
+                torch.tensor(list(module.token_ids.values()), device=input_ids.device),
             )
             labels_masked = labels.clone()
             labels_masked[token_mask] = -100
@@ -238,6 +236,25 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
+
+                language_model_inputs.update(kwargs)
+
+                if module.preprocess_llm_callback is not None:
+                    # filter out inputs that the preprocess_llm_callback doesn't accept
+                    callback_arguments = list(
+                        inspect.signature(
+                            module.preprocess_llm_callback
+                        ).parameters.keys()
+                    )
+
+                    callback_inputs = {
+                        key: value
+                        for key, value in language_model_inputs.items()
+                        if key in callback_arguments
+                    }
+
+                    callback_outputs = module.preprocess_llm_callback(**callback_inputs)
+                    language_model_inputs.update(callback_outputs)
             else:
                 assert inputs_embeds is None
 
@@ -255,23 +272,6 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
-
-            language_model_inputs.update(kwargs)
-
-            if module.preprocess_llm_callback is not None:
-                # filter out inputs that the preprocess_llm_callback doesn't accept
-                callback_arguments = list(
-                    inspect.signature(module.preprocess_llm_callback).parameters.keys()
-                )
-
-                callback_inputs = {
-                    key: value
-                    for key, value in language_model_inputs.items()
-                    if key in callback_arguments
-                }
-
-                callback_outputs = module.preprocess_llm_callback(**callback_inputs)
-                language_model_inputs.update(callback_outputs)
 
             # remove inputs that the language model doesn't accept
             language_model_arguments = list(
@@ -309,12 +309,14 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 assert hidden_states is not None
                 encoder_inputs = dict(hidden_states=hidden_states)
 
-            return encoder_module(
+            outputs = encoder_module(
                 **encoder_inputs,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
+
+            return outputs
         elif "decoder" in self.my_modal_name:
             raise NotImplementedError()
 

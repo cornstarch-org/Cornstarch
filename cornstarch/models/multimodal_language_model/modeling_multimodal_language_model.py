@@ -417,7 +417,7 @@ class ModalModuleBase(nn.Module):
                     "ModalModule should be either ModalEncoderModule or ModalDecoderModule."
                 )
 
-    def train(self, module: False = True, projector: bool = True) -> ModalModuleBase:
+    def train(self, module: bool = True, projector: bool = True) -> ModalModuleBase:
         self.module.train(module)
         if self.projector:
             self.projector.train(projector)
@@ -943,7 +943,6 @@ class MultimodalModel(nn.Module):
 
         # step 1. forward the modal inputs to the encoders,
         # to get encoder embeddings of shape (batch_size, seq_len, hidden_size)
-        encoders_inputs = {}
         encoders_outputs = {}
         for modal_key in self.encoders.keys():
             encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
@@ -964,7 +963,6 @@ class MultimodalModel(nn.Module):
             if "return_dict" in self.encoders_args[modal_key]:
                 args["return_dict"] = return_dict
 
-            encoders_inputs[modal_key] = args
             encoders_outputs[modal_key] = encoder_module(**args)
 
         # step 2. merge encoded multimodal features into text embeddings
@@ -978,9 +976,10 @@ class MultimodalModel(nn.Module):
         input_ids_masked[token_mask] = 0
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids_masked)
 
+        labels_masked = labels.clone()
+        labels_masked[token_mask] = -100
+
         # step 3. merge encoder outputs to llm inputs_embeds
-        # the original, not masked input_ids should be given to merge encoder_outputs
-        # to the locations special tokens exist.
         inputs_embeds, attention_mask = self.merge_encoder_outputs(
             encoders_outputs=encoders_outputs,
             input_ids=input_ids,
@@ -988,8 +987,6 @@ class MultimodalModel(nn.Module):
         )
 
         # step 4. run llm with merged inputs_embeds
-        labels_masked = labels.clone()
-        labels_masked[token_mask] = -100
         language_model_inputs = dict(
             input_ids=None,
             attention_mask=attention_mask,
@@ -997,6 +994,7 @@ class MultimodalModel(nn.Module):
             position_embeddings=position_embeddings,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
+            hidden_states=None,
             labels=labels_masked,
             use_cache=use_cache,
             output_attentions=output_attentions,
@@ -1050,7 +1048,6 @@ class MultimodalModel(nn.Module):
             # Does not support CLIP-like encoder only multimodal model yet
             raise NotImplementedError
 
-        encoders_inputs = {}
         encoders_outputs = {}
         for modal_key in self.encoders.keys():
             encoder_module: ModalEncoderModule = getattr(self, f"{modal_key}_encoder")
@@ -1064,7 +1061,6 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
-            encoders_inputs[modal_key] = args
             encoders_outputs[modal_key] = encoder_module(
                 **args,
                 output_attentions=encoder_module.config[0].output_attentions,
