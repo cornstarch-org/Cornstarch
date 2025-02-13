@@ -579,18 +579,15 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         tp_size: int,
         modal_pp_size: dict[str, int],
         llm_sp_mode: str | None,
-        precision: str,
         run_original_model: bool = True,
         run_sharded_model: bool = True,
     ) -> tuple[nn.Module, ModelWrapper, Optimizer, OptimizerWrapper, Booster]:
-        assert precision in ["bf16", "fp16"]
-        precision = torch.bfloat16 if precision == "bf16" else torch.float16
+        precision = torch.bfloat16
 
         test_config = dict(
             num_microbatches=self.num_microbatches,
             microbatch_size=self.microbatch_size,
             initial_scale=1,
-            precision=precision,
         )
 
         (
@@ -927,13 +924,8 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         org_loss, org_output = None, None
         if run_original_model:
             org_model.train()
-            with torch.autocast(
-                device_type="cuda",
-                enabled=precision == torch.float16,
-                dtype=torch.float16,
-            ):
-                org_output = org_model(**unshard_test_data)
-                org_loss = criterion(org_output).to(precision)
+            org_output = org_model(**unshard_test_data)
+            org_loss = criterion(org_output).to(precision)
             org_loss.backward()
 
         sharded_loss, sharded_output = None, None

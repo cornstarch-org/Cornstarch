@@ -223,13 +223,6 @@ class EncodersReplicatedMultimodalParallelModule(MultimodalParallelModule):
         else:
             assert inputs_embeds is None
 
-            setattr(
-                attention_mask,
-                "cornstarch_is_bitattention",
-                torch.any(attention_mask > 1),
-            )
-            setattr(attention_mask, "cornstarch_num_encoders", len(module.encoders))
-
             language_model_inputs = dict(
                 input_ids=None,
                 attention_mask=attention_mask,

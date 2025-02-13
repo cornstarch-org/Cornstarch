@@ -123,7 +123,7 @@ class Phi3ModelForwards:
             if attention_mask is None:
                 attn_mask = create_bitfield_attention_mask(input_ids, token_ids={})
 
-            elif attention_mask.dtype == torch.int64:
+            elif attention_mask.dtype == torch.int64 and (attention_mask > 1).any():
                 attn_mask = attention_mask
 
             else:

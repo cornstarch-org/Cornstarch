@@ -21,7 +21,6 @@ class ModalModulePipelineForwards:
         return_dict: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        *args,
         **kwargs,
     ) -> ModelOutput | tuple | dict:
         return_dict = (
@@ -40,19 +39,17 @@ class ModalModulePipelineForwards:
             else self.module.config.output_hidden_states
         )
 
-        # Merge args to kwargs
-        module_params = list(inspect.signature(self.module.forward).parameters.keys())
-        args_dict = {param_name: arg for param_name, arg in zip(module_params, args)}
-        kwargs.update(args_dict)
-
         if stage_manager.is_first_stage(check_only_in_modal=True):
             # Call preprocess callback
             kwargs = self.preprocess_callback(inputs=kwargs)
 
-        # Filter out additional arguments
-        kwargs = {k: v for k, v in kwargs.items() if k in module_params}
+        # Filter out arguments
+        module_params = list(inspect.signature(self.module.forward).parameters.keys())
+        module_params = {k: v for k, v in kwargs.items() if k in kwargs}
 
-        outputs: BaseModelOutput | dict | tuple | torch.Tensor = self.module(**kwargs)
+        outputs: BaseModelOutput | dict | tuple | torch.Tensor = self.module(
+            **module_params
+        )
 
         if not stage_manager.is_last_stage(check_only_in_modal=True):
             assert isinstance(outputs, dict), (

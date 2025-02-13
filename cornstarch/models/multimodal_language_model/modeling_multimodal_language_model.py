@@ -60,6 +60,7 @@ class LlavaNextModel:
                 self.config.name_or_path, config=self.config, *args, **kwargs
             )
         )
+        attn_implementation = model.language_model.config._attn_implementation
 
         model.vision_tower.config.output_hidden_states = True
         vision_encoder = model.vision_tower
@@ -98,6 +99,7 @@ class LlavaNextModel:
         )
         mm_model.set_modality_token_ids({"vision": model.config.image_token_index})
         mm_model.image_newline = model.image_newline
+        mm_model.language_model.config._attn_implementation = attn_implementation
         return mm_model
 
     @staticmethod
@@ -253,6 +255,7 @@ class Qwen2VLModel:
                 self.config.name_or_path, config=self.config, *args, **kwargs
             )
         )
+        attn_implementation = model.config._attn_implementation
 
         vision_encoder = model.visual
         vision_encoder.main_input_name = "pixel_values"
@@ -295,6 +298,7 @@ class Qwen2VLModel:
             language_model=model,
         )
         mm_model.set_modality_token_ids({"vision": model.config.image_token_id})
+        mm_model.language_model.config._attn_implementation = attn_implementation
 
         return mm_model
 
@@ -500,7 +504,6 @@ class ModalEncoderModule(ModalModuleBase):
         return_dict: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        *args,
         **kwargs,
     ) -> ModelOutput | tuple:
         return_dict = (
@@ -519,18 +522,14 @@ class ModalEncoderModule(ModalModuleBase):
             else self.module.config.output_hidden_states
         )
 
-        # Merge args to kwargs
-        module_params = list(inspect.signature(self.module.forward).parameters.keys())
-        args_dict = {param_name: arg for param_name, arg in zip(module_params, args)}
-        kwargs.update(args_dict)
-
         # Call preprocess callback
         kwargs = self.preprocess_callback(inputs=kwargs)
 
-        # Filter out additional arguments
-        kwargs = {k: v for k, v in kwargs.items() if k in module_params}
+        # Filter out arguments
+        module_params = list(inspect.signature(self.module.forward).parameters.keys())
+        module_params = {k: v for k, v in kwargs.items() if k in module_params}
 
-        outputs: BaseModelOutput | tuple | torch.Tensor = self.module(**kwargs)
+        outputs: BaseModelOutput | tuple | torch.Tensor = self.module(**module_params)
 
         if isinstance(outputs, torch.Tensor):
             outputs = BaseModelOutput(last_hidden_state=outputs)
@@ -1051,11 +1050,6 @@ class MultimodalModel(nn.Module):
             # Does not support CLIP-like encoder only multimodal model yet
             raise NotImplementedError
 
-        # Filter out unused arguments
-        language_model_params = list(
-            inspect.signature(self.language_model.forward).parameters.keys()
-        )
-
         encoders_inputs = {}
         encoders_outputs = {}
         for modal_key in self.encoders.keys():
@@ -1070,15 +1064,7 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
-            if encoder_module.module.main_input_name is not None:
-                kwargs.pop(encoder_module.module.main_input_name, None)
-
-            for arg in args:
-                if arg not in language_model_params:
-                    kwargs.pop(arg, None)
-
             encoders_inputs[modal_key] = args
-
             encoders_outputs[modal_key] = encoder_module(
                 **args,
                 output_attentions=encoder_module.config[0].output_attentions,
@@ -1086,9 +1072,15 @@ class MultimodalModel(nn.Module):
                 return_dict=True,
             )
 
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        token_mask = torch.isin(
+            input_ids,
+            torch.tensor(list(self.token_ids.values()), device=input_ids.device),
+        )
+        input_ids_masked = input_ids.clone()
+        input_ids_masked[token_mask] = 0
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids_masked)
 
-        inputs_embeds, bitfield_attention_mask, *_ = self.merge_encoder_outputs(
+        inputs_embeds, bitfield_attention_mask = self.merge_encoder_outputs(
             encoders_outputs=encoders_outputs,
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
@@ -1097,9 +1089,19 @@ class MultimodalModel(nn.Module):
         if attention_mask is None:
             attention_mask = bitfield_attention_mask
 
-        return self.language_model.generate(
-            input_ids,
+        # remove inputs that the language model doesn't accept
+        language_model_inputs = dict(
+            input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            **kwargs,
         )
+        language_model_inputs.update(kwargs)
+
+        language_model_arguments = list(
+            inspect.signature(self.language_model.forward).parameters.keys()
+        )
+        for key in list(language_model_inputs.keys()):
+            if key not in language_model_arguments:
+                language_model_inputs.pop(key)
+
+        return self.language_model.generate(**language_model_inputs)

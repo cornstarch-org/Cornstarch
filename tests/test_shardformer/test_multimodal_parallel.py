@@ -1,3 +1,4 @@
+import torch
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -5,13 +6,11 @@ from torch.testing._internal.common_utils import (
 
 from .model_zoo import (
     CLIPModelBase,
-    Dinov2ModelBase,
     LlamaForCausalLMBase,
     MistralForCausalLMBase,
     Phi3ForCausalLMBase,
     Qwen2AudioEncoderBase,
     Qwen2ForCausalLMBase,
-    Qwen2VisionTransformerBase,
     SiglipModelBase,
     WhisperEncoderBase,
 )
@@ -45,7 +44,7 @@ causal_lms = dict(
 class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 2
+        return 8
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
@@ -58,7 +57,6 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         ],
         name_fn=lambda tp, vpp, lpp: f"tp={tp}, pp={vpp},{lpp}",
     )
-    @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
         self,
         vision_model_name: str,
@@ -66,7 +64,6 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         tp_size: int,
         vision_pp_size: int,
         language_pp_size: int,
-        precision: str,
     ):
         self.set_model(
             encoders={"vision": vision_models[vision_model_name]()},
@@ -76,7 +73,6 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
             tp_size,
             {"vision": vision_pp_size, "llm": language_pp_size},
             None,
-            precision,
         )
 
 
