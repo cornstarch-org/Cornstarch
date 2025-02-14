@@ -926,13 +926,13 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         if run_original_model:
             org_model.train()
 
-            accum_loss = torch.scalar_tensor(0, device="cuda")
+            org_loss = torch.scalar_tensor(0, device="cuda")
             for i in range(self.num_microbatches):
                 input = get_micro_batch(unshard_test_data, i, self.microbatch_size)
-                org_output = org_model(**input)
-                org_loss = criterion(org_output) / self.num_microbatches
-                org_loss.backward()
-                accum_loss.add_(org_loss.data)
+                output = org_model(**input)
+                loss = criterion(output) / self.num_microbatches
+                loss.backward()
+                org_loss.add_(loss.data)
 
         sharded_loss, sharded_output = None, None
         if run_sharded_model:
@@ -948,7 +948,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             )
             sharded_loss = sharded_output["loss"]
 
-        return accum_loss, org_output, sharded_loss, sharded_output
+        return org_loss, org_output, sharded_loss, sharded_output
 
 
 def check_output_hidden_state(
