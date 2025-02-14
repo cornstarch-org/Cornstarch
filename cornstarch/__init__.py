@@ -1,4 +1,1 @@
-from .pipeline_template import PipelineTemplate
-from .plugin.heterogeneous_dataloader import HeterogeneousDataLoader
-from .plugin.heterogeneous_parallel_module import HeterogeneousParallelModule
-from .plugin.heterogeneous_parallel_plugin import HeterogeneousParallelPlugin
+__version__ = "0.0.5"

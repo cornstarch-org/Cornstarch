@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Optional, Type
 
 from colossalai.shardformer.policies.auto_policy import _fullname
@@ -18,20 +19,49 @@ class PipelineTemplate:
     def get_modules(model: nn.Module) -> list[str]:
         """Get all modules from the model."""
         # Avoid circular import
+        from cornstarch.models.multimodal_language_model import ModalModuleBase
         from cornstarch.shardformer.policies.auto_policy import (
             get_policy_type,
         )
+        from cornstarch.shardformer.policies.multimodal import MultimodalProjectorPolicy
         from cornstarch.shardformer.policies.pipeline_template_policy import (
             PipelineTemplatePolicyBase,
         )
 
-        policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
-            PipelineTemplate.get_model_name(model)
-        )
-        assert issubclass(
-            policy, PipelineTemplatePolicyBase
-        ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
-        return policy.get_all_modules(model.config)
+        if isinstance(model, ModalModuleBase):
+            modules = []
+
+            policy = get_policy_type(PipelineTemplate.get_model_name(model.module))
+            assert issubclass(
+                policy, PipelineTemplatePolicyBase
+            ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
+            modules.extend(
+                [
+                    f"module.{module}"
+                    for module in policy.get_all_modules(model.module.config)
+                ]
+            )
+
+            modules.extend(
+                [
+                    f"projector.{module}"
+                    for module in MultimodalProjectorPolicy.get_all_modules(
+                        model.projector.config
+                    )
+                ]
+            )
+
+            return modules
+
+        else:
+            policy: Type[PipelineTemplatePolicyBase] = get_policy_type(
+                PipelineTemplate.get_model_name(model)
+            )
+            assert issubclass(
+                policy, PipelineTemplatePolicyBase
+            ), f"Policy {policy} does not inherit PipelineTemplatePolicyBase."
+
+            return policy.get_all_modules(model.config)
 
     @staticmethod
     def find_pipeline_template(
@@ -73,6 +103,18 @@ class PipelineTemplate:
             num_microbatches - 4 * self.num_stages
         )
 
+    def get_num_layers_per_stage(self) -> list[int]:
+        """
+        Count layers in each stage by checking whether each layer includes an integer number.
+        For example, LlamaModel has `layers` as a `nn.ModuleList` of `LlamaDecoderLayer` objects.
+        Each layer's name is `model.layers.0`, `model.layers.1`, ...,
+        which will be counted by this function.
+        """
+        return [
+            sum(bool(re.search(r"\.\d", s)) for s in modules)
+            for modules in self.modules_per_stage
+        ]
+
     @property
     def num_layers(self) -> int:
         return sum(len(stage) for stage in self.modules_per_stage)
@@ -82,7 +124,11 @@ class PipelineTemplate:
         return len(self.modules_per_stage)
 
     def __eq__(self, template: PipelineTemplate) -> bool:
-        return self.modules_per_stage == template.modules_per_stage
+        return (
+            isinstance(template, PipelineTemplate)
+            and self.model_name == template.model_name
+            and hash(self) == hash(template)
+        )
 
     def __hash__(self) -> int:
         return hash(tuple(tuple(modules) for modules in self.modules_per_stage))

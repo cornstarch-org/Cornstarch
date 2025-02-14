@@ -4,7 +4,7 @@ description = "A versatile model toolkit for distributed training."
 readme = "README.md"
 license = {file = "LICENSE.txt"}
 requires-python = ">=3.10"
-version = "0.0.4"
+version = "0.0.5"
 authors = [
     {name = "Insu Jang", email = "insujang@umich.edu"}
 ]
@@ -17,29 +17,71 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
 ]
 dependencies = [
-    "torch",
-    "transformers==4.36.0",
-    "colossalai==0.3.6",
+    "torch>=2.5.0",
+    "triton>=3.0.0",
+    "transformers>=4.48.0",
     "loguru",
     "simple_parsing",
     "datasets",
+    "tyro",
+    "flash-attn",
+    "numpy",
+    "tqdm",
+    "psutil",
+    "packaging",
+    "pre-commit",
+    "rich",
+    "click",
+    "fabric",
+    "contexttimer",
+    "ninja",
+    "safetensors",
+    "einops",
+    "pydantic",
+    "ray",
+    "sentencepiece",
+    "google",
+    "protobuf",
+    "peft>=0.7.1,<=0.13.2",
+    "bitsandbytes>=0.39.0",
+    "rpyc==6.0.0",
+    "fastapi",
+    "uvicorn==0.29.0",
+    "galore_torch",
+    "diffusers==0.29.0",
+    "timm",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "torch>=2.1.0",
+    "torch>=2.5.0",
     "ruff",
     "black>=23.0",
     "isort>=5.12",
-    "pytest",
+    "pytest<=8.1",
     "pytest-mock",
     "expecttest",
     "accelerate",
 ]
 
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings",
+]
+
+colossalai = [
+    "colossalai>=0.4.5",
+]
+
 [tool.ruff]
 # Never enforce `E501` (line length violations).
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+env = [
+    "TORCHDYNAMO_DISABLE=1",
+]
 
 [build-system]
 requires = ["setuptools>=63.0.0", "wheel"]

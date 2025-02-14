@@ -1,57 +1,48 @@
-# Copied from https://github.com/hpcaitech/ColossalAI/blob/v0.3.5/colossalai/shardformer/policies/llama.py
-
 from __future__ import annotations
 
+import functools
 import itertools
-import warnings
-from functools import partial
-from typing import Callable, Dict, List, Union, cast
+from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
     FusedRMSNorm,
     Linear1D_Col,
     Linear1D_Row,
-    RMSNorm,
+    PaddingEmbedding,
+    PaddingLMHead,
     VocabParallelEmbedding1D,
-)
-from colossalai.shardformer.modeling.llama import (
-    LlamaPipelineForwards,
-    get_llama_flash_attention_forward,
-    get_lm_forward_with_dist_cross_entropy,
+    VocabParallelLMHead1D,
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
     SubModuleReplacementDescription,
 )
+from torch import Tensor, nn
+from transformers import LlamaConfig, PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
+from transformers.models.llama.modeling_llama import LlamaModel
+
 from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.modeling.llama import (
+    LlamaAttentionForwards,
+    LlamaModelForwards,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
-from cornstarch.shardformer.policies.utils import (
-    resize_embeddings,
-    resize_lm_head,
-)
-from torch import Tensor, nn
-from transformers import LlamaConfig, PretrainedConfig
-
-__all__ = [
-    "LlamaPolicy",
-    "LlamaForCausalLMPolicy",
-    "LlamaForSequenceClassificationPolicy",
-]
 
 
 class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> list[str]:
         assert isinstance(
             config, LlamaConfig
         ), "config must be an instance of LlamaConfig"
         config: LlamaConfig = cast(LlamaConfig, config)
 
         modules = []
-        modules.append("embed_tokens")
+        modules.extend(["embed_tokens", "rotary_emb"])
         modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("norm")
 
@@ -72,216 +63,19 @@ class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
                 "Modules in the pipeline template do not match the modules in the model."
             )
 
-        if f"{prefix}embed_tokens" not in modules_in_template[0]:
-            raise ValueError("embed_tokens must be in the first stage.")
+        if not all(
+            module in modules_in_template[0]
+            for module in [f"{prefix}embed_tokens", f"{prefix}rotary_emb"]
+        ):
+            raise ValueError("Teh embedding layers must be in the first stage.")
 
         if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("norm must be in the last stage.")
 
-    def config_sanity_check(self):
-        pass
-
-    def preprocess(self):
-        r"""
-        Reshape the Embedding layer to make the embedding dimension divisible by world_size
-        """
-        vocab_size = self.model.config.vocab_size
-        world_size = self.shard_config.tensor_parallel_size
-
-        if self.shard_config.enable_tensor_parallelism and vocab_size % world_size != 0:
-            new_vocab_size = vocab_size + world_size - vocab_size % world_size
-
-            embeddings: nn.Embedding = self.model.get_input_embeddings()
-            if embeddings.num_embeddings * world_size == new_vocab_size:
-                # Skip if the embedding layer has already been resized
-                return self.model
-
-            resize_embeddings(new_vocab_size, embeddings)
-
-            lm_head: nn.Embedding | nn.Linear = self.model.get_output_embeddings()
-            if isinstance(lm_head, nn.Embedding):
-                resize_embeddings(new_vocab_size, lm_head)
-            elif isinstance(lm_head, nn.Linear):
-                resize_lm_head(new_vocab_size, lm_head)
-
-            self.model.vocab_size = new_vocab_size
-
-        return self.model
-
-    def module_policy(self) -> Dict[Union[str, nn.Module], ModulePolicyDescription]:
-        from transformers.models.llama.modeling_llama import (
-            LlamaAttention,
-            LlamaDecoderLayer,
-            LlamaModel,
-        )
-
-        policy = {}
-
-        if self.shard_config.enable_fused_normalization:
-            norm_cls = FusedRMSNorm
-        else:
-            norm_cls = RMSNorm
-
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "Llama doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
-            )
-
-        if self.shard_config.enable_tensor_parallelism:
-            decoder_attribute_replacement = {
-                "self_attn.hidden_size": self.model.config.hidden_size
-                // self.shard_config.tensor_parallel_size,
-                "self_attn.num_heads": self.model.config.num_attention_heads
-                // self.shard_config.tensor_parallel_size,
-            }
-            if getattr(self.model.config, "num_key_value_heads", False):
-                decoder_attribute_replacement["self_attn.num_key_value_heads"] = (
-                    self.model.config.num_key_value_heads
-                    // self.shard_config.tensor_parallel_size
-                )
-
-            policy[LlamaDecoderLayer] = ModulePolicyDescription(
-                attribute_replacement=decoder_attribute_replacement,
-                sub_module_replacement=[
-                    SubModuleReplacementDescription(
-                        suffix="self_attn.q_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="self_attn.k_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="self_attn.v_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="self_attn.o_proj",
-                        target_module=Linear1D_Row,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="mlp.gate_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="mlp.up_proj",
-                        target_module=Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="mlp.down_proj",
-                        target_module=Linear1D_Row,
-                    ),
-                ],
-            )
-
-            self.append_or_create_submodule_replacement(
-                description=SubModuleReplacementDescription(
-                    suffix="embed_tokens",
-                    target_module=VocabParallelEmbedding1D,
-                ),
-                policy=policy,
-                target_key=LlamaModel,
-            )
-
-        # optimization configuration
-        self.append_or_create_submodule_replacement(
-            description=[
-                SubModuleReplacementDescription(
-                    suffix="input_layernorm",
-                    target_module=norm_cls,
-                ),
-                SubModuleReplacementDescription(
-                    suffix="post_attention_layernorm",
-                    target_module=norm_cls,
-                ),
-            ],
-            policy=policy,
-            target_key=LlamaDecoderLayer,
-        )
-
-        self.append_or_create_submodule_replacement(
-            description=SubModuleReplacementDescription(
-                suffix="norm",
-                target_module=norm_cls,
-            ),
-            policy=policy,
-            target_key=LlamaModel,
-        )
-
-        # use flash attention
-        if self.shard_config.enable_flash_attention:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": get_llama_flash_attention_forward(self.shard_config),
-                },
-                policy=policy,
-                target_key=LlamaAttention,
-            )
-
-        return policy
-
-    def postprocess(self):
-        return self.model
-
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, new_forward: Callable, policy: Dict
-    ) -> None:
-        """If under pipeline parallel setting, replacing the original forward method of huggingface
-        to customized forward method, and add this changing to policy."""
-        if self.pipeline_stage_manager is None:
-            return
-
-        stage_manager = self.pipeline_stage_manager
-        if self.model.__class__.__name__ == "LlamaModel":
-            module = self.model
-        else:
-            module = self.model.model
-
-        if stage_manager.is_interleave:
-            layers_per_stage = self.distribute_layers(
-                len(module.layers),
-                stage_manager.num_stages * stage_manager.num_model_chunks,
-            )
-            stage_manager.stage_indices = self.get_stage_index(
-                layers_per_stage,
-                stage_manager.stage,
-                num_model_chunks=stage_manager.num_model_chunks,
-                num_stages=stage_manager.num_stages,
-            )
-            method_replacement = {
-                "forward": partial(
-                    new_forward,
-                    stage_manager=stage_manager,
-                    shard_config=self.shard_config,
-                )
-            }
-
-        else:
-            layers_per_stage = self.distribute_layers(
-                len(module.layers), stage_manager.num_stages
-            )
-            stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
-            method_replacement = {
-                "forward": partial(
-                    new_forward,
-                    stage_manager=stage_manager,
-                    stage_index=stage_index,
-                    shard_config=self.shard_config,
-                )
-            }
-            self.append_or_create_method_replacement(
-                description=method_replacement, policy=policy, target_key=model_cls
-            )
-
-        self.append_or_create_method_replacement(
-            description=method_replacement, policy=policy, target_key=model_cls
-        )
-
     def get_held_layers(self) -> List[nn.Module]:
-        """Get pipeline layers for current stage."""
         assert self.pipeline_stage_manager is not None
 
+        module: LlamaModel
         if self.model.__class__.__name__ == "LlamaModel":
             module = self.model
         else:
@@ -289,75 +83,231 @@ class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        if stage_manager.is_interleave:
-            assert stage_manager.num_model_chunks is not None
-            layers_per_stage = self.distribute_layers(
-                len(module.layers),
-                stage_manager.num_stages * stage_manager.num_model_chunks,
-            )
-            stage_indices = self.get_stage_index(
-                layers_per_stage,
-                stage_manager.stage,
-                num_model_chunks=stage_manager.num_model_chunks,
-                num_stages=stage_manager.num_stages,
-            )
-            if stage_manager.is_first_stage(ignore_chunk=True):
-                held_layers.append(module.embed_tokens)
-            for start_idx, end_idx in stage_indices:
-                held_layers.extend(module.layers[start_idx:end_idx])
-            if stage_manager.is_last_stage(ignore_chunk=True):
-                held_layers.append(module.norm)
-
-        else:
-            layers_per_stage = self.distribute_layers(
-                len(module.layers), stage_manager.num_stages
-            )
-            if stage_manager.is_first_stage():
-                held_layers.append(module.embed_tokens)
-            start_idx, end_idx = self.get_stage_index(
-                layers_per_stage, stage_manager.stage
-            )
-            held_layers.extend(module.layers[start_idx:end_idx])
-            if stage_manager.is_last_stage():
-                held_layers.append(module.norm)
+        layers_per_stage = stage_manager.distribute_layers(len(module.layers))
+        if stage_manager.is_first_stage():
+            held_layers.extend([module.embed_tokens, module.rotary_emb])
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
+        held_layers.extend(module.layers[start_idx:end_idx])
+        if stage_manager.is_last_stage():
+            held_layers.append(module.norm)
 
         return held_layers
+
+    def config_sanity_check(self):
+        pass
+
+    def preprocess(self) -> nn.Module:
+        self.tie_weight = self.tie_weight_check()
+        return self.model
+
+    def postprocess(self) -> nn.Module:
+        return self.model
+
+    def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
+        from transformers.models.llama.modeling_llama import (
+            LlamaAttention,
+            LlamaDecoderLayer,
+            LlamaRMSNorm,
+        )
+
+        config: LlamaConfig = self.model.config
+        policy = {}
+
+        # This is to avoid refererence to its weight which has been replaced by a placeholder
+        policy[LlamaRMSNorm] = ModulePolicyDescription(
+            method_replacement={
+                "extra_repr": lambda self: f"eps={self.variance_epsilon}"
+            }
+        )
+
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
+        sp_size = self.shard_config.sequence_parallel_size or None
+        if sp_mode == "ring_attn" and not self.is_causal:
+            raise ValueError(
+                "Ring attention is only meant for causal language modeling."
+            )
+
+        tp_size = self.shard_config.tensor_parallel_size
+        num_q_heads = config.num_attention_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", None)
+        hidden_size = config.hidden_size
+
+        if sp_mode == "all_to_all":
+            # Ulysses all-to-all context parallelism needs to partition number of heads
+            hidden_size //= sp_size
+
+            assert (
+                num_q_heads % sp_size == 0
+            ), "The number of attention heads must be divisible by the sequence parallel size."
+            num_q_heads //= sp_size
+
+            if num_kv_heads:
+                assert (
+                    num_kv_heads % sp_size == 0
+                ), "The number of key_value heads must be divisible by the sequence parallel size."
+                num_kv_heads //= sp_size
+
+        if self.shard_config.enable_tensor_parallelism:
+            hidden_size //= tp_size
+
+            assert (
+                num_q_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_q_heads //= tp_size
+
+            if num_kv_heads:
+                assert (
+                    num_kv_heads % tp_size == 0
+                ), "The number of key_value heads must be divisible by the tensor parallel size."
+                num_kv_heads //= tp_size
+
+        attention_attribute_replacement = {}
+        attention_attribute_replacement["hidden_size"] = hidden_size
+        attention_attribute_replacement["num_heads"] = num_q_heads
+        if num_kv_heads:
+            attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
+
+        policy[LlamaAttention] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    LlamaAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
+        )
+
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
+            )
+
+            policy[LlamaModel] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2"
+                }
+            )
+
+        if self.shard_config.enable_tensor_parallelism:
+            policy[LlamaDecoderLayer] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.q_proj",
+                        target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.k_proj",
+                        target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.v_proj",
+                        target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.o_proj",
+                        target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.gate_proj",
+                        target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.up_proj",
+                        target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.down_proj",
+                        target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
+                    ),
+                ],
+            )
+
+        embedding_cls = None
+        if self.shard_config.enable_tensor_parallelism:
+            embedding_cls = VocabParallelEmbedding1D
+        elif self.tie_weight:
+            embedding_cls = PaddingEmbedding
+
+        if embedding_cls is not None:
+            self.append_or_create_submodule_replacement(
+                description=SubModuleReplacementDescription(
+                    suffix="embed_tokens",
+                    target_module=embedding_cls,
+                    kwargs={
+                        "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by
+                    },
+                ),
+                policy=policy,
+                target_key=LlamaModel,
+            )
+
+        # optimization configuration
+        if self.shard_config.enable_fused_normalization:
+            self.append_or_create_submodule_replacement(
+                description=[
+                    SubModuleReplacementDescription(
+                        suffix="input_layernorm",
+                        target_module=FusedRMSNorm,
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="post_attention_layernorm",
+                        target_module=FusedRMSNorm,
+                    ),
+                ],
+                policy=policy,
+                target_key=LlamaDecoderLayer,
+            )
+
+            self.append_or_create_submodule_replacement(
+                description=SubModuleReplacementDescription(
+                    suffix="norm",
+                    target_module=FusedRMSNorm,
+                ),
+                policy=policy,
+                target_key=LlamaModel,
+            )
+
+        return policy
 
 
 class LlamaModelPolicy(LlamaPolicy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> list[str]:
         return LlamaPolicy.get_all_modules(config)
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
         super().pipeline_template_sanity_check(template)
 
-    def module_policy(self):
+    def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         policy = super().module_policy()
-        from transformers.models.llama.modeling_llama import LlamaModel
 
-        if self.pipeline_stage_manager:
-            # set None as default
-            self.set_pipeline_forward(
-                model_cls=LlamaModel,
-                new_forward=LlamaPipelineForwards.llama_model_forward,
-                policy=policy,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    LlamaModelForwards.llama_model_forward,
+                    shard_config=self.shard_config,
+                ),
+            },
+            policy=policy,
+            target_key=LlamaModel,
+        )
+
         return policy
 
     def get_held_layers(self) -> List[nn.Module]:
-        """Get pipeline layers for current stage."""
-        held_layers = super().get_held_layers()
-        return held_layers
-
-    def get_shared_params(self) -> List[Dict[int, Tensor]]:
-        """No shared params in llama model"""
-        return []
+        return super().get_held_layers()
 
 
 class LlamaForCausalLMPolicy(LlamaPolicy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> list[str]:
         modules = [f"model.{module}" for module in LlamaPolicy.get_all_modules(config)]
         modules.append("lm_head")
         return modules
@@ -367,56 +317,60 @@ class LlamaForCausalLMPolicy(LlamaPolicy):
         if "lm_head" not in template.modules_per_stage[-1]:
             raise ValueError("lm_head must be in the last stage.")
 
-    def module_policy(self):
-        from transformers import LlamaForCausalLM
+    def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
+        from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
+        self.is_causal = True
         policy = super().module_policy()
 
-        setattr(self.shard_config, "causal_lm", True)
-
         if self.shard_config.enable_tensor_parallelism:
-            # add a new item for casual lm
-            new_item = {
-                LlamaForCausalLM: ModulePolicyDescription(
-                    sub_module_replacement=[
-                        SubModuleReplacementDescription(
-                            suffix="lm_head", target_module=Linear1D_Col
-                        )
-                    ],
-                    method_replacement={
-                        "forward": get_lm_forward_with_dist_cross_entropy(
-                            self.shard_config
-                        )
-                    },
-                )
+            # add a new item for causal lm
+            target_module = VocabParallelLMHead1D
+            kwargs = {
+                "gather_output": not self.shard_config.parallel_output,
+                "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by,
             }
-            policy.update(new_item)
+        else:
+            target_module = PaddingLMHead
+            kwargs = {
+                "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by
+            }
 
-        if self.pipeline_stage_manager:
-            # set None as default
-            self.set_pipeline_forward(
-                model_cls=LlamaForCausalLM,
-                new_forward=LlamaPipelineForwards.llama_for_causal_lm_forward,
-                policy=policy,
-            )
+        self.append_or_create_submodule_replacement(
+            description=SubModuleReplacementDescription(
+                suffix="lm_head",
+                target_module=target_module,
+                kwargs=kwargs,
+            ),
+            policy=policy,
+            target_key=LlamaForCausalLM,
+        )
+
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    LlamaModelForwards.llama_for_causal_lm_forward,
+                    shard_config=self.shard_config,
+                ),
+            },
+            policy=policy,
+            target_key=LlamaForCausalLM,
+        )
 
         return policy
 
     def get_held_layers(self) -> List[nn.Module]:
-        """Get pipeline layers for current stage."""
         stage_manager = self.pipeline_stage_manager
-        held_layers = super().get_held_layers()
-        if stage_manager.is_last_stage(ignore_chunk=True):
-            held_layers.append(self.model.lm_head)
-        return held_layers
+        layers = super().get_held_layers()
+        if stage_manager.is_last_stage():
+            layers.append(self.model.lm_head)
+
+        return layers
 
     def get_shared_params(self) -> List[Dict[int, Tensor]]:
         llama_model = self.model.model
         if self.pipeline_stage_manager and self.pipeline_stage_manager.num_stages > 1:
-            if (
-                id(llama_model.embed_tokens.weight) == id(self.model.lm_head.weight)
-                and self.pipeline_stage_manager.num_stages > 1
-            ):
+            if id(llama_model.embed_tokens.weight) == id(self.model.lm_head.weight):
                 # tie weights
                 return [
                     {
@@ -425,58 +379,5 @@ class LlamaForCausalLMPolicy(LlamaPolicy):
                         - 1: self.model.lm_head.weight,
                     }
                 ]
-        return []
 
-
-class LlamaForSequenceClassificationPolicy(LlamaPolicy):
-    @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = [f"model.{module}" for module in LlamaPolicy.get_all_modules(config)]
-        modules.append("score")
-        return modules
-
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-        if "score" not in template.modules_per_stage[-1]:
-            raise ValueError("score must be in the last stage.")
-
-    def module_policy(self):
-        from transformers import LlamaForSequenceClassification
-
-        policy = super().module_policy()
-
-        if self.shard_config.enable_tensor_parallelism:
-            # add a new item for sequence classification
-            new_item = {
-                LlamaForSequenceClassification: ModulePolicyDescription(
-                    sub_module_replacement=[
-                        SubModuleReplacementDescription(
-                            suffix="score",
-                            target_module=Linear1D_Col,
-                            kwargs=dict(gather_output=True),
-                        )
-                    ]
-                )
-            }
-            policy.update(new_item)
-        # to be confirmed
-        if self.pipeline_stage_manager:
-            # set None as default
-            self.set_pipeline_forward(
-                model_cls=LlamaForSequenceClassification,
-                new_forward=LlamaPipelineForwards.llama_for_sequence_classification_forward,
-                policy=policy,
-            )
-        return policy
-
-    def get_held_layers(self) -> List[nn.Module]:
-        """Get pipeline layers for current stage."""
-        stage_manager = self.pipeline_stage_manager
-        held_layers = super().get_held_layers()
-        if stage_manager.is_last_stage(ignore_chunk=True):
-            held_layers.append(self.model.score)
-        return held_layers
-
-    def get_shared_params(self) -> List[Dict[int, Tensor]]:
-        """No shared params in llama for sequence classification model"""
         return []

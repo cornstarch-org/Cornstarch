@@ -14,3 +14,10 @@ __pycache__/
 
 # due to using vscode
 .vscode
+
+# tensorboard
+runs
+
+# wandb
+wandb/*
+logs/*

@@ -1,5 +1,6 @@
 from typing import Iterator, List, Optional, Set
 
+from colossalai.accelerator import get_accelerator
 from colossalai.shardformer._utils import getattr_, setattr_
 from colossalai.shardformer.policies.base_policy import (
     Policy,
@@ -8,9 +9,10 @@ from colossalai.shardformer.policies.base_policy import (
 from colossalai.shardformer.shard.sharder import ModelSharder as ColossalModelSharder
 from colossalai.shardformer.shard.shardformer import ShardConfig
 from colossalai.shardformer.shard.shardformer import ShardFormer as ColossalShardFormer
-from cornstarch.shardformer.shard.placeholder import TensorPlaceholder
 from loguru import logger
 from torch import Tensor, nn
+
+from cornstarch.shardformer.shard.placeholder import TensorPlaceholder
 
 
 class ModelSharder(ColossalModelSharder):
@@ -31,6 +33,12 @@ class ModelSharder(ColossalModelSharder):
         self._materialize()
         self._postprocess()
         return shared_params
+
+    def _materialize(self) -> None:
+        for p in self.model.parameters():
+            if p.device.type == "meta":
+                p.to_empty(device=get_accelerator().get_current_device())
+        super()._materialize()
 
     @classmethod
     def set_tensors_to_placeholder(

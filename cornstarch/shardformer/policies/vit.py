@@ -1,50 +1,41 @@
-# Copied from https://github.com/hpcaitech/ColossalAI/blob/v0.3.5/colossalai/shardformer/policies/vit.py
-
 from __future__ import annotations
 
+import functools
 import itertools
 import warnings
-from typing import Callable, Dict, List, Union, cast
+from typing import Dict, List, cast
 
-import colossalai.shardformer.layer as col_nn
-import torch.nn as nn
-from colossalai.shardformer.layer import DropoutForReplicatedInput, Linear1D_Col
-from colossalai.shardformer.modeling.jit import get_jit_fused_dropout_add_func
-from colossalai.shardformer.modeling.vit import (
-    ViTForImageClassification_pipeline_forward,
-    ViTForMaskedImageModeling_pipeline_forward,
-    ViTModel_pipeline_forward,
-    get_jit_fused_vit_output_forward,
-    get_vit_flash_self_attention_forward,
+from colossalai.shardformer.layer import (
+    FusedLayerNorm,
+    Linear1D_Col,
+    Linear1D_Row,
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
     Policy,
     SubModuleReplacementDescription,
 )
+from torch import nn
+from transformers.configuration_utils import PretrainedConfig
+from transformers.models.vit.modeling_vit import ViTConfig, ViTModel
+
 from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.modeling.vit import ViTModelForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
-from transformers import PretrainedConfig, ViTConfig
-
-__all__ = [
-    "ViTPolicy",
-    "ViTModelPolicy",
-    "ViTForImageClassificationPolicy",
-    "ViTForMaskedImageModelingPolicy",
-]
 
 
-class ViTPolicy(PipelineTemplatePolicyBase, Policy):
+class ViTModelPolicy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
+    def get_all_modules(config: PretrainedConfig) -> list[str]:
         assert isinstance(config, ViTConfig), "config must be an instance of ViTConfig"
         config: ViTConfig = cast(ViTConfig, config)
 
         modules = []
         modules.append("embeddings")
         modules.extend([f"encoder.layer.{i}" for i in range(config.num_hidden_layers)])
+        modules.extend(["layernorm", "pooler"])
         return modules
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
@@ -65,120 +56,152 @@ class ViTPolicy(PipelineTemplatePolicyBase, Policy):
         if f"{prefix}embeddings" not in modules_in_template[0]:
             raise ValueError("embeddings must be in the first stage.")
 
+        if not all(
+            module in template.modules_per_stage[-1]
+            for module in [f"{prefix}layernorm", f"{prefix}pooler"]
+        ):
+            raise ValueError("layernorm and pooler must be in the last stage.")
+
     def config_sanity_check(self):
         pass
 
-    def preprocess(self):
+    def preprocess(self) -> nn.Module:
         return self.model
 
-    def module_policy(self) -> Dict[Union[str, nn.Module], ModulePolicyDescription]:
+    def postprocess(self) -> nn.Module:
+        return self.model
+
+    def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from transformers.models.vit.modeling_vit import (
-            ViTEmbeddings,
             ViTLayer,
-            ViTOutput,
+            ViTSdpaSelfAttention,
             ViTSelfAttention,
         )
+
+        config: ViTConfig = self.model.config
+        ATTN_IMPLEMENTATION = {
+            "eager": ViTSelfAttention,
+            "sdpa": ViTSdpaSelfAttention,
+        }
+        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
             warnings.warn(
-                "Vit doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
+                "ViT doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
             )
+
+        tp_size = self.shard_config.tensor_parallel_size
+        num_heads = config.num_attention_heads
+        hidden_size = config.hidden_size
 
         if self.shard_config.enable_tensor_parallelism:
-            policy[ViTEmbeddings] = ModulePolicyDescription(
-                attribute_replacement={},
-                param_replacement=[],
-                sub_module_replacement=[
-                    SubModuleReplacementDescription(
-                        suffix="dropout",
-                        target_module=DropoutForReplicatedInput,
-                    )
-                ],
-            )
+            hidden_size //= tp_size
 
+            assert (
+                num_heads % tp_size == 0
+            ), "The number of attention heads must be divisible by the tensor parallel size."
+            num_heads //= tp_size
+
+        attention_attribute_replacement = {
+            "num_attention_heads": num_heads,
+            "all_head_size": hidden_size,
+            "attention_probs_dropout_prob": config.attention_probs_dropout_prob,
+        }
+
+        policy[attn_cls] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": ViTSdpaSelfAttention.forward,
+            },
+        )
+
+        policy[ViTModel] = ModulePolicyDescription(
+            attribute_replacement={
+                "config._attn_implementation": "sdpa",
+            }
+        )
+
+        if self.shard_config.enable_flash_attention:
+            warnings.warn(
+                "ViT doesn't support FlashAttention now, will ignore the FlashAttention flag."
+            )
+            self.shard_config.enable_flash_attention = False
+
+        if self.shard_config.enable_tensor_parallelism:
             policy[ViTLayer] = ModulePolicyDescription(
-                attribute_replacement={
-                    "attention.attention.num_attention_heads": self.model.config.num_attention_heads
-                    // self.shard_config.tensor_parallel_size,
-                    "attention.attention.all_head_size": self.model.config.hidden_size
-                    // self.shard_config.tensor_parallel_size,
-                },
-                param_replacement=[],
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="attention.attention.query",
-                        target_module=col_nn.Linear1D_Col,
+                        target_module=Linear1D_Col,
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.key",
-                        target_module=col_nn.Linear1D_Col,
+                        target_module=Linear1D_Col,
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.value",
-                        target_module=col_nn.Linear1D_Col,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="attention.attention.dropout",
-                        target_module=col_nn.DropoutForParallelInput,
+                        target_module=Linear1D_Col,
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.output.dense",
-                        target_module=col_nn.Linear1D_Row,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="attention.output.dropout",
-                        target_module=col_nn.DropoutForReplicatedInput,
+                        target_module=Linear1D_Row,
                     ),
                     SubModuleReplacementDescription(
                         suffix="intermediate.dense",
-                        target_module=col_nn.Linear1D_Col,
+                        target_module=Linear1D_Col,
                     ),
                     SubModuleReplacementDescription(
                         suffix="output.dense",
-                        target_module=col_nn.Linear1D_Row,
+                        target_module=Linear1D_Row,
+                    ),
+                ]
+            )
+
+        if self.shard_config.enable_fused_normalization:
+            self.append_or_create_method_replacement(
+                description=[
+                    SubModuleReplacementDescription(
+                        suffix="layernorm_before",
+                        target_module=FusedLayerNorm,
                     ),
                     SubModuleReplacementDescription(
-                        suffix="output.dropout",
-                        target_module=col_nn.DropoutForReplicatedInput,
+                        suffix="layernorm_after",
+                        target_module=FusedLayerNorm,
                     ),
                 ],
+                policy=policy,
+                target_key=ViTLayer,
             )
 
-        # use flash attention
-        if self.shard_config.enable_flash_attention:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": get_vit_flash_self_attention_forward(),
-                },
+            self.append_or_create_submodule_replacement(
+                description=[
+                    SubModuleReplacementDescription(
+                        suffix="layernorm",
+                    )
+                ],
                 policy=policy,
-                target_key=ViTSelfAttention,
+                target_key=ViTModel,
             )
 
-        # use jit fused operator
-        if self.shard_config.enable_jit_fused:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": get_jit_fused_vit_output_forward(),
-                    "dropout_add": get_jit_fused_dropout_add_func(),
-                },
-                policy=policy,
-                target_key=ViTOutput,
-            )
+        self.append_or_create_method_replacement(
+            description={
+                "forward": functools.partial(
+                    ViTModelForwards.vit_model_forward, shard_config=self.shard_config
+                )
+            },
+            policy=policy,
+            target_key=ViTModel,
+        )
+
         return policy
 
-    def new_model_class(self):
-        return None
-
-    def postprocess(self):
-        return self.model
-
     def get_held_layers(self) -> List[nn.Module]:
-        """Get pipeline layers for current stage."""
-        assert self.pipeline_stage_manager is not None, "pipeline_stage_manager is None"
+        assert self.pipeline_stage_manager is not None
 
+        module: ViTModel
         if self.model.__class__.__name__ == "ViTModel":
             module = self.model
         else:
@@ -186,191 +209,12 @@ class ViTPolicy(PipelineTemplatePolicyBase, Policy):
         stage_manager = self.pipeline_stage_manager
 
         held_layers = []
-        layers_per_stage = self.distribute_layers(
-            len(module.encoder.layer), stage_manager.num_stages
-        )
+        layers_per_stage = stage_manager.distribute_layers(len(module.encoder.layer))
         if stage_manager.is_first_stage():
             held_layers.append(module.embeddings)
-        start_idx, end_idx = self.get_stage_index(layers_per_stage, stage_manager.stage)
+        start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.encoder.layer[start_idx:end_idx])
-        return held_layers
-
-    def set_pipeline_forward(
-        self, model_cls: nn.Module, pipeline_forward: Callable, policy: Dict
-    ):
-        if self.pipeline_stage_manager:
-            stage_manager = self.pipeline_stage_manager
-            if self.model.__class__.__name__ == "ViTModel":
-                module = self.model
-            else:
-                module = self.model.vit
-
-            layers_per_stage = self.distribute_layers(
-                len(module.encoder.layer), stage_manager.num_stages
-            )
-            stage_index = self.get_stage_index(layers_per_stage, stage_manager.stage)
-            method_replacement = {
-                "forward": pipeline_forward(
-                    stage_manager=stage_manager, stage_index=stage_index
-                )
-            }
-            self.append_or_create_method_replacement(
-                description=method_replacement, policy=policy, target_key=model_cls
-            )
-
-
-# ViTModel
-class ViTModelPolicy(ViTPolicy):
-    @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = ViTPolicy.get_all_modules(config)
-        modules.extend(["layernorm", "pooler"])
-        return modules
-
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-
-        if not all(
-            module in template.modules_per_stage[-1]
-            for module in ["layernorm", "pooler"]
-        ):
-            raise ValueError("layernorm and pooler must be in the last stage.")
-
-    def module_policy(self):
-        from transformers.models.vit.modeling_vit import ViTModel
-
-        policy = super().module_policy()
-
-        if self.shard_config.pipeline_stage_manager is not None:
-            self.set_pipeline_forward(
-                model_cls=ViTModel,
-                pipeline_forward=ViTModel_pipeline_forward,
-                policy=policy,
-            )
-        return policy
-
-    def get_held_layers(self) -> List[nn.Module]:
-        held_layers = super().get_held_layers()
-        assert self.pipeline_stage_manager is not None, "pipeline_stage_manager is None"
-
-        module = self.model
-        stage_manager = self.pipeline_stage_manager
         if stage_manager.is_last_stage():
-            held_layers.append(module.layernorm)
-            held_layers.append(module.pooler)
-
-        return held_layers
-
-
-# ViTForImageClassification
-class ViTForImageClassificationPolicy(ViTPolicy):
-    @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = [f"vit.{module}" for module in ViTPolicy.get_all_modules(config)]
-        modules.extend(["vit.layernorm", "classifier"])
-        return modules
-
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-        if not all(
-            module in template.modules_per_stage[-1]
-            for module in ["vit.layernorm", "classifier"]
-        ):
-            raise ValueError("layernorm and classifier must be in the last stage.")
-
-    def module_policy(self):
-        from transformers.models.vit.modeling_vit import (
-            ViTForImageClassification,
-            ViTModel,
-        )
-
-        policy = super().module_policy()
-        if self.shard_config.enable_tensor_parallelism:
-            new_item = {
-                ViTForImageClassification: ModulePolicyDescription(
-                    sub_module_replacement=[
-                        SubModuleReplacementDescription(
-                            suffix="classifier",
-                            target_module=Linear1D_Col,
-                            kwargs=dict(gather_output=True),
-                        )
-                    ]
-                )
-            }
-            policy.update(new_item)
-
-        if self.shard_config.pipeline_stage_manager is not None:
-            self.set_pipeline_forward(
-                model_cls=ViTModel,
-                pipeline_forward=ViTModel_pipeline_forward,
-                policy=policy,
-            )
-            self.set_pipeline_forward(
-                model_cls=ViTForImageClassification,
-                pipeline_forward=ViTForImageClassification_pipeline_forward,
-                policy=policy,
-            )
-
-        return policy
-
-    def get_held_layers(self) -> List[nn.Module]:
-        held_layers = super().get_held_layers()
-        assert self.pipeline_stage_manager is not None, "pipeline_stage_manager is None"
-
-        module = self.model.vit
-        stage_manager = self.pipeline_stage_manager
-        if stage_manager.is_last_stage():
-            held_layers.append(module.layernorm)
-            held_layers.append(self.model.classifier)
-
-        return held_layers
-
-
-# ViTForMaskedImageModeling
-class ViTForMaskedImageModelingPolicy(ViTPolicy):
-    @staticmethod
-    def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = [f"vit.{module}" for module in ViTPolicy.get_all_modules(config)]
-        modules.extend(["vit.layernorm", "decoder"])
-        return modules
-
-    def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
-        if not all(
-            module in template.modules_per_stage[-1]
-            for module in ["vit.layernorm", "decoder"]
-        ):
-            raise ValueError("layernorm and decoder must be in the last stage.")
-
-    def module_policy(self):
-        from transformers.models.vit.modeling_vit import (
-            ViTForMaskedImageModeling,
-            ViTModel,
-        )
-
-        policy = super().module_policy()
-
-        if self.shard_config.pipeline_stage_manager is not None:
-            self.set_pipeline_forward(
-                model_cls=ViTModel,
-                pipeline_forward=ViTModel_pipeline_forward,
-                policy=policy,
-            )
-            self.set_pipeline_forward(
-                model_cls=ViTForMaskedImageModeling,
-                pipeline_forward=ViTForMaskedImageModeling_pipeline_forward,
-                policy=policy,
-            )
-        return policy
-
-    def get_held_layers(self) -> List[nn.Module]:
-        held_layers = super().get_held_layers()
-        assert self.pipeline_stage_manager is not None, "pipeline_stage_manager is None"
-
-        module = self.model.vit
-        stage_manager = self.pipeline_stage_manager
-        if stage_manager.is_last_stage():
-            held_layers.append(module.layernorm)
-            held_layers.append(self.model.decoder)
+            held_layers.extend([module.layernorm, module.pooler])
 
         return held_layers

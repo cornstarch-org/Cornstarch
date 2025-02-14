@@ -1,0 +1,54 @@
+site_name: Cornstarch Project
+site_author: Cornstarch team
+site_description: Distributed Multimodal LLM training framework
+
+repo_name: SymbioticLab/Cornstarch
+repo_url: https://github.com/SymbioticLab/Cornstarch
+
+copyright: Copyright &copy; 2025 Cornstarch team
+
+theme:
+  name: material
+  logo: assets/images/cornstarch.svg
+  favicon: assets/images/favicon.svg
+  palette:
+    scheme: slate
+    primary: amber
+  features:
+    - content.code.copy
+    - search.suggest
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+
+plugins:
+  - search
+  - mkdocstrings
+
+markdown_extensions:
+  - meta
+  - abbr
+  - admonition
+  - attr_list
+  - footnotes
+  - pymdownx.highlight:
+      anchor_linenums: true
+      pygments_lang_class: true
+      linenums: true
+      use_pygments: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+
+nav:
+  - Cornstarch: index.md
+  - Installation: getting_started/installation.md
+  - Using Cornstarch:
+    - Creating a MLLM model: using_cornstarch/creating_mllm.md
+    - Preprocessing inputs: using_cornstarch/preprocessing_inputs.md
+    - Training a MLLM model: using_cornstarch/training_mllm.md
+  - Distributed Training:
+    - Overview: parallelization/index.md
+    - Using DDP/FSDP: parallelization/ddp_fsdp.md
+    - Using Cornstarch 4D Parallelism: parallelization/cornstarch_parallel.md
+  - Source Code Reference: reference/
