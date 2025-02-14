@@ -81,3 +81,32 @@ def all_to_all_single_gloo(
         dim=0,
     )
     output.copy_(output_tensor)
+
+
+def reduce_scatter_gloo(
+    output: torch.Tensor,
+    input_list: list[torch.Tensor],
+    op=dist.ReduceOp.SUM,
+    group: Optional[dist.ProcessGroup] = None,
+    async_op: bool = False,
+):
+    """
+    Implements reduce_scatter using supported PyTorch distributed APIs.
+    Args:
+        output (torch.Tensor): The tensor to store the scattered reduced result.
+        input_list (list[torch.Tensor]): List of input tensors from each process.
+        op (dist.ReduceOp, optional): The reduction operation (e.g., SUM, PROD). Defaults to dist.ReduceOp.SUM.
+        group (dist.ProcessGroup, optional): The process group to work on. Defaults to None.
+        async_op (bool, optional): If set to True, performs the operation asynchronously. Defaults to False.
+    Returns:
+        dist.Work or None: If async_op is True, returns a Work object. Otherwise, returns None.
+    """
+    world_size = dist.get_world_size(group=group)
+    my_rank = dist.get_rank(group=group)
+    # Ensure that input_list has tensors from all processes
+    if len(input_list) != world_size:
+        raise ValueError(f"input_list must contain {world_size} tensors.")
+    for rank in range(world_size):
+        dist.reduce(input_list[rank], dst=rank, op=op, group=group)
+        if rank == my_rank:
+            output.copy_(input_list[rank])
