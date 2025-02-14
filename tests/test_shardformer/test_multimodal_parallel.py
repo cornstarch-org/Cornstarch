@@ -80,7 +80,7 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
 class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 3
+        return 6
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
