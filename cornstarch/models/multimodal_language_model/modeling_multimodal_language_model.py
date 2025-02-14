@@ -7,7 +7,6 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
-from colossalai.shardformer.policies.auto_policy import _fullname
 from transformers.activations import get_activation
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -37,9 +36,6 @@ from cornstarch.kernel.interface import (
     create_bitfield_attention_mask,
 )
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
-from cornstarch.shardformer.policies.auto_policy import get_autopolicy
-from cornstarch.shardformer.shard.shard_config import ShardConfig
-from cornstarch.shardformer.shard.shardformer import ShardFormer
 
 logger = logging.get_logger(__name__)
 
@@ -688,25 +684,30 @@ class MultimodalModel(nn.Module):
                 inspect.signature(modal_module.module.forward).parameters.keys()
             )
 
-        shard_config = ShardConfig(
-            enable_flash_attention=False,
-            enable_sequence_parallelism=False,
-            enable_tensor_parallelism=False,
-            pipeline_stage_manager=None,
-        )
-        shardformer = ShardFormer(shard_config)
-
-        policy = get_autopolicy(_fullname(language_model))
-        policy.set_model(language_model)
-        policy.set_shard_config(shard_config)
-
-        language_model, _ = shardformer.optimize(language_model, policy)
-        language_model.config._attn_implementation = "bitfield_attention"
+        self.update_language_model_to_use_bitfield_attention_mask(language_model)
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
         self.token_ids: dict[str, int] = None
         self.preprocess_llm_callback = preprocess_llm_callback
+
+    def update_language_model_to_use_bitfield_attention_mask(
+        self, language_model: PreTrainedModel
+    ):
+        if not hasattr(language_model, "_update_causal_mask"):
+            # TODO: does this always work?
+            language_model = language_model.model
+
+        assert hasattr(language_model, "_update_causal_mask"), (
+            "The language model should have _update_causal_mask method. "
+            "Please check if the language model is from HuggingFace Transformers."
+        )
+
+        language_model.config._attn_implementation = "bitfield_attention"
+        language_model._update_causal_mask = MethodType(
+            MultimodalModel.check_bitfield_attention_mask,
+            language_model,
+        )
 
     @classmethod
     def from_pretrained_multimodal_model(
@@ -729,6 +730,22 @@ class MultimodalModel(nn.Module):
             return Qwen2VLModel(config).from_pretrained(*args, **kwargs)
         else:
             raise NotImplementedError
+
+    @staticmethod
+    def check_bitfield_attention_mask(
+        self, attention_mask: torch.Tensor, *args, **kwargs
+    ):
+        """
+        A replacement function for Model._update_causal_mask() to avoid updating the attention mask.
+        Plus, it checks if the attention mask is a bitfield attention mask.
+        """
+        assert (
+            attention_mask is not None
+            and attention_mask.dtype == torch.int64
+            and (attention_mask > 1).any()
+        ), "The attention mask should be a bitfield attention mask."
+
+        return attention_mask
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         for encoder in self.encoders.values():
