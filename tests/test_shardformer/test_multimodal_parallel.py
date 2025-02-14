@@ -1,4 +1,3 @@
-import torch
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -52,6 +51,7 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         "tp_size, vision_pp_size, language_pp_size",
         [
             (1, 1, 1),
+            (2, 1, 1),
             (2, 1, 3),
             (2, 2, 2),
         ],
@@ -93,7 +93,6 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         ],
         name_fn=lambda tp, vpp, app, lpp: f"tp={tp}, pp={vpp},{app},{lpp}",
     )
-    @parametrize("precision", ["bf16"], name_fn=lambda p: p)
     def test(
         self,
         vision_model_name: str,
@@ -103,7 +102,6 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         vision_pp_size: int,
         audio_pp_size: int,
         language_pp_size: int,
-        precision: str,
     ):
         self.set_model(
             encoders={
@@ -116,5 +114,4 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
             tp_size,
             {"vision": vision_pp_size, "audio": audio_pp_size, "llm": language_pp_size},
             None,
-            precision,
         )
