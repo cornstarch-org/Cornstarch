@@ -13,60 +13,9 @@ from cornstarch.shardformer.layers.context_parallel_attention import (
 from ..distributed_base import GlooDistributedTestBase
 
 
-def test_fake_context_parallelism():
-    batch_size: int = 1
-    seq_len: int = 128
-
-    query, key, value = torch.unbind(
-        torch.randn(
-            (3, batch_size, seq_len, 8, 64), device="cuda", dtype=torch.float16
-        ).normal_(mean=0, std=0.5),
-    )
-
-    for t in [query, key, value]:
-        t.requires_grad_()
-
-    mask = torch.full((batch_size, seq_len), 1 << 1, dtype=torch.int64, device="cuda")
-
-    ref_out: torch.Tensor = bitfield_attn_func(query, key, value, None, None, mask)
-
-    local_queries = [q.requires_grad_().contiguous() for q in query.chunk(2, dim=1)]
-
-    cp_outs: list[torch.Tensor] = [
-        bitfield_attn_func(local_query, key, value, None, None, mask)
-        for local_query in local_queries
-    ]
-
-    # torch.testing.assert_close(ref_out.chunk(2, dim=1)[0], cp_out, rtol=5e-3, atol=5e-3)
-
-    # ========================================================================
-    # Check backward
-    # ========================================================================
-
-    dout = torch.randn_like(ref_out)
-    cp_douts = [do.contiguous() for do in dout.chunk(2, dim=1)]
-
-    ref_dq, ref_dk, ref_dv = torch.autograd.grad(ref_out, [query, key, value], dout)
-
-    assert key.grad is None and value.grad is None
-
-    cp_dq0, cp_dk0, cp_dv0 = torch.autograd.grad(
-        cp_outs[0], [local_queries[0], key, value], cp_douts[0]
-    )
-
-    cp_dq1, cp_dk1, cp_dv1 = torch.autograd.grad(
-        cp_outs[1], [local_queries[1], key, value], cp_douts[1]
-    )
-
-    print("done")
-
-    # torch.testing.assert_close(ref_dq.chunk(2, dim=1)[0], cp_dq, rtol=5e-3, atol=5e-3)
-    # torch.testing.assert_close(ref_dk, cp_dk, rtol=5e-3, atol=5e-3)
-    # torch.testing.assert_close(ref_dv, cp_dv, rtol=5e-3, atol=5e-3)
-
-
 @instantiate_parametrized_tests
 class TestContextParallelismClass(GlooDistributedTestBase):
+
     @property
     def world_size(self) -> int:
         return 2

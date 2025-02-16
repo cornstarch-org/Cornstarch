@@ -101,8 +101,8 @@ def get_submask_from_bitfield_mask(
             )
             | (
                 (is_text_token == False)
-                & (kv_modality_bits == q_modality_bits)
-                & (q_bitfield_mask > 0)
+                & (q_modality_bits == kv_modality_bits)
+                & (q_bitfield_mask[:, None] > 0)
             )
         ),
         1,
