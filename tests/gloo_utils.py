@@ -101,12 +101,19 @@ def reduce_scatter_gloo(
     Returns:
         dist.Work or None: If async_op is True, returns a Work object. Otherwise, returns None.
     """
+    assert op in [
+        dist.ReduceOp.SUM,
+        dist.ReduceOp.AVG,
+    ], f"Unsupported reduce operation: {op.name}"
+
     world_size = dist.get_world_size(group=group)
     my_rank = dist.get_rank(group=group)
     # Ensure that input_list has tensors from all processes
     if len(input_list) != world_size:
         raise ValueError(f"input_list must contain {world_size} tensors.")
-    for rank in range(world_size):
-        dist.reduce(input_list[rank], dst=rank, op=op, group=group)
-        if rank == my_rank:
-            output.copy_(input_list[rank])
+
+    global_tensor = torch.cat(input_list, dim=0)
+    dist.all_reduce(global_tensor, op=op, group=group)
+    chunks = torch.chunk(global_tensor, world_size, dim=0)
+
+    output.copy_(chunks[my_rank])
