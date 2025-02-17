@@ -154,6 +154,7 @@ def _fwd_kernel(
     stride_oh,
     stride_om,
     nheads,
+    context_offset,
     seqlen_q,
     seqlen_k,
     seqlen_q_rounded,
@@ -243,7 +244,7 @@ def _fwd_kernel(
             )
 
     q_bitfield_mask = tl.load(
-        bitfield_mask + off_b * stride_maskb + offs_m,
+        bitfield_mask + off_b * stride_maskb + offs_m + context_offset,
         mask=offs_m < seqlen_q,
         other=0,
     )
@@ -523,6 +524,7 @@ def _bwd_kernel_one_col_block(
     stride_dqm,
     stride_dkn,
     stride_dvn,
+    context_offset,
     seqlen_q,
     seqlen_k,
     headdim,
@@ -626,7 +628,7 @@ def _bwd_kernel_one_col_block(
         offs_m_curr = start_m + offs_m
 
         q_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_maskb + offs_m_curr,
+            bitfield_mask + off_b * stride_maskb + offs_m_curr + context_offset,
             mask=offs_m_curr < seqlen_q,
             other=0,
         )
@@ -899,6 +901,7 @@ def _bwd_kernel(
     stride_dvh,
     stride_dvn,
     nheads,
+    context_offset,
     seqlen_q,
     seqlen_k,
     seqlen_q_rounded,
@@ -957,6 +960,7 @@ def _bwd_kernel(
                 stride_dqm,
                 stride_dkn,
                 stride_dvn,
+                context_offset,
                 seqlen_q,
                 seqlen_k,
                 headdim,
@@ -995,6 +999,7 @@ def _bwd_kernel(
             stride_dqm,
             stride_dkn,
             stride_dvn,
+            context_offset,
             seqlen_q,
             seqlen_k,
             headdim,
@@ -1016,6 +1021,7 @@ def _flash_attn_forward(
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     mask: torch.Tensor = None,
+    context_offset: int = 0,
 ):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
@@ -1092,6 +1098,7 @@ def _flash_attn_forward(
         o.stride(2),
         o.stride(1),
         nheads,
+        context_offset,
         seqlen_q,
         seqlen_k,
         seqlen_q_rounded,
@@ -1123,6 +1130,7 @@ def _flash_attn_backward(
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     mask: torch.Tensor = None,
+    context_offset: int = 0,
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
@@ -1227,6 +1235,7 @@ def _flash_attn_backward(
         dv.stride(2),
         dv.stride(1),
         nheads,
+        context_offset,
         seqlen_q,
         seqlen_k,
         seqlen_q_rounded,
@@ -1351,7 +1360,9 @@ bitfield_attn_kvpacked_func = FlashAttnKVPackedFunc.apply
 
 class FlashAttnFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, bias=None, softmax_scale=None, mask=None):
+    def forward(
+        ctx, q, k, v, bias=None, softmax_scale=None, mask=None, context_offset=0
+    ):
         """
         q: (batch_size, seqlen_q, nheads, headdim)
         k, v: (batch_size, seqlen_k, nheads, headdim)
@@ -1362,9 +1373,16 @@ class FlashAttnFunc(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
         o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, bias=bias, softmax_scale=softmax_scale, mask=mask
+            q,
+            k,
+            v,
+            bias=bias,
+            softmax_scale=softmax_scale,
+            mask=mask,
+            context_offset=context_offset,
         )
         ctx.save_for_backward(q, k, v, o, lse, bias, mask)
+        ctx.context_offset = context_offset
         return o
 
     @staticmethod
@@ -1392,8 +1410,9 @@ class FlashAttnFunc(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=ctx.softmax_scale,
                 mask=mask,
+                context_offset=ctx.context_offset,
             )
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, None, None, None, None
 
 
 bitfield_attn_func = FlashAttnFunc.apply
