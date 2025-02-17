@@ -372,3 +372,137 @@ def test_bitfield_attention(head_dim: int, seqlen: int, batch_size: int):
     torch.testing.assert_close(dq_ref, dq, rtol=5e-3, atol=5e-3)
     torch.testing.assert_close(dk_ref, dk, rtol=5e-3, atol=5e-3)
     torch.testing.assert_close(dv_ref, dv, rtol=5e-3, atol=5e-3)
+
+
+@pytest.mark.parametrize(
+    "offset, subset_size", [(24, 30), (77, 24), (0, 32), (200, 64)]
+)
+@pytest.mark.parametrize(
+    "seqlen", [54, 57, 128, 144, 283, 256, 1024], ids=lambda x: f"sl={x}"
+)
+@pytest.mark.parametrize("batch_size", [1, 2, 4], ids=lambda x: f"b={x}")
+def test_subquery_bitfield_attention(
+    offset: int, subset_size: int, seqlen: int, batch_size: int
+):
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    num_heads = 1
+    head_dim = 64
+
+    if offset + subset_size > seqlen:
+        pytest.skip("Subset size exceeds sequence length")
+
+    # torch.random.manual_seed(0)
+
+    q = (
+        torch.randn(
+            batch_size,
+            seqlen,
+            num_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        .normal_(mean=0, std=0.5)
+        .requires_grad_(True)
+    )
+    k = (
+        torch.randn(
+            batch_size,
+            seqlen,
+            num_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        .normal_(mean=0, std=0.5)
+        .requires_grad_(True)
+    )
+    v = (
+        torch.randn(
+            batch_size,
+            seqlen,
+            num_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        .normal_(mean=0, std=0.5)
+        .requires_grad_(True)
+    )
+
+    # create a bitfield attention mask
+    def get_bitfield_attention_mask() -> tuple[torch.Tensor, torch.Tensor]:
+        text_bit = (1 << 62) | 1 | (1 << 1) | (1 << 2)
+
+        attention_mask = torch.full(
+            (batch_size, seqlen),
+            text_bit,
+            dtype=torch.int64,
+            device=device,
+        )
+        attention_mask[:, 12:24] = 1 << 1
+        attention_mask[:, 36:56] = 1 << 2
+
+        full_mask = torch.tril(
+            torch.ones((batch_size, seqlen, seqlen), dtype=torch.bool, device=device),
+            diagonal=0,
+        )
+        full_mask[:, 12:24, :] = False
+        full_mask[:, 12:24, 12:24] = True
+        full_mask[:, 36:56, :] = False
+        full_mask[:, 36:56, 36:56] = True
+
+        return attention_mask, full_mask
+
+    bitfield_mask, full_mask = get_bitfield_attention_mask()
+
+    local_q = q[:, offset : offset + subset_size, :, :].contiguous()
+    local_mask = full_mask[:, offset : offset + subset_size, :].contiguous()
+
+    reference_out = reference_attention(local_q, k, v, local_mask)
+    triton_out = bitfield_attn_func(local_q, k, v, None, None, bitfield_mask, offset)
+
+    torch.testing.assert_close(reference_out, triton_out, atol=5e-3, rtol=5e-3)
+
+    full_g = torch.randn_like(q).normal_(mean=0, std=0.05)
+    g = full_g[:, offset : offset + subset_size, :, :].contiguous()
+    dq_ref, dk_ref, dv_ref = torch.autograd.grad(reference_out, (local_q, k, v), g)
+    dq, dk, dv = torch.autograd.grad(triton_out, (local_q, k, v), g)
+
+    torch.testing.assert_close(dq_ref, dq, atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(dk_ref, dk, atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(dv_ref, dv, atol=5e-3, rtol=5e-3)
+
+    # ========================================================================
+    # Compare the result vs full attention computation
+    # ========================================================================
+
+    reference_out = reference_attention(q, k, v, full_mask)
+    torch.testing.assert_close(
+        reference_out[:, offset : offset + subset_size, :, :],
+        triton_out,
+        atol=5e-3,
+        rtol=5e-3,
+    )
+    dg_ref, dk_ref, dv_ref = torch.autograd.grad(reference_out, (q, k, v), full_g)
+    torch.testing.assert_close(
+        dg_ref[:, offset : offset + subset_size, :, :], dq, atol=5e-3, rtol=5e-3
+    )
+    # compute other parts
+    other_q1 = q[:, :offset, :, :].contiguous()
+    other_q2 = q[:, offset + subset_size :, :, :].contiguous()
+
+    triton_out1 = bitfield_attn_func(other_q1, k, v, None, None, bitfield_mask, 0)
+    triton_out2 = bitfield_attn_func(
+        other_q2, k, v, None, None, bitfield_mask, offset + subset_size
+    )
+
+    g1 = full_g[:, :offset, :, :].contiguous()
+    g2 = full_g[:, offset + subset_size :, :, :].contiguous()
+
+    _, dk1, dv1 = torch.autograd.grad(triton_out1, (other_q1, k, v), g1)
+    _, dk2, dv2 = torch.autograd.grad(triton_out2, (other_q2, k, v), g2)
+
+    torch.testing.assert_close(dk_ref, dk + dk1 + dk2, atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(dv_ref, dv + dv1 + dv2, atol=5e-3, rtol=5e-3)
