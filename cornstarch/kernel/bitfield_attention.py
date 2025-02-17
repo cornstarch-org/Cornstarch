@@ -263,7 +263,7 @@ def _fwd_kernel(
         )
 
         block_mask = get_submask_from_bitfield_mask(
-            q_bitfield_mask, kv_bitfield_mask, offs_m, offs_n_curr
+            q_bitfield_mask, kv_bitfield_mask, offs_m + context_offset, offs_n_curr
         )
 
         if not is_block_masked_out(block_mask):
@@ -634,7 +634,7 @@ def _bwd_kernel_one_col_block(
         )
 
         block_mask = get_submask_from_bitfield_mask(
-            q_bitfield_mask, kv_bitfield_mask, offs_m_curr, offs_n
+            q_bitfield_mask, kv_bitfield_mask, offs_m_curr + context_offset, offs_n
         )
 
         if not is_block_masked_out(block_mask):
