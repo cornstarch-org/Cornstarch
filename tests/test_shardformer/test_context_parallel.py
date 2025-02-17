@@ -21,7 +21,7 @@ class TestContextParallelismClass(GlooDistributedTestBase):
         return 2
 
     @parametrize("batch_size", [1, 2, 4], name_fn=lambda x: f"bs={x}")
-    @parametrize("seq_len", [64, 256, 400, 1024], name_fn=lambda x: f"seq={x}")
+    @parametrize("seq_len", [64, 256, 336, 400, 1024], name_fn=lambda x: f"seq={x}")
     def test(self, batch_size: int, seq_len: int) -> tuple[torch.Tensor, ...]:
         query, key, value = torch.unbind(
             torch.randn(
@@ -32,9 +32,18 @@ class TestContextParallelismClass(GlooDistributedTestBase):
         for t in [query, key, value]:
             t.requires_grad_()
 
+        # mask = torch.full(
+        #     (batch_size, seq_len), 1 << 1, dtype=torch.int64, device="cuda"
+        # )
         mask = torch.full(
-            (batch_size, seq_len), 1 << 1, dtype=torch.int64, device="cuda"
+            (batch_size, seq_len),
+            (1 << 62) | 1 | (1 << 1),
+            dtype=torch.int64,
+            device="cuda",
         )
+        mask[:, 32:44] = 1 << 1
+        if seq_len >= 256:
+            mask[:, 180:280] = 1 << 1
 
         ref_out: torch.Tensor = bitfield_attn_func(query, key, value, None, None, mask)
 
@@ -81,7 +90,7 @@ class TestContextParallelismClass(GlooDistributedTestBase):
         # Check backward
         # ========================================================================
 
-        dout = torch.randn_like(ref_out)
+        dout = torch.randn_like(ref_out).normal_(mean=0, std=0.05)
         ref_dq, ref_dk, ref_dv = torch.autograd.grad(ref_out, [query, key, value], dout)
 
         cp_dout = torch.chunk(dout, self.world_size, dim=1)[self.rank].contiguous()

@@ -31,6 +31,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         """
         # shape constraints
         sp_world_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+
         batch, seqlen_q, nheads, d = q.shape
         _, seqlen_k, _, _ = k.shape
         assert k.shape == (batch, seqlen_k, nheads, d)
@@ -45,6 +47,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
         assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
         assert q.is_cuda and k.is_cuda and v.is_cuda
+
+        context_offset = seqlen_q * sp_rank
 
         gathered_k = [
             torch.empty(
@@ -108,6 +112,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=softmax_scale,
                 mask=mask,
+                context_offset=context_offset,
             )
 
             os.append(o)
@@ -132,9 +137,12 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         softmax_scales: list[torch.Tensor] = ctx.softmax_scales
         sp_group: dist.ProcessGroup = ctx.sp_group
         sp_world_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
 
         batch, seqlen_q, nheads, d = q.shape
         _, seqlen_k, _, _ = k.shape
+
+        context_offset = seqlen_q * sp_rank
 
         gathered_k = [
             torch.empty(
@@ -229,6 +237,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=softmax_scale,
                 mask=mask,
+                context_offset=context_offset,
             )
 
             dist.reduce_scatter(dk, dgk.chunk(sp_world_size, dim=1), group=sp_group)
