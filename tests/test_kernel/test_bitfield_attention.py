@@ -461,7 +461,9 @@ def test_subquery_bitfield_attention(
     local_mask = full_mask[:, offset : offset + subset_size, :].contiguous()
 
     reference_out = reference_attention(local_q, k, v, local_mask)
-    triton_out = bitfield_attn_func(local_q, k, v, None, None, bitfield_mask, offset)
+    triton_out = bitfield_attn_func(
+        local_q, k, v, None, None, bitfield_mask, [offset] * batch_size
+    )
 
     torch.testing.assert_close(reference_out, triton_out, atol=5e-3, rtol=5e-3)
 
@@ -493,9 +495,11 @@ def test_subquery_bitfield_attention(
     other_q1 = q[:, :offset, :, :].contiguous()
     other_q2 = q[:, offset + subset_size :, :, :].contiguous()
 
-    triton_out1 = bitfield_attn_func(other_q1, k, v, None, None, bitfield_mask, 0)
+    triton_out1 = bitfield_attn_func(
+        other_q1, k, v, None, None, bitfield_mask, [0] * batch_size
+    )
     triton_out2 = bitfield_attn_func(
-        other_q2, k, v, None, None, bitfield_mask, offset + subset_size
+        other_q2, k, v, None, None, bitfield_mask, [offset + subset_size] * batch_size
     )
 
     g1 = full_g[:, :offset, :, :].contiguous()

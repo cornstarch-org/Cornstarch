@@ -112,7 +112,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=softmax_scale,
                 mask=mask,
-                context_offset=context_offset,
+                context_offsets=[context_offset] * batch,
             )
 
             os.append(o)
@@ -237,7 +237,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=softmax_scale,
                 mask=mask,
-                context_offset=context_offset,
+                context_offsets=[context_offset] * batch,
             )
 
             dist.reduce_scatter(dk, dgk.chunk(sp_world_size, dim=1), group=sp_group)
