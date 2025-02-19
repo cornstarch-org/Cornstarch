@@ -4,6 +4,7 @@ import pytest
 import torch
 import triton
 import triton.language as tl
+from torch.nn.functional import scaled_dot_product_attention as sdpa
 
 from cornstarch.kernel.bitfield_attention import (
     bitfield_attn_func,
@@ -386,7 +387,7 @@ def test_subquery_bitfield_attention(
 ):
     device = torch.device("cuda")
     dtype = torch.bfloat16
-    num_heads = 1
+    num_heads = 8
     head_dim = 64
 
     if offset + subset_size > seqlen:
@@ -462,7 +463,7 @@ def test_subquery_bitfield_attention(
 
     reference_out = reference_attention(local_q, k, v, local_mask)
     triton_out = bitfield_attn_func(
-        local_q, k, v, None, None, bitfield_mask, [offset] * batch_size
+        local_q, k, v, None, None, bitfield_mask, None, None, [offset] * batch_size
     )
 
     torch.testing.assert_close(reference_out, triton_out, atol=5e-3, rtol=5e-3)
@@ -496,10 +497,18 @@ def test_subquery_bitfield_attention(
     other_q2 = q[:, offset + subset_size :, :, :].contiguous()
 
     triton_out1 = bitfield_attn_func(
-        other_q1, k, v, None, None, bitfield_mask, [0] * batch_size
+        other_q1, k, v, None, None, bitfield_mask, None, None, [0] * batch_size
     )
     triton_out2 = bitfield_attn_func(
-        other_q2, k, v, None, None, bitfield_mask, [offset + subset_size] * batch_size
+        other_q2,
+        k,
+        v,
+        None,
+        None,
+        bitfield_mask,
+        None,
+        None,
+        [offset + subset_size] * batch_size,
     )
 
     g1 = full_g[:, :offset, :, :].contiguous()
@@ -510,3 +519,118 @@ def test_subquery_bitfield_attention(
 
     torch.testing.assert_close(dk_ref, dk + dk1 + dk2, atol=5e-3, rtol=5e-3)
     torch.testing.assert_close(dv_ref, dv + dv1 + dv2, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.parametrize(
+    "seqlens",
+    [(57, 34), (128, 82), (144, 46), (283, 273), (256, 124), (1024, 133)]
+    + [(34, 57), (82, 128), (46, 144), (273, 283), (124, 255), (133, 1024)],
+    ids=lambda x: f"sl=({x[0]}, {x[1]})",
+)
+def test_bitfield_attention_with_different_mask(seqlens: tuple[int]):
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    batch_size = len(seqlens)
+    num_heads = 1
+    head_dim = 64
+
+    q = torch.randn(
+        batch_size,
+        max(seqlens),
+        num_heads,
+        head_dim,
+        device=device,
+        dtype=dtype,
+    ).normal_(mean=0, std=0.5)
+    k = torch.randn(
+        batch_size,
+        max(seqlens),
+        num_heads,
+        head_dim,
+        device=device,
+        dtype=dtype,
+    ).normal_(mean=0, std=0.5)
+    v = torch.randn(
+        batch_size,
+        max(seqlens),
+        num_heads,
+        head_dim,
+        device=device,
+        dtype=dtype,
+    ).normal_(mean=0, std=0.5)
+
+    for t in [q, k, v]:
+        t.requires_grad_(True)
+
+    # create a bitfield attention mask
+    def get_bitfield_attention_mask() -> tuple[torch.Tensor, torch.Tensor]:
+        text_bit = (1 << 62) | 1 | (1 << 1) | (1 << 2)
+
+        attention_mask = torch.full(
+            (batch_size, max(seqlens)),
+            text_bit,
+            dtype=torch.int64,
+            device=device,
+        )
+
+        attention_mask[:, 12:24] = 1 << 1
+        attention_mask[:, 36:56] = 1 << 2
+
+        for batch_index, seqlen in enumerate(seqlens):
+            attention_mask[batch_index, seqlen:] = 0
+
+        full_mask = torch.tril(
+            torch.ones(
+                (batch_size, max(seqlens), max(seqlens)),
+                dtype=torch.bool,
+                device=device,
+            ),
+            diagonal=0,
+        )
+        full_mask[:, 12:24, :] = False
+        full_mask[:, 12:24, 12:24] = True
+        full_mask[:, 36:56, :] = False
+        full_mask[:, 36:56, 36:56] = True
+
+        for batch_index, seqlen in enumerate(seqlens):
+            full_mask[batch_index, seqlen:, :] = False
+            full_mask[batch_index, :, seqlen:] = False
+
+        return attention_mask, full_mask
+
+    with torch.no_grad():
+        bitfield_mask, full_mask = get_bitfield_attention_mask()
+
+    reference_out = sdpa(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), full_mask.unsqueeze(1)
+    ).transpose(1, 2)
+
+    triton_out = bitfield_attn_func(
+        q, k, v, None, None, bitfield_mask, list(seqlens), list(seqlens), None
+    )
+
+    full_g = torch.randn_like(q).normal_(mean=0, std=0.05)
+    for batch_index, seqlen in enumerate(seqlens):
+        full_g[batch_index, seqlen:] = 0
+
+    dq_ref, dk_ref, dv_ref = torch.autograd.grad(reference_out, (q, k, v), full_g)
+    dq, dk, dv = torch.autograd.grad(triton_out, (q, k, v), full_g)
+
+    # sdpa holds garbage data in the padded region
+    for batch_index, seqlen in enumerate(seqlens):
+        reference_out[batch_index, seqlen:] = torch.nan
+    torch.testing.assert_close(
+        reference_out, triton_out, atol=5e-3, rtol=5e-3, equal_nan=True
+    )
+    for batch_index, seqlen in enumerate(seqlens):
+        assert triton_out[batch_index, seqlen:].isnan().all()
+
+    torch.testing.assert_close(
+        dq_ref.nan_to_num(), dq.nan_to_num(), atol=5e-3, rtol=5e-3
+    )
+    torch.testing.assert_close(
+        dk_ref.nan_to_num(), dk.nan_to_num(), atol=5e-3, rtol=5e-3
+    )
+    torch.testing.assert_close(
+        dv_ref.nan_to_num(), dv.nan_to_num(), atol=5e-3, rtol=5e-3
+    )
