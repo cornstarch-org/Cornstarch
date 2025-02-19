@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
-SUPPORT_RING_ATTN_DISTRIBUTION_MODE = ["uniform", "zigzag", "random"]
+
+class ContextParallelDistributionMode(Enum):
+    UNIFORM = "uniform"
+    ZIGZAG = "zigzag"
+    MAKESPAN_MIN = "makespan_min"
 
 
-class ContextParallelBatchUtils:
+class ContextParallelBatchSplitUtils:
     split_batch_cache: Optional[np.ndarray] = None
 
     @classmethod
-    def clear_split_cache(cls: ContextParallelBatchUtils):
+    def clear_split_cache(cls: ContextParallelBatchSplitUtils):
         cls.split_batch_cache = None
 
     @staticmethod
@@ -22,25 +27,21 @@ class ContextParallelBatchUtils:
         sp_group: dist.ProcessGroup,
         seq_dim: int = 1,
         is_label: bool = False,
-        ring_attn_mode: str = "uniform",
+        ring_attn_mode: ContextParallelDistributionMode = ContextParallelDistributionMode.UNIFORM,
     ) -> torch.Tensor:
         if batch is None:
             return None
 
-        assert (
-            ring_attn_mode in SUPPORT_RING_ATTN_DISTRIBUTION_MODE
-        ), f"Ring attention distribution mode {ring_attn_mode} is not in the supported list {SUPPORT_RING_ATTN_DISTRIBUTION_MODE}"
-
-        if ring_attn_mode == "uniform":
-            return ContextParallelBatchUtils._split_batch_uniform(
+        if ring_attn_mode == ContextParallelDistributionMode.UNIFORM:
+            return ContextParallelBatchSplitUtils._split_batch_uniform(
                 batch, sp_group, seq_dim, is_label
             )
-        elif ring_attn_mode == "zigzag":
-            return ContextParallelBatchUtils._split_batch_zigzag(
+        elif ring_attn_mode == ContextParallelDistributionMode.ZIGZAG:
+            return ContextParallelBatchSplitUtils._split_batch_zigzag(
                 batch, sp_group, seq_dim, is_label
             )
-        elif ring_attn_mode == "random":
-            return ContextParallelBatchUtils._split_batch_random(
+        elif ring_attn_mode == ContextParallelDistributionMode.MAKESPAN_MIN:
+            return ContextParallelBatchSplitUtils._split_batch_makespan_minimization(
                 batch, sp_group, seq_dim, is_label
             )
 
@@ -72,7 +73,7 @@ class ContextParallelBatchUtils:
 
     @classmethod
     def _split_batch_zigzag(
-        cls: ContextParallelBatchUtils,
+        cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
         sp_group: dist.ProcessGroup,
         seq_dim: int = 1,
@@ -125,8 +126,18 @@ class ContextParallelBatchUtils:
         return batch[slices].contiguous()
 
     @classmethod
+    def _split_batch_makespan_minimization(
+        cls: ContextParallelBatchSplitUtils,
+        batch: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        seq_dim: int = 1,
+        is_label: bool = False,
+    ) -> torch.Tensor:
+        pass
+
+    @classmethod
     def _split_batch_random(
-        cls: ContextParallelBatchUtils,
+        cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
         sp_group: dist.ProcessGroup,
         seq_dim: int = 1,
