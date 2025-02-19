@@ -231,8 +231,12 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 mask=mask,
             )
 
-            dist.reduce_scatter(dk, dgk.chunk(sp_world_size, dim=1), group=sp_group)
-            dist.reduce_scatter(dv, dgv.chunk(sp_world_size, dim=1), group=sp_group)
+            dist.reduce_scatter(
+                dk, list(dgk.chunk(sp_world_size, dim=1)), group=sp_group
+            )
+            dist.reduce_scatter(
+                dv, list(dgv.chunk(sp_world_size, dim=1)), group=sp_group
+            )
 
             dqs.append(dq.clone())
             dks.append(dk.clone())
