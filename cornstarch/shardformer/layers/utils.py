@@ -1,80 +1,10 @@
 from __future__ import annotations
-import inspect
-from functools import cache
+
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
-import numpy as np
-
-
-@cache
-def get_default_args(func):
-    spec = inspect.getfullargspec(func)
-    defaults = spec.defaults if spec.defaults is not None else ()
-    padded_defaults = (None,) * (len(spec.args) - len(defaults)) + defaults
-    args = dict(zip(spec.args, padded_defaults))
-    if "softcap" in args:
-        args["softcap"] = 0.0
-    return args
-
-
-def repeat_attention_mask_heads(
-    attention_mask: torch.Tensor, num_heads: int, head_dim: int = 1
-):
-    """
-    transform attention mask 3d(B, L, L) to 4d(B, H, L, L)
-    An example:
-    attention_mask = torch.tensor([[1, 0, 0], [1, 0, 1], [0, 1, 1]])
-    repeat_attention_mask_heads(attention_mask, num_heads=2, head_dim=1)
-    >>> torch.tensor([[[1, 0, 0], [1, 0, 1], [0, 1, 1]], [[1, 0, 0], [1, 0, 1], [0, 1, 1]]])
-    """
-    return attention_mask.unsqueeze(dim=head_dim).expand(-1, num_heads, -1, -1)
-
-
-def convert_bit_attention_mask_to_full_mask(
-    attention_mask: torch.Tensor, num_heads: int
-):
-    assert getattr(
-        attention_mask, "cornstarch_is_bitattention", False
-    ), "attention_mask should be bit attention mask."
-    assert attention_mask.dtype == torch.int64, "attention_mask should be int64."
-    num_encoders = int(getattr(attention_mask, "cornstarch_num_encoders"))
-
-    bsz, seq_len = attention_mask.shape
-
-    encoder_output_indices: list[list[int]] = []
-    for i in range(num_encoders):
-        mask_set_bit = (attention_mask & (1 << i)) != 0
-        mask_unset_causal_bit = (attention_mask & (1 << 62)) == 0
-
-        indices = (mask_set_bit & mask_unset_causal_bit).nonzero(as_tuple=False)[:, 1]
-        encoder_output_indices.append(indices)
-
-    # Create a 2D causal mask
-    causal_mask_2d = torch.tril(
-        torch.ones((seq_len, seq_len), dtype=torch.bool, device=attention_mask.device)
-    )
-
-    # Expand the 2D causal mask to a 3D tensor
-    full_causal_mask = causal_mask_2d.unsqueeze(0).expand(bsz, seq_len, seq_len)
-
-    # Identify the indices where the 62nd bit is set for each batch
-    bit_62_mask = (attention_mask & (1 << 62)) != 0
-
-    # Create a list of indices where the 62nd bit is set for each batch
-    bit_62_list = bit_62_mask.nonzero(as_tuple=True)
-
-    # Set rows not in bit_62_list to 0 using advanced indexing
-    mask = torch.ones((bsz, seq_len), dtype=torch.bool, device=attention_mask.device)
-    mask[bit_62_list] = False
-    full_causal_mask[mask] = 0
-
-    for indices in encoder_output_indices:
-        full_causal_mask[:, indices[:, None], indices] = True
-
-    return full_causal_mask.unsqueeze(1).expand(bsz, num_heads, seq_len, seq_len)
-
 
 SUPPORT_RING_ATTN_DISTRIBUTION_MODE = ["uniform", "zigzag", "random"]
 
