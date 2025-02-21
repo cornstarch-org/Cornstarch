@@ -135,16 +135,11 @@ class ContextParallelBatchSplitUtils:
         """
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
-        if sp_size == 1:
+        batch_size, seq_len = bitfield_attention_mask.shape
+        if sp_size == 1 or seq_len <= 128 * sp_size:
             return batch
 
-        batch_size, seq_len = bitfield_attention_mask.shape
-
         if cls.split_batch_cache is not None:
-            assert cls.split_batch_cache.shape == (seq_len,), (
-                f"Random split cache shape {cls.split_batch_cache.shape} "
-                f"does not match the sequence length {seq_len}"
-            )
             assignments = cls.split_batch_cache
         else:
             block_size = 128
@@ -155,18 +150,20 @@ class ContextParallelBatchSplitUtils:
                 bitfield_attention_mask
             )
             workloads_per_query_block, indices = torch.sort(
-                workloads_per_query_block, descending=True
+                workloads_per_query_block, stable=True, descending=True
             )
 
             assignments: list[torch.Tensor] = []
 
-            for _ in range(batch_size):
-                loads_per_gpu = []
+            for batch_index in range(batch_size):
+                # (total workload, sp_rank, [block indices])
+                loads_per_gpu: list[tuple[int, int, list[int]]] = []
                 for i in range(sp_size):
-                    # (total workload, sp_rank, [block indices])
                     heapq.heappush(loads_per_gpu, (0, i, []))
 
-                for index, block_workload in zip(indices, workloads_per_query_block):
+                for index, block_workload in zip(
+                    indices[batch_index], workloads_per_query_block[batch_index]
+                ):
                     load, gpu, block_indices = heapq.heappop(loads_per_gpu)
                     block_indices.append(index.item())
                     heapq.heappush(
@@ -189,8 +186,9 @@ class ContextParallelBatchSplitUtils:
 
         assignments: torch.Tensor  # shape: [batch_size, seq_len]
 
-        # Extract the indices assigned to this process
-        assigned_indices = assignments[:, sp_rank]
+        mask_assignments = assignments == sp_rank
+        assigned_indices = batch[mask_assignments]
+        # assigned_indices = assignments[:, sp_rank]
         seq_dim = 1
 
         # Create a slice to index of selected tokens in seq_dim

@@ -79,7 +79,7 @@ class TestContextParallelBatchSplitUtilClass:
     @pytest.mark.parametrize(
         "seqlen",
         [57, 64, 256, 335, 402, 1024],
-        ids=["seq=57", "seq=64", "seq=256", "seq=335", "seq=402", "seq=1024"],
+        ids=lambda x: f"seq={x}",
     )
     @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
     def test_split_batch_zigzag(self, batch_size: int, seqlen: int, world_size: int):
@@ -133,6 +133,71 @@ class TestContextParallelBatchSplitUtilClass:
                 expected_indices = np.concatenate([expected_first, expected_second])
 
                 expected_split_data = data[:, expected_indices, :, :]
+
+            torch.testing.assert_close(expected_split_data, split_data)
+
+            self.teardown_method()
+
+    @pytest.mark.parametrize("batch_size", [1, 2], ids=["bs=1", "bs=2"])
+    @pytest.mark.parametrize(
+        "seqlen",
+        [57, 256, 335, 684, 1024, 2003, 3712],
+        ids=lambda x: f"seq={x}",
+    )
+    @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
+    @pytest.mark.parametrize("mask_type", ["causal", "full"])
+    def test_split_batch_makespan_min(
+        self, batch_size: int, seqlen: int, world_size: int, mask_type: str
+    ):
+        torch.manual_seed(0)
+
+        data = torch.randn(
+            (batch_size, seqlen, self.num_heads, self.head_dim),
+            device="cuda",
+        )
+
+        if mask_type == "causal":
+            mask = torch.full(
+                (batch_size, seqlen), (1 << 62) | 1, dtype=torch.int64, device="cuda"
+            )
+        else:
+            mask = torch.full(
+                (batch_size, seqlen), 1 << 1, dtype=torch.int64, device="cuda"
+            )
+
+        # Expected data structure for world_size=4
+
+        store = FakeStore()
+        for rank in range(world_size):
+            dist.init_process_group(
+                "fake", rank=rank, world_size=world_size, store=store
+            )
+
+            split_data = (
+                ContextParallelBatchSplitUtils._split_batch_makespan_minimization(
+                    data, mask, sp_group=dist.GroupMember.WORLD
+                )
+            )
+
+            if world_size == 1 or seqlen <= 128 * 4:
+                expected_split_data = data
+            else:
+                num_blocks = math.ceil(seqlen / 128)
+
+                if mask_type == "causal":
+                    raise NotImplementedError
+                else:
+                    pattern = [0, 1, 2, 3]
+                    assignments = (
+                        pattern * (num_blocks // len(pattern))
+                        + pattern[: num_blocks % len(pattern)]
+                    )
+                    assignments = torch.as_tensor(
+                        assignments, device="cuda"
+                    ).repeat_interleave(128)
+
+                indices = torch.nonzero(assignments == rank, as_tuple=True)[0]
+                expected_split_data = torch.index_select(data, dim=1, index=indices)
 
             torch.testing.assert_close(expected_split_data, split_data)
 
