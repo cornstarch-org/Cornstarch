@@ -1,16 +1,61 @@
+import math
+
+import pytest
 import torch
 import torch.distributed as dist
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
+from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.kernel.bitfield_attention import bitfield_attn_func
 from cornstarch.shardformer.layers.context_parallel_attention import (
     context_parallel_bitfield_attn_func,
 )
+from cornstarch.shardformer.layers.utils import ContextParallelBatchSplitUtils
 
 from ..distributed_base import GlooDistributedTestBase
+
+
+class TestContextParallelBatchSplitUtilClass:
+    @pytest.mark.parametrize("batch_size", [1, 2], ids=["bs=1", "bs=2"])
+    @pytest.mark.parametrize(
+        "seqlen",
+        [57, 64, 256, 335, 402, 1024],
+        ids=["seq=57", "seq=64", "seq=256", "seq=335", "seq=402", "seq=1024"],
+    )
+    @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
+    def test_split_batch_uniform(self, batch_size: int, seqlen: int, world_size: int):
+        num_heads = 8
+        head_dim = 64
+
+        data = torch.randn((batch_size, seqlen, num_heads, head_dim), device="cuda")
+        mask = torch.full(
+            (batch_size, seqlen), 1 << 1, dtype=torch.int64, device="cuda"
+        )
+
+        # Expected data structure
+        expected_seqlen_per_rank = math.ceil(seqlen / world_size)
+
+        store = FakeStore()
+        for rank in range(world_size):
+            if dist.is_initialized():
+                dist.destroy_process_group()
+
+            dist.init_process_group(
+                "fake", rank=rank, world_size=world_size, store=store
+            )
+
+            split_data = ContextParallelBatchSplitUtils._split_batch_uniform(
+                data, mask, sp_group=dist.GroupMember.WORLD
+            )
+
+            start_offset = expected_seqlen_per_rank * rank
+            end_offset = min(expected_seqlen_per_rank * (rank + 1), seqlen)
+            torch.testing.assert_close(
+                data[:, start_offset:end_offset, :, :], split_data
+            )
 
 
 @instantiate_parametrized_tests
