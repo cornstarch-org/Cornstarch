@@ -111,6 +111,68 @@ def get_submask_from_bitfield_mask(
     )
 
 
+@triton.jit
+def compute_num_block_computation(
+    attention_mask: tl.tensor,
+    out: tl.tensor,
+    stride_maskb,
+    stride_outb,
+    seqlen: tl.constexpr,
+):
+    """
+    For a single query block (128 queries), check the number of blocks that need to be computed.
+    Each element in the output tensor is the number of blocks that need computation.
+
+    Args:
+        - attention_mask: tl.tensor (batch_size, seqlen)
+            a bitfield attention mask
+        - out: tl.tensor (batch_size, ceil(seqlen / 128))
+        - seqlen: tl.constexpr
+    """
+
+    BLOCK_SIZE: tl.constexpr = 128
+
+    batch_size = tl.program_id(0)
+    offset = tl.program_id(1) * BLOCK_SIZE
+
+    offs_mask = tl.arange(0, BLOCK_SIZE)
+    mask_ptr = attention_mask + batch_size * stride_maskb + offset + offs_mask
+    out_ptr = out + batch_size * stride_outb + tl.program_id(1)
+
+    q_bitfield_mask = tl.load(mask_ptr, mask=offset + offs_mask < seqlen, other=0)
+    num_blocks_to_compute = 0
+    for index in range(0, seqlen, BLOCK_SIZE):
+        kv_mask_ptr = attention_mask + batch_size * stride_maskb + index + offs_mask
+        kv_bitfield_mask = tl.load(
+            kv_mask_ptr, mask=index + offs_mask < seqlen, other=0
+        )
+        block_mask = get_submask_from_bitfield_mask(
+            q_bitfield_mask, kv_bitfield_mask, offset + offs_mask, index + offs_mask
+        )
+
+        if not is_block_masked_out(block_mask):
+            num_blocks_to_compute += 1
+
+    tl.store(out_ptr, num_blocks_to_compute)
+
+
+def get_num_computation_block_per_query_block(
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    # attention_mask: (batch_size, seqlen)
+    batch_size, seqlen = attention_mask.shape
+    num_blocks = math.ceil(seqlen / 128)
+    out = torch.empty(
+        (batch_size, num_blocks), dtype=torch.int32, device=attention_mask.device
+    )
+    grid = lambda META: batch_size, triton.cdiv(seqlen, 128)
+
+    compute_num_block_computation[grid](
+        attention_mask, out, attention_mask.stride(0), out.stride(0), seqlen
+    )
+    return out
+
+
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
 @triton.autotune(
     configs=[
