@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import math
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -19,6 +22,21 @@ from ..distributed_base import GlooDistributedTestBase
 
 
 class TestContextParallelBatchSplitUtilClass:
+
+    num_heads: int
+    head_dim: int
+
+    @classmethod
+    def setup_class(cls: TestContextParallelBatchSplitUtilClass):
+        cls.num_heads = 8
+        cls.head_dim = 64
+
+    def teardown_method(self):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+        ContextParallelBatchSplitUtils.clear_split_cache()
+
     @pytest.mark.parametrize("batch_size", [1, 2], ids=["bs=1", "bs=2"])
     @pytest.mark.parametrize(
         "seqlen",
@@ -27,10 +45,10 @@ class TestContextParallelBatchSplitUtilClass:
     )
     @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
     def test_split_batch_uniform(self, batch_size: int, seqlen: int, world_size: int):
-        num_heads = 8
-        head_dim = 64
-
-        data = torch.randn((batch_size, seqlen, num_heads, head_dim), device="cuda")
+        data = torch.randn(
+            (batch_size, seqlen, self.num_heads, self.head_dim),
+            device="cuda",
+        )
         mask = torch.full(
             (batch_size, seqlen), 1 << 1, dtype=torch.int64, device="cuda"
         )
@@ -56,6 +74,69 @@ class TestContextParallelBatchSplitUtilClass:
             torch.testing.assert_close(
                 data[:, start_offset:end_offset, :, :], split_data
             )
+
+    @pytest.mark.parametrize("batch_size", [1, 2], ids=["bs=1", "bs=2"])
+    @pytest.mark.parametrize(
+        "seqlen",
+        [57, 64, 256, 335, 402, 1024],
+        ids=["seq=57", "seq=64", "seq=256", "seq=335", "seq=402", "seq=1024"],
+    )
+    @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
+    def test_split_batch_zigzag(self, batch_size: int, seqlen: int, world_size: int):
+        data = torch.randn(
+            (batch_size, seqlen, self.num_heads, self.head_dim),
+            device="cuda",
+        )
+        mask = torch.full(
+            (batch_size, seqlen), 1 << 1, dtype=torch.int64, device="cuda"
+        )
+
+        # Expected data structure for world_size=4
+        num_chunks = world_size * 2
+        base_size = seqlen // num_chunks
+        remainder = seqlen % num_chunks
+        chunk_sizes = [
+            base_size + 1 if i < remainder else base_size for i in range(num_chunks)
+        ]
+
+        indices = np.arange(seqlen)
+        chunks = []
+        start = 0
+        for size in chunk_sizes:
+            chunks.append(indices[start : start + size])
+            start += size
+
+        store = FakeStore()
+        for rank in range(world_size):
+            dist.init_process_group(
+                "fake", rank=rank, world_size=world_size, store=store
+            )
+
+            split_data = ContextParallelBatchSplitUtils._split_batch_zigzag(
+                data, mask, sp_group=dist.GroupMember.WORLD
+            )
+
+            if world_size == 1:
+                expected_split_data = data
+            else:
+                # Each rank should get its corresponding chunk and the symmetric one.
+                expected_first = (
+                    chunks[rank]
+                    if rank < len(chunks)
+                    else np.array([], dtype=indices.dtype)
+                )
+                expected_second = (
+                    chunks[-rank - 1]
+                    if rank < len(chunks)
+                    else np.array([], dtype=indices.dtype)
+                )
+                expected_indices = np.concatenate([expected_first, expected_second])
+
+                expected_split_data = data[:, expected_indices, :, :]
+
+            torch.testing.assert_close(expected_split_data, split_data)
+
+            self.teardown_method()
 
 
 @instantiate_parametrized_tests

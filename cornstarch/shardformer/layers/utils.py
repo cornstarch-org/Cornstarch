@@ -91,40 +91,33 @@ class ContextParallelBatchSplitUtils:
             return batch
 
         batch_size, seq_len = bitfield_attention_mask.shape
-        num_elements_per_process = seq_len // sp_size
-
-        assert (
-            seq_len % (sp_size * 2) == 0
-        ), f"Sequence length {seq_len} must be divisible by {sp_size * 2}!"
 
         if cls.split_batch_cache is not None:
-            assert cls.split_batch_cache.shape == (seq_len,), (
-                f"Zigzag split cache shape {cls.split_batch_cache.shape} "
-                f"does not match the sequence length {seq_len}"
-            )
             assignments = cls.split_batch_cache
         else:
             indices = np.arange(seq_len)
 
-            first_half = indices[: seq_len // 2]
-            second_half = indices[seq_len // 2 :][::-1]
+            # Divide indices into 2*sp_size chunks.
+            num_chunks = 2 * sp_size
+            chunks = np.array_split(indices, num_chunks)
 
-            # Stack the two halves and interleave them to form the zigzag pattern
-            assignments = np.ravel(np.column_stack((first_half, second_half)))
+            # Each rank gets two chunks: the chunk at position 'sp_rank' and the symmetric one.
+            first_chunk = chunks[sp_rank]
+            second_chunk = chunks[-sp_rank - 1]
+
+            assignments = np.concatenate([first_chunk, second_chunk])
 
             # Cache assignments
             cls.split_batch_cache = assignments
 
-        # Select the range of indices for the current process
-        start_idx = sp_rank * num_elements_per_process
-        end_idx = start_idx + num_elements_per_process
-        process_indices = torch.as_tensor(
-            assignments[start_idx:end_idx], dtype=torch.long, device=batch.device
+        # Combine the assignments preserving order.
+        assignments = torch.as_tensor(
+            assignments, dtype=torch.long, device=batch.device
         ).detach()
 
         slices = [slice(None)] * batch.dim()
         seq_dim = 1
-        slices[seq_dim] = process_indices
+        slices[seq_dim] = assignments
 
         return batch[slices].contiguous()
 
