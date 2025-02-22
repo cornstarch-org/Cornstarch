@@ -145,7 +145,7 @@ class TestContextParallelBatchSplitUtilClass:
         ids=lambda x: f"seq={x}",
     )
     @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
-    @pytest.mark.parametrize("mask_type", ["causal", "full"])
+    @pytest.mark.parametrize("mask_type", ["causal", "full", "mixed"])
     def test_split_batch_makespan_min(
         self, batch_size: int, seqlen: int, world_size: int, mask_type: str
     ):
@@ -160,9 +160,22 @@ class TestContextParallelBatchSplitUtilClass:
             mask = torch.full(
                 (batch_size, seqlen), (1 << 62) | 1, dtype=torch.int64, device="cuda"
             )
-        else:
+        elif mask_type == "full":
             mask = torch.full(
                 (batch_size, seqlen), 1 << 1, dtype=torch.int64, device="cuda"
+            )
+        else:
+            if batch_size == 1:
+                pytest.skip("Mixed mask not supported for batch_size=1")
+
+            mask = torch.cat(
+                [
+                    torch.full(
+                        (1, seqlen), (1 << 62) | 1, dtype=torch.int64, device="cuda"
+                    ),
+                    torch.full((1, seqlen), 1 << 1, dtype=torch.int64, device="cuda"),
+                ],
+                dim=0,
             )
 
         # Expected data structure for world_size=4
@@ -184,7 +197,7 @@ class TestContextParallelBatchSplitUtilClass:
             else:
                 num_blocks = math.ceil(seqlen / 128)
 
-                if mask_type == "causal":
+                def get_causal_assignments():
                     """
                     Assignment pattern for causal mask looks like:
                     [..., 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0]
@@ -207,19 +220,41 @@ class TestContextParallelBatchSplitUtilClass:
                     assignments = torch.as_tensor(
                         assignments, device="cuda"
                     ).repeat_interleave(128)
-                else:
+
+                    return assignments
+
+                def get_full_assignments():
                     pattern = [0, 1, 2, 3]
                     assignments = (
                         pattern * (num_blocks // len(pattern))
                         + pattern[: num_blocks % len(pattern)]
                     )
+
                     assignments = torch.as_tensor(
                         assignments, device="cuda"
                     ).repeat_interleave(128)
 
-                indices = torch.nonzero(assignments == rank, as_tuple=True)[0]
-                indices = indices[indices < data.shape[1]]
-                expected_split_data = torch.index_select(data, dim=1, index=indices)
+                    return assignments
+
+                if mask_type == "causal":
+                    assignments = get_causal_assignments()
+                    assignments = assignments.repeat(batch_size, 1)
+                elif mask_type == "full":
+                    assignments = get_full_assignments()
+                    assignments = assignments.repeat(batch_size, 1)
+                else:
+                    assignments = [get_causal_assignments(), get_full_assignments()]
+                    assignments = torch.stack(assignments, dim=0)
+
+                filtered_data = []
+                for i in range(batch_size):
+                    indices = torch.nonzero(assignments[i] == rank, as_tuple=True)[0]
+                    indices = indices[indices < data.shape[1]]
+                    filtered_data.append(data[i, indices])
+
+                expected_split_data = torch.nested.as_nested_tensor(
+                    filtered_data, device="cuda"
+                ).to_padded_tensor(padding=0.0)
 
             torch.testing.assert_close(expected_split_data, split_data)
 
