@@ -218,58 +218,59 @@ class ContextParallelBatchSplitUtils:
         linear hash function.
         To ensure even distribution, a and mod (sp_size) should be coprime, i.e. their GCD is 1.
         """
-        sp_size = dist.get_world_size(sp_group)
-        sp_rank = dist.get_rank(sp_group)
-        if sp_size == 1:
-            return batch
+        raise NotImplementedError
+        # sp_size = dist.get_world_size(sp_group)
+        # sp_rank = dist.get_rank(sp_group)
+        # if sp_size == 1:
+        #     return batch
 
-        batch_size, seq_len = bitfield_attention_mask.shape
+        # batch_size, seq_len = bitfield_attention_mask.shape
 
-        if cls.split_batch_cache is not None:
-            assert cls.split_batch_cache.shape == (seq_len,), (
-                f"Random split cache shape {cls.split_batch_cache.shape} "
-                f"does not match the sequence length {seq_len}"
-            )
-            assignments = cls.split_batch_cache
-        else:
+        # if cls.split_batch_cache is not None:
+        #     assert cls.split_batch_cache.shape == (seq_len,), (
+        #         f"Random split cache shape {cls.split_batch_cache.shape} "
+        #         f"does not match the sequence length {seq_len}"
+        #     )
+        #     assignments = cls.split_batch_cache
+        # else:
 
-            def generate_coprime_a(p, mod):
-                while True:
-                    a = np.random.randint(1, p)
-                    if np.gcd(a, mod) == 1:
-                        return a
+        #     def generate_coprime_a(p, mod):
+        #         while True:
+        #             a = np.random.randint(1, p)
+        #             if np.gcd(a, mod) == 1:
+        #                 return a
 
-            # Hash function parameters
-            p = 2**31  # Modulus
-            a = generate_coprime_a(p, sp_size)  # multiplier
-            b = np.random.randint(0, p)  # increment
-            offset = np.random.randint(0, p)
+        #     # Hash function parameters
+        #     p = 2**31  # Modulus
+        #     a = generate_coprime_a(p, sp_size)  # multiplier
+        #     b = np.random.randint(0, p)  # increment
+        #     offset = np.random.randint(0, p)
 
-            token_indices = np.arange(seq_len, dtype=np.int64)  # shape: [seq_len]
+        #     token_indices = np.arange(seq_len, dtype=np.int64)  # shape: [seq_len]
 
-            # Compute the hash for each index
-            hash_values = (
-                a * ((token_indices + offset) % p) + b
-            ) % p  # shape: [seq_len]
+        #     # Compute the hash for each index
+        #     hash_values = (
+        #         a * ((token_indices + offset) % p) + b
+        #     ) % p  # shape: [seq_len]
 
-            # Determine assignment based on hash modulo 'mod'
-            assignments = (hash_values % sp_size) == sp_rank  # shape: [seq_len]
+        #     # Determine assignment based on hash modulo 'mod'
+        #     assignments = (hash_values % sp_size) == sp_rank  # shape: [seq_len]
 
-            # Cache assignments
-            cls.split_batch_cache = assignments
+        #     # Cache assignments
+        #     cls.split_batch_cache = assignments
 
-        # Extract the indices assigned to this process
-        assigned_indices = np.flatnonzero(assignments)  # shape: [num_assigned_indices]
-        assigned_indices = torch.as_tensor(
-            assigned_indices, dtype=torch.long, device=batch.device
-        )
+        # # Extract the indices assigned to this process
+        # assigned_indices = np.flatnonzero(assignments)  # shape: [num_assigned_indices]
+        # assigned_indices = torch.as_tensor(
+        #     assigned_indices, dtype=torch.long, device=batch.device
+        # )
 
-        # Create a slice to index of selected tokens in seq_dim
-        slices = [slice(None)] * batch.dim()
-        seq_dim = 1
-        slices[seq_dim] = (
-            assigned_indices  # replace only the seq_dim with assigned indices
-        )
+        # # Create a slice to index of selected tokens in seq_dim
+        # slices = [slice(None)] * batch.dim()
+        # seq_dim = 1
+        # slices[seq_dim] = (
+        #     assigned_indices  # replace only the seq_dim with assigned indices
+        # )
 
-        # Use advanced indexing with slices to select the tokens
-        return batch[slices].contiguous()
+        # # Use advanced indexing with slices to select the tokens
+        # return batch[slices].contiguous()
