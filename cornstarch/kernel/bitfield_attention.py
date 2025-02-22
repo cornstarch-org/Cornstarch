@@ -165,8 +165,8 @@ def get_num_computation_block_per_query_block(
     out = torch.empty(
         (batch_size, num_blocks), dtype=torch.int32, device=attention_mask.device
     )
-    grid = lambda META: batch_size, triton.cdiv(seqlen, 128)
 
+    grid = lambda META: (batch_size, triton.cdiv(seqlen, 128))
     compute_num_block_computation[grid](
         attention_mask, out, attention_mask.stride(0), out.stride(0), seqlen
     )
