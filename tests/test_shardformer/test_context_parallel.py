@@ -185,7 +185,28 @@ class TestContextParallelBatchSplitUtilClass:
                 num_blocks = math.ceil(seqlen / 128)
 
                 if mask_type == "causal":
-                    raise NotImplementedError
+                    """
+                    Assignment pattern for causal mask looks like:
+                    [..., 2, 1, 0, 0, 1, 2, 3, 3, 2, 1, 0]
+                    """
+                    base = [0, 1, 2, 3]
+                    tail = [3, 2, 1, 0]
+
+                    assignments = tail[:]
+                    current_length = len(assignments)
+                    toggle = True
+                    while current_length < num_blocks:
+                        needed = num_blocks - current_length
+                        prepend = base[:] if toggle else tail[:]
+                        if needed < 4:
+                            prepend = prepend[-needed:]
+                        assignments = prepend + assignments
+                        current_length = len(assignments)
+                        toggle = not toggle
+
+                    assignments = torch.as_tensor(
+                        assignments, device="cuda"
+                    ).repeat_interleave(128)
                 else:
                     pattern = [0, 1, 2, 3]
                     assignments = (
@@ -197,6 +218,7 @@ class TestContextParallelBatchSplitUtilClass:
                     ).repeat_interleave(128)
 
                 indices = torch.nonzero(assignments == rank, as_tuple=True)[0]
+                indices = indices[indices < data.shape[1]]
                 expected_split_data = torch.index_select(data, dim=1, index=indices)
 
             torch.testing.assert_close(expected_split_data, split_data)

@@ -186,19 +186,21 @@ class ContextParallelBatchSplitUtils:
 
         assignments: torch.Tensor  # shape: [batch_size, seq_len]
 
-        mask_assignments = assignments == sp_rank
-        assigned_indices = batch[mask_assignments]
-        # assigned_indices = assignments[:, sp_rank]
-        seq_dim = 1
+        # Extract per-batch assigned indices.
+        filtered_data = []
+        for i in range(batch_size):
+            indices = torch.nonzero(assignments[i] == sp_rank, as_tuple=False).squeeze()
+            indices = indices[indices < batch.shape[1]]
+            filtered_data.append(batch[i, indices])
 
-        # Create a slice to index of selected tokens in seq_dim
-        slices = [slice(None)] * batch.dim()
-        slices[seq_dim] = (
-            assigned_indices  # replace only the seq_dim with assigned indices
-        )
-
-        # Use advanced indexing with slices to select the tokens
-        return batch[slices].contiguous()
+        if len(filtered_data) == 1:
+            return filtered_data[0].unsqueeze(0)
+        else:
+            return (
+                torch.nested.as_nested_tensor(filtered_data, device=batch.device)
+                .to_padded_tensor(padding=0.0)
+                .contiguous()
+            )
 
     @classmethod
     def _split_batch_random(
