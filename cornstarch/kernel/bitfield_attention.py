@@ -197,6 +197,7 @@ def _fwd_kernel(
     TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale,
     stride_maskb,
+    stride_offsetb,
     stride_qb,
     stride_qh,
     stride_qm,
@@ -299,10 +300,10 @@ def _fwd_kernel(
             other=0.0,
         )
 
-    context_offset_ptr = Context_offsets + off_b
-    context_offset = tl.load(context_offset_ptr)
+    context_offsets_ptr = Context_offsets + off_b * stride_offsetb + offs_m
+    context_offsets = tl.load(context_offsets_ptr, mask=offs_m < seqlen_q, other=0)
     q_bitfield_mask = tl.load(
-        bitfield_mask + off_b * stride_maskb + offs_m + context_offset,
+        bitfield_mask + off_b * stride_maskb + context_offsets,
         mask=offs_m < seqlen_q,
         other=0,
     )
@@ -321,7 +322,7 @@ def _fwd_kernel(
         )
 
         block_mask = get_submask_from_bitfield_mask(
-            q_bitfield_mask, kv_bitfield_mask, offs_m + context_offset, offs_n_curr
+            q_bitfield_mask, kv_bitfield_mask, context_offsets, offs_n_curr
         )
 
         if not is_block_masked_out(block_mask):
@@ -531,6 +532,7 @@ def _bwd_kernel_one_col_block(
     D,
     softmax_scale,
     stride_maskb,
+    stride_offsetb,
     stride_qm,
     stride_kn,
     stride_vn,
@@ -625,23 +627,22 @@ def _bwd_kernel_one_col_block(
         other=0,
     )
 
-    context_offset_ptr = Context_offsets + off_b
-    context_offset = tl.load(context_offset_ptr)
-
     # loop over rows
     num_block_m = tl.cdiv(seqlen_q, BLOCK_M)
     for start_m in range(begin_m, num_block_m * BLOCK_M, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         offs_m_curr = start_m + offs_m
 
+        context_offsets_ptr = Context_offsets + off_b * stride_offsetb + offs_m_curr
+        context_offsets = tl.load(context_offsets_ptr)
         q_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_maskb + offs_m_curr + context_offset,
+            bitfield_mask + off_b * stride_maskb + context_offsets,
             mask=offs_m_curr < seqlen_q,
             other=0,
         )
 
         block_mask = get_submask_from_bitfield_mask(
-            q_bitfield_mask, kv_bitfield_mask, offs_m_curr + context_offset, offs_n
+            q_bitfield_mask, kv_bitfield_mask, context_offsets, offs_n
         )
 
         if not is_block_masked_out(block_mask):
@@ -857,6 +858,7 @@ def _bwd_kernel(
     D,
     softmax_scale,
     stride_maskb,
+    stride_offsetb,
     stride_qb,
     stride_qh,
     stride_qm,
@@ -882,7 +884,7 @@ def _bwd_kernel(
     stride_dvh,
     stride_dvn,
     nheads,
-    context_offset,
+    Context_offsets,
     seqlen_qs,
     seqlen_ks,
     seqlen_q_rounded,
@@ -935,6 +937,7 @@ def _bwd_kernel(
                 D,
                 softmax_scale,
                 stride_maskb,
+                stride_offsetb,
                 stride_qm,
                 stride_kn,
                 stride_vn,
@@ -943,7 +946,7 @@ def _bwd_kernel(
                 stride_dqm,
                 stride_dkn,
                 stride_dvn,
-                context_offset,
+                Context_offsets,
                 seqlen_q,
                 seqlen_k,
                 headdim,
@@ -972,6 +975,7 @@ def _bwd_kernel(
             D,
             softmax_scale,
             stride_maskb,
+            stride_offsetb,
             stride_qm,
             stride_kn,
             stride_vn,
@@ -980,7 +984,7 @@ def _bwd_kernel(
             stride_dqm,
             stride_dkn,
             stride_dvn,
-            context_offset,
+            Context_offsets,
             seqlen_q,
             seqlen_k,
             headdim,
@@ -1000,9 +1004,9 @@ def _flash_attn_forward(
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     mask: torch.Tensor = None,
-    seqlen_qs: list[int] = None,
-    seqlen_ks: list[int] = None,
-    context_offsets: list[int] = None,
+    seqlen_qs: Optional[torch.Tensor] = None,
+    seqlen_ks: Optional[torch.Tensor] = None,
+    context_offsets: Optional[torch.Tensor] = None,
 ):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
@@ -1019,15 +1023,13 @@ def _flash_attn_forward(
     assert q.is_cuda and k.is_cuda and v.is_cuda
 
     if seqlen_qs is None:
-        seqlen_qs = [seqlen_q] * batch
+        seqlen_qs = torch.tensor([seqlen_q] * batch, dtype=torch.int64, device=q.device)
     if seqlen_ks is None:
-        seqlen_ks = [seqlen_k] * batch
+        seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
     if context_offsets is None:
-        context_offsets = [0] * batch
-
-    assert isinstance(
-        context_offsets, list
-    ), "context_offsets must be provided as a 1D list."
+        context_offsets = torch.arange(
+            seqlen_q, dtype=torch.int32, device=q.device
+        ).repeat(batch, 1)
 
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
 
@@ -1075,6 +1077,7 @@ def _flash_attn_forward(
         tmp,
         softmax_scale,
         mask.stride(0),
+        context_offsets.stride(0),
         q.stride(0),
         q.stride(2),
         q.stride(1),
@@ -1089,9 +1092,9 @@ def _flash_attn_forward(
         o.stride(2),
         o.stride(1),
         nheads,
-        torch.tensor(context_offsets, device=q.device, dtype=torch.int32),
-        torch.tensor(seqlen_qs, device=q.device, dtype=torch.int32),
-        torch.tensor(seqlen_ks, device=q.device, dtype=torch.int32),
+        context_offsets,
+        seqlen_qs,
+        seqlen_ks,
         seqlen_q_rounded,
         d,
         seqlen_q // 32,
@@ -1121,9 +1124,9 @@ def _flash_attn_backward(
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     mask: torch.Tensor = None,
-    seqlen_qs: list[int] = None,
-    seqlen_ks: list[int] = None,
-    context_offsets: list[int] = None,
+    seqlen_qs: torch.Tensor = None,
+    seqlen_ks: torch.Tensor = None,
+    context_offsets: torch.Tensor = None,
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
@@ -1132,12 +1135,14 @@ def _flash_attn_backward(
     _, seqlen_k, _, _ = k.shape
 
     if seqlen_qs is None:
-        seqlen_qs = [seqlen_q] * batch
+        seqlen_qs = torch.tensor([seqlen_q] * batch, dtype=torch.int64, device=q.device)
     if seqlen_ks is None:
-        seqlen_ks = [seqlen_k] * batch
+        seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
 
     if context_offsets is None:
-        context_offsets = torch.tensor([0] * batch, device=q.device, dtype=torch.int32)
+        context_offsets = torch.arange(
+            seqlen_q, dtype=torch.int32, device=q.device
+        ).repeat(batch, 1)
 
     # assert d in {16, 32, 64, 128}
     assert d <= 128
@@ -1218,6 +1223,7 @@ def _flash_attn_backward(
         delta,
         softmax_scale,
         mask.stride(0),
+        context_offsets.stride(0),
         q.stride(0),
         q.stride(2),
         q.stride(1),
@@ -1241,7 +1247,7 @@ def _flash_attn_backward(
         dv.stride(2),
         dv.stride(1),
         nheads,
-        torch.tensor(context_offsets, device=q.device, dtype=torch.int32),
+        context_offsets,
         seqlen_qs,
         seqlen_ks,
         seqlen_q_rounded,
@@ -1270,9 +1276,9 @@ class FlashAttnFunc(torch.autograd.Function):
         bias=None,
         softmax_scale=None,
         mask=None,
-        seqlen_qs: list[int] = None,
-        seqlen_ks: list[int] = None,
-        context_offsets: list[int] = None,
+        seqlen_qs: torch.Tensor = None,
+        seqlen_ks: torch.Tensor = None,
+        context_offsets: torch.Tensor = None,
     ):
         """
         q: (batch_size, seqlen_q, nheads, headdim)

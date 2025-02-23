@@ -358,7 +358,10 @@ def test_bitfield_attention(head_dim: int, seqlen: int, batch_size: int):
 
     bitfield_mask, full_mask = get_bitfield_attention_mask()
 
-    reference_out = reference_attention(q, k, v, full_mask)
+    # reference_out = reference_attention(q, k, v, full_mask)
+    reference_out = sdpa(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), full_mask.unsqueeze(1)
+    ).transpose(1, 2)
 
     # without materializing the full mask,
     # our Triton implementation accepts the bitfield mask directly
