@@ -105,39 +105,108 @@ class ContextParallelBatchSplitUtils:
     def split_batch_zigzag(
         cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
+        seqlens: torch.Tensor,
         bitfield_attention_mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
         is_label: bool = False,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         split them using zigzag strategy
+
+        Returns:
+            - torch.Tensor (batch_size, max_seqlen, num_heads, headdim):
+                the split batch
+                If each split sequence in a batch has different length, the padding is 0.
+            - torch.Tensor (batch_size):
+                the sequence lengths of the split batch
+            - torch.Tensor (batch_size, max_seqlen):
+                the indices of tokens in the split batch.
+                If each split sequence in a batch has different length, the padding is -1.
         """
+        assert batch is not None
+
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
         if sp_size == 1:
-            return batch
+            return (
+                batch,
+                seqlens,
+                torch.nested.nested_tensor(
+                    [
+                        torch.arange(seqlen, device=batch.device, dtype=torch.int32)
+                        for seqlen in seqlens
+                    ]
+                ).to_padded_tensor(padding=-1),
+            )
 
         batch_size, seq_len = bitfield_attention_mask.shape
         if seq_len < 128 * sp_size:
-            return batch
+            return (
+                batch,
+                seqlens,
+                torch.nested.nested_tensor(
+                    [
+                        torch.arange(seqlen, device=batch.device, dtype=torch.int32)
+                        for seqlen in seqlens
+                    ]
+                ).to_padded_tensor(padding=-1),
+            )
+
+        split_batches = []
+        seq_lens = []
+        offsets = []
 
         if cls.split_batch_cache is not None:
-            assignments = cls.split_batch_cache
+            offsets = cls.split_batch_cache
+            seq_lens = [len(offset) for offset in offsets]
         else:
-            indices = np.arange(seq_len)
+            for i in range(batch_size):
+                seq_len = seqlens[i].item()
+                indices = np.arange(seq_len)
 
-            # Divide indices into 2*sp_size chunks.
-            num_chunks = 2 * sp_size
-            chunks = np.array_split(indices, num_chunks)
+                # Divide indices into 2*sp_size chunks.
+                num_chunks = 2 * sp_size
+                chunks = np.array_split(indices, num_chunks)
 
-            # Each rank gets two chunks: the chunk at position 'sp_rank' and the symmetric one.
-            first_chunk = chunks[sp_rank]
-            second_chunk = chunks[-sp_rank - 1]
+                # Each rank gets two chunks: the chunk at position 'sp_rank' and the symmetric one.
+                first_chunk = chunks[sp_rank]
+                second_chunk = chunks[-sp_rank - 1]
 
-            assignments = np.concatenate([first_chunk, second_chunk])
+                assignments = np.concatenate([first_chunk, second_chunk])
+
+                seq_lens.append(len(assignments))
+                offsets.append(assignments)
 
             # Cache assignments
-            cls.split_batch_cache = assignments
+            cls.split_batch_cache = offsets
+
+        for i in range(batch_size):
+            split_batches.append(batch[i, offsets[i]])
+
+        return (
+            torch.nested.as_nested_tensor(split_batches, device=batch.device)
+            .to_padded_tensor(padding=0.0)
+            .contiguous(),
+            torch.tensor(seq_lens, dtype=torch.int64, device=batch.device),
+            torch.nested.nested_tensor(offsets, device=batch.device).to_padded_tensor(
+                padding=-1
+            ),
+        )
+
+        indices = np.arange(seq_len)
+
+        # Divide indices into 2*sp_size chunks.
+        num_chunks = 2 * sp_size
+        chunks = np.array_split(indices, num_chunks)
+
+        # Each rank gets two chunks: the chunk at position 'sp_rank' and the symmetric one.
+        first_chunk = chunks[sp_rank]
+        second_chunk = chunks[-sp_rank - 1]
+
+        assignments = np.concatenate([first_chunk, second_chunk])
+
+        # Cache assignments
+        cls.split_batch_cache = assignments
 
         # Combine the assignments preserving order.
         assignments = torch.as_tensor(
