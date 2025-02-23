@@ -23,40 +23,82 @@ class ContextParallelBatchSplitUtils:
     @staticmethod
     def split_batch_uniform(
         batch: torch.Tensor,
+        seqlens: torch.Tensor,
         bitfield_attention_mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
         is_label: bool = False,
-    ) -> tuple[torch.Tensor, list[int], list[int]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         split them evenly by seq_dim
+
+        Returns:
+            - torch.Tensor (batch_size, max_seqlen, num_heads, headdim):
+                the split batch
+                If each split sequence in a batch has different length, the padding is 0.
+            - torch.Tensor (batch_size):
+                the sequence lengths of the split batch
+            - torch.Tensor (batch_size, max_seqlen):
+                the indices of tokens in the split batch.
+                If each split sequence in a batch has different length, the padding is -1.
         """
+        assert batch is not None
 
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
-        if sp_size == 1 or batch is None:
-            return batch
+        if sp_size == 1:
+            return (
+                batch,
+                seqlens,
+                torch.nested.nested_tensor(
+                    [
+                        torch.arange(seqlen, device=batch.device, dtype=torch.int32)
+                        for seqlen in seqlens
+                    ]
+                ).to_padded_tensor(padding=-1),
+            )
 
         batch_size, seq_len = bitfield_attention_mask.shape
+        if seq_len < 128 * sp_size:
+            return (
+                batch,
+                seqlens,
+                torch.nested.nested_tensor(
+                    [
+                        torch.arange(seqlen, device=batch.device, dtype=torch.int32)
+                        for seqlen in seqlens
+                    ]
+                ).to_padded_tensor(padding=-1),
+            )
 
         split_batches = []
         seq_lens = []
         offsets = []
         for i in range(batch_size):
-            batch_chunks = batch[i].chunk(sp_size, dim=1)
+            # We chunk batch[i] with dim=0, which equivalent to dim=1 in the original tensor.
+            batch_chunks = batch[i, : seqlens[i]].chunk(sp_size, dim=0)
             split_batches.append(batch_chunks[sp_rank])
-            seq_lens.append(batch_chunks[sp_rank].shape[1])
+
+            chunked_seqlens = [chunk.shape[0] for chunk in batch_chunks]
+            seq_lens.append(chunked_seqlens[sp_rank])
+
+            start_offset = sum(chunked_seqlens[:sp_rank])
             offsets.append(
-                sum(c.shape[1] for c in batch_chunks[: sp_rank - 1])
-                if sp_rank > 0
-                else 0
+                torch.arange(
+                    start_offset,
+                    start_offset + chunked_seqlens[sp_rank],
+                    dtype=torch.int32,
+                    device=batch.device,
+                )
             )
 
         return (
             torch.nested.as_nested_tensor(split_batches, device=batch.device)
             .to_padded_tensor(padding=0.0)
             .contiguous(),
-            seq_lens,
-            offsets,
+            torch.tensor(seq_lens, dtype=torch.int64, device=batch.device),
+            torch.nested.nested_tensor(offsets, device=batch.device).to_padded_tensor(
+                padding=-1
+            ),
         )
 
     @classmethod
@@ -76,8 +118,7 @@ class ContextParallelBatchSplitUtils:
             return batch
 
         batch_size, seq_len = bitfield_attention_mask.shape
-
-        if seq_len <= 128 * sp_size:
+        if seq_len < 128 * sp_size:
             return batch
 
         if cls.split_batch_cache is not None:
