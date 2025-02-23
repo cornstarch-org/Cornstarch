@@ -1027,9 +1027,16 @@ def _flash_attn_forward(
     if seqlen_ks is None:
         seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
     if context_offsets is None:
-        context_offsets = torch.arange(
-            seqlen_q, dtype=torch.int32, device=q.device
-        ).repeat(batch, 1)
+        context_offsets = torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
+
+    if seqlen_qs.ndim == 1:
+        seqlen_qs = seqlen_qs.unsqueeze(0).repeat(batch, 1)
+
+    if seqlen_ks.ndim == 1:
+        seqlen_ks = seqlen_ks.unsqueeze(0).repeat(batch, 1)
+
+    if context_offsets.ndim == 1:
+        context_offsets = context_offsets.unsqueeze(0).repeat(batch, 1)
 
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
 
@@ -1140,9 +1147,16 @@ def _flash_attn_backward(
         seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
 
     if context_offsets is None:
-        context_offsets = torch.arange(
-            seqlen_q, dtype=torch.int32, device=q.device
-        ).repeat(batch, 1)
+        context_offsets = torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
+
+    if seqlen_qs.ndim == 1:
+        seqlen_qs = seqlen_qs.unsqueeze(0).repeat(batch, 1)
+
+    if seqlen_ks.ndim == 1:
+        seqlen_ks = seqlen_ks.unsqueeze(0).repeat(batch, 1)
+
+    if context_offsets.ndim == 1:
+        context_offsets = context_offsets.unsqueeze(0).repeat(batch, 1)
 
     # assert d in {16, 32, 64, 128}
     assert d <= 128
