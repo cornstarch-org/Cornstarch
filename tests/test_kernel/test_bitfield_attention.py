@@ -1,5 +1,3 @@
-import math
-
 import pytest
 import torch
 import triton
@@ -10,63 +8,6 @@ from cornstarch.kernel.bitfield_attention import (
     bitfield_attn_func,
     get_submask_from_bitfield_mask,
 )
-
-
-def reference_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    attention_mask: torch.Tensor = None,
-) -> torch.Tensor:
-    """
-    Arguments:
-        q: (batch_size, seqlen_q, nheads, head_dim)
-        k: (batch_size, seqlen_k, nheads_k, head_dim)
-        v: (batch_size, seqlen_k, nheads_k, head_dim)
-        attention_mask: (seqlen_q, seqlen_k)
-
-    Return:
-        output: (batch_size, seqlen_q, nheads, head_dim)
-    """
-    q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-
-    if q.shape[1] % k.shape[1] != 0:
-        raise ValueError(
-            "Number of heads in q must be divisible by number of heads in k and v"
-        )
-    num_key_value_groups = q.shape[1] // k.shape[1]
-
-    if num_key_value_groups > 1:
-        from transformers.models.llama.modeling_llama import repeat_kv
-
-        k = repeat_kv(k, num_key_value_groups)
-        v = repeat_kv(v, num_key_value_groups)
-
-    head_dim = q.shape[-1]
-    attn_weights = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(head_dim)
-
-    if attention_mask is not None:
-        # attn_weights should be (batch_size, nheads, seqlen_q, seqlen_k)
-        # mask out with -inf for every (batch_size, nheads)
-        # using pattern of "q k -> 1 1 q k" and add it to attn_weights
-        # Expand to match the dimensions of attn_weights and attention_mask
-        attn_weights = attn_weights + torch.where(
-            attention_mask.unsqueeze(1).expand(-1, attn_weights.shape[1], -1, -1) == 0,
-            float("-inf"),
-            0.0,
-        )
-
-    # upcast attention to fp32
-    attn_weights = torch.nn.functional.softmax(
-        attn_weights, dim=-1, dtype=torch.float32
-    ).to(q.dtype)
-    attn_weights = torch.nn.functional.dropout(attn_weights, p=0.0, training=True)
-    attn_output = torch.matmul(attn_weights, v)
-
-    assert attn_output.shape == q.shape
-
-    return attn_output.transpose(1, 2).contiguous()
-
 
 BLOCK_SIZE: tl.constexpr = 64
 
@@ -464,9 +405,24 @@ def test_subquery_bitfield_attention(
     local_q = q[:, offset : offset + subset_size, :, :].contiguous()
     local_mask = full_mask[:, offset : offset + subset_size, :].contiguous()
 
-    reference_out = reference_attention(local_q, k, v, local_mask)
+    reference_out = sdpa(
+        local_q.transpose(1, 2),
+        k.transpose(1, 2),
+        v.transpose(1, 2),
+        local_mask.unsqueeze(1),
+    ).transpose(1, 2)
     triton_out = bitfield_attn_func(
-        local_q, k, v, None, None, bitfield_mask, None, None, [offset] * batch_size
+        local_q,
+        k,
+        v,
+        None,
+        None,
+        bitfield_mask,
+        None,
+        None,
+        torch.arange(offset, offset + subset_size, dtype=torch.int32, device="cuda")
+        .unsqueeze(0)
+        .repeat(batch_size, 1),
     )
 
     torch.testing.assert_close(reference_out, triton_out, atol=5e-3, rtol=5e-3)
@@ -484,7 +440,10 @@ def test_subquery_bitfield_attention(
     # Compare the result vs full attention computation
     # ========================================================================
 
-    reference_out = reference_attention(q, k, v, full_mask)
+    # reference_out = reference_attention(q, k, v, full_mask)
+    reference_out = sdpa(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), full_mask.unsqueeze(1)
+    ).transpose(1, 2)
     torch.testing.assert_close(
         reference_out[:, offset : offset + subset_size, :, :],
         triton_out,
@@ -500,7 +459,17 @@ def test_subquery_bitfield_attention(
     other_q2 = q[:, offset + subset_size :, :, :].contiguous()
 
     triton_out1 = bitfield_attn_func(
-        other_q1, k, v, None, None, bitfield_mask, None, None, [0] * batch_size
+        other_q1,
+        k,
+        v,
+        None,
+        None,
+        bitfield_mask,
+        None,
+        None,
+        torch.arange(0, offset, dtype=torch.int32, device="cuda")
+        .unsqueeze(0)
+        .repeat(batch_size, 1),
     )
     triton_out2 = bitfield_attn_func(
         other_q2,
@@ -511,7 +480,9 @@ def test_subquery_bitfield_attention(
         bitfield_mask,
         None,
         None,
-        [offset + subset_size] * batch_size,
+        torch.arange(offset + subset_size, seqlen, dtype=torch.int32, device="cuda")
+        .unsqueeze(0)
+        .repeat(batch_size, 1),
     )
 
     g1 = full_g[:, :offset, :, :].contiguous()
@@ -530,7 +501,7 @@ def test_subquery_bitfield_attention(
     + [(34, 57), (82, 128), (46, 144), (273, 283), (124, 255), (133, 1024)],
     ids=lambda x: f"sl=({x[0]}, {x[1]})",
 )
-def test_bitfield_attention_with_different_mask(seqlens: tuple[int]):
+def test_bitfield_attention_with_batched_different_seqlens(seqlens: tuple[int]):
     device = torch.device("cuda")
     dtype = torch.bfloat16
     batch_size = len(seqlens)
@@ -609,7 +580,15 @@ def test_bitfield_attention_with_different_mask(seqlens: tuple[int]):
     ).transpose(1, 2)
 
     triton_out = bitfield_attn_func(
-        q, k, v, None, None, bitfield_mask, list(seqlens), list(seqlens), None
+        q,
+        k,
+        v,
+        None,
+        None,
+        bitfield_mask,
+        torch.tensor(list(seqlens), dtype=torch.int64, device="cuda"),
+        torch.tensor(list(seqlens), dtype=torch.int64, device="cuda"),
+        None,
     )
 
     full_g = torch.randn_like(q).normal_(mean=0, std=0.05)

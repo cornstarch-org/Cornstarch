@@ -1027,9 +1027,6 @@ def _flash_attn_forward(
     if seqlen_ks is None:
         seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
     if context_offsets is None:
-        context_offsets = torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
-
-    if context_offsets is None:
         context_offsets = (
             torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
             .unsqueeze(0)
@@ -1143,7 +1140,6 @@ def _flash_attn_backward(
         seqlen_qs = torch.tensor([seqlen_q] * batch, dtype=torch.int64, device=q.device)
     if seqlen_ks is None:
         seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
-
     if context_offsets is None:
         context_offsets = (
             torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
