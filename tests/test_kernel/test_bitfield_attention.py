@@ -299,7 +299,6 @@ def test_bitfield_attention(head_dim: int, seqlen: int, batch_size: int):
 
     bitfield_mask, full_mask = get_bitfield_attention_mask()
 
-    # reference_out = reference_attention(q, k, v, full_mask)
     reference_out = sdpa(
         q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), full_mask.unsqueeze(1)
     ).transpose(1, 2)
@@ -439,8 +438,6 @@ def test_subquery_bitfield_attention(
     # ========================================================================
     # Compare the result vs full attention computation
     # ========================================================================
-
-    # reference_out = reference_attention(q, k, v, full_mask)
     reference_out = sdpa(
         q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), full_mask.unsqueeze(1)
     ).transpose(1, 2)
@@ -455,11 +452,12 @@ def test_subquery_bitfield_attention(
         dg_ref[:, offset : offset + subset_size, :, :], dq, atol=5e-3, rtol=5e-3
     )
     # compute other parts
-    other_q1 = q[:, :offset, :, :].contiguous()
-    other_q2 = q[:, offset + subset_size :, :, :].contiguous()
+    other_q = torch.cat(
+        [q[:, :offset, :, :], q[:, offset + subset_size :, :, :]], dim=1
+    )
 
-    triton_out1 = bitfield_attn_func(
-        other_q1,
+    triton_other_out = bitfield_attn_func(
+        other_q,
         k,
         v,
         None,
@@ -467,32 +465,27 @@ def test_subquery_bitfield_attention(
         bitfield_mask,
         None,
         None,
-        torch.arange(0, offset, dtype=torch.int32, device="cuda")
-        .unsqueeze(0)
-        .repeat(batch_size, 1),
-    )
-    triton_out2 = bitfield_attn_func(
-        other_q2,
-        k,
-        v,
-        None,
-        None,
-        bitfield_mask,
-        None,
-        None,
-        torch.arange(offset + subset_size, seqlen, dtype=torch.int32, device="cuda")
+        torch.cat(
+            [
+                torch.arange(0, offset, dtype=torch.int32, device="cuda"),
+                torch.arange(
+                    offset + subset_size, seqlen, dtype=torch.int32, device="cuda"
+                ),
+            ],
+            dim=0,
+        )
         .unsqueeze(0)
         .repeat(batch_size, 1),
     )
 
-    g1 = full_g[:, :offset, :, :].contiguous()
-    g2 = full_g[:, offset + subset_size :, :, :].contiguous()
+    other_g = torch.cat(
+        [full_g[:, :offset, :, :], full_g[:, offset + subset_size :, :, :]], dim=1
+    )
 
-    _, dk1, dv1 = torch.autograd.grad(triton_out1, (other_q1, k, v), g1)
-    _, dk2, dv2 = torch.autograd.grad(triton_out2, (other_q2, k, v), g2)
+    _, odk, odv = torch.autograd.grad(triton_other_out, (other_q, k, v), other_g)
 
-    torch.testing.assert_close(dk_ref, dk + dk1 + dk2, atol=5e-3, rtol=5e-3)
-    torch.testing.assert_close(dv_ref, dv + dv1 + dv2, atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(dk_ref, dk + odk, atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(dv_ref, dv + odv, atol=5e-3, rtol=5e-3)
 
 
 @pytest.mark.parametrize(
