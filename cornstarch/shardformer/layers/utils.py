@@ -193,32 +193,6 @@ class ContextParallelBatchSplitUtils:
             ),
         )
 
-        indices = np.arange(seq_len)
-
-        # Divide indices into 2*sp_size chunks.
-        num_chunks = 2 * sp_size
-        chunks = np.array_split(indices, num_chunks)
-
-        # Each rank gets two chunks: the chunk at position 'sp_rank' and the symmetric one.
-        first_chunk = chunks[sp_rank]
-        second_chunk = chunks[-sp_rank - 1]
-
-        assignments = np.concatenate([first_chunk, second_chunk])
-
-        # Cache assignments
-        cls.split_batch_cache = assignments
-
-        # Combine the assignments preserving order.
-        assignments = torch.as_tensor(
-            assignments, dtype=torch.long, device=batch.device
-        ).detach()
-
-        slices = [slice(None)] * batch.dim()
-        seq_dim = 1
-        slices[seq_dim] = assignments
-
-        return batch[slices].contiguous()
-
     @classmethod
     def split_batch_makespan_minimization(
         cls: ContextParallelBatchSplitUtils,
