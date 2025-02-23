@@ -15,7 +15,6 @@ class ShardConfig(ColossalShardConfig):
     enable_sequence_parallelism: bool = False
     sequence_parallelism_mode: str = None
     enable_sequence_overlap: bool = False
-    ring_attention_distribution_mode: str = None
     pipeline_stage_manager: Optional[PipelineStageManager] = None
     pipeline_template: Optional[PipelineTemplate] = None
     enable_tensor_parallelism: bool = True
@@ -32,3 +31,13 @@ class ShardConfig(ColossalShardConfig):
         assert (
             not self.enable_sequence_parallelism
         ), "Sequence parallelism is currently not supported"
+
+        if self.enable_sequence_parallelism:
+            assert self.sequence_parallelism_mode in [
+                "uniform",
+                "zigzag",
+                "makespan_main",
+            ], (
+                "Invalid sequence parallelism mode. "
+                f"Supported modes are 'uniform', 'zigzag', 'makespan_main', got {self.sequence_parallelism_mode}"
+            )

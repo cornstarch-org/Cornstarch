@@ -13,7 +13,7 @@ from torch.testing._internal.common_utils import (
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.kernel.bitfield_attention import bitfield_attn_func
-from cornstarch.shardformer.layers.context_parallel_attention import (
+from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
     context_parallel_bitfield_attn_func,
 )
 from cornstarch.shardformer.layers.utils import ContextParallelBatchSplitUtils
@@ -65,7 +65,7 @@ class TestContextParallelBatchSplitUtilClass:
                 "fake", rank=rank, world_size=world_size, store=store
             )
 
-            split_data = ContextParallelBatchSplitUtils._split_batch_uniform(
+            split_data = ContextParallelBatchSplitUtils.split_batch_uniform(
                 data, mask, sp_group=dist.GroupMember.WORLD
             )
 
@@ -112,7 +112,7 @@ class TestContextParallelBatchSplitUtilClass:
                 "fake", rank=rank, world_size=world_size, store=store
             )
 
-            split_data = ContextParallelBatchSplitUtils._split_batch_zigzag(
+            split_data = ContextParallelBatchSplitUtils.split_batch_zigzag(
                 data, mask, sp_group=dist.GroupMember.WORLD
             )
 
@@ -187,7 +187,7 @@ class TestContextParallelBatchSplitUtilClass:
             )
 
             split_data = (
-                ContextParallelBatchSplitUtils._split_batch_makespan_minimization(
+                ContextParallelBatchSplitUtils.split_batch_makespan_minimization(
                     data, mask, sp_group=dist.GroupMember.WORLD
                 )
             )

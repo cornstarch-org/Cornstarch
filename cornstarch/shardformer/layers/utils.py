@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import heapq
 import math
-from enum import Enum
 from typing import Optional
 
 import numpy as np
@@ -14,12 +13,6 @@ from cornstarch.kernel.bitfield_attention import (
 )
 
 
-class ContextParallelDistributionMode(Enum):
-    UNIFORM = "uniform"
-    ZIGZAG = "zigzag"
-    MAKESPAN_MIN = "makespan_min"
-
-
 class ContextParallelBatchSplitUtils:
     split_batch_cache: Optional[np.ndarray] = None
 
@@ -28,54 +21,46 @@ class ContextParallelBatchSplitUtils:
         cls.split_batch_cache = None
 
     @staticmethod
-    def split_batch(
+    def split_batch_uniform(
         batch: torch.Tensor,
         bitfield_attention_mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
         is_label: bool = False,
-        ring_attn_mode: ContextParallelDistributionMode = ContextParallelDistributionMode.UNIFORM,
-    ) -> torch.Tensor:
-        if batch is None:
-            return None
-
-        if ring_attn_mode == ContextParallelDistributionMode.UNIFORM:
-            return ContextParallelBatchSplitUtils._split_batch_uniform(
-                batch, bitfield_attention_mask, sp_group, is_label
-            )
-        elif ring_attn_mode == ContextParallelDistributionMode.ZIGZAG:
-            return ContextParallelBatchSplitUtils._split_batch_zigzag(
-                batch, bitfield_attention_mask, sp_group, is_label
-            )
-        elif ring_attn_mode == ContextParallelDistributionMode.MAKESPAN_MIN:
-            return ContextParallelBatchSplitUtils._split_batch_makespan_minimization(
-                batch, bitfield_attention_mask, sp_group, is_label
-            )
-
-    @staticmethod
-    def _split_batch_uniform(
-        batch: torch.Tensor,
-        bitfield_attention_mask: torch.Tensor,
-        sp_group: dist.ProcessGroup,
-        is_label: bool = False,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, list[int], list[int]]:
         """
         split them evenly by seq_dim
         """
 
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
-        if sp_size == 1:
+        if sp_size == 1 or batch is None:
             return batch
 
         batch_size, seq_len = bitfield_attention_mask.shape
 
-        seq_dim = 1
-        split_batch = batch.chunk(sp_size, dim=seq_dim)[sp_rank].contiguous()
+        split_batches = []
+        seq_lens = []
+        offsets = []
+        for i in range(batch_size):
+            batch_chunks = batch[i].chunk(sp_size, dim=1)
+            split_batches.append(batch_chunks[sp_rank])
+            seq_lens.append(batch_chunks[sp_rank].shape[1])
+            offsets.append(
+                sum(c.shape[1] for c in batch_chunks[: sp_rank - 1])
+                if sp_rank > 0
+                else 0
+            )
 
-        return split_batch
+        return (
+            torch.nested.as_nested_tensor(split_batches, device=batch.device)
+            .to_padded_tensor(padding=0.0)
+            .contiguous(),
+            seq_lens,
+            offsets,
+        )
 
     @classmethod
-    def _split_batch_zigzag(
+    def split_batch_zigzag(
         cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
         bitfield_attention_mask: torch.Tensor,
@@ -91,6 +76,9 @@ class ContextParallelBatchSplitUtils:
             return batch
 
         batch_size, seq_len = bitfield_attention_mask.shape
+
+        if seq_len <= 128 * sp_size:
+            return batch
 
         if cls.split_batch_cache is not None:
             assignments = cls.split_batch_cache
@@ -122,7 +110,7 @@ class ContextParallelBatchSplitUtils:
         return batch[slices].contiguous()
 
     @classmethod
-    def _split_batch_makespan_minimization(
+    def split_batch_makespan_minimization(
         cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
         bitfield_attention_mask: torch.Tensor,
