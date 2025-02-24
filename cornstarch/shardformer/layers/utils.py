@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import heapq
-import math
 from typing import Optional
 
 import numpy as np
@@ -14,7 +13,7 @@ from cornstarch.kernel.bitfield_attention import (
 
 
 class ContextParallelBatchSplitUtils:
-    split_batch_cache: Optional[np.ndarray] = None
+    split_batch_cache: Optional[list[np.ndarray]] = None
 
     @classmethod
     def clear_split_cache(cls: ContextParallelBatchSplitUtils):
@@ -197,25 +196,47 @@ class ContextParallelBatchSplitUtils:
     def split_batch_makespan_minimization(
         cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
+        seqlens: torch.Tensor,
         bitfield_attention_mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
         is_label: bool = False,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         split tokens considering their makespan to be minimized.
         Tokens are grouped as blocks to reduce overhead of makespan minimization algorithm.
+
+        Returns:
+            - torch.Tensor (batch_size, max_seqlen, num_heads, headdim):
+                the split batch
+                If each split sequence in a batch has different length, the padding is 0.
+            - torch.Tensor (batch_size):
+                the sequence lengths of the split batch
+            - torch.Tensor (batch_size, max_seqlen):
+                the indices of tokens in the split batch.
+                If each split sequence in a batch has different length, the padding is -1.
         """
+        assert batch is not None
+
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
         batch_size, seq_len = bitfield_attention_mask.shape
         if sp_size == 1 or seq_len <= 128 * sp_size:
-            return batch
+            return (
+                batch,
+                seqlens,
+                torch.nested.nested_tensor(
+                    [
+                        torch.arange(seqlen, device=batch.device, dtype=torch.int32)
+                        for seqlen in seqlens
+                    ]
+                ).to_padded_tensor(padding=-1),
+            )
 
         if cls.split_batch_cache is not None:
-            assignments = cls.split_batch_cache
+            offsets = cls.split_batch_cache
+            seq_lens = [len(offset) for offset in offsets]
         else:
             block_size = 128
-            num_blocks = math.ceil(seq_len / block_size)
 
             # compress the attention mask, for each 128x128 block, set True if any True in the block.
             workloads_per_query_block = get_num_computation_block_per_query_block(
@@ -224,55 +245,76 @@ class ContextParallelBatchSplitUtils:
             workloads_per_query_block, indices = torch.sort(
                 workloads_per_query_block, stable=True, descending=True
             )
+            # (total workload, sp_rank)
+            loads_per_rank: list[tuple[int, int]] = []
+            for i in range(sp_size):
+                heapq.heappush(loads_per_rank, (0, i))
 
-            assignments: list[torch.Tensor] = []
+            # sequence length assigned to this process per batch (shape: [batch_size])
+            seq_lens = []
+            offsets = []
 
             for batch_index in range(batch_size):
-                # (total workload, sp_rank, [block indices])
-                loads_per_gpu: list[tuple[int, int, list[int]]] = []
-                for i in range(sp_size):
-                    heapq.heappush(loads_per_gpu, (0, i, []))
+                workloads_per_query_block_per_batch = workloads_per_query_block[
+                    batch_index
+                ]
 
-                for index, block_workload in zip(
-                    indices[batch_index], workloads_per_query_block[batch_index]
+                num_tokens_per_block = []
+                remaining_tokens = seqlens[batch_index].item()
+                for _ in range(len(workloads_per_query_block_per_batch)):
+                    num_tokens = min(remaining_tokens, block_size)
+                    num_tokens_per_block.append(num_tokens)
+                    remaining_tokens -= num_tokens
+
+                seq_lens_per_batch = 0
+                assignments = []
+                # Iterate over the blocks and assign them to the process with the least load
+                for i, block_workload in zip(
+                    indices[batch_index].numpy(force=True),
+                    workloads_per_query_block_per_batch,
                 ):
-                    load, gpu, block_indices = heapq.heappop(loads_per_gpu)
-                    block_indices.append(index.item())
+                    load, rank = heapq.heappop(loads_per_rank)
+
                     heapq.heappush(
-                        loads_per_gpu,
-                        (load + block_workload.item(), gpu, block_indices),
+                        loads_per_rank,
+                        (load + block_workload.item(), rank),
                     )
+                    if rank == sp_rank:
+                        seq_lens_per_batch += num_tokens_per_block[i]
+                        assignments.append(i)
 
-                batch_assignments = torch.empty(num_blocks, dtype=torch.long)
-                for _, gpu, block_indices in loads_per_gpu:
-                    for block_idx in block_indices:
-                        batch_assignments[block_idx] = gpu
+                assignments.sort()
+                if assignments:
+                    assignments = np.concatenate(
+                        [
+                            np.arange(
+                                sum(num_tokens_per_block[:i]),
+                                sum(num_tokens_per_block[:i]) + num_tokens_per_block[i],
+                            )
+                            for i in assignments
+                        ]
+                    )
+                else:
+                    assert seq_lens_per_batch == 0
 
-                batch_assignments = batch_assignments.to(batch.device)
-                batch_assignments = batch_assignments.repeat_interleave(block_size)
-                assignments.append(batch_assignments)
+                seq_lens.append(seq_lens_per_batch)
+                offsets.append(assignments)
 
-            assignments = torch.stack(assignments, dim=0)
+            cls.split_batch_cache = offsets
 
-            cls.split_batch_cache = assignments
-
-        assignments: torch.Tensor  # shape: [batch_size, seq_len]
-
-        # Extract per-batch assigned indices.
-        filtered_data = []
+        split_batches = []
         for i in range(batch_size):
-            indices = torch.nonzero(assignments[i] == sp_rank, as_tuple=False).squeeze()
-            indices = indices[indices < batch.shape[1]]
-            filtered_data.append(batch[i, indices])
+            split_batches.append(batch[i, offsets[i]])
 
-        if len(filtered_data) == 1:
-            return filtered_data[0].unsqueeze(0)
-        else:
-            return (
-                torch.nested.as_nested_tensor(filtered_data, device=batch.device)
-                .to_padded_tensor(padding=0.0)
-                .contiguous()
-            )
+        return (
+            torch.nested.as_nested_tensor(split_batches, device=batch.device)
+            .to_padded_tensor(padding=0.0)
+            .contiguous(),
+            torch.tensor(seq_lens, dtype=torch.int64, device=batch.device),
+            torch.nested.nested_tensor(offsets, device=batch.device).to_padded_tensor(
+                padding=-1
+            ),
+        )
 
     @classmethod
     def _split_batch_random(
