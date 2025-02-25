@@ -44,7 +44,7 @@ class ContextParallelBatchSplitUtils:
             return ContextParallelBatchSplitUtils.split_batch_zigzag(
                 batch, seqlens, bitfield_attention_mask, sp_group, is_label
             )
-        elif dist_mode == ContextParallelDistributionMode.MAKESPAN_MAIN:
+        elif dist_mode == ContextParallelDistributionMode.MAKESPAN_MIN:
             return ContextParallelBatchSplitUtils.split_batch_makespan_minimization(
                 batch, seqlens, bitfield_attention_mask, sp_group, is_label
             )

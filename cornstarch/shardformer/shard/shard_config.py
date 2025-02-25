@@ -16,7 +16,7 @@ class ContextParallelDistributionMode(Enum):
 
     UNIFORM = "uniform"
     ZIGZAG = "zigzag"
-    MAKESPAN_MAIN = "makespan_main"
+    MAKESPAN_MIN = "makespan_min"
 
 
 @dataclass
@@ -24,11 +24,11 @@ class ShardConfig(ColossalShardConfig):
     tensor_parallel_process_group: Optional[dist.ProcessGroup] = None
     sequence_parallel_process_group: Optional[dist.ProcessGroup] = None
     enable_sequence_parallelism: bool = False
-    sequence_parallelism_mode: ContextParallelDistributionMode = (
+    sequence_parallelism_mode: str = None
+    enable_sequence_overlap: bool = False
+    context_parallel_distribution_mode: ContextParallelDistributionMode = (
         ContextParallelDistributionMode.UNIFORM
     )
-    enable_sequence_overlap: bool = False
-    context_parallel_distribution_mode: str = None
     pipeline_stage_manager: Optional[PipelineStageManager] = None
     pipeline_template: Optional[PipelineTemplate] = None
     enable_tensor_parallelism: bool = True
@@ -42,6 +42,7 @@ class ShardConfig(ColossalShardConfig):
     def __post_init__(self):
         super().__post_init__()
 
-        assert (
-            not self.enable_sequence_parallelism
-        ), "Sequence parallelism is currently not supported"
+        assert self.sequence_parallelism_mode in [
+            "ring_attn",
+            "all_to_all",
+        ], f"Invalid sequence parallelism mode {self.sequence_parallelism_mode}"
