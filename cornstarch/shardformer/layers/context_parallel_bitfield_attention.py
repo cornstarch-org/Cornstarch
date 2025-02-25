@@ -2,12 +2,13 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 
 from cornstarch.kernel.bitfield_attention import (
     _flash_attn_backward,
     _flash_attn_forward,
 )
-from cornstarch.kernel.interface import BitfieldUtils
+from cornstarch.kernel.interface import repeat_kv
 
 
 class ContextParallelBitfieldAttention(torch.autograd.Function):
@@ -17,10 +18,13 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
+        seqlen_qs: torch.Tensor,
+        seqlen_ks: torch.Tensor,
+        offsets: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
-        mask: torch.Tensor = None,
         heads_stride: int = 1,
     ) -> torch.Tensor:
         """
@@ -78,17 +82,6 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         lses: list[torch.Tensor] = []
         softmax_scales: list[torch.Tensor] = []
 
-        seq_lens, local_seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
-        seqlen_qs = torch.tensor(local_seq_lens, dtype=torch.int64, device=q.device)
-        seqlen_ks = torch.tensor(seq_lens, dtype=torch.int64, device=q.device)
-        offsets = torch.nested.nested_tensor(
-            [
-                torch.tensor(offset, dtype=torch.int32, device=q.device)
-                for offset in offsets
-            ],
-            device=q.device,
-        )
-
         head_index = 0
         while head_index < nheads:
             gk_work.wait()
@@ -123,7 +116,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 mask=mask,
                 seqlen_qs=seqlen_qs,
                 seqlen_ks=seqlen_ks,
-                context_offsets=offsets,
+                offsets=offsets,
             )
 
             os.append(o)
@@ -247,7 +240,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 mask=mask,
                 seqlen_qs=seqlen_qs,
                 seqlen_ks=seqlen_ks,
-                context_offsets=offsets,
+                offsets=offsets,
             )
 
             dist.reduce_scatter(
@@ -265,12 +258,51 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             torch.cat(dqs, dim=2),
             torch.cat(dks, dim=2),
             torch.cat(dvs, dim=2),
-            None,
-            None,
-            None,
-            None,
-            None,
+            *[None] * 8,
         )
 
 
-context_parallel_bitfield_attn_func = ContextParallelBitfieldAttention.apply
+def context_parallel_bitfield_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor,
+    sp_group: dist.ProcessGroup,
+    seqlen_qs: torch.Tensor,
+    seqlen_ks: torch.Tensor,
+    offsets: torch.Tensor,
+    heads_stride: int = 1,
+    dropout: float = 0.0,
+    scaling: Optional[float] = None,
+    sliding_window: Optional[int] = None,
+    softcap: Optional[float] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, None]:
+    assert (
+        attention_mask is not None and attention_mask.dtype == torch.int64
+    ), "Bitfield attention requires an attention mask of type torch.int64."
+
+    key = repeat_kv(key, module.num_key_value_groups)
+    value = repeat_kv(value, module.num_key_value_groups)
+
+    # BAM follows FA2 that uses non-transposed inputs
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
+
+    attn_output = ContextParallelBitfieldAttention.apply(
+        query,
+        key,
+        value,
+        attention_mask,
+        sp_group,
+        seqlen_qs,
+        seqlen_ks,
+        offsets,
+        None,
+        None,
+        heads_stride,
+    )
+
+    return attn_output, None

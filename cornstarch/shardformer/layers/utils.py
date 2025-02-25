@@ -94,7 +94,9 @@ class ContextParallelBatchSplitUtils:
         offsets = []
 
         if BitfieldUtils.sequence_lengths_cache is not None:
-            _, seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
+            local_seq_lens, seq_lens, offsets = (
+                BitfieldUtils.get_sequence_lengths_cache()
+            )
             split_batches = [batch[i, offset] for i, offset in enumerate(offsets)]
         else:
             for i in range(batch_size):
@@ -107,11 +109,10 @@ class ContextParallelBatchSplitUtils:
 
                 start_offset = sum(chunked_seqlens[:sp_rank])
                 offsets.append(
-                    torch.arange(
+                    np.arange(
                         start_offset,
                         start_offset + chunked_seqlens[sp_rank],
-                        dtype=torch.int32,
-                        device=batch.device,
+                        dtype=np.int32,
                     )
                 )
 
@@ -119,14 +120,16 @@ class ContextParallelBatchSplitUtils:
                 seqlens.tolist(), seq_lens, offsets
             )
 
+            local_seq_lens, seq_lens, offsets = (
+                BitfieldUtils.get_sequence_lengths_cache()
+            )
+
         return (
             torch.nested.as_nested_tensor(split_batches, device=batch.device)
             .to_padded_tensor(padding=0.0)
             .contiguous(),
-            torch.tensor(seq_lens, dtype=torch.int64, device=batch.device),
-            torch.nested.nested_tensor(offsets, device=batch.device).to_padded_tensor(
-                padding=-1
-            ),
+            local_seq_lens,
+            offsets,
         )
 
     @staticmethod
@@ -174,7 +177,9 @@ class ContextParallelBatchSplitUtils:
         offsets = []
 
         if BitfieldUtils.sequence_lengths_cache is not None:
-            _, seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
+            local_seq_lens, seq_lens, offsets = (
+                BitfieldUtils.get_sequence_lengths_cache()
+            )
         else:
             for i in range(batch_size):
                 seq_len = seqlens[i].item()
@@ -198,6 +203,10 @@ class ContextParallelBatchSplitUtils:
                 seqlens.tolist(), seq_lens, offsets
             )
 
+            local_seq_lens, seq_lens, offsets = (
+                BitfieldUtils.get_sequence_lengths_cache()
+            )
+
         for i in range(batch_size):
             split_batches.append(batch[i, offsets[i]])
 
@@ -205,10 +214,8 @@ class ContextParallelBatchSplitUtils:
             torch.nested.as_nested_tensor(split_batches, device=batch.device)
             .to_padded_tensor(padding=0.0)
             .contiguous(),
-            torch.tensor(seq_lens, dtype=torch.int64, device=batch.device),
-            torch.nested.nested_tensor(offsets, device=batch.device).to_padded_tensor(
-                padding=-1
-            ),
+            local_seq_lens,
+            offsets,
         )
 
     @staticmethod
@@ -241,7 +248,9 @@ class ContextParallelBatchSplitUtils:
             )
 
         if BitfieldUtils.sequence_lengths_cache is not None:
-            _, seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
+            local_seq_lens, seq_lens, offsets = (
+                BitfieldUtils.get_sequence_lengths_cache()
+            )
         else:
             block_size = 128
 
@@ -307,7 +316,13 @@ class ContextParallelBatchSplitUtils:
                 seq_lens.append(seq_lens_per_batch)
                 offsets.append(assignments)
 
-            BitfieldUtils.sequence_lengths_cache = (seqlens.tolist(), seq_lens, offsets)
+            BitfieldUtils.set_sequence_lengths_cache(
+                seqlens.tolist(), seq_lens, offsets
+            )
+
+            local_seq_lens, seq_lens, offsets = (
+                BitfieldUtils.get_sequence_lengths_cache()
+            )
 
         split_batches = []
         for i in range(batch_size):
@@ -317,10 +332,8 @@ class ContextParallelBatchSplitUtils:
             torch.nested.as_nested_tensor(split_batches, device=batch.device)
             .to_padded_tensor(padding=0.0)
             .contiguous(),
-            torch.tensor(seq_lens, dtype=torch.int64, device=batch.device),
-            torch.nested.nested_tensor(offsets, device=batch.device).to_padded_tensor(
-                padding=-1
-            ),
+            local_seq_lens,
+            offsets,
         )
 
     @classmethod

@@ -68,22 +68,7 @@ def bitfield_attention_forward(
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
 
-    if BitfieldUtils.sequence_lengths_cache is None:
-        seq_lens = offsets = local_seq_lens = None
-    else:
-        seq_lens, local_seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
-        local_seq_lens = torch.tensor(
-            local_seq_lens, dtype=torch.int64, device=query.device
-        )
-        seq_lens = torch.tensor(seq_lens, dtype=torch.int64, device=query.device)
-        if offsets is not None:
-            offsets = torch.nested.nested_tensor(
-                [
-                    torch.tensor(offset, dtype=torch.int32, device=query.device)
-                    for offset in offsets
-                ],
-                device=query.device,
-            ).to_padded_tensor(padding=-1)
+    seq_lens, local_seq_lens, offsets = BitfieldUtils.get_sequence_lengths_cache()
 
     attn_output = bitfield_attn_func(
         query,
@@ -143,17 +128,19 @@ class BitfieldUtils:
         device: torch.device = get_accelerator().get_current_device(),
     ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         if cls.sequence_lengths_cache is None:
-            return None
+            return None, None, None
 
         seq_lens, local_seq_lens, offsets = cls.sequence_lengths_cache
         seqlen_qs = torch.tensor(local_seq_lens, dtype=torch.int64, device=device)
         seqlen_ks = torch.tensor(seq_lens, dtype=torch.int64, device=device)
-        offsets = torch.nested.nested_tensor(
-            [
-                torch.tensor(offset, dtype=torch.int32, device=device)
-                for offset in offsets
-            ],
-            device=device,
-        ).to_padded_tensor(padding=-1)
+
+        if offsets is not None:
+            offsets = torch.nested.nested_tensor(
+                [
+                    torch.tensor(offset, dtype=torch.int32, device=device)
+                    for offset in offsets
+                ],
+                device=device,
+            ).to_padded_tensor(padding=-1)
 
         return seqlen_qs, seqlen_ks, offsets

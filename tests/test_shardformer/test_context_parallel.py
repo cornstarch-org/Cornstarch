@@ -14,8 +14,9 @@ from torch.testing._internal.common_utils import (
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.kernel.bitfield_attention import bitfield_attn_func
+from cornstarch.kernel.interface import BitfieldUtils
 from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
-    context_parallel_bitfield_attn_func,
+    ContextParallelBitfieldAttention,
 )
 from cornstarch.shardformer.layers.utils import ContextParallelBatchSplitUtils
 
@@ -72,7 +73,7 @@ class TestContextParallelBatchSplitUtilClass:
         if dist.is_initialized():
             dist.destroy_process_group()
 
-        ContextParallelBatchSplitUtils.clear_split_cache()
+        BitfieldUtils.clear_cache()
 
     @pytest.mark.parametrize(
         "seqlen",
@@ -92,8 +93,7 @@ class TestContextParallelBatchSplitUtilClass:
 
         store = FakeStore()
         for rank in range(world_size):
-            if dist.is_initialized():
-                dist.destroy_process_group()
+            self.teardown_method()
 
             dist.init_process_group(
                 "fake", rank=rank, world_size=world_size, store=store
@@ -151,8 +151,7 @@ class TestContextParallelBatchSplitUtilClass:
 
         store = FakeStore()
         for rank in range(world_size):
-            if dist.is_initialized():
-                dist.destroy_process_group()
+            self.teardown_method()
 
             dist.init_process_group(
                 "fake", rank=rank, world_size=world_size, store=store
@@ -644,14 +643,24 @@ class TestContextParallelismClass(GlooDistributedTestBase):
             == (batch_size, seq_len // self.world_size, 8, 64)
         )
 
-        cp_out: torch.Tensor = context_parallel_bitfield_attn_func(
+        sequence_lengths = [seq_len] * batch_size
+        local_sequence_lengths = [local_query.shape[1]] * batch_size
+        offsets = torch.chunk(
+            torch.arange(query.shape[1], device="cpu"), self.world_size, dim=0
+        )[self.rank].numpy()
+        offsets = [offsets] * batch_size
+        BitfieldUtils.set_sequence_lengths_cache(
+            sequence_lengths, local_sequence_lengths, offsets
+        )
+
+        cp_out: torch.Tensor = ContextParallelBitfieldAttention.apply(
             local_query,
             local_key,
             local_value,
+            mask,
             dist.GroupMember.WORLD,
             None,
             None,
-            mask,
         )
 
         torch.testing.assert_close(
@@ -665,7 +674,7 @@ class TestContextParallelismClass(GlooDistributedTestBase):
         # Check backward
         # ========================================================================
 
-        dout = torch.randn_like(ref_out).normal_(mean=0, std=0.05)
+        dout = torch.randn_like(ref_out).normal_(mean=0, std=0.5)
         ref_dq, ref_dk, ref_dv = torch.autograd.grad(ref_out, [query, key, value], dout)
 
         cp_dout = torch.chunk(dout, self.world_size, dim=1)[self.rank].contiguous()
