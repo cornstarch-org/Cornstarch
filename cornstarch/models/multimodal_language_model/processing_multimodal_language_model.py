@@ -279,8 +279,6 @@ class MultimodalProcessor:
         text_inputs = self.llm_tokenizer(
             **tokenizer_inputs, return_tensors=return_tensors
         )
-        text_inputs["sequence_length"] = torch.sum(text_inputs["attention_mask"], dim=1)
-        text_inputs.pop("attention_mask")
 
         result.update(text_inputs)
 
