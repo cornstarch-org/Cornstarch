@@ -4,6 +4,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+from colossalai.accelerator import get_accelerator
 from torch import nn
 
 from cornstarch.kernel.bitfield_attention import bitfield_attn_func
@@ -75,13 +76,14 @@ def bitfield_attention_forward(
             local_seq_lens, dtype=torch.int64, device=query.device
         )
         seq_lens = torch.tensor(seq_lens, dtype=torch.int64, device=query.device)
-        offsets = torch.nested.nested_tensor(
-            [
-                torch.tensor(offset, dtype=torch.int32, device=query.device)
-                for offset in offsets
-            ],
-            device=query.device,
-        ).to_padded_tensor(padding=-1)
+        if offsets is not None:
+            offsets = torch.nested.nested_tensor(
+                [
+                    torch.tensor(offset, dtype=torch.int32, device=query.device)
+                    for offset in offsets
+                ],
+                device=query.device,
+            ).to_padded_tensor(padding=-1)
 
     attn_output = bitfield_attn_func(
         query,
@@ -126,11 +128,32 @@ class BitfieldUtils:
     def set_sequence_lengths_cache(
         cls: BitfieldUtils,
         sequence_lengths: list[int],
-        offsets: Optional[list[np.ndarray]] = None,
         local_sequence_lengths: list[int] = None,
+        offsets: Optional[list[np.ndarray]] = None,
         overwrite: bool = True,
     ):
         if not overwrite and cls.sequence_lengths_cache is not None:
             return
 
         cls.sequence_lengths_cache = (sequence_lengths, local_sequence_lengths, offsets)
+
+    @classmethod
+    def get_sequence_lengths_cache(
+        cls: BitfieldUtils,
+        device: torch.device = get_accelerator().get_current_device(),
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        if cls.sequence_lengths_cache is None:
+            return None
+
+        seq_lens, local_seq_lens, offsets = cls.sequence_lengths_cache
+        seqlen_qs = torch.tensor(local_seq_lens, dtype=torch.int64, device=device)
+        seqlen_ks = torch.tensor(seq_lens, dtype=torch.int64, device=device)
+        offsets = torch.nested.nested_tensor(
+            [
+                torch.tensor(offset, dtype=torch.int32, device=device)
+                for offset in offsets
+            ],
+            device=device,
+        ).to_padded_tensor(padding=-1)
+
+        return seqlen_qs, seqlen_ks, offsets
