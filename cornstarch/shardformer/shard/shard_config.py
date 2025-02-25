@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 import torch.distributed as dist
@@ -8,13 +9,26 @@ from colossalai.shardformer.shard.shard_config import ShardConfig as ColossalSha
 from cornstarch.pipeline_template import PipelineTemplate
 
 
+class ContextParallelDistributionMode(Enum):
+    """
+    Enum class for the context parallel distribution mode
+    """
+
+    UNIFORM = "uniform"
+    ZIGZAG = "zigzag"
+    MAKESPAN_MAIN = "makespan_main"
+
+
 @dataclass
 class ShardConfig(ColossalShardConfig):
     tensor_parallel_process_group: Optional[dist.ProcessGroup] = None
     sequence_parallel_process_group: Optional[dist.ProcessGroup] = None
     enable_sequence_parallelism: bool = False
-    sequence_parallelism_mode: str = None
+    sequence_parallelism_mode: ContextParallelDistributionMode = (
+        ContextParallelDistributionMode.UNIFORM
+    )
     enable_sequence_overlap: bool = False
+    context_parallel_distribution_mode: str = None
     pipeline_stage_manager: Optional[PipelineStageManager] = None
     pipeline_template: Optional[PipelineTemplate] = None
     enable_tensor_parallelism: bool = True
@@ -31,13 +45,3 @@ class ShardConfig(ColossalShardConfig):
         assert (
             not self.enable_sequence_parallelism
         ), "Sequence parallelism is currently not supported"
-
-        if self.enable_sequence_parallelism:
-            assert self.sequence_parallelism_mode in [
-                "uniform",
-                "zigzag",
-                "makespan_main",
-            ], (
-                "Invalid sequence parallelism mode. "
-                f"Supported modes are 'uniform', 'zigzag', 'makespan_main', got {self.sequence_parallelism_mode}"
-            )
