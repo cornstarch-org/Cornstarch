@@ -1,3 +1,4 @@
+import functools
 from typing import Callable, List, Optional, Tuple, Union
 
 import torch
@@ -9,20 +10,17 @@ from colossalai.shardformer.layer._operation import (
     split_forward_gather_backward,
 )
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from torch.nn.modules.loss import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
-    SequenceClassifierOutputWithPast,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.llama.modeling_llama import (
     KwargsForCausalLM,
     LlamaAttention,
     LlamaForCausalLM,
-    LlamaForSequenceClassification,
     LlamaModel,
     apply_rotary_pos_emb,
     eager_attention_forward,
@@ -30,8 +28,14 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.processing_utils import Unpack
 
-from cornstarch.kernel.interface import create_bitfield_attention_mask
-from cornstarch.shardformer.layers.utils import ContextParallelBatchUtils
+from cornstarch.kernel.interface import BitfieldUtils
+from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
+    context_parallel_bitfield_attention_forward,
+)
+from cornstarch.shardformer.layers.utils import (
+    ContextParallelBatchSplitUtils,
+    ContextParallelDistributionMode,
+)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -114,8 +118,10 @@ class LlamaModelForwards:
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
-        ring_attn_mode = getattr(
-            shard_config, "ring_attention_distribution_mode", "uniform"
+        cp_dist_mode = getattr(
+            shard_config,
+            "context_parallel_distribution_mode",
+            ContextParallelDistributionMode.UNIFORM,
         )
 
         """
@@ -130,40 +136,48 @@ class LlamaModelForwards:
         In other cases, we need to update attention mask to be compatible with the model.
         """
 
-        if sp_mode == "ring_attn":
-            # Do nothing. Our RingAttention implementation converts attention mask automatically.
+        sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
+        if self.config._attn_implementation == "bitfield_attention":
+            BitfieldUtils.set_sequence_lengths_cache(
+                sequence_lengths=sequence_lengths.tolist(),
+                local_sequence_lengths=sequence_lengths.tolist(),
+                offsets=None,
+                overwrite=False,
+            )
             attn_mask = attention_mask
         else:
-            if self.config._attn_implementation == "bitfield_attention":
-                attn_mask = (
-                    attention_mask
-                    if attention_mask is not None
-                    else create_bitfield_attention_mask(input_ids, token_ids={})
-                )
-            else:
-                # causal mask
-                attn_mask = self._update_causal_mask(
-                    attention_mask,
-                    hidden_states,
-                    cache_position,
-                    past_key_values,
-                    output_attentions,
-                )
+            # causal mask
+            attn_mask = self._update_causal_mask(
+                attention_mask,
+                hidden_states,
+                cache_position,
+                past_key_values,
+                output_attentions,
+            )
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
-            # NOTE(Runyu): ColossalAI uses  attention_mask.bool().all() to judge if the input is var len version, which is a hack way. But in multi-modal model training, it is not good to use this way.
-            # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
-            # TODO(Runyu): We should use a better way to judge if the input is var len version.
-            # TODO(Runyu): support var len version
             if sp_mode == "ring_attn":
-                hidden_states = ContextParallelBatchUtils.split_batch(
-                    hidden_states, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
+                assert self.config._attn_implementation == "bitfield_attention", (
+                    "Cornstarch context parallelism is only supported with bitfield_attention. "
+                    f"Got {self.config._attn_implementation}"
+                )
+                hidden_states, _, offsets = ContextParallelBatchSplitUtils.split_batch(
+                    hidden_states,
+                    sequence_lengths,
+                    attn_mask,
+                    sp_group,
+                    dist_mode=cp_dist_mode,
                 )  # shape: [B, L // sp_size, ...]
-                position_ids = ContextParallelBatchUtils.split_batch(
-                    position_ids, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
-                )  # shape: [B, L // sp_size]
+                position_ids = offsets
+                # position_ids, _, _ = ContextParallelBatchSplitUtils.split_batch(
+                #     position_ids,
+                #     sequence_lengths,
+                #     attn_mask,
+                #     sp_group,
+                #     dist_mode=cp_dist_mode,
+                # )  # shape: [B, L // sp_size]
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
@@ -182,6 +196,9 @@ class LlamaModelForwards:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
+            cache = BitfieldUtils.get_sequence_lengths_cache()
+            seqlen_qs, seqlen_ks, offsets = cache or (None, None, None)
+
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
@@ -193,6 +210,9 @@ class LlamaModelForwards:
                     use_cache,
                     cache_position,
                     position_embeddings,
+                    seqlen_qs=seqlen_qs,
+                    seqlen_ks=seqlen_ks,
+                    offsets=offsets,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -204,6 +224,9 @@ class LlamaModelForwards:
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    seqlen_qs=seqlen_qs,
+                    seqlen_ks=seqlen_ks,
+                    offsets=offsets,
                     **flash_attn_kwargs,
                 )
 
@@ -211,6 +234,8 @@ class LlamaModelForwards:
 
             if output_attentions:
                 all_self_attentions += (layer_outputs[1],)
+
+        BitfieldUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
             outputs = {
@@ -298,20 +323,28 @@ class LlamaModelForwards:
         ):
             # Split labels too
             sp_group = shard_config.sequence_parallel_process_group
-            ring_attn_mode = getattr(
-                shard_config, "ring_attention_distribution_mode", "uniform"
+            sp_dist_mode = getattr(
+                shard_config,
+                "context_parallel_distribution_mode",
+                ContextParallelDistributionMode.UNIFORM,
+            )
+
+            assert self.config._attn_implementation == "bitfield_attention", (
+                "Cornstarch context parallelism is only supported with bitfield_attention. "
+                f"Got {self.config._attn_implementation}"
             )
 
             # NOTE(Runyu): ColossalAI uses attention_mask.bool().all() to judge if the input is var len version, which is a hack way. But in multi-modal model training, it is not good to use this way.
             # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
             # TODO(Runyu): We should use a better way to judge if the input is var len version.
             # TODO(Runyu): support var len version
-            # labels = split_batch_uniform(labels, sp_group, seq_dim=1, is_label=True)
-            labels = ContextParallelBatchUtils.split_batch(
+            sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
+            labels, _, _ = ContextParallelBatchSplitUtils.split_batch(
                 labels,
+                sequence_lengths,
+                attention_mask,
                 sp_group,
-                seq_dim=1,
-                ring_attn_mode=ring_attn_mode,
+                dist_mode=sp_dist_mode,
             )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
@@ -335,6 +368,8 @@ class LlamaModelForwards:
             force_sp_gather=False,
         )
         past_key_values = None
+
+        BitfieldUtils.clear_cache()
 
         stage_manager = shard_config.pipeline_stage_manager
         if not (stage_manager is None or stage_manager.is_last_stage()):
@@ -369,127 +404,6 @@ class LlamaModelForwards:
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-    @staticmethod
-    def llama_for_sequence_classification_forward(
-        self: LlamaForSequenceClassification,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        hidden_states: Optional[torch.FloatTensor] = None,
-        all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
-        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
-        shard_config: ShardConfig = None,
-        **kwargs: Unpack[KwargsForCausalLM],
-    ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
-        )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
-        outputs = LlamaModelForwards.llama_model_forward(
-            self.model,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            hidden_states=hidden_states,
-            all_hidden_states=all_hidden_states,
-            all_self_attentions=all_self_attentions,
-            shard_config=shard_config,
-            **kwargs,
-        )
-
-        stage_manager = shard_config.pipeline_stage_manager
-        if not (stage_manager is None or stage_manager.is_last_stage()):
-            return outputs
-
-        hidden_states = outputs[0]
-        logits = self.score(hidden_states)
-
-        batch_size = hidden_states.shape[0]
-        if self.config.pad_token_id is None and batch_size != 1:
-            raise ValueError(
-                "Cannot handle batch sizes > 1 if no padding token is defined."
-            )
-        if self.config.pad_token_id is not None and input_ids is not None:
-            # if no pad token found, use modulo instead of reverse indexing for ONNX compatibility
-            sequence_lengths = (
-                torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
-            )
-            sequence_lengths = sequence_lengths % input_ids.shape[-1]
-            sequence_lengths = sequence_lengths.to(logits.device)
-        else:
-            sequence_lengths = -1
-
-        pooled_logits = logits[
-            torch.arange(batch_size, device=logits.device), sequence_lengths
-        ]
-
-        loss = None
-        if labels is not None:
-            labels = labels.to(logits.device)
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (
-                    labels.dtype == torch.long or labels.dtype == torch.int
-                ):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.num_labels == 1:
-                    loss = loss_fct(pooled_logits.squeeze(), labels.squeeze())
-                else:
-                    loss = loss_fct(pooled_logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(
-                    pooled_logits.view(-1, self.num_labels), labels.view(-1)
-                )
-            elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
-                loss = loss_fct(pooled_logits, labels)
-
-        if not return_dict:
-            output = (pooled_logits,) + outputs[1:]
-            return ((loss,) + output) if loss is not None else output
-
-        return SequenceClassifierOutputWithPast(
-            loss=loss,
-            logits=pooled_logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
@@ -559,19 +473,29 @@ class LlamaAttentionForwards:
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            if self.config._attn_implementation == "sdpa" and kwargs.get(
-                "output_attentions", False
-            ):
-                logger.warning_once(
-                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-                )
-            else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS[
-                    self.config._attn_implementation
-                ]
+        if sp_mode == "ring_attn":
+            assert self.config._attn_implementation == "bitfield_attention", (
+                "Cornstarch context parallelism is only supported with bitfield_attention. "
+                f"Got {self.config._attn_implementation}"
+            )
+
+            attention_interface: Callable = functools.partial(
+                context_parallel_bitfield_attention_forward, sp_group=sp_group
+            )
+        else:
+            attention_interface: Callable = eager_attention_forward
+            if self.config._attn_implementation != "eager":
+                if self.config._attn_implementation == "sdpa" and kwargs.get(
+                    "output_attentions", False
+                ):
+                    logger.warning_once(
+                        "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                        'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                    )
+                else:
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[
+                        self.config._attn_implementation
+                    ]
 
         attn_output, attn_weights = attention_interface(
             self,

@@ -33,9 +33,16 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     ModelOutput,
 )
-from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
+from transformers.modeling_utils import (
+    ALL_ATTENTION_FUNCTIONS,
+    PretrainedConfig,
+    PreTrainedModel,
+)
 
-from cornstarch.kernel.interface import create_bitfield_attention_mask
+from cornstarch.kernel.interface import (
+    bitfield_attention_forward,
+    create_bitfield_attention_mask,
+)
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
@@ -49,8 +56,11 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultiModalPipelineStageManager,
 )
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
 
 from ..distributed_base import GlooDistributedTestBase
+
+ALL_ATTENTION_FUNCTIONS.update({"bitfield_attention": bitfield_attention_forward})
 
 
 class ModelClassBase(ABC):
@@ -215,7 +225,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         attention: str,
         precision: str,
         sp_mode: str | None = None,
-        ring_attn_mode: str | None = "zigzag",
+        ring_attn_mode: ContextParallelDistributionMode | None = None,
     ):
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -236,6 +246,8 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                     "enable_sequence_parallelism": True,
                     "sequence_parallelism_mode": sp_mode,
                     "sp_size": 2,
+                    # context_parallel_distribution_mode will be set later,
+                    # as HybirdParallelPlugin doesn't support it
                 }
             )
 
@@ -251,13 +263,18 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         )
 
         if sp_mode == "ring_attn":
-            booster.plugin.shard_config.ring_attention_distribution_mode = (
+            booster.plugin.shard_config.context_parallel_distribution_mode = (
                 ring_attn_mode
             )
 
+        assert org_model.config._attn_implementation == "eager"
+        assert sharded_model.unwrap().config._attn_implementation == attention
+
         try:
-            org_model.gradient_checkpointing_enable()
-            sharded_model.unwrap().gradient_checkpointing_enable()
+            org_model.gradient_checkpointing_enable({"use_reentrant": False})
+            sharded_model.unwrap().gradient_checkpointing_enable(
+                {"use_reentrant": False}
+            )
         except ValueError:
             # Model does not support gradient checkpointing
             pass
@@ -307,6 +324,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         with ctx:
             org_model = self.model.model_fn().to(device="cuda")
             sharded_model = copy.deepcopy(org_model)
+            sharded_model.config._attn_implementation = attention
         if use_lazy_init:
             ctx.materialize(org_model)
 
