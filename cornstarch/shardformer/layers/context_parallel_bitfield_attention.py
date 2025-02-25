@@ -7,6 +7,7 @@ from cornstarch.kernel.bitfield_attention import (
     _flash_attn_backward,
     _flash_attn_forward,
 )
+from cornstarch.kernel.interface import BitfieldUtils
 
 
 class ContextParallelBitfieldAttention(torch.autograd.Function):
@@ -31,7 +32,6 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         """
         # shape constraints
         sp_world_size = dist.get_world_size(sp_group)
-        sp_rank = dist.get_rank(sp_group)
 
         batch, seqlen_q, nheads, d = q.shape
         _, seqlen_k, _, _ = k.shape
@@ -47,8 +47,6 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
         assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
         assert q.is_cuda and k.is_cuda and v.is_cuda
-
-        context_offset = seqlen_q * sp_rank
 
         gathered_k = [
             torch.empty(
@@ -79,6 +77,17 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         os: list[torch.Tensor] = []
         lses: list[torch.Tensor] = []
         softmax_scales: list[torch.Tensor] = []
+
+        seq_lens, local_seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
+        seqlen_qs = torch.tensor(local_seq_lens, dtype=torch.int64, device=q.device)
+        seqlen_ks = torch.tensor(seq_lens, dtype=torch.int64, device=q.device)
+        offsets = torch.nested.nested_tensor(
+            [
+                torch.tensor(offset, dtype=torch.int32, device=q.device)
+                for offset in offsets
+            ],
+            device=q.device,
+        )
 
         head_index = 0
         while head_index < nheads:
@@ -112,14 +121,16 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=softmax_scale,
                 mask=mask,
-                context_offsets=[context_offset] * batch,
+                seqlen_qs=seqlen_qs,
+                seqlen_ks=seqlen_ks,
+                context_offsets=offsets,
             )
 
             os.append(o)
             lses.append(lse)
             softmax_scales.append(softmax_scale)
 
-        ctx.save_for_backward(q, k, v, bias, mask)
+        ctx.save_for_backward(q, k, v, bias, mask, seqlen_qs, seqlen_ks, offsets)
         ctx.heads_stride = heads_stride
         ctx.os = os
         ctx.lses = lses
@@ -130,19 +141,16 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: torch.autograd.function.FunctionCtx, do: torch.Tensor):
-        q, k, v, bias, mask = ctx.saved_tensors
+        q, k, v, bias, mask, seqlen_qs, seqlen_ks, offsets = ctx.saved_tensors
         heads_stride: int = ctx.heads_stride
         os: list[torch.Tensor] = ctx.os
         lses: list[torch.Tensor] = ctx.lses
         softmax_scales: list[torch.Tensor] = ctx.softmax_scales
         sp_group: dist.ProcessGroup = ctx.sp_group
         sp_world_size = dist.get_world_size(sp_group)
-        sp_rank = dist.get_rank(sp_group)
 
         batch, seqlen_q, nheads, d = q.shape
         _, seqlen_k, _, _ = k.shape
-
-        context_offset = seqlen_q * sp_rank
 
         gathered_k = [
             torch.empty(
@@ -237,7 +245,9 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=softmax_scale,
                 mask=mask,
-                context_offsets=[context_offset] * batch,
+                seqlen_qs=seqlen_qs,
+                seqlen_ks=seqlen_ks,
+                context_offsets=offsets,
             )
 
             dist.reduce_scatter(
