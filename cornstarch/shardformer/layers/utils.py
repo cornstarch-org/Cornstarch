@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import heapq
-from typing import Optional
 
 import numpy as np
 import torch
@@ -10,14 +9,45 @@ import torch.distributed as dist
 from cornstarch.kernel.bitfield_attention import (
     get_num_computation_block_per_query_block,
 )
+from cornstarch.kernel.interface import BitfieldUtils
+from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
 
 
 class ContextParallelBatchSplitUtils:
-    split_batch_cache: Optional[list[np.ndarray]] = None
+    @staticmethod
+    def split_batch(
+        batch: torch.Tensor,
+        seqlens: torch.Tensor,
+        bitfield_attention_mask: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        dist_mode: ContextParallelDistributionMode,
+        is_label: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+            - torch.Tensor (batch_size, max_seqlen, num_heads, headdim):
+                the split batch
+                If each split sequence in a batch has different length, the padding is 0.
+            - torch.Tensor (batch_size):
+                the sequence lengths of the split batch
+            - torch.Tensor (batch_size, max_seqlen):
+                the indices of tokens in the split batch.
+                If each split sequence in a batch has different length, the padding is -1.
+        """
+        assert seqlens is not None, "Sequence lengths must be provided."
 
-    @classmethod
-    def clear_split_cache(cls: ContextParallelBatchSplitUtils):
-        cls.split_batch_cache = None
+        if dist_mode == ContextParallelDistributionMode.UNIFORM:
+            return ContextParallelBatchSplitUtils.split_batch_uniform(
+                batch, seqlens, bitfield_attention_mask, sp_group, is_label
+            )
+        elif dist_mode == ContextParallelDistributionMode.ZIGZAG:
+            return ContextParallelBatchSplitUtils.split_batch_zigzag(
+                batch, seqlens, bitfield_attention_mask, sp_group, is_label
+            )
+        elif dist_mode == ContextParallelDistributionMode.MAKESPAN_MAIN:
+            return ContextParallelBatchSplitUtils.split_batch_makespan_minimization(
+                batch, seqlens, bitfield_attention_mask, sp_group, is_label
+            )
 
     @staticmethod
     def split_batch_uniform(
@@ -29,16 +59,6 @@ class ContextParallelBatchSplitUtils:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         split them evenly by seq_dim
-
-        Returns:
-            - torch.Tensor (batch_size, max_seqlen, num_heads, headdim):
-                the split batch
-                If each split sequence in a batch has different length, the padding is 0.
-            - torch.Tensor (batch_size):
-                the sequence lengths of the split batch
-            - torch.Tensor (batch_size, max_seqlen):
-                the indices of tokens in the split batch.
-                If each split sequence in a batch has different length, the padding is -1.
         """
         assert batch is not None
 
@@ -72,22 +92,31 @@ class ContextParallelBatchSplitUtils:
         split_batches = []
         seq_lens = []
         offsets = []
-        for i in range(batch_size):
-            # We chunk batch[i] with dim=0, which equivalent to dim=1 in the original tensor.
-            batch_chunks = batch[i, : seqlens[i]].chunk(sp_size, dim=0)
-            split_batches.append(batch_chunks[sp_rank])
 
-            chunked_seqlens = [chunk.shape[0] for chunk in batch_chunks]
-            seq_lens.append(chunked_seqlens[sp_rank])
+        if BitfieldUtils.sequence_lengths_cache is not None:
+            _, seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
+            split_batches = [batch[i, offset] for i, offset in enumerate(offsets)]
+        else:
+            for i in range(batch_size):
+                # We chunk batch[i] with dim=0, which equivalent to dim=1 in the original tensor.
+                batch_chunks = batch[i, : seqlens[i]].chunk(sp_size, dim=0)
+                split_batches.append(batch_chunks[sp_rank])
 
-            start_offset = sum(chunked_seqlens[:sp_rank])
-            offsets.append(
-                torch.arange(
-                    start_offset,
-                    start_offset + chunked_seqlens[sp_rank],
-                    dtype=torch.int32,
-                    device=batch.device,
+                chunked_seqlens = [chunk.shape[0] for chunk in batch_chunks]
+                seq_lens.append(chunked_seqlens[sp_rank])
+
+                start_offset = sum(chunked_seqlens[:sp_rank])
+                offsets.append(
+                    torch.arange(
+                        start_offset,
+                        start_offset + chunked_seqlens[sp_rank],
+                        dtype=torch.int32,
+                        device=batch.device,
+                    )
                 )
+
+            BitfieldUtils.set_sequence_lengths_cache(
+                seqlens.tolist(), seq_lens, offsets
             )
 
         return (
@@ -100,9 +129,8 @@ class ContextParallelBatchSplitUtils:
             ),
         )
 
-    @classmethod
+    @staticmethod
     def split_batch_zigzag(
-        cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
         seqlens: torch.Tensor,
         bitfield_attention_mask: torch.Tensor,
@@ -111,16 +139,6 @@ class ContextParallelBatchSplitUtils:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         split them using zigzag strategy
-
-        Returns:
-            - torch.Tensor (batch_size, max_seqlen, num_heads, headdim):
-                the split batch
-                If each split sequence in a batch has different length, the padding is 0.
-            - torch.Tensor (batch_size):
-                the sequence lengths of the split batch
-            - torch.Tensor (batch_size, max_seqlen):
-                the indices of tokens in the split batch.
-                If each split sequence in a batch has different length, the padding is -1.
         """
         assert batch is not None
 
@@ -155,9 +173,8 @@ class ContextParallelBatchSplitUtils:
         seq_lens = []
         offsets = []
 
-        if cls.split_batch_cache is not None:
-            offsets = cls.split_batch_cache
-            seq_lens = [len(offset) for offset in offsets]
+        if BitfieldUtils.sequence_lengths_cache is not None:
+            _, seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
         else:
             for i in range(batch_size):
                 seq_len = seqlens[i].item()
@@ -177,7 +194,9 @@ class ContextParallelBatchSplitUtils:
                 offsets.append(assignments)
 
             # Cache assignments
-            cls.split_batch_cache = offsets
+            BitfieldUtils.set_sequence_lengths_cache(
+                seqlens.tolist(), seq_lens, offsets
+            )
 
         for i in range(batch_size):
             split_batches.append(batch[i, offsets[i]])
@@ -192,9 +211,8 @@ class ContextParallelBatchSplitUtils:
             ),
         )
 
-    @classmethod
+    @staticmethod
     def split_batch_makespan_minimization(
-        cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
         seqlens: torch.Tensor,
         bitfield_attention_mask: torch.Tensor,
@@ -204,16 +222,6 @@ class ContextParallelBatchSplitUtils:
         """
         split tokens considering their makespan to be minimized.
         Tokens are grouped as blocks to reduce overhead of makespan minimization algorithm.
-
-        Returns:
-            - torch.Tensor (batch_size, max_seqlen, num_heads, headdim):
-                the split batch
-                If each split sequence in a batch has different length, the padding is 0.
-            - torch.Tensor (batch_size):
-                the sequence lengths of the split batch
-            - torch.Tensor (batch_size, max_seqlen):
-                the indices of tokens in the split batch.
-                If each split sequence in a batch has different length, the padding is -1.
         """
         assert batch is not None
 
@@ -232,9 +240,8 @@ class ContextParallelBatchSplitUtils:
                 ).to_padded_tensor(padding=-1),
             )
 
-        if cls.split_batch_cache is not None:
-            offsets = cls.split_batch_cache
-            seq_lens = [len(offset) for offset in offsets]
+        if BitfieldUtils.sequence_lengths_cache is not None:
+            _, seq_lens, offsets = BitfieldUtils.sequence_lengths_cache
         else:
             block_size = 128
 
@@ -300,7 +307,7 @@ class ContextParallelBatchSplitUtils:
                 seq_lens.append(seq_lens_per_batch)
                 offsets.append(assignments)
 
-            cls.split_batch_cache = offsets
+            BitfieldUtils.sequence_lengths_cache = (seqlens.tolist(), seq_lens, offsets)
 
         split_batches = []
         for i in range(batch_size):
