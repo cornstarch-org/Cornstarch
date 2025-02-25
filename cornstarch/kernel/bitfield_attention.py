@@ -1001,12 +1001,12 @@ def _flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    seqlen_qs: torch.Tensor,
+    seqlen_ks: torch.Tensor,
+    offsets: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     mask: torch.Tensor = None,
-    seqlen_qs: Optional[torch.Tensor] = None,
-    seqlen_ks: Optional[torch.Tensor] = None,
-    context_offsets: Optional[torch.Tensor] = None,
 ):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
@@ -1021,19 +1021,6 @@ def _flash_attn_forward(
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
     assert q.is_cuda and k.is_cuda and v.is_cuda
-
-    if seqlen_qs is None:
-        seqlen_qs = torch.tensor([seqlen_q] * batch, dtype=torch.int64, device=q.device)
-    if seqlen_ks is None:
-        seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
-    if context_offsets is None:
-        context_offsets = torch.nested.nested_tensor(
-            [
-                torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
-                for seqlen_q in seqlen_qs
-            ],
-            device=q.device,
-        ).to_padded_tensor(padding=-1)
 
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
 
@@ -1081,7 +1068,7 @@ def _flash_attn_forward(
         tmp,
         softmax_scale,
         mask.stride(0),
-        context_offsets.stride(0),
+        offsets.stride(0),
         q.stride(0),
         q.stride(2),
         q.stride(1),
@@ -1096,7 +1083,7 @@ def _flash_attn_forward(
         o.stride(2),
         o.stride(1),
         nheads,
-        context_offsets,
+        offsets,
         seqlen_qs,
         seqlen_ks,
         seqlen_q_rounded,
@@ -1130,24 +1117,13 @@ def _flash_attn_backward(
     mask: torch.Tensor = None,
     seqlen_qs: torch.Tensor = None,
     seqlen_ks: torch.Tensor = None,
-    context_offsets: torch.Tensor = None,
+    offsets: torch.Tensor = None,
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
         do = do.contiguous()
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
-
-    if seqlen_qs is None:
-        seqlen_qs = torch.tensor([seqlen_q] * batch, dtype=torch.int64, device=q.device)
-    if seqlen_ks is None:
-        seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
-    if context_offsets is None:
-        context_offsets = (
-            torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
-            .unsqueeze(0)
-            .repeat(batch, 1)
-        )
 
     # assert d in {16, 32, 64, 128}
     assert d <= 128
@@ -1161,9 +1137,6 @@ def _flash_attn_backward(
     dq_accum = torch.empty_like(q, dtype=torch.float32)  # Accumulates gradients for q
     delta = torch.empty_like(lse)  # intermediate results for softmax gradient
     # delta = torch.zeros_like(lse)
-
-    seqlen_qs = torch.tensor(seqlen_qs, device=q.device, dtype=torch.int32)
-    seqlen_ks = torch.tensor(seqlen_ks, device=q.device, dtype=torch.int32)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
@@ -1228,7 +1201,7 @@ def _flash_attn_backward(
         delta,
         softmax_scale,
         mask.stride(0),
-        context_offsets.stride(0),
+        offsets.stride(0),
         q.stride(0),
         q.stride(2),
         q.stride(1),
@@ -1252,7 +1225,7 @@ def _flash_attn_backward(
         dv.stride(2),
         dv.stride(1),
         nheads,
-        context_offsets,
+        offsets,
         seqlen_qs,
         seqlen_ks,
         seqlen_q_rounded,
@@ -1283,7 +1256,7 @@ class FlashAttnFunc(torch.autograd.Function):
         mask=None,
         seqlen_qs: torch.Tensor = None,
         seqlen_ks: torch.Tensor = None,
-        context_offsets: torch.Tensor = None,
+        offsets: torch.Tensor = None,
     ):
         """
         q: (batch_size, seqlen_q, nheads, headdim)
@@ -1294,26 +1267,46 @@ class FlashAttnFunc(torch.autograd.Function):
         """
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
+
+        batch = q.shape[0]
+        if seqlen_qs is None:
+            seqlen_q = q.shape[1]
+            seqlen_qs = torch.tensor(
+                [seqlen_q] * batch, dtype=torch.int64, device=q.device
+            )
+        if seqlen_ks is None:
+            seqlen_k = k.shape[1]
+            seqlen_ks = torch.tensor(
+                [seqlen_k] * batch, dtype=torch.int64, device=q.device
+            )
+        if offsets is None:
+            offsets = torch.nested.nested_tensor(
+                [
+                    torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
+                    for seqlen_q in seqlen_qs
+                ],
+                device=q.device,
+            ).to_padded_tensor(padding=-1)
+
         o, lse, ctx.softmax_scale = _flash_attn_forward(
             q,
             k,
             v,
+            seqlen_qs=seqlen_qs,
+            seqlen_ks=seqlen_ks,
+            offsets=offsets,
             bias=bias,
             softmax_scale=softmax_scale,
             mask=mask,
-            seqlen_qs=seqlen_qs,
-            seqlen_ks=seqlen_ks,
-            context_offsets=context_offsets,
         )
-        ctx.save_for_backward(q, k, v, o, lse, bias, mask)
-        ctx.context_offsets = context_offsets
-        ctx.seqlen_qs = seqlen_qs
-        ctx.seqlen_ks = seqlen_ks
+        ctx.save_for_backward(
+            q, k, v, o, lse, bias, mask, seqlen_qs, seqlen_ks, offsets
+        )
         return o
 
     @staticmethod
     def backward(ctx, do):
-        q, k, v, o, lse, bias, mask = ctx.saved_tensors
+        q, k, v, o, lse, bias, mask, seqlen_qs, seqlen_ks, offsets = ctx.saved_tensors
         assert not ctx.needs_input_grad[
             3
         ], "FlashAttention does not support bias gradient yet"
@@ -1336,9 +1329,9 @@ class FlashAttnFunc(torch.autograd.Function):
             bias=bias,
             softmax_scale=ctx.softmax_scale,
             mask=mask,
-            seqlen_qs=ctx.seqlen_qs,
-            seqlen_ks=ctx.seqlen_ks,
-            context_offsets=ctx.context_offsets,
+            seqlen_qs=seqlen_qs,
+            seqlen_ks=seqlen_ks,
+            offsets=offsets,
         )
         return dq, dk, dv, *([None] * 6)
 
