@@ -219,6 +219,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     encoders_outputs=encoders_outputs,
                     input_ids=input_ids,
                     inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
                 )
 
                 # step 4. run llm with merged inputs_embeds
