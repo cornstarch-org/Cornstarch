@@ -1027,11 +1027,13 @@ def _flash_attn_forward(
     if seqlen_ks is None:
         seqlen_ks = torch.tensor([seqlen_k] * batch, dtype=torch.int64, device=q.device)
     if context_offsets is None:
-        context_offsets = (
-            torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
-            .unsqueeze(0)
-            .repeat(batch, 1)
-        )
+        context_offsets = torch.nested.nested_tensor(
+            [
+                torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
+                for seqlen_q in seqlen_qs
+            ],
+            device=q.device,
+        ).to_padded_tensor(padding=-1)
 
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
 
