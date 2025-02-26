@@ -652,6 +652,7 @@ class TestContextParallelismClass(GlooDistributedTestBase):
         BitfieldUtils.set_sequence_lengths_cache(
             sequence_lengths, local_sequence_lengths, offsets
         )
+        seqlen_qs, seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache()
 
         cp_out: torch.Tensor = ContextParallelBitfieldAttention.apply(
             local_query,
@@ -659,8 +660,9 @@ class TestContextParallelismClass(GlooDistributedTestBase):
             local_value,
             mask,
             dist.GroupMember.WORLD,
-            None,
-            None,
+            seqlen_qs,
+            seqlen_ks,
+            offsets,
         )
 
         torch.testing.assert_close(
