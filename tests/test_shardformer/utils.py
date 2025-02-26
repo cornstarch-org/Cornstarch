@@ -88,7 +88,7 @@ class ModelClassBase(ABC):
 
 class ColossalaiHybridParallelBase(GlooDistributedTestBase):
     num_microbatches: int = 4
-    microbatch_size: int = 1
+    microbatch_size: int = 2
 
     @property
     def world_size(self) -> int:
@@ -133,7 +133,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         org_loss: torch.Tensor,
         sharded_loss: torch.Tensor,
     ):
-        plugin: MultimodalParallelPlugin = booster.plugin
+        plugin: HybridParallelPlugin = booster.plugin
         stage_manager = plugin.stage_manager
         # Loss check
         if stage_manager is None or stage_manager.is_last_stage():
@@ -397,7 +397,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 org_output = org_model(*unshard_test_data)
             else:
                 org_output = org_model(**unshard_test_data)
-            org_loss = criterion(org_output).to(precision)
+            org_loss = criterion(org_output)
         org_loss.backward()
 
         sharded_model.train()

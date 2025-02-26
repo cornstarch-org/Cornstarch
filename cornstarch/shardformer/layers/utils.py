@@ -235,7 +235,7 @@ class ContextParallelBatchSplitUtils:
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
         batch_size, seq_len = bitfield_attention_mask.shape
-        if sp_size == 1 or seq_len <= 128 * sp_size:
+        if sp_size == 1 or seq_len < 128 * sp_size:
             return (
                 batch,
                 seqlens,
