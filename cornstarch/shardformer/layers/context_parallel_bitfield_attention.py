@@ -52,6 +52,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
         assert q.is_cuda and k.is_cuda and v.is_cuda
 
+        # TODO: see the notion note. Need to gather k/v properly.
+
         gathered_k = [
             torch.empty(
                 (batch, seqlen_k, heads_stride, d), dtype=k.dtype, device=k.device

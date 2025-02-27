@@ -90,12 +90,12 @@ class ContextParallelBatchSplitUtils:
             )
 
         split_batches = []
-        seq_lens = []
-        offsets = []
+        seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
+        offsets: list[list[np.ndarray]] = [[] for _ in range(sp_size)]
 
         if BitfieldUtils.sequence_lengths_cache is not None:
             local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache()
+                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
             )
             split_batches = [batch[i, offset] for i, offset in enumerate(offsets)]
         else:
@@ -105,23 +105,24 @@ class ContextParallelBatchSplitUtils:
                 split_batches.append(batch_chunks[sp_rank])
 
                 chunked_seqlens = [chunk.shape[0] for chunk in batch_chunks]
-                seq_lens.append(chunked_seqlens[sp_rank])
+                for r in range(sp_size):
+                    seq_lens[r].append(chunked_seqlens[r])
 
-                start_offset = sum(chunked_seqlens[:sp_rank])
-                offsets.append(
-                    np.arange(
-                        start_offset,
-                        start_offset + chunked_seqlens[sp_rank],
-                        dtype=np.int32,
+                    start_offset = sum(chunked_seqlens[:r])
+                    offsets[r].append(
+                        np.arange(
+                            start_offset,
+                            start_offset + chunked_seqlens[r],
+                            dtype=np.int32,
+                        )
                     )
-                )
 
             BitfieldUtils.set_sequence_lengths_cache(
                 seqlens.tolist(), seq_lens, offsets
             )
 
             local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache()
+                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
             )
 
         return (
@@ -173,12 +174,12 @@ class ContextParallelBatchSplitUtils:
             )
 
         split_batches = []
-        seq_lens = []
-        offsets = []
+        seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
+        offsets: list[list[np.ndarray]] = [[] for _ in range(sp_size)]
 
         if BitfieldUtils.sequence_lengths_cache is not None:
             local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache()
+                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
             )
         else:
             for i in range(batch_size):
@@ -190,13 +191,14 @@ class ContextParallelBatchSplitUtils:
                 chunks = np.array_split(indices, num_chunks)
 
                 # Each rank gets two chunks: the chunk at position 'sp_rank' and the symmetric one.
-                first_chunk = chunks[sp_rank]
-                second_chunk = chunks[-sp_rank - 1]
+                for r in range(sp_size):
+                    first_chunk = chunks[r]
+                    second_chunk = chunks[-r - 1]
 
-                assignments = np.concatenate([first_chunk, second_chunk])
+                    assignments = np.concatenate([first_chunk, second_chunk])
 
-                seq_lens.append(len(assignments))
-                offsets.append(assignments)
+                    seq_lens[r].append(len(assignments))
+                    offsets[r].append(assignments)
 
             # Cache assignments
             BitfieldUtils.set_sequence_lengths_cache(
@@ -204,7 +206,7 @@ class ContextParallelBatchSplitUtils:
             )
 
             local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache()
+                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
             )
 
         for i in range(batch_size):
@@ -249,7 +251,7 @@ class ContextParallelBatchSplitUtils:
 
         if BitfieldUtils.sequence_lengths_cache is not None:
             local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache()
+                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
             )
         else:
             block_size = 128
@@ -266,9 +268,8 @@ class ContextParallelBatchSplitUtils:
             for i in range(sp_size):
                 heapq.heappush(loads_per_rank, (0, i))
 
-            # sequence length assigned to this process per batch (shape: [batch_size])
-            seq_lens = []
-            offsets = []
+            seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
+            offsets: list[list[np.ndarray]] = [[] for _ in range(sp_size)]
 
             for batch_index in range(batch_size):
                 workloads_per_query_block_per_batch = workloads_per_query_block[
@@ -282,8 +283,8 @@ class ContextParallelBatchSplitUtils:
                     num_tokens_per_block.append(num_tokens)
                     remaining_tokens -= num_tokens
 
-                seq_lens_per_batch = 0
-                assignments = []
+                seq_lens_per_batch_per_rank = [0 for _ in range(sp_size)]
+                assignments_per_rank = [[] for _ in range(sp_size)]
                 # Iterate over the blocks and assign them to the process with the least load
                 for i, block_workload in zip(
                     indices[batch_index].numpy(force=True),
@@ -295,33 +296,35 @@ class ContextParallelBatchSplitUtils:
                         loads_per_rank,
                         (load + block_workload.item(), rank),
                     )
-                    if rank == sp_rank:
-                        seq_lens_per_batch += num_tokens_per_block[i]
-                        assignments.append(i)
 
-                assignments.sort()
-                if assignments:
-                    assignments = np.concatenate(
-                        [
-                            np.arange(
-                                sum(num_tokens_per_block[:i]),
-                                sum(num_tokens_per_block[:i]) + num_tokens_per_block[i],
-                            )
-                            for i in assignments
-                        ]
-                    )
-                else:
-                    assert seq_lens_per_batch == 0
+                    seq_lens_per_batch_per_rank[rank] += num_tokens_per_block[i]
+                    assignments_per_rank[rank].append(i)
 
-                seq_lens.append(seq_lens_per_batch)
-                offsets.append(assignments)
+                for rank, assignments in enumerate(assignments_per_rank):
+                    assignments.sort()
+                    if assignments:
+                        assignments = np.concatenate(
+                            [
+                                np.arange(
+                                    sum(num_tokens_per_block[:i]),
+                                    sum(num_tokens_per_block[:i])
+                                    + num_tokens_per_block[i],
+                                )
+                                for i in assignments
+                            ]
+                        )
+                    else:
+                        assert seq_lens_per_batch_per_rank[rank] == 0
+
+                    seq_lens[rank].append(seq_lens_per_batch_per_rank[rank])
+                    offsets[rank].append(assignments)
 
             BitfieldUtils.set_sequence_lengths_cache(
                 seqlens.tolist(), seq_lens, offsets
             )
 
             local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache()
+                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
             )
 
         split_batches = []

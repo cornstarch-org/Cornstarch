@@ -644,15 +644,29 @@ class TestContextParallelismClass(GlooDistributedTestBase):
         )
 
         sequence_lengths = [seq_len] * batch_size
-        local_sequence_lengths = [local_query.shape[1]] * batch_size
-        offsets = torch.chunk(
+
+        local_sequence_lengths_per_rank = [
+            t.shape[1] for t in torch.chunk(query, self.world_size, dim=1)
+        ]
+        local_sequence_lengths = [
+            [local_sequence_lengths_per_rank[r] for _ in range(batch_size)]
+            for r in range(self.world_size)
+        ]
+
+        offsets_per_rank = torch.chunk(
             torch.arange(query.shape[1], device="cpu"), self.world_size, dim=0
-        )[self.rank].numpy()
-        offsets = [offsets] * batch_size
+        )
+        offsets = [
+            [offsets_per_rank[r].numpy() for _ in range(batch_size)]
+            for r in range(self.world_size)
+        ]
+
         BitfieldUtils.set_sequence_lengths_cache(
             sequence_lengths, local_sequence_lengths, offsets
         )
-        seqlen_qs, seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache()
+        seqlen_qs, seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache(
+            self.rank
+        )
 
         cp_out: torch.Tensor = ContextParallelBitfieldAttention.apply(
             local_query,

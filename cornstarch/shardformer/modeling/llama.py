@@ -140,7 +140,7 @@ class LlamaModelForwards:
         if self.config._attn_implementation == "bitfield_attention":
             BitfieldUtils.set_sequence_lengths_cache(
                 sequence_lengths=sequence_lengths.tolist(),
-                local_sequence_lengths=sequence_lengths.tolist(),
+                local_sequence_lengths=None,
                 offsets=None,
                 overwrite=False,
             )
@@ -473,7 +473,11 @@ class LlamaAttentionForwards:
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-        if sp_mode == "ring_attn":
+        if sp_mode == "ring_attn" and BitfieldUtils.get_sequence_lengths_cache() != (
+            None,
+            None,
+            None,
+        ):
             assert self.config._attn_implementation == "bitfield_attention", (
                 "Cornstarch context parallelism is only supported with bitfield_attention. "
                 f"Got {self.config._attn_implementation}"
