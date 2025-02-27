@@ -157,8 +157,15 @@ class BitfieldUtils:
     def get_sequence_lengths_cache(
         cls: BitfieldUtils,
         sp_rank: int = 0,
+        return_all_ranks: bool = False,
         device: torch.device = get_accelerator().get_current_device(),
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    ) -> Optional[
+        tuple[
+            torch.Tensor | list[torch.Tensor],
+            torch.Tensor,
+            torch.Tensor | list[torch.Tensor],
+        ]
+    ]:
         """
         Return cached result as a set of tensors after merging lists into tensors.
         For local sequence lengths and offsets, it only returns data for the current rank.
@@ -169,9 +176,19 @@ class BitfieldUtils:
         seq_lens, local_seq_lens, offsets = cls.sequence_lengths_cache
         seqlen_ks = torch.tensor(seq_lens, dtype=torch.int64, device=device)
 
-        seqlen_qs = torch.tensor(
-            local_seq_lens[sp_rank], dtype=torch.int64, device=device
-        )
-        offsets = torch.tensor(offsets[sp_rank], dtype=torch.int32, device=device)
+        if return_all_ranks:
+            seqlen_qs = [
+                torch.tensor(local_seq_len, dtype=torch.int64, device=device)
+                for local_seq_len in local_seq_lens
+            ]
+            offsets = [
+                torch.tensor(offset, dtype=torch.int32, device=device)
+                for offset in offsets
+            ]
+        else:
+            seqlen_qs = torch.tensor(
+                local_seq_lens[sp_rank], dtype=torch.int64, device=device
+            )
+            offsets = torch.tensor(offsets[sp_rank], dtype=torch.int32, device=device)
 
         return seqlen_qs, seqlen_ks, offsets
