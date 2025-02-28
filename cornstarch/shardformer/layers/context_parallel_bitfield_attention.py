@@ -9,7 +9,6 @@ from cornstarch.kernel.bitfield_attention import (
     _flash_attn_forward,
 )
 from cornstarch.kernel.interface import repeat_kv
-from cornstarch.shardformer.layers.utils import ContextParallelBatchSplitUtils
 
 
 class ContextParallelBitfieldAttention(torch.autograd.Function):
