@@ -42,7 +42,8 @@ class ShardConfig(ColossalShardConfig):
     def __post_init__(self):
         super().__post_init__()
 
-        assert self.sequence_parallelism_mode in [
-            "ring_attn",
-            "all_to_all",
-        ], f"Invalid sequence parallelism mode {self.sequence_parallelism_mode}"
+        if self.sequence_parallelism_mode is not None:
+            assert self.sequence_parallelism_mode in [
+                "ring_attn",
+                "all_to_all",
+            ], f"Invalid sequence parallelism mode {self.sequence_parallelism_mode}"

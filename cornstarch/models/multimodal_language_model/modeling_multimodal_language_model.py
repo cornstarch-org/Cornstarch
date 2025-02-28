@@ -842,7 +842,7 @@ class MultimodalModel(nn.Module):
                 "Call `MultimodalModel.set_modality_tokens()` to set token ids."
             )
 
-        sequence_lengths = attention_mask.sum(dim=1).to("cpu")
+        sequence_lengths = attention_mask.to(dtype=torch.int64, device="cpu").sum(dim=1)
         for modal_key, output in encoders_outputs.items():
             output: torch.Tensor = output[0]
 
@@ -881,7 +881,9 @@ class MultimodalModel(nn.Module):
             )
             inputs_embeds = inputs_embeds.masked_scatter(modal_mask, output)
 
-            sequence_lengths = sequence_lengths + (input_ids == token_id).sum(dim=1)
+            sequence_lengths = sequence_lengths + (input_ids.to("cpu") == token_id).sum(
+                dim=1
+            )
 
         attention_mask = create_bitfield_attention_mask(input_ids, self.token_ids)
         for i, sequence_length in enumerate(sequence_lengths.tolist()):

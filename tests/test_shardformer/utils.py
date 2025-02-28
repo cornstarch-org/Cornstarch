@@ -702,7 +702,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             for encoder_index, encoder_name in enumerate(encoders)
         }
         model.set_modality_token_ids(self.token_ids)
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable({"use_reentrant": False})
 
         return model
 
@@ -728,7 +728,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             for encoder_index, encoder_name in enumerate(encoders)
         }
         model.set_modality_token_ids(token_ids=self.token_ids)
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable({"use_reentrant": False})
 
         return model
 
@@ -934,8 +934,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         for model_base in self.encoders.values():
             data.update(model_base.data_gen_fn(batch_size))
         data.update(self.llm.data_gen_fn(batch_size))
-        # MultimodalModel automatically generates it after merging encoder outputs
-        data.pop("attention_mask", None)
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
