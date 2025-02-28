@@ -69,11 +69,16 @@ class TestContextParallelBatchSplitUtilClass:
         cls.num_heads = 8
         cls.head_dim = 64
 
+    @pytest.fixture(autouse=True)
+    def cleanup(self):
+        self.teardown_method()
+
     def teardown_method(self):
         if dist.is_initialized():
             dist.destroy_process_group()
 
         BitfieldUtils.clear_cache()
+        ContextParallelBatchSplitUtils.clear_cache()
 
     @pytest.mark.parametrize(
         "seqlen",
@@ -525,67 +530,6 @@ class TestContextParallelBatchSplitUtilClass:
                     torch.tensor(expected_indices[rank][i], device="cuda"),
                 )
 
-            # if world_size == 1 or max_seqlen <= 128 * world_size:
-            #     expected_indices = [np.arange(seqlen) for seqlen in seqlens]
-            #     for i in range(batch_size):
-            #         expected_seqlen = seqlens[i]
-            #         expected_split_data = data[i][:expected_seqlen]
-            #         torch.testing.assert_close(
-            #             expected_split_data, split_data[0][i, :expected_seqlen]
-            #         )
-            #         assert split_data[1][i].item() == expected_seqlen
-            #         assert torch.equal(
-            #             split_data[2][i, :expected_seqlen],
-            #             torch.tensor(expected_indices[i], device="cuda"),
-            #         )
-            # else:
-            #     """
-            #     Makespan minimization computes workloads across batches.
-            #     Therefore compute all expected information first and compare.
-            #     """
-            #     workloads: list[tuple[int, int]] = []  # (total_workloads, sp_rank)
-            #     expected_indices = [[] for _ in range(batch_size)]
-            #     expected_seqlens = [0] * batch_size
-
-            #     for i in range(world_size):
-            #         heapq.heappush(workloads, (0, i))
-
-            #     for i in range(batch_size):
-            #         seqlen = seqlens[i]
-            #         num_blocks = math.ceil(seqlen / 128)
-            #         if i % 2 == 0:
-            #             for workload in reversed(range(num_blocks)):
-            #                 # causal mask. workload will be 1, 2, 3, ...
-            #                 load, sp_rank = heapq.heappop(workloads)
-            #                 heapq.heappush(workloads, (load + workload + 1, sp_rank))
-            #                 start = workload * 128
-            #                 end = min((workload + 1) * 128, seqlen)
-            #                 if sp_rank == rank:
-            #                     expected_indices[i].extend(np.arange(start, end))
-            #                     expected_seqlens[i] += end - start
-            #         else:
-            #             for block_index in range(num_blocks):
-            #                 # full mask. workload will be N, N, N, ...
-            #                 load, sp_rank = heapq.heappop(workloads)
-            #                 heapq.heappush(workloads, (load + num_blocks, sp_rank))
-            #                 start = block_index * 128
-            #                 end = min((block_index + 1) * 128, seqlen)
-            #                 if sp_rank == rank:
-            #                     expected_indices[i].extend(np.arange(start, end))
-            #                     expected_seqlens[i] += end - start
-
-            #     for i in range(batch_size):
-            #         expected_split_data = data[i, expected_indices[i]]
-            #         expected_seqlen = expected_seqlens[i]
-            #         torch.testing.assert_close(
-            #             expected_split_data, split_data[0][i, :expected_seqlen]
-            #         )
-            #         assert split_data[1][i].item() == expected_seqlen
-            #         assert torch.equal(
-            #             split_data[2][i, :expected_seqlen],
-            #             torch.tensor(expected_indices[i], device="cuda"),
-            #         )
-
 
 @instantiate_parametrized_tests
 class TestContextParallelismClass(GlooDistributedTestBase):
@@ -661,12 +605,16 @@ class TestContextParallelismClass(GlooDistributedTestBase):
             for r in range(self.world_size)
         ]
 
-        BitfieldUtils.set_sequence_lengths_cache(
-            sequence_lengths, local_sequence_lengths, offsets
+        BitfieldUtils.set_sequence_lengths_cache(sequence_lengths)
+        ContextParallelBatchSplitUtils.set_context_parallel_sequence_lengths_cache(
+            local_sequence_lengths, offsets
         )
-        seqlen_qs, seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache(
-            self.rank
+
+        seqlen_ks = BitfieldUtils.get_sequence_lengths_cache()[0]
+        seqlen_qs, offsets = (
+            ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache()
         )
+        perm, inverse_perm = ContextParallelBatchSplitUtils.get_permutate_cache()
 
         cp_out: torch.Tensor = ContextParallelBitfieldAttention.apply(
             local_query,
@@ -677,6 +625,8 @@ class TestContextParallelismClass(GlooDistributedTestBase):
             seqlen_qs,
             seqlen_ks,
             offsets,
+            perm,
+            inverse_perm,
         )
 
         torch.testing.assert_close(

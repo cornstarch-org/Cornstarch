@@ -1,19 +1,123 @@
 from __future__ import annotations
 
 import heapq
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
+from colossalai.accelerator import get_accelerator
 
 from cornstarch.kernel.bitfield_attention import (
     get_num_computation_block_per_query_block,
 )
-from cornstarch.kernel.interface import BitfieldUtils
 from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
 
 
 class ContextParallelBatchSplitUtils:
+    """
+    Context parallel cache for local sequence lengths and offsets per rank.
+    Each tensor in the lists is a tensor of sequence lengths or offsets for a rank.
+    """
+
+    context_parallel_sequence_lengths_cache: Optional[
+        tuple[list[torch.Tensor], list[torch.Tensor]]
+    ] = None
+
+    """
+    Indices cache to order gatherd key and value tensors in makespan minimization.
+    First tensor is used to converted linearly `cat`ed tensor to in-order tensor.
+        This guarantees correct computation of attention scores with arbitrary attention mask.
+    Second tensor is used to recover the original order of the tensor,
+        so that after sharding the tensors can be scattered back to ranks.
+    """
+    indices_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None
+
+    @classmethod
+    def clear_cache(cls: ContextParallelBatchSplitUtils):
+        cls.context_parallel_sequence_lengths_cache = None
+        cls.indices_cache = None
+
+    @classmethod
+    def set_context_parallel_sequence_lengths_cache(
+        cls: ContextParallelBatchSplitUtils,
+        sequence_lengths_per_rank: list[list[int]],
+        offsets_per_rank: list[np.ndarray] | list[list[np.ndarray]],
+    ):
+        if isinstance(offsets_per_rank[0], list):
+            new_offsets: list[np.ndarray] = []
+            for offset in offsets_per_rank:
+                new_offsets.append(
+                    np.full(
+                        (
+                            len(offset),
+                            max(map(len, offset)),
+                        ),
+                        -1,
+                    )
+                )
+                for i, off in enumerate(offset):
+                    new_offsets[-1][i, : len(off)] = off
+            offsets_per_rank = new_offsets
+
+        sequence_lengths_per_rank = [
+            torch.tensor(seq_lens, dtype=torch.int64, device="cpu")
+            for seq_lens in sequence_lengths_per_rank
+        ]
+
+        offsets_per_rank = [
+            torch.tensor(offsets, dtype=torch.int32, device="cpu")
+            for offsets in offsets_per_rank
+        ]
+
+        cls.context_parallel_sequence_lengths_cache = (
+            sequence_lengths_per_rank,
+            offsets_per_rank,
+        )
+
+    @classmethod
+    def get_context_parallel_sequence_lengths_cache(
+        cls: ContextParallelBatchSplitUtils,
+        sp_rank: int = -1,
+        device: torch.device = get_accelerator().get_current_device(),
+    ) -> tuple[torch.Tensor | list[torch.Tensor], torch.Tensor | list[torch.Tensor]]:
+        assert sp_rank == -1 or sp_rank >= 0
+        if cls.context_parallel_sequence_lengths_cache is None:
+            return None, None
+
+        seq_lens, offsets = cls.context_parallel_sequence_lengths_cache
+        if sp_rank == -1:
+            return [s.to(device) for s in seq_lens], [o.to(device) for o in offsets]
+        else:
+            return seq_lens[sp_rank].to(device), offsets[sp_rank].to(device)
+
+    @classmethod
+    def get_permutate_cache(
+        cls: ContextParallelBatchSplitUtils,
+        device: torch.device = get_accelerator().get_current_device(),
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if cls.indices_cache is None:
+            assert cls.context_parallel_sequence_lengths_cache is not None
+            # Generate permuation and inverse permutation tensors
+            offsets = torch.cat(cls.context_parallel_sequence_lengths_cache[1], dim=1)
+            perm = torch.argsort(
+                torch.where(offsets == -1, torch.iinfo(torch.int32).max, offsets),
+                dim=1,
+            ).to("cpu")
+
+            inverse_perm = torch.empty_like(perm)
+            indices_range = (
+                torch.arange(perm.shape[1], device="cpu")
+                .unsqueeze(0)
+                .expand(perm.shape)
+            )
+            inverse_perm.scatter_(dim=1, index=perm, src=indices_range)
+
+            cls.indices_cache = (perm, inverse_perm)
+
+        perm, inverse_perm = cls.indices_cache
+        return perm.to(device), inverse_perm.to(device)
+
     @staticmethod
     def split_batch(
         batch: torch.Tensor,
@@ -90,13 +194,19 @@ class ContextParallelBatchSplitUtils:
             )
 
         split_batches = []
-        seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
+        local_seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
         offsets: list[list[np.ndarray]] = [[] for _ in range(sp_size)]
 
-        if BitfieldUtils.sequence_lengths_cache is not None:
-            local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
+        if (
+            ContextParallelBatchSplitUtils.context_parallel_sequence_lengths_cache
+            is not None
+        ):
+            local_seq_lens, offsets = (
+                ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache(
+                    sp_rank
+                )
             )
+
             split_batches = [batch[i, offset] for i, offset in enumerate(offsets)]
         else:
             for i in range(batch_size):
@@ -106,7 +216,7 @@ class ContextParallelBatchSplitUtils:
 
                 chunked_seqlens = [chunk.shape[0] for chunk in batch_chunks]
                 for r in range(sp_size):
-                    seq_lens[r].append(chunked_seqlens[r])
+                    local_seq_lens[r].append(chunked_seqlens[r])
 
                     start_offset = sum(chunked_seqlens[:r])
                     offsets[r].append(
@@ -117,12 +227,13 @@ class ContextParallelBatchSplitUtils:
                         )
                     )
 
-            BitfieldUtils.set_sequence_lengths_cache(
-                seqlens.tolist(), seq_lens, offsets
+            ContextParallelBatchSplitUtils.set_context_parallel_sequence_lengths_cache(
+                local_seq_lens, offsets
             )
-
-            local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
+            local_seq_lens, offsets = (
+                ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache(
+                    sp_rank
+                )
             )
 
         return (
@@ -174,12 +285,17 @@ class ContextParallelBatchSplitUtils:
             )
 
         split_batches = []
-        seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
+        local_seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
         offsets: list[list[np.ndarray]] = [[] for _ in range(sp_size)]
 
-        if BitfieldUtils.sequence_lengths_cache is not None:
-            local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
+        if (
+            ContextParallelBatchSplitUtils.context_parallel_sequence_lengths_cache
+            is not None
+        ):
+            local_seq_lens, offsets = (
+                ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache(
+                    sp_rank
+                )
             )
         else:
             for i in range(batch_size):
@@ -197,16 +313,16 @@ class ContextParallelBatchSplitUtils:
 
                     assignments = np.concatenate([first_chunk, second_chunk])
 
-                    seq_lens[r].append(len(assignments))
+                    local_seq_lens[r].append(len(assignments))
                     offsets[r].append(assignments)
 
-            # Cache assignments
-            BitfieldUtils.set_sequence_lengths_cache(
-                seqlens.tolist(), seq_lens, offsets
+            ContextParallelBatchSplitUtils.set_context_parallel_sequence_lengths_cache(
+                local_seq_lens, offsets
             )
-
-            local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
+            local_seq_lens, offsets = (
+                ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache(
+                    sp_rank
+                )
             )
 
         for i in range(batch_size):
@@ -249,9 +365,14 @@ class ContextParallelBatchSplitUtils:
                 ).to_padded_tensor(padding=-1),
             )
 
-        if BitfieldUtils.sequence_lengths_cache is not None:
-            local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
+        if (
+            ContextParallelBatchSplitUtils.context_parallel_sequence_lengths_cache
+            is not None
+        ):
+            local_seq_lens, offsets = (
+                ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache(
+                    sp_rank
+                )
             )
         else:
             block_size = 128
@@ -268,7 +389,7 @@ class ContextParallelBatchSplitUtils:
             for i in range(sp_size):
                 heapq.heappush(loads_per_rank, (0, i))
 
-            seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
+            local_seq_lens: list[list[int]] = [[] for _ in range(sp_size)]
             offsets: list[list[np.ndarray]] = [[] for _ in range(sp_size)]
 
             for batch_index in range(batch_size):
@@ -316,15 +437,16 @@ class ContextParallelBatchSplitUtils:
                     else:
                         assert seq_lens_per_batch_per_rank[rank] == 0
 
-                    seq_lens[rank].append(seq_lens_per_batch_per_rank[rank])
+                    local_seq_lens[rank].append(seq_lens_per_batch_per_rank[rank])
                     offsets[rank].append(assignments)
 
-            BitfieldUtils.set_sequence_lengths_cache(
-                seqlens.tolist(), seq_lens, offsets
+            ContextParallelBatchSplitUtils.set_context_parallel_sequence_lengths_cache(
+                local_seq_lens, offsets
             )
-
-            local_seq_lens, seq_lens, offsets = (
-                BitfieldUtils.get_sequence_lengths_cache(sp_rank)
+            local_seq_lens, offsets = (
+                ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache(
+                    sp_rank
+                )
             )
 
         split_batches = []

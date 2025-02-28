@@ -68,7 +68,7 @@ def bitfield_attention_forward(
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
 
-    seq_lens, local_seq_lens, offsets = BitfieldUtils.get_sequence_lengths_cache()
+    seq_lens, offsets = BitfieldUtils.get_sequence_lengths_cache()
 
     attn_output = bitfield_attn_func(
         query,
@@ -77,7 +77,7 @@ def bitfield_attention_forward(
         None,
         None,
         attention_mask,
-        local_seq_lens,
+        seq_lens,
         seq_lens,
         offsets,
     )
@@ -103,9 +103,7 @@ class BitfieldUtils:
         If sequences have different lengths, the offsets will be padded with -1.
     """
 
-    sequence_lengths_cache: Optional[
-        tuple[list[int], list[list[int]], list[list[np.ndarray]]]
-    ] = None
+    sequence_lengths_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None
 
     @classmethod
     def clear_cache(cls: BitfieldUtils):
@@ -115,80 +113,23 @@ class BitfieldUtils:
     def set_sequence_lengths_cache(
         cls: BitfieldUtils,
         sequence_lengths: list[int],
-        local_sequence_lengths: list[list[int]] = None,
-        offsets: Optional[list[np.ndarray] | list[list[np.ndarray]]] = None,
-        overwrite: bool = True,
     ):
-        if not overwrite and cls.sequence_lengths_cache is not None:
-            return
+        offsets = np.full((len(sequence_lengths), max(sequence_lengths)), fill_value=-1)
+        for i, seq_len in enumerate(sequence_lengths):
+            offsets[i, :seq_len] = np.arange(seq_len)
 
-        # If local_sequence_lengths and offsets are None,
-        # this is not for context parallelism.
-        if local_sequence_lengths is None:
-            local_sequence_lengths = [sequence_lengths]
-        if offsets is None:
-            # create a 2d np array and fill it with -1. Its shape should be
-            # len(local_sequence_lengths) x max of len(local_sequence_lengths)
-            offsets = np.full(
-                (len(local_sequence_lengths), max(map(len, local_sequence_lengths)), -1)
-            )
-            for i, local_seq_len in enumerate(local_sequence_lengths):
-                offsets[i, : len(local_seq_len)] = np.arange(len(local_seq_len))
-            offsets = [offsets]
-        elif isinstance(offsets[0], list):
-            new_offsets: list[np.ndarray] = []
-            for offset in offsets:
-                new_offsets.append(
-                    np.full(
-                        (
-                            len(offset),
-                            max(map(len, offset)),
-                        ),
-                        -1,
-                    )
-                )
-                for i, off in enumerate(offset):
-                    new_offsets[-1][i, : len(off)] = off
-            offsets = new_offsets
-
-        cls.sequence_lengths_cache = (sequence_lengths, local_sequence_lengths, offsets)
+        cls.sequence_lengths_cache = (
+            torch.tensor(sequence_lengths, dtype=torch.int64, device="cpu"),
+            torch.tensor(offsets, dtype=torch.int32, device="cpu"),
+        )
 
     @classmethod
     def get_sequence_lengths_cache(
         cls: BitfieldUtils,
-        sp_rank: int = 0,
-        return_all_ranks: bool = False,
         device: torch.device = get_accelerator().get_current_device(),
-    ) -> Optional[
-        tuple[
-            torch.Tensor | list[torch.Tensor],
-            torch.Tensor,
-            torch.Tensor | list[torch.Tensor],
-        ]
-    ]:
-        """
-        Return cached result as a set of tensors after merging lists into tensors.
-        For local sequence lengths and offsets, it only returns data for the current rank.
-        """
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if cls.sequence_lengths_cache is None:
-            return None, None, None
+            return None, None
 
-        seq_lens, local_seq_lens, offsets = cls.sequence_lengths_cache
-        seqlen_ks = torch.tensor(seq_lens, dtype=torch.int64, device=device)
-
-        if return_all_ranks:
-            seqlen_qs = [
-                torch.tensor(local_seq_len, dtype=torch.int64, device=device)
-                for local_seq_len in local_seq_lens
-            ]
-            offsets = [
-                torch.tensor(offset, dtype=torch.int32, device=device)
-                for offset in offsets
-            ]
-        else:
-            seqlen_qs = torch.tensor(
-                local_seq_lens[sp_rank], dtype=torch.int64, device=device
-            )
-            offsets = torch.tensor(offsets[sp_rank], dtype=torch.int32, device=device)
-
-        return seqlen_qs, seqlen_ks, offsets
+        seq_lens, offsets = cls.sequence_lengths_cache
+        return seq_lens.to(device), offsets.to(device)

@@ -136,14 +136,10 @@ class LlamaModelForwards:
         In other cases, we need to update attention mask to be compatible with the model.
         """
 
-        sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
         if self.config._attn_implementation == "bitfield_attention":
-            BitfieldUtils.set_sequence_lengths_cache(
-                sequence_lengths=sequence_lengths.tolist(),
-                local_sequence_lengths=None,
-                offsets=None,
-                overwrite=False,
-            )
+            if BitfieldUtils.sequence_lengths_cache is None:
+                sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
+                BitfieldUtils.set_sequence_lengths_cache(sequence_lengths.tolist())
             attn_mask = attention_mask
         else:
             # causal mask
@@ -163,6 +159,7 @@ class LlamaModelForwards:
                     "Cornstarch context parallelism is only supported with bitfield_attention. "
                     f"Got {self.config._attn_implementation}"
                 )
+                sequence_lengths = BitfieldUtils.sequence_lengths_cache[0]
                 hidden_states, _, offsets = ContextParallelBatchSplitUtils.split_batch(
                     hidden_states,
                     sequence_lengths,
@@ -171,13 +168,6 @@ class LlamaModelForwards:
                     dist_mode=cp_dist_mode,
                 )  # shape: [B, L // sp_size, ...]
                 position_ids = offsets
-                # position_ids, _, _ = ContextParallelBatchSplitUtils.split_batch(
-                #     position_ids,
-                #     sequence_lengths,
-                #     attn_mask,
-                #     sp_group,
-                #     dist_mode=cp_dist_mode,
-                # )  # shape: [B, L // sp_size]
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
@@ -196,10 +186,23 @@ class LlamaModelForwards:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            cache = BitfieldUtils.get_sequence_lengths_cache(
-                return_all_ranks=sp_mode is not None
-            )
-            seqlen_qs, seqlen_ks, offsets = cache or (None, None, None)
+            kwargs = {}
+            if self.config._attn_implementation == "bitfield_attention":
+                seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache()
+                seqlen_qs = seqlen_ks
+                if sp_mode == "ring_attn":
+                    seqlen_qs, offsets = (
+                        ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache()
+                    )
+                    indices_perm, indices_inverse_perm = (
+                        ContextParallelBatchSplitUtils.get_permutate_cache()
+                    )
+                    kwargs["indices_perm"] = indices_perm
+                    kwargs["indices_inverse_perm"] = indices_inverse_perm
+
+                kwargs["seqlen_qs"] = seqlen_qs
+                kwargs["seqlen_ks"] = seqlen_ks
+                kwargs["offsets"] = offsets
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -212,9 +215,7 @@ class LlamaModelForwards:
                     use_cache,
                     cache_position,
                     position_embeddings,
-                    seqlen_qs=seqlen_qs,
-                    seqlen_ks=seqlen_ks,
-                    offsets=offsets,
+                    **kwargs,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -230,6 +231,7 @@ class LlamaModelForwards:
                     seqlen_ks=seqlen_ks,
                     offsets=offsets,
                     **flash_attn_kwargs,
+                    **kwargs,
                 )
 
             hidden_states = layer_outputs[0]
@@ -238,6 +240,7 @@ class LlamaModelForwards:
                 all_self_attentions += (layer_outputs[1],)
 
         BitfieldUtils.clear_cache()
+        ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
             outputs = {
@@ -372,6 +375,7 @@ class LlamaModelForwards:
         past_key_values = None
 
         BitfieldUtils.clear_cache()
+        ContextParallelBatchSplitUtils.clear_cache()
 
         stage_manager = shard_config.pipeline_stage_manager
         if not (stage_manager is None or stage_manager.is_last_stage()):

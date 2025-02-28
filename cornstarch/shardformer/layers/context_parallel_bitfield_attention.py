@@ -9,6 +9,7 @@ from cornstarch.kernel.bitfield_attention import (
     _flash_attn_forward,
 )
 from cornstarch.kernel.interface import repeat_kv
+from cornstarch.shardformer.layers.utils import ContextParallelBatchSplitUtils
 
 
 class ContextParallelBitfieldAttention(torch.autograd.Function):
@@ -23,6 +24,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         seqlen_qs: list[torch.Tensor],
         seqlen_ks: torch.Tensor,
         offsets: list[torch.Tensor],
+        indices_perm: torch.Tensor,
+        indices_inverse_perm: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         heads_stride: int = 1,
@@ -87,29 +90,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             async_op=True,
         )
 
-        # offsets may include -1, which indicates the corresponding token should be ignored
-        offsets_for_the_rank = torch.cat(offsets, dim=1)
-        perm = torch.argsort(
-            torch.where(
-                offsets_for_the_rank == -1,
-                torch.iinfo(torch.int32).max,
-                offsets_for_the_rank,
-            ),
-            dim=1,
-        )
-        offsets_for_the_rank = (
-            perm.unsqueeze(2).unsqueeze(3).expand(batch, -1, heads_stride, d)
-        )
-
-        inverse_perm = torch.empty_like(perm)
-        indices_range = (
-            torch.arange(perm.shape[1], device=perm.device)
-            .unsqueeze(0)
-            .expand(batch, perm.shape[1])
-        )
-        inverse_perm.scatter_(1, index=perm, src=indices_range)
-        inverse_offsets_for_the_rank = (
-            inverse_perm.unsqueeze(2).unsqueeze(3).expand(batch, -1, heads_stride, d)
+        unsqueezed_indices_perm = (
+            indices_perm.unsqueeze(2).unsqueeze(3).expand(-1, -1, heads_stride, d)
         )
 
         os: list[torch.Tensor] = []
@@ -124,11 +106,11 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             current_q = q[:, :, head_index : head_index + heads_stride, :].contiguous()
             current_k = torch.cat(gathered_k, dim=1)
             current_k = torch.gather(
-                current_k, dim=1, index=offsets_for_the_rank
+                current_k, dim=1, index=unsqueezed_indices_perm
             ).contiguous()
             current_v = torch.cat(gathered_v, dim=1)
             current_v = torch.gather(
-                current_v, dim=1, index=offsets_for_the_rank
+                current_v, dim=1, index=unsqueezed_indices_perm
             ).contiguous()
 
             head_index += heads_stride
@@ -172,8 +154,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             seqlen_qs[sp_rank],
             seqlen_ks,
             offsets[sp_rank],
-            offsets_for_the_rank,
-            inverse_offsets_for_the_rank,
+            indices_perm,
+            indices_inverse_perm,
         )
         ctx.local_seqlen_per_rank = local_seqlen_per_rank
         ctx.heads_stride = heads_stride
@@ -195,8 +177,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             seqlen_qs,
             seqlen_ks,
             offsets,
-            offsets_for_the_rank,
-            inverse_offsets_for_the_rank,
+            indices_perm,
+            indices_inverse_perm,
         ) = ctx.saved_tensors
         local_seqlen_per_rank = ctx.local_seqlen_per_rank
         heads_stride: int = ctx.heads_stride
@@ -240,6 +222,15 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
         head_index = 0
 
+        unsqueezed_indices_perm = (
+            indices_perm.unsqueeze(2).unsqueeze(3).expand(-1, -1, heads_stride, d)
+        )
+        unsqueezed_indices_inverse_perm = (
+            indices_inverse_perm.unsqueeze(2)
+            .unsqueeze(3)
+            .expand(-1, -1, heads_stride, d)
+        )
+
         dq = torch.empty(
             (batch, seqlen_q, heads_stride, d), dtype=q.dtype, device=q.device
         )
@@ -267,11 +258,11 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             current_q = q[:, :, head_index : head_index + heads_stride, :]
             current_k = torch.cat(gathered_k, dim=1)
             current_k = torch.gather(
-                current_k, dim=1, index=offsets_for_the_rank
+                current_k, dim=1, index=unsqueezed_indices_perm
             ).contiguous()
             current_v = torch.cat(gathered_v, dim=1)
             current_v = torch.gather(
-                current_v, dim=1, index=offsets_for_the_rank
+                current_v, dim=1, index=unsqueezed_indices_perm
             ).contiguous()
 
             head_index += heads_stride
@@ -312,8 +303,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 offsets=offsets,
             )
 
-            dgk = torch.gather(dgk, dim=1, index=inverse_offsets_for_the_rank)
-            dgv = torch.gather(dgv, dim=1, index=inverse_offsets_for_the_rank)
+            dgk = torch.gather(dgk, dim=1, index=unsqueezed_indices_inverse_perm)
+            dgv = torch.gather(dgv, dim=1, index=unsqueezed_indices_inverse_perm)
             # FIXME: this partitioning is wrong
             dist.reduce_scatter(
                 dk, list(dgk.split(local_seqlen_per_rank, dim=1)), group=sp_group
@@ -330,7 +321,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             torch.cat(dqs, dim=2),
             torch.cat(dks, dim=2),
             torch.cat(dvs, dim=2),
-            *[None] * 8,
+            *[None] * 10,
         )
 
 
@@ -341,9 +332,11 @@ def context_parallel_bitfield_attention_forward(
     value: torch.Tensor,
     attention_mask: torch.Tensor,
     sp_group: dist.ProcessGroup,
-    seqlen_qs: torch.Tensor,
+    seqlen_qs: list[torch.Tensor],
     seqlen_ks: torch.Tensor,
-    offsets: torch.Tensor,
+    offsets: list[torch.Tensor],
+    indices_perm: torch.Tensor,
+    indices_inverse_perm: torch.Tensor,
     heads_stride: int = 1,
     dropout: float = 0.0,
     scaling: Optional[float] = None,
@@ -372,6 +365,8 @@ def context_parallel_bitfield_attention_forward(
         seqlen_qs,
         seqlen_ks,
         offsets,
+        indices_perm,
+        indices_inverse_perm,
         None,
         None,
         heads_stride,
