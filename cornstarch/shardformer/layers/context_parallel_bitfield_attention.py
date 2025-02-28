@@ -20,9 +20,9 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         v: torch.Tensor,
         mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
-        seqlen_qs: torch.Tensor,
+        seqlen_qs: list[torch.Tensor],
         seqlen_ks: torch.Tensor,
-        offsets: torch.Tensor,
+        offsets: list[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         heads_stride: int = 1,
@@ -36,15 +36,12 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         """
         # shape constraints
         sp_world_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
 
         batch, seqlen_q, nheads, d = q.shape
         _, seqlen_k, _, _ = k.shape
         assert k.shape == (batch, seqlen_k, nheads, d)
         assert v.shape == (batch, seqlen_k, nheads, d)
-        assert mask.shape == (
-            batch,
-            seqlen_k * sp_world_size,
-        ), f"Expected mask shape ({batch}, {seqlen_k * sp_world_size}), but got {mask.shape}"
         assert (
             nheads % heads_stride == 0
         ), "number of heads must be divisible by heads_stride"
@@ -52,19 +49,29 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
         assert q.is_cuda and k.is_cuda and v.is_cuda
 
-        # TODO: see the notion note. Need to gather k/v properly.
+        local_seqlen_per_rank = [
+            max(seqlen_qs_per_rank).item() for seqlen_qs_per_rank in seqlen_qs
+        ]
+        assert mask.shape == (
+            batch,
+            sum(local_seqlen_per_rank),
+        ), f"Expected mask shape ({batch}, {sum(local_seqlen_per_rank)}), but got {mask.shape}"
 
         gathered_k = [
             torch.empty(
-                (batch, seqlen_k, heads_stride, d), dtype=k.dtype, device=k.device
+                (batch, local_seqlen, heads_stride, d),
+                dtype=k.dtype,
+                device=k.device,
             )
-            for _ in range(sp_world_size)
+            for local_seqlen in local_seqlen_per_rank
         ]
         gathered_v = [
             torch.empty(
-                (batch, seqlen_k, heads_stride, d), dtype=v.dtype, device=v.device
+                (batch, local_seqlen, heads_stride, d),
+                dtype=v.dtype,
+                device=v.device,
             )
-            for _ in range(sp_world_size)
+            for local_seqlen in local_seqlen_per_rank
         ]
 
         gk_work = dist.all_gather(
@@ -80,6 +87,31 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             async_op=True,
         )
 
+        # offsets may include -1, which indicates the corresponding token should be ignored
+        offsets_for_the_rank = torch.cat(offsets, dim=1)
+        perm = torch.argsort(
+            torch.where(
+                offsets_for_the_rank == -1,
+                torch.iinfo(torch.int32).max,
+                offsets_for_the_rank,
+            ),
+            dim=1,
+        )
+        offsets_for_the_rank = (
+            perm.unsqueeze(2).unsqueeze(3).expand(batch, -1, heads_stride, d)
+        )
+
+        inverse_perm = torch.empty_like(perm)
+        indices_range = (
+            torch.arange(perm.shape[1], device=perm.device)
+            .unsqueeze(0)
+            .expand(batch, perm.shape[1])
+        )
+        inverse_perm.scatter_(1, index=perm, src=indices_range)
+        inverse_offsets_for_the_rank = (
+            inverse_perm.unsqueeze(2).unsqueeze(3).expand(batch, -1, heads_stride, d)
+        )
+
         os: list[torch.Tensor] = []
         lses: list[torch.Tensor] = []
         softmax_scales: list[torch.Tensor] = []
@@ -90,8 +122,14 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             gv_work.wait()
 
             current_q = q[:, :, head_index : head_index + heads_stride, :].contiguous()
-            current_k = torch.cat(gathered_k, dim=1).contiguous()
-            current_v = torch.cat(gathered_v, dim=1).contiguous()
+            current_k = torch.cat(gathered_k, dim=1)
+            current_k = torch.gather(
+                current_k, dim=1, index=offsets_for_the_rank
+            ).contiguous()
+            current_v = torch.cat(gathered_v, dim=1)
+            current_v = torch.gather(
+                current_v, dim=1, index=offsets_for_the_rank
+            ).contiguous()
 
             head_index += heads_stride
             # prefetch next heads
@@ -116,16 +154,28 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=softmax_scale,
                 mask=mask,
-                seqlen_qs=seqlen_qs,
+                seqlen_qs=seqlen_qs[sp_rank],
                 seqlen_ks=seqlen_ks,
-                offsets=offsets,
+                offsets=offsets[sp_rank],
             )
 
             os.append(o)
             lses.append(lse)
             softmax_scales.append(softmax_scale)
 
-        ctx.save_for_backward(q, k, v, bias, mask, seqlen_qs, seqlen_ks, offsets)
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            bias,
+            mask,
+            seqlen_qs[sp_rank],
+            seqlen_ks,
+            offsets[sp_rank],
+            offsets_for_the_rank,
+            inverse_offsets_for_the_rank,
+        )
+        ctx.local_seqlen_per_rank = local_seqlen_per_rank
         ctx.heads_stride = heads_stride
         ctx.os = os
         ctx.lses = lses
@@ -136,28 +186,39 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: torch.autograd.function.FunctionCtx, do: torch.Tensor):
-        q, k, v, bias, mask, seqlen_qs, seqlen_ks, offsets = ctx.saved_tensors
+        (
+            q,
+            k,
+            v,
+            bias,
+            mask,
+            seqlen_qs,
+            seqlen_ks,
+            offsets,
+            offsets_for_the_rank,
+            inverse_offsets_for_the_rank,
+        ) = ctx.saved_tensors
+        local_seqlen_per_rank = ctx.local_seqlen_per_rank
         heads_stride: int = ctx.heads_stride
         os: list[torch.Tensor] = ctx.os
         lses: list[torch.Tensor] = ctx.lses
         softmax_scales: list[torch.Tensor] = ctx.softmax_scales
         sp_group: dist.ProcessGroup = ctx.sp_group
-        sp_world_size = dist.get_world_size(sp_group)
 
         batch, seqlen_q, nheads, d = q.shape
         _, seqlen_k, _, _ = k.shape
 
         gathered_k = [
             torch.empty(
-                (batch, seqlen_k, heads_stride, d), dtype=k.dtype, device=k.device
+                (batch, local_seqlen, heads_stride, d), dtype=k.dtype, device=k.device
             )
-            for _ in range(sp_world_size)
+            for local_seqlen in local_seqlen_per_rank
         ]
         gathered_v = [
             torch.empty(
-                (batch, seqlen_k, heads_stride, d), dtype=v.dtype, device=v.device
+                (batch, local_seqlen, heads_stride, d), dtype=v.dtype, device=v.device
             )
-            for _ in range(sp_world_size)
+            for local_seqlen in local_seqlen_per_rank
         ]
 
         gk_work = dist.all_gather(
@@ -189,12 +250,12 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             (batch, seqlen_k, heads_stride, d), dtype=v.dtype, device=v.device
         )
         dgk = torch.empty(
-            (batch, seqlen_k * sp_world_size, heads_stride, d),
+            (batch, sum(local_seqlen_per_rank), heads_stride, d),
             dtype=k.dtype,
             device=k.device,
         )
         dgv = torch.empty(
-            (batch, seqlen_k * sp_world_size, heads_stride, d),
+            (batch, sum(local_seqlen_per_rank), heads_stride, d),
             dtype=v.dtype,
             device=v.device,
         )
@@ -205,7 +266,13 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
             current_q = q[:, :, head_index : head_index + heads_stride, :]
             current_k = torch.cat(gathered_k, dim=1)
+            current_k = torch.gather(
+                current_k, dim=1, index=offsets_for_the_rank
+            ).contiguous()
             current_v = torch.cat(gathered_v, dim=1)
+            current_v = torch.gather(
+                current_v, dim=1, index=offsets_for_the_rank
+            ).contiguous()
 
             head_index += heads_stride
             # prefetch next heads
@@ -245,11 +312,14 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 offsets=offsets,
             )
 
+            dgk = torch.gather(dgk, dim=1, index=inverse_offsets_for_the_rank)
+            dgv = torch.gather(dgv, dim=1, index=inverse_offsets_for_the_rank)
+            # FIXME: this partitioning is wrong
             dist.reduce_scatter(
-                dk, list(dgk.chunk(sp_world_size, dim=1)), group=sp_group
+                dk, list(dgk.split(local_seqlen_per_rank, dim=1)), group=sp_group
             )
             dist.reduce_scatter(
-                dv, list(dgv.chunk(sp_world_size, dim=1)), group=sp_group
+                dv, list(dgv.split(local_seqlen_per_rank, dim=1)), group=sp_group
             )
 
             dqs.append(dq.clone())

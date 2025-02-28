@@ -196,7 +196,9 @@ class LlamaModelForwards:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            cache = BitfieldUtils.get_sequence_lengths_cache()
+            cache = BitfieldUtils.get_sequence_lengths_cache(
+                return_all_ranks=sp_mode is not None
+            )
             seqlen_qs, seqlen_ks, offsets = cache or (None, None, None)
 
             if self.gradient_checkpointing and self.training:
@@ -473,11 +475,7 @@ class LlamaAttentionForwards:
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-        if sp_mode == "ring_attn" and BitfieldUtils.get_sequence_lengths_cache() != (
-            None,
-            None,
-            None,
-        ):
+        if sp_mode == "ring_attn":
             assert self.config._attn_implementation == "bitfield_attention", (
                 "Cornstarch context parallelism is only supported with bitfield_attention. "
                 f"Got {self.config._attn_implementation}"
