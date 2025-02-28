@@ -112,8 +112,30 @@ def reduce_scatter_gloo(
     if len(input_list) != world_size:
         raise ValueError(f"input_list must contain {world_size} tensors.")
 
-    global_tensor = torch.cat(input_list, dim=0)
+    global_tensor = torch.cat(input_list, dim=1)
     dist.all_reduce(global_tensor, op=op, group=group)
-    chunks = torch.chunk(global_tensor, world_size, dim=0)
+    chunks = torch.split(global_tensor, [t.shape[1] for t in input_list], dim=1)
 
     output.copy_(chunks[my_rank])
+
+
+def all_gather_gloo(
+    tensor_list: list[torch.Tensor],
+    tensor: torch.Tensor,
+    group: Optional[dist.ProcessGroup] = None,
+    async_op: bool = False,
+):
+    world_size = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+
+    for group_rank in range(world_size):
+        if rank == group_rank:
+            tensor_list[group_rank].copy_(tensor)
+        global_src = dist.get_global_rank(group, group_rank)
+        dist.broadcast(tensor_list[group_rank], src=global_src, group=group)
+
+    if async_op:
+        global_src = dist.get_global_rank(group, group_rank=0)
+        tensor = torch.tensor([0], device=tensor.device)
+        work = dist.broadcast(tensor, global_src, group, async_op=True)
+        return work
