@@ -43,7 +43,7 @@ causal_lms = dict(
 class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 8
+        return 6
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
@@ -52,7 +52,6 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         [
             (1, 1, 1),
             (2, 1, 1),
-            (2, 1, 3),
             (2, 2, 2),
         ],
         name_fn=lambda tp, vpp, lpp: f"tp={tp}, pp={vpp},{lpp}",
@@ -73,6 +72,35 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
             tp_size,
             {"vision": vision_pp_size, "llm": language_pp_size},
             None,
+        )
+
+    @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
+    @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
+    @parametrize(
+        "tp_size, vision_pp_size, language_pp_size",
+        [
+            (1, 1, 1),
+            (2, 1, 1),
+            (1, 2, 2),
+        ],
+        name_fn=lambda tp, vpp, lpp: f"tp={tp}, pp={vpp},{lpp}",
+    )
+    def test_context_parallel(
+        self,
+        vision_model_name: str,
+        language_model_name: str,
+        tp_size: int,
+        vision_pp_size: int,
+        language_pp_size: int,
+    ):
+        self.set_model(
+            encoders={"vision": vision_models[vision_model_name]()},
+            llm=causal_lms[language_model_name](),
+        )
+        self.run_multimodal_parallel(
+            tp_size,
+            {"vision": vision_pp_size, "llm": language_pp_size},
+            llm_sp_mode="ring_attn",
         )
 
 

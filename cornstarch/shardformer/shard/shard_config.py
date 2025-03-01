@@ -27,7 +27,7 @@ class ShardConfig(ColossalShardConfig):
     sequence_parallelism_mode: str = None
     enable_sequence_overlap: bool = False
     context_parallel_distribution_mode: ContextParallelDistributionMode = (
-        ContextParallelDistributionMode.UNIFORM
+        ContextParallelDistributionMode.MAKESPAN_MIN
     )
     pipeline_stage_manager: Optional[PipelineStageManager] = None
     pipeline_template: Optional[PipelineTemplate] = None
