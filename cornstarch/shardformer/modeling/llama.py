@@ -182,27 +182,27 @@ class LlamaModelForwards:
         else:
             start_idx, end_idx = (0, len(self.layers))
 
+        kwargs = {}
+        if self.config._attn_implementation == "bitfield_attention":
+            seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache()
+            seqlen_qs = seqlen_ks
+            if sp_mode == "ring_attn":
+                seqlen_qs, offsets = (
+                    ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache()
+                )
+                indices_perm, indices_inverse_perm = (
+                    ContextParallelBatchSplitUtils.get_permutate_cache()
+                )
+                kwargs["indices_perm"] = indices_perm
+                kwargs["indices_inverse_perm"] = indices_inverse_perm
+
+            kwargs["seqlen_qs"] = seqlen_qs
+            kwargs["seqlen_ks"] = seqlen_ks
+            kwargs["offsets"] = offsets
+
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-
-            kwargs = {}
-            if self.config._attn_implementation == "bitfield_attention":
-                seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache()
-                seqlen_qs = seqlen_ks
-                if sp_mode == "ring_attn":
-                    seqlen_qs, offsets = (
-                        ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache()
-                    )
-                    indices_perm, indices_inverse_perm = (
-                        ContextParallelBatchSplitUtils.get_permutate_cache()
-                    )
-                    kwargs["indices_perm"] = indices_perm
-                    kwargs["indices_inverse_perm"] = indices_inverse_perm
-
-                kwargs["seqlen_qs"] = seqlen_qs
-                kwargs["seqlen_ks"] = seqlen_ks
-                kwargs["offsets"] = offsets
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -328,7 +328,7 @@ class LlamaModelForwards:
         ):
             # Split labels too
             sp_group = shard_config.sequence_parallel_process_group
-            sp_dist_mode = getattr(
+            cp_dist_mode = getattr(
                 shard_config,
                 "context_parallel_distribution_mode",
                 ContextParallelDistributionMode.UNIFORM,
@@ -349,7 +349,7 @@ class LlamaModelForwards:
                 sequence_lengths,
                 attention_mask,
                 sp_group,
-                dist_mode=sp_dist_mode,
+                dist_mode=cp_dist_mode,
             )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
