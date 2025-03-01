@@ -4,7 +4,6 @@ from .evaclip import EvaCLIPModelBase
 from .gemma import GemmaForCausalLMBase, GemmaModelBase
 from .gemma2 import Gemma2ForCausalLMBase, Gemma2ModelBase
 from .intern_vit import InternVisonModelBase
-from .internlm2 import InternLM2ForCausalLMBase, InternLM2ModelBase
 from .llama import LlamaForCausalLMBase, LlamaModelBase
 from .mistral import MistralForCausalLMBase, MistralModelBase
 from .mixtral import MixtralForCausalLMBase, MixtralModelBase

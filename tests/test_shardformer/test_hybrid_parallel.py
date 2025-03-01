@@ -14,8 +14,6 @@ from .model_zoo import (
     Gemma2ModelBase,
     GemmaForCausalLMBase,
     GemmaModelBase,
-    InternLM2ForCausalLMBase,
-    InternLM2ModelBase,
     InternVisonModelBase,
     LlamaForCausalLMBase,
     LlamaModelBase,
@@ -50,7 +48,6 @@ vision_models = dict(
 language_models = dict(
     gemma=GemmaModelBase,
     gemma2=Gemma2ModelBase,
-    internlm2=InternLM2ModelBase,
     llama=LlamaModelBase,
     mistral=MistralModelBase,
     mixtral=MixtralModelBase,
@@ -61,7 +58,6 @@ language_models = dict(
 causal_lms = dict(
     gemma=GemmaForCausalLMBase,
     gemma2=Gemma2ForCausalLMBase,
-    internlm2=InternLM2ForCausalLMBase,
     llama=LlamaForCausalLMBase,
     mistral=MistralForCausalLMBase,
     mixtral=MixtralForCausalLMBase,
