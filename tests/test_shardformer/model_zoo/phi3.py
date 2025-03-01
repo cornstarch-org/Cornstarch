@@ -31,8 +31,8 @@ class Phi3ModelBase(ModelClassBase):
 
     def data_gen_fn(self, num_batch: int) -> dict:
         input = {
-            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
-            "attention_mask": torch.ones(num_batch, 64),
+            "input_ids": torch.randint(0, 2048, (num_batch, 256)),
+            "attention_mask": torch.ones(num_batch, 256),
         }
 
         return input
@@ -50,8 +50,8 @@ class Phi3ForCausalLMBase(ModelClassBase):
 
     def data_gen_fn(self, num_batch: int) -> dict:
         input = {
-            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
-            "attention_mask": torch.ones(num_batch, 64),
+            "input_ids": torch.randint(0, 2048, (num_batch, 256)),
+            "attention_mask": torch.ones(num_batch, 256),
         }
         input["labels"] = input["input_ids"]
         return input
