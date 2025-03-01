@@ -8,14 +8,15 @@ from transformers.models.gemma import GemmaConfig, GemmaForCausalLM, GemmaModel
 from ..utils import ModelClassBase
 
 gemma_config = GemmaConfig(
-    hidden_size=256,
+    vocab_size=25600,
+    hidden_size=64,
     intermediate_size=64,
     num_attention_heads=8,
     num_key_value_heads=8,
     num_hidden_layers=4,
     # TODO: all pretrained Gemma model uses head_dim=256, which is not supported
     # by bitfield attention mask (Triton FlashAttention base).
-    head_dim=128,
+    head_dim=32,
     use_cache=False,
     # TODO: Gemma uses tie_word_embeddings True, in which case the tests fail.
     # Implement automatic gradient synchronization between tied weights.

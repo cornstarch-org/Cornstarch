@@ -18,6 +18,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.mixtral.modeling_mixtral import (
+    KwargsForCausalLM,
     MixtralAttention,
     MixtralForCausalLM,
     MixtralModel,
@@ -169,6 +170,9 @@ class MixtralModelForwards:
                     hidden_states, 1, sp_group, 1 / sp_size
                 )
 
+            # Recompute position embeddings
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
@@ -292,6 +296,7 @@ class MixtralModelForwards:
         all_router_logits: Optional[Tuple[torch.Tensor]] = (),
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
+        **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -355,6 +360,7 @@ class MixtralModelForwards:
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
+            **kwargs,
         )
 
         BitfieldUtils.clear_cache()

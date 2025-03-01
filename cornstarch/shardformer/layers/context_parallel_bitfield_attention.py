@@ -304,7 +304,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
             dgk = torch.gather(dgk, dim=1, index=unsqueezed_indices_inverse_perm)
             dgv = torch.gather(dgv, dim=1, index=unsqueezed_indices_inverse_perm)
-            # FIXME: this partitioning is wrong
+
             dist.reduce_scatter(
                 dk, list(dgk.split(local_seqlen_per_rank, dim=1)), group=sp_group
             )

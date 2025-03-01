@@ -60,6 +60,7 @@ class GemmaModelForwards:
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross
+        **flash_attn_kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -178,6 +179,9 @@ class GemmaModelForwards:
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
                 )
+
+            # Recompute position embeddings
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
