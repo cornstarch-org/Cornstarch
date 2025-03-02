@@ -6,6 +6,7 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from colossalai.accelerator import get_accelerator
 
 from cornstarch.kernel.bitfield_attention import (
@@ -448,6 +449,12 @@ class ContextParallelBatchSplitUtils:
                     sp_rank
                 )
             )
+
+        if is_label:
+            # shift one position so that tokens < n predict n
+            # shift should only happen for text tokens, so first
+            # find the non-pad token and shift from there.
+            batch = nn.functional.pad(batch, (0, 1), value=-100)[..., 1:]
 
         split_batches = []
         for i in range(batch_size):

@@ -350,6 +350,7 @@ class LlamaModelForwards:
                 attention_mask,
                 sp_group,
                 dist_mode=cp_dist_mode,
+                is_label=True,
             )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)

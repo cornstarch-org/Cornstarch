@@ -239,13 +239,15 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         dv = torch.empty(
             (batch, seqlen_k, heads_stride, d), dtype=v.dtype, device=v.device
         )
-        dgk = torch.empty(
+        dgk = torch.full(
             (batch, sum(local_seqlen_per_rank), heads_stride, d),
+            torch.nan,
             dtype=k.dtype,
             device=k.device,
         )
-        dgv = torch.empty(
+        dgv = torch.full(
             (batch, sum(local_seqlen_per_rank), heads_stride, d),
+            torch.nan,
             dtype=v.dtype,
             device=v.device,
         )
