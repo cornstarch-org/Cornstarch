@@ -13,6 +13,7 @@ from colossalai.booster.plugin import HybridParallelPlugin
 from colossalai.booster.plugin.hybrid_parallel_plugin import HybridParallelModule
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from colossalai.lazy import LazyInitContext
+from colossalai.pipeline.schedule._utils import get_micro_batch
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer._utils import getattr_
 from colossalai.shardformer.layer.qkv_fused_linear import (
@@ -81,7 +82,7 @@ class ModelClassBase(ABC):
     def model_fn(self) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
-        config._attn_implementation = "eager"
+        config._attn_implementation = "flash_attention_2"
         return self.model_class(config)
 
 
@@ -903,6 +904,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         input_ids = torch.cat(encoder_tokens + [input_ids], dim=1)
         new_data["input_ids"] = input_ids
         new_data["labels"] = input_ids
+        new_data["use_cache"] = False
 
         return new_data
 
@@ -940,9 +942,27 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         org_loss, org_output = None, None
         if run_original_model:
             org_model.train()
-            org_output = org_model(**unshard_test_data)
-            org_loss = criterion(org_output)
-            org_loss.backward()
+
+            # org_output = org_model(**unshard_test_data)
+            # org_loss = criterion(org_output)
+            # org_loss.backward()
+
+            org_loss = torch.scalar_tensor(0, device="cuda")
+            for i in range(self.num_microbatches):
+                input = get_micro_batch(
+                    unshard_test_data, i * self.microbatch_size, self.microbatch_size
+                )
+                for k, v in input.items():
+                    if isinstance(v, torch.Tensor):
+                        input[k] = v.contiguous()
+                output = org_model(**input)
+                loss = criterion(output) / self.num_microbatches
+                loss.backward()
+                org_loss.add_(loss.data)
+
+            # org_output = org_model(**unshard_test_data)
+            # org_loss = criterion(org_output)
+            # org_loss.backward()
 
         sharded_loss, sharded_output = None, None
         if run_sharded_model:
