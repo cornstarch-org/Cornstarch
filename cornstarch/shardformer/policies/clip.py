@@ -117,18 +117,26 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement = {}
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
-        attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
-            not is_flash_attn_greater_or_equal("2.1.0")
-        )
 
         policy[attn_cls] = ModulePolicyDescription(
-            attribute_replacement=attention_attribute_replacement,
-            method_replacement={"forward": CLIPFlashAttention2.forward},
+            attribute_replacement=attention_attribute_replacement
         )
 
-        policy[CLIPVisionTransformer] = ModulePolicyDescription(
-            attribute_replacement={"config._attn_implementation": "flash_attention_2"}
-        )
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
+            )
+
+            policy[attn_cls] = ModulePolicyDescription(
+                attribute_replacement=attention_attribute_replacement,
+                method_replacement={"forward": CLIPFlashAttention2.forward},
+            )
+
+            policy[CLIPVisionTransformer] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2"
+                }
+            )
 
         if self.shard_config.enable_tensor_parallelism:
             policy[CLIPEncoderLayer] = ModulePolicyDescription(
