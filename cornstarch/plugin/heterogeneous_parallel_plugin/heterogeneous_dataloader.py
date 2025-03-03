@@ -2,9 +2,11 @@ import math
 from typing import Callable, Iterator
 
 import torch
-from loguru import logger
 from torch.utils.data import BatchSampler, DataLoader, Dataset
 from torch.utils.data.dataloader import _BaseDataLoaderIter
+from transformers.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class HeterogeneousBatchSampler(BatchSampler):

@@ -4,12 +4,10 @@ import inspect
 from typing import Callable, Union
 
 import numpy as np
-import torch
 from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_processing_utils import BaseImageProcessor
-from transformers.models.pixtral.processing_pixtral import BatchMixFeature
 from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer
 from transformers.utils import TensorType, logging
 
@@ -282,7 +280,7 @@ class MultimodalProcessor:
 
         result.update(text_inputs)
 
-        return BatchMixFeature(data={**result})
+        return BatchFeature(data={**result})
 
     def batch_decode(self, *args, **kwargs):
         return self.llm_tokenizer.batch_decode(*args, **kwargs)
