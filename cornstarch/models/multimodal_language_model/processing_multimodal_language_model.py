@@ -25,6 +25,13 @@ def default_num_feature_calculation_func_audio_static(
     return [num_features] * outputs["input_features"].shape[0]
 
 
+def default_num_feature_calculation_func_vision_clip(
+    inputs: dict, outputs: dict, config: PretrainedConfig
+) -> list[int]:
+    num_features = (config.image_size // config.patch_size) ** 2 + 1
+    return [num_features] * outputs["pixel_values"].shape[0]
+
+
 def default_num_feature_calculation_func_vision_static(
     inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[int]:
@@ -77,7 +84,7 @@ def default_num_feature_calculation_func_qwen2vl(
 
 processor_type_to_num_feature_calculation_func = {
     "ViTImageProcessor": default_num_feature_calculation_func_vision_static,
-    "CLIPImageProcessor": default_num_feature_calculation_func_vision_static,
+    "CLIPImageProcessor": default_num_feature_calculation_func_vision_clip,
     "SiglipImageProcessor": default_num_feature_calculation_func_vision_static,
     "BitImageProcessor": default_num_feature_calculation_func_vision_static,
     "PixtralImageProcessor": default_num_feature_calculation_func_pixtral,
