@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Type
 
+import torch
 from PIL import Image
 from transformers import PreTrainedModel
 from transformers.models.clip import CLIPVisionModel
@@ -24,7 +25,7 @@ def collate_fn(batches: list[dict], processor: MultimodalProcessor):
     inputs = processor(
         encoder_inputs={"vision": {"images": images}},
         llm_inputs={"text": texts, "padding": True},
-    ).to("cuda")
+    ).to(dtype=torch.bfloat16, device="cuda")
 
     inputs["labels"] = inputs["input_ids"].clone()
     return inputs
@@ -55,7 +56,7 @@ def collate_fn_llava_pretrain(
         encoder_inputs={"vision": {"images": images}} if images else None,
         llm_inputs={"text": texts, "padding": True},
         return_tensors="pt",
-    ).to("cuda")
+    ).to(dtype=torch.bfloat16, device="cuda")
 
     inputs["labels"] = inputs["input_ids"].clone()
     return inputs

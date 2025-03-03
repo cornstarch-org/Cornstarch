@@ -34,7 +34,7 @@ def default_num_feature_calculation_func_vision_static(
 
 def default_num_feature_calculation_func_pixtral(
     inputs: dict, outputs: dict, config: PretrainedConfig
-) -> list[list[int]]:
+) -> list[int]:
     # output has "image_sizes", which has already been rescaled.
     # Use pixtral image processing functions to get the number of image tokens
     from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
@@ -49,12 +49,9 @@ def default_num_feature_calculation_func_pixtral(
 
     num_image_tokens = []
 
-    for batch_image_size in outputs["image_sizes"]:
-        batch_num_image_tokens = []
-        for image_size in batch_image_size:
-            num_tokens = np.prod(_num_image_tokens(image_size, patch_size))
-            batch_num_image_tokens.append(num_tokens)
-        num_image_tokens.append(batch_num_image_tokens)
+    for image_size in outputs["image_sizes"]:
+        num_tokens = np.prod(_num_image_tokens(image_size, patch_size))
+        num_image_tokens.append(num_tokens)
 
     return num_image_tokens
 
