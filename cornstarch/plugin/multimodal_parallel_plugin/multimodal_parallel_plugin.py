@@ -378,6 +378,13 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                 p.grad.div_(self.dp_group.size())
 
     def sync_sp_grads(self):
+        # For context parallelisms that Cornstarch multimodal module supports (all_to_all and ring_attn),
+        # ranks have the entire copy of model parameters.
+        # Therefore, sp ranks are grouped in the dp group and
+        # synchronization for sp gradients is done within dp_group at once.
+        # see the last part of MultimodalParallelPlugin.init_distributed()
+        # that recreates dp_group with dp * sp ranks.
+        # No need to synchronize gradients again here.
         pass
 
     def _hook_context(self):
@@ -560,6 +567,13 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             else None
         )
         self.shard_config.__post_init__()
+
+        # sync gradients across DP * SP ranks
+        if self.shard_config.enable_sequence_parallelism:
+            self.dp_group = self.pg_mesh.get_group_along_axis(
+                [self.pg_mesh.dp_axis, self.pg_mesh.sp_axis]
+            )
+
         self.distributed_initialized = True
 
     def configure(

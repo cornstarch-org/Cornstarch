@@ -180,15 +180,18 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
 
     def create_or_get_group_along_axis(
         self,
-        axis: int,
-        indices_at_axis: list[int],
+        axis: int | list[int],
+        indices_at_axis: list[int] | list[list[int]],
         target_ranks_in_group: tuple[int],
-        backend: str | None = None,
+        backend: Optional[str] = None,
     ) -> dist.ProcessGroup:
-        indices_at_axis = indices_at_axis or list(range(self._shape[axis]))
+        indices_at_axis = indices_at_axis or [
+            list(range(self._shape[ax])) for ax in axis
+        ]
         reduced_shape = list(self._shape)
         # the choices on the axis are reduced to 1, since it's determined by `indices_at_axis`
-        reduced_shape[axis] = 1
+        for ax in axis:
+            reduced_shape[ax] = 1
         target_group = None
         # use Cartesian product to generate all combinations of coordinates
         for base_coord in itertools.product(*[range(s) for s in reduced_shape]):
@@ -206,9 +209,9 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
 
     def get_group_along_axis(
         self,
-        axis: int,
-        indices_at_axis: list[int] | None = None,
-        backend: str | None = None,
+        axis: int | list[int],
+        indices_at_axis: Optional[list[int] | list[list[int]]] = None,
+        backend: Optional[str] = None,
     ) -> dist.ProcessGroup | list[dist.ProcessGroup]:
         """Get the process group along the given axis which the current process belongs to.
         If the process group doesn't exist, it will be created.
@@ -228,33 +231,42 @@ class MultiModalProcessGroupMesh(ProcessGroupMesh):
             list[ProcessGroup]: if `axis` == pp_axis, a single rank may belong to multiple pp groups.
                 In such case, a list of process groups will be returned.
         """
-        indices_at_axis = indices_at_axis or list(range(self._shape[axis]))
+        if isinstance(axis, int):
+            axis = [axis]
+            if indices_at_axis is not None:
+                assert isinstance(indices_at_axis[0], int)
+                indices_at_axis = [indices_at_axis]
 
-        if axis == MultiModalProcessGroupMesh.pp_axis:
-            coords_in_group = [
-                self.get_coords_along_axis(coord, axis, indices_at_axis)
-                for coord in self._coords
-            ]
-        else:
-            coords_in_group = [
-                self.get_coords_along_axis(self._coords[0], axis, indices_at_axis)
-            ]
+        if MultiModalProcessGroupMesh.pp_axis in axis:
+            assert len(axis) == 1, "Only one axis is allowed for pp group."
 
-        ranks_in_group = [
-            tuple(sorted(set([self._mesh[coord] for coord in coords])))
-            for coords in coords_in_group
+        indices_at_axis = indices_at_axis or [
+            list(range(self._shape[ax])) for ax in axis
         ]
 
+        reduced_shape = list(self._shape)
+        for ax in axis:
+            reduced_shape[ax] = 1
+
         process_group_list: list[dist.ProcessGroup] = []
-        for ranks in ranks_in_group:
-            group = self.create_or_get_group_along_axis(
-                axis, indices_at_axis, ranks, backend
+        for base_coord in itertools.product(*[range(s) for s in reduced_shape]):
+            coords_in_group = self.get_coords_along_axis(
+                base_coord, axis, indices_at_axis
             )
-            process_group_list.append(group)
+
+            ranks_in_group = tuple(
+                sorted(set([self._mesh[coord] for coord in coords_in_group]))
+            )
+            group = self.create_or_get_group_along_axis(
+                axis, indices_at_axis, ranks_in_group, backend
+            )
+
+            if self._rank in ranks_in_group:
+                process_group_list.append(group)
 
         process_group_list = list(set(process_group_list))
 
-        if len(process_group_list) == 1 and axis != MultiModalProcessGroupMesh.pp_axis:
-            return process_group_list[0]
-        else:
+        if len(process_group_list) > 1 or axis[0] == MultiModalProcessGroupMesh.pp_axis:
             return process_group_list
+        else:
+            return process_group_list[0]
