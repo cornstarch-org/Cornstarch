@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 import torch.distributed as dist
@@ -8,6 +9,16 @@ from colossalai.shardformer.shard.shard_config import ShardConfig as ColossalSha
 from cornstarch.pipeline_template import PipelineTemplate
 
 
+class ContextParallelDistributionMode(Enum):
+    """
+    Enum class for the context parallel distribution mode
+    """
+
+    UNIFORM = "uniform"
+    ZIGZAG = "zigzag"
+    MAKESPAN_MIN = "makespan_min"
+
+
 @dataclass
 class ShardConfig(ColossalShardConfig):
     tensor_parallel_process_group: Optional[dist.ProcessGroup] = None
@@ -15,7 +26,9 @@ class ShardConfig(ColossalShardConfig):
     enable_sequence_parallelism: bool = False
     sequence_parallelism_mode: str = None
     enable_sequence_overlap: bool = False
-    ring_attention_distribution_mode: str = None
+    context_parallel_distribution_mode: ContextParallelDistributionMode = (
+        ContextParallelDistributionMode.MAKESPAN_MIN
+    )
     pipeline_stage_manager: Optional[PipelineStageManager] = None
     pipeline_template: Optional[PipelineTemplate] = None
     enable_tensor_parallelism: bool = True
@@ -29,6 +42,8 @@ class ShardConfig(ColossalShardConfig):
     def __post_init__(self):
         super().__post_init__()
 
-        assert (
-            not self.enable_sequence_parallelism
-        ), "Sequence parallelism is currently not supported"
+        if self.sequence_parallelism_mode is not None:
+            assert self.sequence_parallelism_mode in [
+                "ring_attn",
+                "all_to_all",
+            ], f"Invalid sequence parallelism mode {self.sequence_parallelism_mode}"

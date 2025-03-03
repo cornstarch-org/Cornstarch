@@ -4,6 +4,8 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 
+from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
+
 from .model_zoo import (
     CLIPModelBase,
     Dinov2ModelBase,
@@ -12,8 +14,6 @@ from .model_zoo import (
     Gemma2ModelBase,
     GemmaForCausalLMBase,
     GemmaModelBase,
-    InternLM2ForCausalLMBase,
-    InternLM2ModelBase,
     InternVisonModelBase,
     LlamaForCausalLMBase,
     LlamaModelBase,
@@ -48,7 +48,6 @@ vision_models = dict(
 language_models = dict(
     gemma=GemmaModelBase,
     gemma2=Gemma2ModelBase,
-    internlm2=InternLM2ModelBase,
     llama=LlamaModelBase,
     mistral=MistralModelBase,
     mixtral=MixtralModelBase,
@@ -59,7 +58,6 @@ language_models = dict(
 causal_lms = dict(
     gemma=GemmaForCausalLMBase,
     gemma2=Gemma2ForCausalLMBase,
-    internlm2=InternLM2ForCausalLMBase,
     llama=LlamaForCausalLMBase,
     mistral=MistralForCausalLMBase,
     mixtral=MixtralForCausalLMBase,
@@ -173,6 +171,42 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
     ):
         self.set_model(causal_lms[model_name]())
         self.run_hybrid_parallel(tp_size, pp_size, attention, precision)
+
+    @parametrize("model_name", causal_lms.keys(), name_fn=lambda m: m)
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
+    @parametrize(
+        "context_parallel_dist_mode",
+        [
+            ContextParallelDistributionMode.UNIFORM,
+            ContextParallelDistributionMode.ZIGZAG,
+            ContextParallelDistributionMode.MAKESPAN_MIN,
+        ],
+        name_fn=lambda x: {
+            ContextParallelDistributionMode.UNIFORM: "uniform",
+            ContextParallelDistributionMode.ZIGZAG: "zigzag",
+            ContextParallelDistributionMode.MAKESPAN_MIN: "makespan_min",
+        }[x],
+    )
+    def test_context_parallel(
+        self,
+        model_name: str,
+        tp_size: int,
+        pp_size: int,
+        context_parallel_dist_mode: ContextParallelDistributionMode,
+    ):
+        self.set_model(causal_lms[model_name]())
+        self.run_hybrid_parallel(
+            tp_size,
+            pp_size,
+            "bitfield_attention",
+            "bf16",
+            "ring_attn",
+            context_parallel_dist_mode,
+        )
 
 
 @instantiate_parametrized_tests

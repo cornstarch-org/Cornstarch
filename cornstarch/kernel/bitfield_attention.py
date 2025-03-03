@@ -111,6 +111,68 @@ def get_submask_from_bitfield_mask(
     )
 
 
+@triton.jit
+def compute_num_block_computation(
+    attention_mask: tl.tensor,
+    out: tl.tensor,
+    stride_maskb,
+    stride_outb,
+    seqlen: tl.constexpr,
+):
+    """
+    For a single query block (128 queries), check the number of blocks that need to be computed.
+    Each element in the output tensor is the number of blocks that need computation.
+
+    Args:
+        - attention_mask: tl.tensor (batch_size, seqlen)
+            a bitfield attention mask
+        - out: tl.tensor (batch_size, ceil(seqlen / 128))
+        - seqlen: tl.constexpr
+    """
+
+    BLOCK_SIZE: tl.constexpr = 128
+
+    batch_size = tl.program_id(0)
+    offset = tl.program_id(1) * BLOCK_SIZE
+
+    offs_mask = tl.arange(0, BLOCK_SIZE)
+    mask_ptr = attention_mask + batch_size * stride_maskb + offset + offs_mask
+    out_ptr = out + batch_size * stride_outb + tl.program_id(1)
+
+    q_bitfield_mask = tl.load(mask_ptr, mask=offset + offs_mask < seqlen, other=0)
+    num_blocks_to_compute = 0
+    for index in range(0, seqlen, BLOCK_SIZE):
+        kv_mask_ptr = attention_mask + batch_size * stride_maskb + index + offs_mask
+        kv_bitfield_mask = tl.load(
+            kv_mask_ptr, mask=index + offs_mask < seqlen, other=0
+        )
+        block_mask = get_submask_from_bitfield_mask(
+            q_bitfield_mask, kv_bitfield_mask, offset + offs_mask, index + offs_mask
+        )
+
+        if not is_block_masked_out(block_mask):
+            num_blocks_to_compute += 1
+
+    tl.store(out_ptr, num_blocks_to_compute)
+
+
+def get_num_computation_block_per_query_block(
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    # attention_mask: (batch_size, seqlen)
+    batch_size, seqlen = attention_mask.shape
+    num_blocks = math.ceil(seqlen / 128)
+    out = torch.empty(
+        (batch_size, num_blocks), dtype=torch.int32, device=attention_mask.device
+    )
+
+    grid = lambda META: (batch_size, triton.cdiv(seqlen, 128))
+    compute_num_block_computation[grid](
+        attention_mask, out, attention_mask.stride(0), out.stride(0), seqlen
+    )
+    return out
+
+
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
 @triton.autotune(
     configs=[
@@ -135,6 +197,7 @@ def _fwd_kernel(
     TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale,
     stride_maskb,
+    stride_offsetb,
     stride_qb,
     stride_qh,
     stride_qm,
@@ -237,10 +300,10 @@ def _fwd_kernel(
             other=0.0,
         )
 
-    context_offset_ptr = Context_offsets + off_b
-    context_offset = tl.load(context_offset_ptr)
+    context_offsets_ptr = Context_offsets + off_b * stride_offsetb + offs_m
+    context_offsets = tl.load(context_offsets_ptr, mask=offs_m < seqlen_q, other=0)
     q_bitfield_mask = tl.load(
-        bitfield_mask + off_b * stride_maskb + offs_m + context_offset,
+        bitfield_mask + off_b * stride_maskb + context_offsets,
         mask=offs_m < seqlen_q,
         other=0,
     )
@@ -259,7 +322,7 @@ def _fwd_kernel(
         )
 
         block_mask = get_submask_from_bitfield_mask(
-            q_bitfield_mask, kv_bitfield_mask, offs_m + context_offset, offs_n_curr
+            q_bitfield_mask, kv_bitfield_mask, context_offsets, offs_n_curr
         )
 
         if not is_block_masked_out(block_mask):
@@ -469,6 +532,7 @@ def _bwd_kernel_one_col_block(
     D,
     softmax_scale,
     stride_maskb,
+    stride_offsetb,
     stride_qm,
     stride_kn,
     stride_vn,
@@ -563,23 +627,22 @@ def _bwd_kernel_one_col_block(
         other=0,
     )
 
-    context_offset_ptr = Context_offsets + off_b
-    context_offset = tl.load(context_offset_ptr)
-
     # loop over rows
     num_block_m = tl.cdiv(seqlen_q, BLOCK_M)
     for start_m in range(begin_m, num_block_m * BLOCK_M, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         offs_m_curr = start_m + offs_m
 
+        context_offsets_ptr = Context_offsets + off_b * stride_offsetb + offs_m_curr
+        context_offsets = tl.load(context_offsets_ptr)
         q_bitfield_mask = tl.load(
-            bitfield_mask + off_b * stride_maskb + offs_m_curr + context_offset,
+            bitfield_mask + off_b * stride_maskb + context_offsets,
             mask=offs_m_curr < seqlen_q,
             other=0,
         )
 
         block_mask = get_submask_from_bitfield_mask(
-            q_bitfield_mask, kv_bitfield_mask, offs_m_curr + context_offset, offs_n
+            q_bitfield_mask, kv_bitfield_mask, context_offsets, offs_n
         )
 
         if not is_block_masked_out(block_mask):
@@ -795,6 +858,7 @@ def _bwd_kernel(
     D,
     softmax_scale,
     stride_maskb,
+    stride_offsetb,
     stride_qb,
     stride_qh,
     stride_qm,
@@ -820,7 +884,7 @@ def _bwd_kernel(
     stride_dvh,
     stride_dvn,
     nheads,
-    context_offset,
+    Context_offsets,
     seqlen_qs,
     seqlen_ks,
     seqlen_q_rounded,
@@ -873,6 +937,7 @@ def _bwd_kernel(
                 D,
                 softmax_scale,
                 stride_maskb,
+                stride_offsetb,
                 stride_qm,
                 stride_kn,
                 stride_vn,
@@ -881,7 +946,7 @@ def _bwd_kernel(
                 stride_dqm,
                 stride_dkn,
                 stride_dvn,
-                context_offset,
+                Context_offsets,
                 seqlen_q,
                 seqlen_k,
                 headdim,
@@ -910,6 +975,7 @@ def _bwd_kernel(
             D,
             softmax_scale,
             stride_maskb,
+            stride_offsetb,
             stride_qm,
             stride_kn,
             stride_vn,
@@ -918,7 +984,7 @@ def _bwd_kernel(
             stride_dqm,
             stride_dkn,
             stride_dvn,
-            context_offset,
+            Context_offsets,
             seqlen_q,
             seqlen_k,
             headdim,
@@ -935,37 +1001,22 @@ def _flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    seqlen_qs: torch.Tensor,
+    seqlen_ks: torch.Tensor,
+    offsets: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     mask: torch.Tensor = None,
-    seqlen_qs: list[int] = None,
-    seqlen_ks: list[int] = None,
-    context_offsets: list[int] = None,
 ):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
     assert k.shape == (batch, seqlen_k, nheads, d)
     assert v.shape == (batch, seqlen_k, nheads, d)
-    assert mask.shape == (
-        batch,
-        seqlen_k,
-    ), f"Expected mask shape ({batch}, {seqlen_k}), but got {mask.shape}"
     assert d <= 128, "FlashAttention only support head dimensions up to 128"
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
     assert q.is_cuda and k.is_cuda and v.is_cuda
-
-    if seqlen_qs is None:
-        seqlen_qs = [seqlen_q] * batch
-    if seqlen_ks is None:
-        seqlen_ks = [seqlen_k] * batch
-    if context_offsets is None:
-        context_offsets = [0] * batch
-
-    assert isinstance(
-        context_offsets, list
-    ), "context_offsets must be provided as a 1D list."
 
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
 
@@ -1013,6 +1064,7 @@ def _flash_attn_forward(
         tmp,
         softmax_scale,
         mask.stride(0),
+        offsets.stride(0),
         q.stride(0),
         q.stride(2),
         q.stride(1),
@@ -1027,9 +1079,9 @@ def _flash_attn_forward(
         o.stride(2),
         o.stride(1),
         nheads,
-        torch.tensor(context_offsets, device=q.device, dtype=torch.int32),
-        torch.tensor(seqlen_qs, device=q.device, dtype=torch.int32),
-        torch.tensor(seqlen_ks, device=q.device, dtype=torch.int32),
+        offsets,
+        seqlen_qs,
+        seqlen_ks,
         seqlen_q_rounded,
         d,
         seqlen_q // 32,
@@ -1059,23 +1111,15 @@ def _flash_attn_backward(
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     mask: torch.Tensor = None,
-    seqlen_qs: list[int] = None,
-    seqlen_ks: list[int] = None,
-    context_offsets: list[int] = None,
+    seqlen_qs: torch.Tensor = None,
+    seqlen_ks: torch.Tensor = None,
+    offsets: torch.Tensor = None,
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
         do = do.contiguous()
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
-
-    if seqlen_qs is None:
-        seqlen_qs = [seqlen_q] * batch
-    if seqlen_ks is None:
-        seqlen_ks = [seqlen_k] * batch
-
-    if context_offsets is None:
-        context_offsets = torch.tensor([0] * batch, device=q.device, dtype=torch.int32)
 
     # assert d in {16, 32, 64, 128}
     assert d <= 128
@@ -1089,9 +1133,6 @@ def _flash_attn_backward(
     dq_accum = torch.empty_like(q, dtype=torch.float32)  # Accumulates gradients for q
     delta = torch.empty_like(lse)  # intermediate results for softmax gradient
     # delta = torch.zeros_like(lse)
-
-    seqlen_qs = torch.tensor(seqlen_qs, device=q.device, dtype=torch.int32)
-    seqlen_ks = torch.tensor(seqlen_ks, device=q.device, dtype=torch.int32)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
@@ -1156,6 +1197,7 @@ def _flash_attn_backward(
         delta,
         softmax_scale,
         mask.stride(0),
+        offsets.stride(0),
         q.stride(0),
         q.stride(2),
         q.stride(1),
@@ -1179,7 +1221,7 @@ def _flash_attn_backward(
         dv.stride(2),
         dv.stride(1),
         nheads,
-        torch.tensor(context_offsets, device=q.device, dtype=torch.int32),
+        offsets,
         seqlen_qs,
         seqlen_ks,
         seqlen_q_rounded,
@@ -1208,9 +1250,9 @@ class FlashAttnFunc(torch.autograd.Function):
         bias=None,
         softmax_scale=None,
         mask=None,
-        seqlen_qs: list[int] = None,
-        seqlen_ks: list[int] = None,
-        context_offsets: list[int] = None,
+        seqlen_qs: torch.Tensor = None,
+        seqlen_ks: torch.Tensor = None,
+        offsets: torch.Tensor = None,
     ):
         """
         q: (batch_size, seqlen_q, nheads, headdim)
@@ -1221,26 +1263,46 @@ class FlashAttnFunc(torch.autograd.Function):
         """
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
+
+        batch = q.shape[0]
+        if seqlen_qs is None:
+            seqlen_q = q.shape[1]
+            seqlen_qs = torch.tensor(
+                [seqlen_q] * batch, dtype=torch.int64, device=q.device
+            )
+        if seqlen_ks is None:
+            seqlen_k = k.shape[1]
+            seqlen_ks = torch.tensor(
+                [seqlen_k] * batch, dtype=torch.int64, device=q.device
+            )
+        if offsets is None:
+            offsets = torch.nested.nested_tensor(
+                [
+                    torch.arange(seqlen_q, dtype=torch.int32, device=q.device)
+                    for seqlen_q in seqlen_qs
+                ],
+                device=q.device,
+            ).to_padded_tensor(padding=-1)
+
         o, lse, ctx.softmax_scale = _flash_attn_forward(
             q,
             k,
             v,
+            seqlen_qs=seqlen_qs,
+            seqlen_ks=seqlen_ks,
+            offsets=offsets,
             bias=bias,
             softmax_scale=softmax_scale,
             mask=mask,
-            seqlen_qs=seqlen_qs,
-            seqlen_ks=seqlen_ks,
-            context_offsets=context_offsets,
         )
-        ctx.save_for_backward(q, k, v, o, lse, bias, mask)
-        ctx.context_offsets = context_offsets
-        ctx.seqlen_qs = seqlen_qs
-        ctx.seqlen_ks = seqlen_ks
+        ctx.save_for_backward(
+            q, k, v, o, lse, bias, mask, seqlen_qs, seqlen_ks, offsets
+        )
         return o
 
     @staticmethod
     def backward(ctx, do):
-        q, k, v, o, lse, bias, mask = ctx.saved_tensors
+        q, k, v, o, lse, bias, mask, seqlen_qs, seqlen_ks, offsets = ctx.saved_tensors
         assert not ctx.needs_input_grad[
             3
         ], "FlashAttention does not support bias gradient yet"
@@ -1263,9 +1325,9 @@ class FlashAttnFunc(torch.autograd.Function):
             bias=bias,
             softmax_scale=ctx.softmax_scale,
             mask=mask,
-            seqlen_qs=ctx.seqlen_qs,
-            seqlen_ks=ctx.seqlen_ks,
-            context_offsets=ctx.context_offsets,
+            seqlen_qs=seqlen_qs,
+            seqlen_ks=seqlen_ks,
+            offsets=offsets,
         )
         return dq, dk, dv, *([None] * 6)
 

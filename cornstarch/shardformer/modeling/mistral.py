@@ -1,3 +1,4 @@
+import functools
 from typing import Callable, List, Optional, Tuple, Union
 
 import torch
@@ -27,8 +28,14 @@ from transformers.models.mistral.modeling_mistral import (
 )
 from transformers.processing_utils import Unpack
 
-from cornstarch.kernel.interface import create_bitfield_attention_mask
-from cornstarch.shardformer.layers.utils import ContextParallelBatchUtils
+from cornstarch.kernel.interface import BitfieldUtils
+from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
+    context_parallel_bitfield_attention_forward,
+)
+from cornstarch.shardformer.layers.utils import (
+    ContextParallelBatchSplitUtils,
+    ContextParallelDistributionMode,
+)
 
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
@@ -111,53 +118,75 @@ class MistralModelForwards:
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
-        ring_attn_mode = getattr(
-            shard_config, "ring_attention_distribution_mode", "uniform"
+        cp_dist_mode = getattr(
+            shard_config,
+            "context_parallel_distribution_mode",
+            ContextParallelDistributionMode.UNIFORM,
         )
 
-        if sp_mode == "ring_attn":
-            # Do nothing. Our RingAttention implementation converts attention mask automatically.
+        if self.config._attn_implementation == "bitfield_attention":
+            if BitfieldUtils.sequence_lengths_cache is None:
+                sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
+                BitfieldUtils.set_sequence_lengths_cache(sequence_lengths.tolist())
             attn_mask = attention_mask
         else:
-            # non ring attention (either all-to-all or non sequence parallel)
-            if attention_mask is None:
-                attn_mask = create_bitfield_attention_mask(input_ids, token_ids={})
-
-            elif attention_mask.dtype == torch.int64 and (attention_mask > 1).any():
-                attn_mask = attention_mask
-
-            else:
-                # causal mask
-                attn_mask = self._update_causal_mask(
-                    attention_mask,
-                    hidden_states,
-                    cache_position,
-                    past_key_values,
-                    output_attentions,
-                )
+            # causal mask
+            attn_mask = self._update_causal_mask(
+                attention_mask,
+                hidden_states,
+                cache_position,
+                past_key_values,
+                output_attentions,
+            )
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
-            # Ring Attention batch processing
             if sp_mode == "ring_attn":
-                hidden_states = ContextParallelBatchUtils.split_batch(
-                    hidden_states, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
+                assert self.config._attn_implementation == "bitfield_attention", (
+                    "Cornstarch context parallelism is only supported with bitfield_attention. "
+                    f"Got {self.config._attn_implementation}"
+                )
+                sequence_lengths = BitfieldUtils.sequence_lengths_cache[0]
+                hidden_states, _, offsets = ContextParallelBatchSplitUtils.split_batch(
+                    hidden_states,
+                    sequence_lengths,
+                    attn_mask,
+                    sp_group,
+                    dist_mode=cp_dist_mode,
                 )  # shape: [B, L // sp_size, ...]
-                position_ids = ContextParallelBatchUtils.split_batch(
-                    position_ids, sp_group, seq_dim=1, ring_attn_mode=ring_attn_mode
-                )  # shape: [B, L // sp_size]
-
+                position_ids = offsets
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
                 )
+
+            # Recompute position embeddings
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         else:
             start_idx, end_idx = (0, len(self.layers))
+
+        kwargs = {}
+        if self.config._attn_implementation == "bitfield_attention":
+            seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache()
+            seqlen_qs = seqlen_ks
+            if sp_mode == "ring_attn":
+                seqlen_qs, offsets = (
+                    ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache()
+                )
+                indices_perm, indices_inverse_perm = (
+                    ContextParallelBatchSplitUtils.get_permutate_cache()
+                )
+                kwargs["indices_perm"] = indices_perm
+                kwargs["indices_inverse_perm"] = indices_inverse_perm
+
+            kwargs["seqlen_qs"] = seqlen_qs
+            kwargs["seqlen_ks"] = seqlen_ks
+            kwargs["offsets"] = offsets
 
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
@@ -174,6 +203,7 @@ class MistralModelForwards:
                     use_cache,
                     cache_position,
                     position_embeddings,
+                    **kwargs,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -186,12 +216,16 @@ class MistralModelForwards:
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                     **flash_attn_kwargs,
+                    **kwargs,
                 )
 
             hidden_states = layer_outputs[0]
 
             if output_attentions:
                 all_self_attentions += (layer_outputs[1],)
+
+        BitfieldUtils.clear_cache()
+        ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
             outputs = {
@@ -215,9 +249,6 @@ class MistralModelForwards:
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
-
-        # Clear cache so that it is not used in the next forward pass
-        ContextParallelBatchUtils.clear_split_cache()
 
         output = BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -269,15 +300,24 @@ class MistralModelForwards:
         ):
             # Split labels too
             sp_group = shard_config.sequence_parallel_process_group
-            ring_attn_mode = getattr(
-                shard_config, "ring_attention_distribution_mode", "uniform"
+            cp_dist_mode = getattr(
+                shard_config,
+                "context_parallel_distribution_mode",
+                ContextParallelDistributionMode.UNIFORM,
             )
 
-            labels = ContextParallelBatchUtils.split_batch(
+            assert self.config._attn_implementation == "bitfield_attention", (
+                "Cornstarch context parallelism is only supported with bitfield_attention. "
+                f"Got {self.config._attn_implementation}"
+            )
+
+            sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
+            labels, _, _ = ContextParallelBatchSplitUtils.split_batch(
                 labels,
+                sequence_lengths,
+                attention_mask,
                 sp_group,
-                seq_dim=1,
-                ring_attn_mode=ring_attn_mode,
+                dist_mode=cp_dist_mode,
             )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
@@ -301,6 +341,9 @@ class MistralModelForwards:
             force_sp_gather=False,
             **kwargs,
         )
+
+        BitfieldUtils.clear_cache()
+        ContextParallelBatchSplitUtils.clear_cache()
 
         stage_manager = shard_config.pipeline_stage_manager
         if not (stage_manager is None or stage_manager.is_last_stage()):
@@ -400,19 +443,29 @@ class MistralAttentionForwards:
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            if self.config._attn_implementation == "sdpa" and kwargs.get(
-                "output_attentions", False
-            ):
-                logger.warning_once(
-                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-                )
-            else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS[
-                    self.config._attn_implementation
-                ]
+        if sp_mode == "ring_attn":
+            assert self.config._attn_implementation == "bitfield_attention", (
+                "Cornstarch context parallelism is only supported with bitfield_attention. "
+                f"Got {self.config._attn_implementation}"
+            )
+
+            attention_interface: Callable = functools.partial(
+                context_parallel_bitfield_attention_forward, sp_group=sp_group
+            )
+        else:
+            attention_interface: Callable = eager_attention_forward
+            if self.config._attn_implementation != "eager":
+                if self.config._attn_implementation == "sdpa" and kwargs.get(
+                    "output_attentions", False
+                ):
+                    logger.warning_once(
+                        "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                        'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                    )
+                else:
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[
+                        self.config._attn_implementation
+                    ]
 
         attn_output, attn_weights = attention_interface(
             self,

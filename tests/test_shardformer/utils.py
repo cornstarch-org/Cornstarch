@@ -33,9 +33,16 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     ModelOutput,
 )
-from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
+from transformers.modeling_utils import (
+    ALL_ATTENTION_FUNCTIONS,
+    PretrainedConfig,
+    PreTrainedModel,
+)
 
-from cornstarch.kernel.interface import create_bitfield_attention_mask
+from cornstarch.kernel.interface import (
+    bitfield_attention_forward,
+    create_bitfield_attention_mask,
+)
 from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
@@ -49,8 +56,11 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultiModalPipelineStageManager,
 )
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
 
 from ..distributed_base import GlooDistributedTestBase
+
+ALL_ATTENTION_FUNCTIONS.update({"bitfield_attention": bitfield_attention_forward})
 
 
 class ModelClassBase(ABC):
@@ -72,13 +82,13 @@ class ModelClassBase(ABC):
     def model_fn(self) -> PreTrainedModel:
         config = copy.deepcopy(self.config)
         config.pad_token_id = config.eos_token_id
-        config._attn_implementation = "eager"
+        config._attn_implementation = "flash_attention_2"
         return self.model_class(config)
 
 
 class ColossalaiHybridParallelBase(GlooDistributedTestBase):
     num_microbatches: int = 4
-    microbatch_size: int = 1
+    microbatch_size: int = 2
 
     @property
     def world_size(self) -> int:
@@ -123,7 +133,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         org_loss: torch.Tensor,
         sharded_loss: torch.Tensor,
     ):
-        plugin: MultimodalParallelPlugin = booster.plugin
+        plugin: HybridParallelPlugin = booster.plugin
         stage_manager = plugin.stage_manager
         # Loss check
         if stage_manager is None or stage_manager.is_last_stage():
@@ -215,7 +225,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         attention: str,
         precision: str,
         sp_mode: str | None = None,
-        ring_attn_mode: str | None = "zigzag",
+        ring_attn_mode: ContextParallelDistributionMode | None = None,
     ):
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -236,6 +246,8 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                     "enable_sequence_parallelism": True,
                     "sequence_parallelism_mode": sp_mode,
                     "sp_size": 2,
+                    # context_parallel_distribution_mode will be set later,
+                    # as HybirdParallelPlugin doesn't support it
                 }
             )
 
@@ -251,13 +263,17 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         )
 
         if sp_mode == "ring_attn":
-            booster.plugin.shard_config.ring_attention_distribution_mode = (
+            booster.plugin.shard_config.context_parallel_distribution_mode = (
                 ring_attn_mode
             )
 
+        assert sharded_model.unwrap().config._attn_implementation == attention
+
         try:
-            org_model.gradient_checkpointing_enable()
-            sharded_model.unwrap().gradient_checkpointing_enable()
+            org_model.gradient_checkpointing_enable({"use_reentrant": False})
+            sharded_model.unwrap().gradient_checkpointing_enable(
+                {"use_reentrant": False}
+            )
         except ValueError:
             # Model does not support gradient checkpointing
             pass
@@ -307,6 +323,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         with ctx:
             org_model = self.model.model_fn().to(device="cuda")
             sharded_model = copy.deepcopy(org_model)
+            sharded_model.config._attn_implementation = attention
         if use_lazy_init:
             ctx.materialize(org_model)
 
@@ -379,7 +396,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 org_output = org_model(*unshard_test_data)
             else:
                 org_output = org_model(**unshard_test_data)
-            org_loss = criterion(org_output).to(precision)
+            org_loss = criterion(org_output)
         org_loss.backward()
 
         sharded_model.train()
@@ -407,7 +424,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
 class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
     num_microbatches: int = 4
-    microbatch_size: int = 1
+    microbatch_size: int = 2
     token_ids: dict[str, int]
 
     def set_model(self, encoders: dict[str, ModelClassBase], llm: ModelClassBase):
@@ -684,7 +701,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             for encoder_index, encoder_name in enumerate(encoders)
         }
         model.set_modality_token_ids(self.token_ids)
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable({"use_reentrant": False})
 
         return model
 
@@ -710,7 +727,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             for encoder_index, encoder_name in enumerate(encoders)
         }
         model.set_modality_token_ids(token_ids=self.token_ids)
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable({"use_reentrant": False})
 
         return model
 
@@ -886,6 +903,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         input_ids = torch.cat(encoder_tokens + [input_ids], dim=1)
         new_data["input_ids"] = input_ids
         new_data["labels"] = input_ids
+        new_data["use_cache"] = False
 
         return new_data
 
@@ -916,8 +934,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         for model_base in self.encoders.values():
             data.update(model_base.data_gen_fn(batch_size))
         data.update(self.llm.data_gen_fn(batch_size))
-        # MultimodalModel automatically generates it after merging encoder outputs
-        data.pop("attention_mask", None)
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
@@ -926,13 +942,26 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         if run_original_model:
             org_model.train()
 
+            # org_output = org_model(**unshard_test_data)
+            # org_loss = criterion(org_output)
+            # org_loss.backward()
+
             org_loss = torch.scalar_tensor(0, device="cuda")
             for i in range(self.num_microbatches):
-                input = get_micro_batch(unshard_test_data, i, self.microbatch_size)
+                input = get_micro_batch(
+                    unshard_test_data, i * self.microbatch_size, self.microbatch_size
+                )
+                for k, v in input.items():
+                    if isinstance(v, torch.Tensor):
+                        input[k] = v.contiguous()
                 output = org_model(**input)
                 loss = criterion(output) / self.num_microbatches
                 loss.backward()
                 org_loss.add_(loss.data)
+
+            # org_output = org_model(**unshard_test_data)
+            # org_loss = criterion(org_output)
+            # org_loss.backward()
 
         sharded_loss, sharded_output = None, None
         if run_sharded_model:

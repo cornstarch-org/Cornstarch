@@ -4,6 +4,7 @@ import inspect
 from typing import Callable, Union
 
 import numpy as np
+import torch
 from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
@@ -278,6 +279,7 @@ class MultimodalProcessor:
         text_inputs = self.llm_tokenizer(
             **tokenizer_inputs, return_tensors=return_tensors
         )
+
         result.update(text_inputs)
 
         return BatchMixFeature(data={**result})

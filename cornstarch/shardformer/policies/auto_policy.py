@@ -177,13 +177,6 @@ _POLICY_LIST = {
     "transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration": PolicyLocation(
         file_name="qwen2", class_name="Qwen2ForCausalLMPolicy"
     ),
-    # InternLM2
-    "cornstarch.models.internlm2.modeling_internlm2.InternLM2Model": PolicyLocation(
-        file_name="internlm2", class_name="InternLM2ModelPolicy"
-    ),
-    "cornstarch.models.internlm2.modeling_internlm2.InternLM2ForCausalLM": PolicyLocation(
-        file_name="internlm2", class_name="InternLM2ForCausalLMPolicy"
-    ),
     # Whisper
     "transformers.models.whisper.modeling_whisper.WhisperEncoder": PolicyLocation(
         file_name="whisper", class_name="WhisperEncoderPolicy"

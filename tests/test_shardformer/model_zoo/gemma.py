@@ -8,14 +8,15 @@ from transformers.models.gemma import GemmaConfig, GemmaForCausalLM, GemmaModel
 from ..utils import ModelClassBase
 
 gemma_config = GemmaConfig(
-    hidden_size=256,
+    vocab_size=25600,
+    hidden_size=64,
     intermediate_size=64,
     num_attention_heads=8,
     num_key_value_heads=8,
     num_hidden_layers=4,
     # TODO: all pretrained Gemma model uses head_dim=256, which is not supported
     # by bitfield attention mask (Triton FlashAttention base).
-    head_dim=128,
+    head_dim=32,
     use_cache=False,
     # TODO: Gemma uses tie_word_embeddings True, in which case the tests fail.
     # Implement automatic gradient synchronization between tied weights.
@@ -38,8 +39,8 @@ class GemmaModelBase(ModelClassBase):
 
     def data_gen_fn(self, num_batch: int) -> dict:
         input = {
-            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
-            "attention_mask": torch.ones(num_batch, 64),
+            "input_ids": torch.randint(0, 2048, (num_batch, 256)),
+            "attention_mask": torch.ones(num_batch, 256),
         }
 
         return input
@@ -59,8 +60,8 @@ class GemmaForCausalLMBase(ModelClassBase):
 
     def data_gen_fn(self, num_batch: int) -> dict:
         input = {
-            "input_ids": torch.randint(0, 2048, (num_batch, 64)),
-            "attention_mask": torch.ones(num_batch, 64),
+            "input_ids": torch.randint(0, 2048, (num_batch, 256)),
+            "attention_mask": torch.ones(num_batch, 256),
         }
         input["labels"] = input["input_ids"]
         return input

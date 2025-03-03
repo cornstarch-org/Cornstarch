@@ -10,6 +10,7 @@ from torch.testing._internal.common_distributed import TEST_SKIPS, MultiProcessT
 from torch.testing._internal.common_utils import FILE_SCHEMA
 
 from .gloo_utils import (
+    all_gather_gloo,
     all_to_all_gloo,
     all_to_all_single_gloo,
     batch_isend_irecv_gloo,
@@ -73,6 +74,7 @@ class GlooDistributedTestBase(MultiProcessTestCase):
             patch.object(dist, "all_to_all", new=all_to_all_gloo),
             patch.object(dist, "all_to_all_single", new=all_to_all_single_gloo),
             patch.object(dist, "reduce_scatter", new=reduce_scatter_gloo),
+            patch.object(dist, "all_gather", new=all_gather_gloo),
             patch(
                 "colossalai.pipeline.p2p._check_device",
                 return_value=(torch.device("cuda"), False),
