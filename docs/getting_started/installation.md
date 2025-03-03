@@ -37,12 +37,11 @@ $ pip install cornstarch
     colossalai 0.4.6 requires transformers==4.39.3, but you have transformers <your_version> which is incompatible.
     ```
 
-    But you can also see that packages including cornstarch are successfully installed right after the error message:
+    But this is expected and there is no problem in installing and using cornstarch.
+    You can also see that packages including cornstarch are successfully installed right after the error message:
     ```
     Successfully installed ... cornstarch-0.0.5 ... tokenizers-0.21.0 transformers-4.49.0 ...
     ```
-
-Cornstarch includes every dependent package that `colossalai` has, thus it should have no problem in using `colossalai` or Cornstarch.
 
 ## Install Cornstarch from Source
 
