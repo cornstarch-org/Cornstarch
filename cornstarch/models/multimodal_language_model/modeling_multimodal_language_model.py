@@ -748,6 +748,14 @@ class MultimodalModel(nn.Module):
         return attention_mask
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        if gradient_checkpointing_kwargs is None:
+            gradient_checkpointing_kwargs = {}
+        if (
+            "use_reentrant" not in gradient_checkpointing_kwargs
+            or gradient_checkpointing_kwargs["use_reentrant"] is True
+        ):
+            gradient_checkpointing_kwargs["use_reentrant"] = False
+
         for encoder in self.encoders.values():
             encoder.module.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
             encoder.projector.gradient_checkpointing_enable(
