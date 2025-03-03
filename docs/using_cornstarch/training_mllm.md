@@ -1,3 +1,9 @@
+!!! info
+
+    [Cornstarch repository](https://github.com/SymbioticLab/Cornstarch) provides an end-to-end example
+    in [`examples/pretrain_vlm.py`](https://github.com/SymbioticLab/Cornstarch/blob/main/examples/pretrain_vlm.py).
+    
+
 ## Training a Multimodal LLM
 
 `MultimodalModel` inherits from `torch.nn.Module`, which has its own `forward()` function for inference and training.
@@ -13,24 +19,43 @@ loss.backward()
 
 ## Freezing Modules
 
-Cornstarch supports freezing a part of the `MultimodalModel`.
+Cornstarch supports freezing a portion of the `MultimodalModel`.
 For encoder (`ModalEncoderModule`), an encoder and a projector can individually be frozen:
 
 ``` py
 mllm = MultimodalModule(
     encoders={
         "vision": ModalEncoderModule(...),
+        "audio": ModalEncoderModule(...),
     },
     langauge_model=llm,
 )
 
-mllm.train("vision_encoder", mode=False)
-mllm.train("vision_projector", mode=True)
-mllm.train("language_model", mode=False)
+mllm.train(
+    encoders_mode={
+        "vision": (False, True), # encoder and projector, respectively
+        "audio": (True, True),
+    },
+    llm_mode=False,
+)
 ```
 
-Each modality encoder module (`ModalEncoderModule`) has two components: an encoder, and a projector.
-The example above has a `vision` encoder module, where `vision_encoder` and `vision_projector` keys represent `mllm.vision_encoder.module` (the encoder) and `mllm.vision_encoder.projector` (the projector), respectively.
+!!! info
+
+    if `encoders_mode` is not given, the train mode of all encoders including projectors' is set to `llm_mode`.
+
+    ```
+    mllm.train(llm_mode=True)
+    ```
+
+    is equivalent to:
+
+    ```
+    mllm.train(
+        {encoder: (True, True) for encoder in mllm.encoders},
+        llm_mode=True,
+    )
+    ```
 
 If the given encoder key does not exist in the `MultimodalModel`, it raises a `ValueError`.
 For example, if you call `mllm.train("non_existing_encoder", mode=False)`, the encoder key `non_existing` does not exist in the `MultimodalModel` encoder dictionary, hence it raises an error.
@@ -59,7 +84,7 @@ If the output of the last modality encoder is prepended first, the result will b
 
 ### Injecting modality encoder outputs
 
-Unlike simply prepending modality encoders, *injecting` mehcanism injects modality encoder outputs to the location that user wants to put them to.
+Unlike simply prepending modality encoders, *injecting* mehcanism injects modality encoder outputs to the location that user wants to put them to.
 To specify where to put the modality encoder outputs, custom tokens must be added before running the model.
 Use `MultimodalModel.set_token_ids()` API to register the token IDs per modality encoders:
 

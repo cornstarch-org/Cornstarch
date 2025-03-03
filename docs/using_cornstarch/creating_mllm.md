@@ -1,3 +1,9 @@
+!!! info
+
+    [Cornstarch repository](https://github.com/SymbioticLab/Cornstarch) provides an end-to-end example
+    in [`examples/pretrain_vlm.py`](https://github.com/SymbioticLab/Cornstarch/blob/main/examples/pretrain_vlm.py).
+    
+
 ## Creating a Multimodal LLM
 
 Cornstarch supports creating a modular multimodal LLM from HuggingFace models.

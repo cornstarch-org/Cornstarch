@@ -20,20 +20,27 @@ Cornstarch is a Python library that works with Pytorch (>=2.5) and ColossalAI (>
 
 Cornstarch relies on [Colossal-AI](https://github.com/hpcaitech/ColossalAI) for training a multimodal LLM, which has a strict version requirement on [Pytorch](https://github.com/pytorch/pytorch) and [Huggingface transformers](https://github.com/huggingface/transformers) that are not compatible with Cornstarch dependencies.
 
-For this reason, ColossalAI should first manually be installed and then should Cornstarch be installed.
+For this reason, ColossalAI should first manually be installed and then should Cornstarch be installed:
 
 ```
-$ pip install colossalai
+$ pip install --no-deps colossalai==0.4.6
 $ pip install cornstarch
 ```
 
-During installing `colossalai`, your preinstalled `torch` and `transformers` will be uninstalled.  
-To avoid redundant installation, you can use `--no-deps` when installing `colossalai`:
+!!! note
 
-```
-$ pip install --no-deps colossalai
-$ pip install cornstarch
-```
+    You will see an error message from pip dependency resolver similar to the following:
+
+    ```
+    ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+    colossalai 0.4.6 requires torch<=2.4.1,>=2.2.0, but you have torch <your_version> which is incompatible.
+    colossalai 0.4.6 requires transformers==4.39.3, but you have transformers <your_version> which is incompatible.
+    ```
+
+    But you can also see that packages including cornstarch are successfully installed right after the error message:
+    ```
+    Successfully installed ... cornstarch-0.0.5 ... tokenizers-0.21.0 transformers-4.49.0 ...
+    ```
 
 Cornstarch includes every dependent package that `colossalai` has, thus it should have no problem in using `colossalai` or Cornstarch.
 
@@ -42,7 +49,7 @@ Cornstarch includes every dependent package that `colossalai` has, thus it shoul
 You can also install Cornstarch from source by cloning the Github repository. Manual `colossalai` installation introduced above should still be done.
 
 ```
-$ pip install --no-deps colossalai
+$ pip install --no-deps colossalai==0.4.6
 $ git clone https://github.com/SymbioticLab/Cornstarch
 $ cd Cornstarch
 $ pip install -e .[dev]

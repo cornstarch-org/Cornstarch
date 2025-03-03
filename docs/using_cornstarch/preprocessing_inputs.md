@@ -1,3 +1,9 @@
+!!! info
+
+    [Cornstarch repository](https://github.com/SymbioticLab/Cornstarch) provides an end-to-end example
+    in [`examples/pretrain_vlm.py`](https://github.com/SymbioticLab/Cornstarch/blob/main/examples/pretrain_vlm.py).
+    
+
 Running a multimodal model needs multimodal inputs.
 Yet processors for each modality model do not have interaction required for multimodal model execution.
 
