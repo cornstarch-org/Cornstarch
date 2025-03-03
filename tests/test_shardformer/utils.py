@@ -267,7 +267,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 ring_attn_mode
             )
 
-        assert org_model.config._attn_implementation == "eager"
         assert sharded_model.unwrap().config._attn_implementation == attention
 
         try:

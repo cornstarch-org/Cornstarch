@@ -43,7 +43,7 @@ causal_lms = dict(
 class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 6
+        return 8
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
@@ -74,6 +74,13 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
             None,
         )
 
+
+@instantiate_parametrized_tests
+class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
+    @property
+    def world_size(self) -> int:
+        return 6
+
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize(
@@ -85,7 +92,7 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         ],
         name_fn=lambda tp, vpp, lpp: f"tp={tp}, pp={vpp},{lpp}",
     )
-    def test_context_parallel(
+    def test(
         self,
         vision_model_name: str,
         language_model_name: str,
