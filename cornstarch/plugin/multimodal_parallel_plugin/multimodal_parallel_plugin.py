@@ -606,6 +606,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             llm_shard_config = replace(
                 self.shard_config,
                 pipeline_template=self.language_model_plugin.pipeline_template,
+                enable_flash_attention=False,
             )
             module = model.get_submodule("language_model")
             module = self.language_model_plugin.configure(
