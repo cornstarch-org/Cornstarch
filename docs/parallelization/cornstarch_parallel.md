@@ -1,3 +1,8 @@
+!!! info
+
+    [Cornstarch repository](https://github.com/SymbioticLab/Cornstarch) provides an end-to-end example
+    in [`examples/distributed/run_vlm_hybrid.py`](https://github.com/SymbioticLab/Cornstarch/blob/main/examples/distributed/run_vlm_hybrid.py).
+
 Using FSDP/DDP only may not be scalable depending on the infrastructure (e.g. slow inter-node networking).
 Cornstarch provides 4D parallelism (data parallelism, tensor parallelism, pipeline parallelism, and context parallelism).
 
@@ -67,8 +72,13 @@ Each `ModalParallelPlugin` has four arguments for parallel configurations: `tp_s
 The arguments are mapped to the following three parallel dimensions:
 
 - Tensor Parallelism (TP): `tp_size`
-- Context Parallelism (CP): `sp_size` and `sequence_parallelism_mode` (use `sequence_parallelism` for backward compatibility)
+- Context Parallelism (CP): `sp_size`, `sequence_parallelism_mode`, and `context_parallel_distribution_mode`.
 - Pipeline Parallelism (PP): `pipeline_template`
+
+!!! note
+
+    Cornstarch uses the term `sequence_parallelism` for backward compatibility: which is used by colossalai.
+    Cornstarch does not support Megatron's sequence parallelism that is used as a combination of tensor parallelism.
 
 ### Tensor Parallelism
 
@@ -93,6 +103,17 @@ Encoders and the LLM can have different number of `sp_size`.
 !!! note
 
     Currently context parallelism is supported only for the LLM.
+
+Context parallelism split sequeneces into subsets of tokens and distribute them into multiple ranks.
+There are multiple ways of partitioning sequences and distributing tokens into ranks that Corntarch supports:
+
+- `uniform`: The simplest way of such partitioning. Chunk every sequence into `cp_world_size` chunks, and each rank takes one portion.
+- `zigzag`: For causal attention, the amount of computation becomes imbalanced if tokens are uniformly distributed. `zigzag` partitions the sequence into `2 * cp_world_size` and each rank gets one portion from the upper half and another from the lower half, the workload sum of which is always balanced in causal attention.
+- `makespan_min`: In multimodal LLM, attention should no longer be simple causal; vision tokens should attend each other regardless of their location (previous vision tokens can attend to the future vision tokens). In this form of attention, zigzag is no longer be balanced, `makespan_min` computes the amount of workloads per token block (128 tokens per block) and distributes them to minimize overall makespan (execution time). The number of tokens per rank may be different depending on the amount of workloads.
+
+![](/assets/images/context_parallel_distribution_mode_illustration.png)
+
+The token distribution scheme can be configured by passing `cornstarch.shardformer.shard.shard_config.ContextParallelDistributionMode.[UNIFORM | ZIGZAG | MAKESPAN_MIN]` to LLM's `shard_config.context_parallel_distribution_mode`. Default is `MAKESPAN_MIN`.
 
 ### Pipeline Parallelism
 

@@ -19,7 +19,7 @@ classifiers = [
 dependencies = [
     "torch>=2.5.0",
     "triton>=3.0.0",
-    "transformers>=4.48.0",
+    "transformers>=4.49.0", # packages below this line are for colossalai
     "loguru",
     "simple_parsing",
     "datasets",
@@ -54,7 +54,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "torch>=2.5.0",
+    "torch>=2.3.0",
     "ruff",
     "black>=23.0",
     "isort>=5.12",
@@ -71,7 +71,7 @@ docs = [
 ]
 
 colossalai = [
-    "colossalai>=0.4.5",
+    "colossalai==0.4.6",
 ]
 
 [tool.ruff]

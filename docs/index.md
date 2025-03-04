@@ -23,7 +23,6 @@ Cornstarch is a distributed multimodal LLM modeling framework that allows you to
 - [Preprocessing multimodal inputs](using_cornstarch/preprocessing_inputs.md): How to preprocess muiltimodal inputs to run a multimodal LLM.
 - [Training a multimodal LLM](using_cornstarch/training_mllm.md): How to train a multimodal LLM using Cornstarch.
 - [Multimodal LLM Parallelization](using_cornstarch/parallelization.md): How to parallelize a multimodal LLM training.
-- [Source Code Reference](references): Auto-generated source code reference.
 
 # Research Works
 Below is a list of works powered by Cornstarch.

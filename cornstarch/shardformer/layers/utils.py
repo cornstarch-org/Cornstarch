@@ -80,8 +80,11 @@ class ContextParallelBatchSplitUtils:
     def get_context_parallel_sequence_lengths_cache(
         cls: ContextParallelBatchSplitUtils,
         sp_rank: int = -1,
-        device: torch.device = get_accelerator().get_current_device(),
+        device: torch.device = None,
     ) -> tuple[torch.Tensor | list[torch.Tensor], torch.Tensor | list[torch.Tensor]]:
+        if device is None:
+            device = get_accelerator().get_current_device()
+
         assert sp_rank == -1 or sp_rank >= 0
         if cls.context_parallel_sequence_lengths_cache is None:
             return None, None
@@ -95,8 +98,11 @@ class ContextParallelBatchSplitUtils:
     @classmethod
     def get_permutate_cache(
         cls: ContextParallelBatchSplitUtils,
-        device: torch.device = get_accelerator().get_current_device(),
+        device: torch.device = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if device is None:
+            device = get_accelerator().get_current_device()
+
         if cls.indices_cache is None:
             assert cls.context_parallel_sequence_lengths_cache is not None
             # Generate permuation and inverse permutation tensors

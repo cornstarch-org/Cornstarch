@@ -33,7 +33,7 @@ from cornstarch.models.multimodal_language_model import (
 
 def pretrain(
     vision_encoder_name: Literal["clip", "siglip", "pixtral", "qwen2_vision"],
-    llm_name: Literal["gemma2", "llama", "phi3", "mistral"],
+    llm_name_or_path: str,
     llava_dataset_file_path: Optional[Path] = None,
 ):
     """
@@ -42,8 +42,7 @@ def pretrain(
     torch.cuda.set_device(0)
 
     vision_encoder_path = model_names[vision_encoder_name]
-    llm_path = model_names[llm_name]
-    print(f"Pretraining a VLM with {vision_encoder_path} + {llm_path}.")
+    print(f"Pretraining a VLM with {vision_encoder_path} + {llm_name_or_path}.")
 
     # Create a model
     with torch.device("meta"):
@@ -52,7 +51,7 @@ def pretrain(
             vision_config.vision_config
         )
 
-        llm_config = AutoConfig.from_pretrained(llm_path)
+        llm_config = AutoConfig.from_pretrained(llm_name_or_path)
         language_model = AutoModelForCausalLM.from_config(llm_config)
 
         if vision_encoder_name == "qwen2_vision":
@@ -83,13 +82,16 @@ def pretrain(
 
     # Create a processor
     image_processor = AutoImageProcessor.from_pretrained(vision_encoder_path)
-    tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path, use_fast=True)
     tokenizer.pad_token = tokenizer.eos_token
 
     processor = MultimodalProcessor(
         encoder_processors={"vision": image_processor},
         llm_tokenizer=tokenizer,
         model=model,
+        # by default, vision encoder uses "<vision>" as its special token,
+        # while Llava pretrain dataset of fake dataset includes "<image>".
+        # So, we need to specify the token for the vision encoder.
         predefined_tokens={"vision": "<image>"},
     )
 

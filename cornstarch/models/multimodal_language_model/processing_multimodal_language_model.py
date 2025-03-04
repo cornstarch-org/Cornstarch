@@ -4,12 +4,10 @@ import inspect
 from typing import Callable, Union
 
 import numpy as np
-import torch
 from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_processing_utils import BaseImageProcessor
-from transformers.models.pixtral.processing_pixtral import BatchMixFeature
 from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer
 from transformers.utils import TensorType, logging
 
@@ -27,6 +25,13 @@ def default_num_feature_calculation_func_audio_static(
     return [num_features] * outputs["input_features"].shape[0]
 
 
+def default_num_feature_calculation_func_vision_clip(
+    inputs: dict, outputs: dict, config: PretrainedConfig
+) -> list[int]:
+    num_features = (config.image_size // config.patch_size) ** 2 + 1
+    return [num_features] * outputs["pixel_values"].shape[0]
+
+
 def default_num_feature_calculation_func_vision_static(
     inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[int]:
@@ -36,7 +41,7 @@ def default_num_feature_calculation_func_vision_static(
 
 def default_num_feature_calculation_func_pixtral(
     inputs: dict, outputs: dict, config: PretrainedConfig
-) -> list[list[int]]:
+) -> list[int]:
     # output has "image_sizes", which has already been rescaled.
     # Use pixtral image processing functions to get the number of image tokens
     from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
@@ -51,12 +56,9 @@ def default_num_feature_calculation_func_pixtral(
 
     num_image_tokens = []
 
-    for batch_image_size in outputs["image_sizes"]:
-        batch_num_image_tokens = []
-        for image_size in batch_image_size:
-            num_tokens = np.prod(_num_image_tokens(image_size, patch_size))
-            batch_num_image_tokens.append(num_tokens)
-        num_image_tokens.append(batch_num_image_tokens)
+    for image_size in outputs["image_sizes"]:
+        num_tokens = np.prod(_num_image_tokens(image_size, patch_size))
+        num_image_tokens.append(num_tokens)
 
     return num_image_tokens
 
@@ -82,7 +84,7 @@ def default_num_feature_calculation_func_qwen2vl(
 
 processor_type_to_num_feature_calculation_func = {
     "ViTImageProcessor": default_num_feature_calculation_func_vision_static,
-    "CLIPImageProcessor": default_num_feature_calculation_func_vision_static,
+    "CLIPImageProcessor": default_num_feature_calculation_func_vision_clip,
     "SiglipImageProcessor": default_num_feature_calculation_func_vision_static,
     "BitImageProcessor": default_num_feature_calculation_func_vision_static,
     "PixtralImageProcessor": default_num_feature_calculation_func_pixtral,
@@ -282,7 +284,7 @@ class MultimodalProcessor:
 
         result.update(text_inputs)
 
-        return BatchMixFeature(data={**result})
+        return BatchFeature(data={**result})
 
     def batch_decode(self, *args, **kwargs):
         return self.llm_tokenizer.batch_decode(*args, **kwargs)

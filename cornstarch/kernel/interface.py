@@ -126,8 +126,11 @@ class BitfieldUtils:
     @classmethod
     def get_sequence_lengths_cache(
         cls: BitfieldUtils,
-        device: torch.device = get_accelerator().get_current_device(),
+        device: torch.device = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if device is None:
+            device = get_accelerator().get_current_device()
+
         if cls.sequence_lengths_cache is None:
             return None, None
 

@@ -51,4 +51,3 @@ nav:
     - Overview: parallelization/index.md
     - Using DDP/FSDP: parallelization/ddp_fsdp.md
     - Using Cornstarch 4D Parallelism: parallelization/cornstarch_parallel.md
-  - Source Code Reference: reference/
