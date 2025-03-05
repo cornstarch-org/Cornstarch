@@ -1,6 +1,6 @@
 [project]
 name = "cornstarch"
-description = "A versatile model toolkit for distributed training."
+description = "A multimodal model training toolkit"
 readme = "README.md"
 license = {file = "LICENSE.txt"}
 requires-python = ">=3.10"
@@ -51,6 +51,11 @@ dependencies = [
     "diffusers==0.29.0",
     "timm",
 ]
+
+[project.urls]
+Homepages = "https://cornstarch-org.github.io"
+Issues = "https://github.com/cornstarch-org/Cornstarch/issues"
+
 
 [project.optional-dependencies]
 dev = [
