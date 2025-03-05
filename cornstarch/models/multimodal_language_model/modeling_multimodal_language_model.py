@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
+from peft.peft_model import PeftModel
 from transformers.activations import get_activation
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -694,6 +695,9 @@ class MultimodalModel(nn.Module):
     def update_language_model_to_use_bitfield_attention_mask(
         self, language_model: PreTrainedModel
     ):
+        if isinstance(language_model, PeftModel):
+            language_model = language_model.get_base_model()
+
         if not hasattr(language_model, "_update_causal_mask"):
             # TODO: does this always work?
             language_model = language_model.model
@@ -768,7 +772,7 @@ class MultimodalModel(nn.Module):
             )
 
     def train(
-        self, encoders_mode: dict[str, tuple[bool, bool]] = None, llm_mode: bool = True
+        self, encoders_mode: dict[str, tuple[bool, bool]] = None, llm_mode: bool = None
     ) -> MultimodalModel:
         """
         Set the training mode for the model components.
@@ -780,6 +784,9 @@ class MultimodalModel(nn.Module):
                 The training mode for the language model.
         """
         if encoders_mode is None:
+            if llm_mode is None:
+                return
+
             encoders_mode = {
                 encoder_key: (llm_mode, llm_mode) for encoder_key in self.encoders
             }
@@ -797,7 +804,8 @@ class MultimodalModel(nn.Module):
             for p in encoder.projector.parameters():
                 p.requires_grad_(projector_mode)
 
-        if self.language_model is not None:
+        if self.language_model is not None and llm_mode is not None:
+            # only change language model train mode when llm_mode is given to support peft
             self.language_model.train(llm_mode)
             for p in self.language_model.parameters():
                 p.requires_grad_(llm_mode)
