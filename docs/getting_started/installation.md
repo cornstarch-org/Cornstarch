@@ -49,7 +49,7 @@ You can also install Cornstarch from source by cloning the Github repository. Ma
 
 ```
 $ pip install --no-deps colossalai==0.4.6
-$ git clone https://github.com/SymbioticLab/Cornstarch
+$ git clone https://github.com/cornstarch-org/Cornstarch
 $ cd Cornstarch
 $ pip install -e .[dev]
 ```

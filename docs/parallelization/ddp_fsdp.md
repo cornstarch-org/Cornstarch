@@ -1,7 +1,7 @@
 !!! info
 
-    [Cornstarch repository](https://github.com/SymbioticLab/Cornstarch) provides an end-to-end example
-    in [`examples/distributed/run_vlm_ddp.py`](https://github.com/SymbioticLab/Cornstarch/blob/main/examples/distributed/run_vlm_ddp.py) and [`examples/distributed/run_vlm_fsdp.py`](https://github.com/SymbioticLab/Cornstarch/blob/main/examples/distributed/run_vlm_fsdp.py).
+    [Cornstarch repository](https://github.com/cornstarch-org/Cornstarch) provides an end-to-end example
+    in [`examples/distributed/run_vlm_ddp.py`](https://github.com/cornstarch-org/Cornstarch/blob/main/examples/distributed/run_vlm_ddp.py) and [`examples/distributed/run_vlm_fsdp.py`](https://github.com/cornstarch-org/Cornstarch/blob/main/examples/distributed/run_vlm_fsdp.py).
 
 PyTorch DDP and FSDP work by simply wrapping the original model with the API.
 This design principle is also compatible with Cornstarch multimodal LLM, therefore DDP/FSDP can be used with Cornstarch.

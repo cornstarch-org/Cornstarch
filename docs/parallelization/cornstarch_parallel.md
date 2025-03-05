@@ -1,10 +1,10 @@
 !!! info
 
-    [Cornstarch repository](https://github.com/SymbioticLab/Cornstarch) provides an end-to-end example
-    in [`examples/distributed/run_vlm_hybrid.py`](https://github.com/SymbioticLab/Cornstarch/blob/main/examples/distributed/run_vlm_hybrid.py).
+    [Cornstarch repository](https://github.com/cornstarch-org/Cornstarch) provides an end-to-end example
+    in [`examples/distributed/run_vlm_hybrid.py`](https://github.com/cornstarch-org/Cornstarch/blob/main/examples/distributed/run_vlm_hybrid.py).
 
 Using FSDP/DDP only may not be scalable depending on the infrastructure (e.g. slow inter-node networking).
-Cornstarch provides 4D parallelism (data parallelism, tensor parallelism, pipeline parallelism, and context parallelism).
+Cornstarch provides 5D parallelism (data parallelism, tensor parallelism, pipeline parallelism, context parallelism, and modality parallelism).
 
 ## Creating `MultimodalParallelPlugin`
 
@@ -168,7 +168,7 @@ which will give you a 2-stage pipeline template for `LlamaForCausalLM`:
 ``` py
 pipeline_template
 PipelineTemplate(transformers.models.llama.modeling_llama.LlamaForCausalLM, 2 stages)
-````
+```
 
 !!! note
 
@@ -211,6 +211,13 @@ If 54 GPUs join the training, there will be 2 data parallel replicas.
     Cornstarch does not optimize rank assignment and leaves it to user responsibility.
     The example above assigns 3 GPUs to the encoders and 8 GPUs to the LLM;
     if each node has 8 GPUs, cross-node GPUs may be assigned to the LLM (5 GPUs from one node, and 3 GPUs from another one).
+
+### Modality Parallelism
+
+Cornstarch executes multiple modality encoders in parallel, as there is no dependency between them.
+By using `cornstarch.plugin.multimodal_parallel_plugin.MultimodalParallelPlugin`, modality encoders will be assigned to different devices and executed separately.
+
+If you do not want to parallelize them, consider using `cornstarch.plugin.encoders_colocated_plugin.EncodersColocatedPlugin`, which colocates multiple modality encoders into the same GPUs and execute them sequentially.
 
 
 ## Running Parallelized Module

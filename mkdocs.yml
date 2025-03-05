@@ -2,8 +2,8 @@ site_name: Cornstarch Project
 site_author: Cornstarch team
 site_description: Distributed Multimodal LLM training framework
 
-repo_name: SymbioticLab/Cornstarch
-repo_url: https://github.com/SymbioticLab/Cornstarch
+repo_name: cornstarch-org/Cornstarch
+repo_url: https://github.com/cornstarch-org/Cornstarch
 
 copyright: Copyright &copy; 2025 Cornstarch team
 
@@ -50,4 +50,4 @@ nav:
   - Distributed Training:
     - Overview: parallelization/index.md
     - Using DDP/FSDP: parallelization/ddp_fsdp.md
-    - Using Cornstarch 4D Parallelism: parallelization/cornstarch_parallel.md
+    - Using Cornstarch 5D Parallelism: parallelization/cornstarch_parallel.md

@@ -1,7 +1,7 @@
 !!! info
 
-    [Cornstarch repository](https://github.com/SymbioticLab/Cornstarch) provides an end-to-end example
-    in [`examples/pretrain_vlm.py`](https://github.com/SymbioticLab/Cornstarch/blob/main/examples/pretrain_vlm.py).
+    [Cornstarch repository](https://github.com/cornstarch-org/Cornstarch) provides an end-to-end example
+    in [`examples/pretrain_vlm.py`](https://github.com/cornstarch-org/Cornstarch/blob/main/examples/pretrain_vlm.py).
     
 
 ## Training a Multimodal LLM
