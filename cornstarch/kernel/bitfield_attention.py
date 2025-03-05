@@ -997,7 +997,7 @@ def _bwd_kernel(
         )
 
 
-def _flash_attn_forward(
+def _bitfield_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -1098,7 +1098,7 @@ def _flash_attn_forward(
     return o, lse, softmax_scale  # softmax_scale could have been updated
 
 
-def _flash_attn_backward(
+def _bitfield_attn_backward(
     do: torch.Tensor,
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1240,7 +1240,7 @@ def _flash_attn_backward(
     dq.copy_(dq_accum)
 
 
-class FlashAttnFunc(torch.autograd.Function):
+class BitfieldAttnFunc(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -1284,7 +1284,7 @@ class FlashAttnFunc(torch.autograd.Function):
                 device=q.device,
             ).to_padded_tensor(padding=-1)
 
-        o, lse, ctx.softmax_scale = _flash_attn_forward(
+        o, lse, ctx.softmax_scale = _bitfield_attn_forward(
             q,
             k,
             v,
@@ -1312,7 +1312,7 @@ class FlashAttnFunc(torch.autograd.Function):
         dq = torch.full_like(q, torch.nan)
         dk = torch.full_like(k, torch.nan)
         dv = torch.full_like(v, torch.nan)
-        _flash_attn_backward(
+        _bitfield_attn_backward(
             do,
             q,
             k,
@@ -1332,4 +1332,4 @@ class FlashAttnFunc(torch.autograd.Function):
         return dq, dk, dv, *([None] * 6)
 
 
-bitfield_attn_func = FlashAttnFunc.apply
+bitfield_attn_func = BitfieldAttnFunc.apply

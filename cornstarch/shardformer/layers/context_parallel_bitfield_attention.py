@@ -5,8 +5,8 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from cornstarch.kernel.bitfield_attention import (
-    _flash_attn_backward,
-    _flash_attn_forward,
+    _bitfield_attn_backward,
+    _bitfield_attn_forward,
 )
 from cornstarch.kernel.interface import repeat_kv
 
@@ -128,7 +128,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                     async_op=True,
                 )
 
-            o, lse, softmax_scale = _flash_attn_forward(
+            o, lse, softmax_scale = _bitfield_attn_forward(
                 current_q,
                 current_k,
                 current_v,
@@ -286,7 +286,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             lse = lses.pop(0)
             softmax_scale = softmax_scales.pop(0)
 
-            _flash_attn_backward(
+            _bitfield_attn_backward(
                 do[:, :, head_index - heads_stride : head_index, :],
                 current_q,
                 current_k,
