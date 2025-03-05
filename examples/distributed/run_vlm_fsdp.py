@@ -92,7 +92,7 @@ def pretrain(
         ).to(dtype=torch.bfloat16)
 
     model.gradient_checkpointing_enable({"use_reentrant": False})
-    model.train()
+    model.train(encoders_mode={"vision": (True, True)}, llm_mode=True)
 
     # Create a processor
     image_processor = AutoImageProcessor.from_pretrained(vision_encoder_path)
