@@ -99,6 +99,30 @@ Currently `MultimodalModel` accepts either `linear` or `mlp` as an `init_project
 - `mlp`: has two `torch.nn.Linear` layers, where there is an activation layer as `init_activation` type in the middle.
 The type of activations that Cornstarch supports is defined in [`transformers.activations.ACT2CLS`](https://github.com/huggingface/transformers/blob/v4.45.0/src/transformers/activations.py#L200).
 
+## Using PEFT
+
+!!! info
+
+    [Cornstarch repository](https://github.com/cornstarch-org/Cornstarch) provides an end-to-end example
+    in [`examples/pretrain_vlm_lora.py`](https://github.com/cornstarch-org/Cornstarch/blob/main/examples/pretrain_vlm_lora.py)
+
+Cornstarch is compatible with HuggingFace PEFT.
+
+Before passing models to `MultimodalModel`, the model can be wrapped with peft (e.g. via `get_peft_model`):
+
+``` py
+from transformers.models.llama.modeling_llama import LlamaForCausalLM
+from peft import LoraConfig, get_peft_model
+from cornstarch.models.multimodal_language_model import MultimodalModel
+
+llm = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
+
+peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM, inference_mode=False)
+llm = get_peft_model(llm, peft_config)
+
+mllm = MultimodalModel(..., language_model=llm)
+```
+
 
 ## Callback Interface
 
