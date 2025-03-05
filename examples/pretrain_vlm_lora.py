@@ -80,7 +80,7 @@ def pretrain(
         ).to(dtype=torch.bfloat16)
 
     model.gradient_checkpointing_enable()
-    model.train()
+    model.train(encoders_mode={"vision": (False, True)})
 
     # materialize the model
     model.to_empty(device="cuda")
