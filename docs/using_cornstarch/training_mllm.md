@@ -69,50 +69,11 @@ For example, if you call `mllm.train("non_existing_encoder", mode=False)`, the e
 
 When multimodal LLM forward is executed, modality encoders are executed first.
 After that, LLM input embedding layer is executed, the modality encoder outputs is embedded into the LLM embedding space, and then execute the remaining LLM layers with modality encoder outputs and LLM embedding outputs.
-Cornstarch provides two ways of embedding  modality encoder outputs to LLM embedding outputs: prepending and injecting.
-
-### Prepending modality encoder outputs
-
-Like initial VLMS (e.g. Llava 1.5), *prepending* simply attaches all modality encoder outputs prior to text embedding outputs.
-The order of prepending is the opposite to the order of modality encoders.
-When there are multiple modality encoders, encoders are executed in order of their order in the `MultimodalModule.encoders` dictionary.
-If the output of the last modality encoder is prepended first, the result will be `[modality_encoder1][modality_encoder2]...[modality_encoderN][llm_embedding]`, which is the same as the order of modality encoders in the dictionary.
-
-!!! note
-    
-    It does not require any specific LLM tokens to specify the location of modality encoders.
-
-### Injecting modality encoder outputs
-
-Unlike simply prepending modality encoders, *injecting* mehcanism injects modality encoder outputs to the location that user wants to put them to.
+Cornstarch follows HuggingFace's way of embedding: *injection mechanism* that injects modality encoder outputs to proper locations that user wants to put them to.
 To specify where to put the modality encoder outputs, custom tokens must be added before running the model.
-Use `MultimodalModel.set_token_ids()` API to register the token IDs per modality encoders:
+Cornstarch automatically adds the custom token information to the model when `MultimodalProcessor` is created, as described in [Preprocessing inputs page](../preprocessing_inputs).
 
-``` py
-mllm = MultimodalModel(
-    encoders={
-        "vision": ...,
-        "audio": ...,
-    },
-    language_model=llm,
-)
-
-mllm.set_token_ids({
-    "vision": vision_token_id,
-    "audio": audio_token_id,
-})
-```
-
-The model is automatically switched to injection mode and registered token IDs are used in merging modality encoder outputs.
-
-It is a user responsibility to prepare placeholders that modality encoder outputs will replace.
-During injection, Cornstarch replaces embeddings in the indices of the corresponding token IDs with the modality encoder outputs. For example, if the vision token ID is 200 and the given `input_ids` (tokenized text) looks like:
-
-```
-input_ids = [1, 33, 7752, 10452, 200, 200, 200, 200, 4465, 4832, 6921, ...]
-```
-You are expecting there would be 4 vision tokens from the vision encoder, which will be injected at indices 4, 5, 6, and 7 (zero-based).
-
-!!! note
-
-    The number of tokens must match.
+To maintain the language model's original embedding table, Cornstarch exploits a tricky way of executing the input embedding.
+If we execute the input embedding with `input_ids` where custom tokens are embedded, the embedding layer will raise an out of index exception.
+To avoid such exception, Cornstarch first masks all custom tokens with 0 and executes the input embedding.
+The result for the masked tokens will be replaced by the encoder outputs, thus we do not have to care about the result in the corresponding token indices.

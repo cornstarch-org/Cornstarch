@@ -175,6 +175,10 @@ PipelineTemplate(transformers.models.llama.modeling_llama.LlamaForCausalLM, 2 st
     Cornstarch verifies if the pipeline template is for the given unimodal model by checking its name and modules_per_stage.
     It will raise an exception if a pipeline template for different model is given.
 
+!!! warning
+
+    Currently Cornstarch pipeline parallelism does not support synchronizing tied word embeddings.
+
 ### Data Parallelism
 
 Data Parallelism is not explictly specified by some arguments.
