@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.5.0",
-    "triton>=3.0.0",
+    "triton<=3.1.0",
     "transformers>=4.49.0", # packages below this line are for colossalai
     "loguru",
     "simple_parsing",
@@ -42,7 +42,7 @@ dependencies = [
     "sentencepiece",
     "google",
     "protobuf",
-    "peft>=0.7.1,<=0.13.2",
+    "peft",
     "bitsandbytes>=0.39.0",
     "rpyc==6.0.0",
     "fastapi",
