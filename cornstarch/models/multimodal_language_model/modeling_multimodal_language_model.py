@@ -1017,7 +1017,7 @@ class MultimodalModel(nn.Module):
             torch.tensor(list(self.token_ids.values()), device=input_ids.device),
         )
         input_ids_masked = input_ids.clone()
-        input_ids_masked[token_mask] = 0
+        input_ids_masked[token_mask] = self.language_model.config.eos_token_id
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids_masked)
 
         labels_masked = labels.clone()
@@ -1067,9 +1067,10 @@ class MultimodalModel(nn.Module):
         language_model_arguments = list(
             inspect.signature(self.language_model.forward).parameters.keys()
         )
-        for key in list(language_model_inputs.keys()):
-            if key not in language_model_arguments:
-                language_model_inputs.pop(key)
+        if "kwargs" not in language_model_arguments:
+            for key in list(language_model_inputs.keys()):
+                if key not in language_model_arguments:
+                    language_model_inputs.pop(key)
 
         return self.language_model(**language_model_inputs)
 
@@ -1106,6 +1107,9 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
+            for arg in args:
+                kwargs.pop(arg, None)
+
             encoders_outputs[modal_key] = encoder_module(
                 **args,
                 output_attentions=encoder_module.config[0].output_attentions,
@@ -1118,32 +1122,29 @@ class MultimodalModel(nn.Module):
             torch.tensor(list(self.token_ids.values()), device=input_ids.device),
         )
         input_ids_masked = input_ids.clone()
-        input_ids_masked[token_mask] = 0
+        input_ids_masked[token_mask] = self.language_model.config.eos_token_id
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids_masked)
 
-        inputs_embeds, bitfield_attention_mask = self.merge_encoder_outputs(
+        inputs_embeds, attention_mask = self.merge_encoder_outputs(
             encoders_outputs=encoders_outputs,
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
         )
 
-        if attention_mask is None:
-            attention_mask = bitfield_attention_mask
+        # create position_ids. GenerationMixin.prepare_inputs_for_generation()
+        # computes `position_ids` on the fly based on attention_mask's values,
+        # making it incompatible with bitfield attention mask.
+        position_ids = attention_mask.ne(0).cumsum(dim=-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 1)
 
         # remove inputs that the language model doesn't accept
         language_model_inputs = dict(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
+            position_ids=position_ids,
         )
         language_model_inputs.update(kwargs)
-
-        language_model_arguments = list(
-            inspect.signature(self.language_model.forward).parameters.keys()
-        )
-        for key in list(language_model_inputs.keys()):
-            if key not in language_model_arguments:
-                language_model_inputs.pop(key)
 
         return self.language_model.generate(**language_model_inputs)
