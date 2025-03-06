@@ -1107,6 +1107,11 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
+            if hasattr(encoder_module.module, "main_input_name"):
+                # if the main input is not in args, this encoder should not be executed
+                if encoder_module.module.main_input_name not in args:
+                    continue
+
             for arg in args:
                 kwargs.pop(arg, None)
 
