@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from peft.peft_model import PeftModel
 from transformers.activations import get_activation
+from transformers.cache_utils import Cache
 from transformers.modeling_outputs import (
     BaseModelOutput,
     CausalLMOutputWithPast,
@@ -698,6 +699,14 @@ class MultimodalModel(nn.Module):
         if isinstance(language_model, PeftModel):
             language_model = language_model.get_base_model()
 
+        language_model.prepare_inputs_for_generation = MethodType(
+            functools.partial(
+                MultimodalModel.prepare_inputs_for_generation_of_language_model,
+                original_func=language_model.prepare_inputs_for_generation,
+            ),
+            language_model,
+        )
+
         if not hasattr(language_model, "_update_causal_mask"):
             # TODO: does this always work?
             language_model = language_model.model
@@ -1074,6 +1083,43 @@ class MultimodalModel(nn.Module):
 
         return self.language_model(**language_model_inputs)
 
+    def prepare_inputs_for_generation_of_language_model(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        original_func: Callable = None,
+        **kwargs,
+    ):
+        """
+        HF Transformers GenerationMixin.prepare_inputs_for_generation() generates
+        `position_ids` on the fly based on the value of attention mask,
+        which makes itself incompatible with bitfield attention mask.
+
+        This function is to replace the language model's `prepare_inputs_for_generation`
+        to avoid an error when using bitfield attention mask.
+        """
+        bool_attention_mask = (attention_mask != 0).long()
+
+        model_inputs = original_func(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=bool_attention_mask,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        if cache_position[0] == 0:
+            # This is the prefill stage; replace the bool attention mask with bitfield attention mask
+            model_inputs["attention_mask"] = attention_mask
+        else:
+            attention_mask[attention_mask == 1] = (1 << 62) | 1
+            model_inputs["attention_mask"] = attention_mask
+
+        return model_inputs
+
     @torch.no_grad()
     def generate(
         self,
@@ -1137,18 +1183,11 @@ class MultimodalModel(nn.Module):
             attention_mask=attention_mask,
         )
 
-        # create position_ids. GenerationMixin.prepare_inputs_for_generation()
-        # computes `position_ids` on the fly based on attention_mask's values,
-        # making it incompatible with bitfield attention mask.
-        position_ids = attention_mask.ne(0).cumsum(dim=-1) - 1
-        position_ids.masked_fill_(attention_mask == 0, 1)
-
         # remove inputs that the language model doesn't accept
         language_model_inputs = dict(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            position_ids=position_ids,
         )
         language_model_inputs.update(kwargs)
 
