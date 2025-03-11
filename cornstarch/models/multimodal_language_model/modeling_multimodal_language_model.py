@@ -752,11 +752,12 @@ class MultimodalModel(nn.Module):
         A replacement function for Model._update_causal_mask() to avoid updating the attention mask.
         Plus, it checks if the attention mask is a bitfield attention mask.
         """
-        assert (
-            attention_mask is not None
-            and attention_mask.dtype == torch.int64
-            and (attention_mask > 1).any()
-        ), "The attention mask should be a bitfield attention mask."
+        if self.training:
+            assert (
+                attention_mask is not None
+                and attention_mask.dtype == torch.int64
+                and (attention_mask > 1).any()
+            ), "The attention mask should be a bitfield attention mask."
 
         return attention_mask
 
@@ -792,6 +793,8 @@ class MultimodalModel(nn.Module):
             llm_mode: bool
                 The training mode for the language model.
         """
+        super().train(True)
+
         if encoders_mode is None:
             if llm_mode is None:
                 return
@@ -805,7 +808,6 @@ class MultimodalModel(nn.Module):
                 continue
 
             encoder = self.encoders[encoder_key]
-            encoder.module.train(encoder_mode)
             for p in encoder.module.parameters():
                 p.requires_grad_(encoder_mode)
 
@@ -815,7 +817,6 @@ class MultimodalModel(nn.Module):
 
         if self.language_model is not None and llm_mode is not None:
             # only change language model train mode when llm_mode is given to support peft
-            self.language_model.train(llm_mode)
             for p in self.language_model.parameters():
                 p.requires_grad_(llm_mode)
 
@@ -1115,8 +1116,9 @@ class MultimodalModel(nn.Module):
             # This is the prefill stage; replace the bool attention mask with bitfield attention mask
             model_inputs["attention_mask"] = attention_mask
         else:
-            attention_mask[attention_mask == 1] = (1 << 62) | 1
-            model_inputs["attention_mask"] = attention_mask
+            # In the decoding stage, Cornstarch no longer uses bitfield attention mask.
+            # Don't have to take care about the value of attention mask.
+            pass
 
         return model_inputs
 
