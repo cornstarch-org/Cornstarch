@@ -912,9 +912,13 @@ class MultimodalModel(nn.Module):
                 dim=1
             )
 
-        attention_mask = create_bitfield_attention_mask(input_ids, self.token_ids)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
         for i, sequence_length in enumerate(sequence_lengths.tolist()):
             attention_mask[i, sequence_length:] = 0
+
+        # attention_mask = create_bitfield_attention_mask(input_ids, self.token_ids)
+        # for i, sequence_length in enumerate(sequence_lengths.tolist()):
+        #     attention_mask[i, sequence_length:] = 0
 
         return inputs_embeds, attention_mask
 
