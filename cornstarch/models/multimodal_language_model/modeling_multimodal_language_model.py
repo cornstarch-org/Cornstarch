@@ -686,7 +686,8 @@ class MultimodalModel(nn.Module):
                 inspect.signature(modal_module.module.forward).parameters.keys()
             )
 
-        self.update_language_model_to_use_bitfield_attention_mask(language_model)
+        # FIXME: bitfield attention currently is not functional.
+        # self.update_language_model_to_use_bitfield_attention_mask(language_model)
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
