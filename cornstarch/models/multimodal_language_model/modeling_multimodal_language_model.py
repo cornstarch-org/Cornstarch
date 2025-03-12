@@ -811,8 +811,6 @@ class MultimodalModel(nn.Module):
             encoder = self.encoders[encoder_key]
             for p in encoder.module.parameters():
                 p.requires_grad_(encoder_mode)
-
-            encoder.projector.train(projector_mode)
             for p in encoder.projector.parameters():
                 p.requires_grad_(projector_mode)
 
