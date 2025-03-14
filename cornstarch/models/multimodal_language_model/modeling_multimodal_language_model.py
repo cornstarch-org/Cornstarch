@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from peft.peft_model import PeftModel
 from transformers.activations import get_activation
+from transformers.cache_utils import Cache
 from transformers.modeling_outputs import (
     BaseModelOutput,
     CausalLMOutputWithPast,
@@ -685,7 +686,8 @@ class MultimodalModel(nn.Module):
                 inspect.signature(modal_module.module.forward).parameters.keys()
             )
 
-        self.update_language_model_to_use_bitfield_attention_mask(language_model)
+        # FIXME: bitfield attention currently is not functional.
+        # self.update_language_model_to_use_bitfield_attention_mask(language_model)
         self.language_model = language_model
         self.add_module("language_model", language_model)
 
@@ -697,6 +699,14 @@ class MultimodalModel(nn.Module):
     ):
         if isinstance(language_model, PeftModel):
             language_model = language_model.get_base_model()
+
+        language_model.prepare_inputs_for_generation = MethodType(
+            functools.partial(
+                MultimodalModel.prepare_inputs_for_generation_of_language_model,
+                original_func=language_model.prepare_inputs_for_generation,
+            ),
+            language_model,
+        )
 
         if not hasattr(language_model, "_update_causal_mask"):
             # TODO: does this always work?
@@ -743,11 +753,12 @@ class MultimodalModel(nn.Module):
         A replacement function for Model._update_causal_mask() to avoid updating the attention mask.
         Plus, it checks if the attention mask is a bitfield attention mask.
         """
-        assert (
-            attention_mask is not None
-            and attention_mask.dtype == torch.int64
-            and (attention_mask > 1).any()
-        ), "The attention mask should be a bitfield attention mask."
+        if self.training:
+            assert (
+                attention_mask is not None
+                and attention_mask.dtype == torch.int64
+                and (attention_mask > 1).any()
+            ), "The attention mask should be a bitfield attention mask."
 
         return attention_mask
 
@@ -783,6 +794,8 @@ class MultimodalModel(nn.Module):
             llm_mode: bool
                 The training mode for the language model.
         """
+        super().train(True)
+
         if encoders_mode is None:
             if llm_mode is None:
                 return
@@ -796,17 +809,13 @@ class MultimodalModel(nn.Module):
                 continue
 
             encoder = self.encoders[encoder_key]
-            encoder.module.train(encoder_mode)
             for p in encoder.module.parameters():
                 p.requires_grad_(encoder_mode)
-
-            encoder.projector.train(projector_mode)
             for p in encoder.projector.parameters():
                 p.requires_grad_(projector_mode)
 
         if self.language_model is not None and llm_mode is not None:
             # only change language model train mode when llm_mode is given to support peft
-            self.language_model.train(llm_mode)
             for p in self.language_model.parameters():
                 p.requires_grad_(llm_mode)
 
@@ -901,9 +910,13 @@ class MultimodalModel(nn.Module):
                 dim=1
             )
 
-        attention_mask = create_bitfield_attention_mask(input_ids, self.token_ids)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
         for i, sequence_length in enumerate(sequence_lengths.tolist()):
             attention_mask[i, sequence_length:] = 0
+
+        # attention_mask = create_bitfield_attention_mask(input_ids, self.token_ids)
+        # for i, sequence_length in enumerate(sequence_lengths.tolist()):
+        #     attention_mask[i, sequence_length:] = 0
 
         return inputs_embeds, attention_mask
 
@@ -1000,6 +1013,11 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
+            if hasattr(encoder_module.module, "main_input_name"):
+                # if the main input is not in args, this encoder should not be executed
+                if encoder_module.module.main_input_name not in args:
+                    continue
+
             if "output_attentions" in self.encoders_args[modal_key]:
                 args["output_attentions"] = output_attentions
             if "output_hidden_states" in self.encoders_args[modal_key]:
@@ -1017,7 +1035,7 @@ class MultimodalModel(nn.Module):
             torch.tensor(list(self.token_ids.values()), device=input_ids.device),
         )
         input_ids_masked = input_ids.clone()
-        input_ids_masked[token_mask] = 0
+        input_ids_masked[token_mask] = self.language_model.config.eos_token_id
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids_masked)
 
         labels_masked = labels.clone()
@@ -1067,11 +1085,50 @@ class MultimodalModel(nn.Module):
         language_model_arguments = list(
             inspect.signature(self.language_model.forward).parameters.keys()
         )
-        for key in list(language_model_inputs.keys()):
-            if key not in language_model_arguments:
-                language_model_inputs.pop(key)
+        if "kwargs" not in language_model_arguments:
+            for key in list(language_model_inputs.keys()):
+                if key not in language_model_arguments:
+                    language_model_inputs.pop(key)
 
         return self.language_model(**language_model_inputs)
+
+    def prepare_inputs_for_generation_of_language_model(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        original_func: Callable = None,
+        **kwargs,
+    ):
+        """
+        HF Transformers GenerationMixin.prepare_inputs_for_generation() generates
+        `position_ids` on the fly based on the value of attention mask,
+        which makes itself incompatible with bitfield attention mask.
+
+        This function is to replace the language model's `prepare_inputs_for_generation`
+        to avoid an error when using bitfield attention mask.
+        """
+        bool_attention_mask = (attention_mask != 0).long()
+
+        model_inputs = original_func(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=bool_attention_mask,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        if cache_position[0] == 0:
+            # This is the prefill stage; replace the bool attention mask with bitfield attention mask
+            model_inputs["attention_mask"] = attention_mask
+        else:
+            # In the decoding stage, Cornstarch no longer uses bitfield attention mask.
+            # Don't have to take care about the value of attention mask.
+            pass
+
+        return model_inputs
 
     @torch.no_grad()
     def generate(
@@ -1106,6 +1163,14 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
+            if hasattr(encoder_module.module, "main_input_name"):
+                # if the main input is not in args, this encoder should not be executed
+                if encoder_module.module.main_input_name not in args:
+                    continue
+
+            for arg in args:
+                kwargs.pop(arg, None)
+
             encoders_outputs[modal_key] = encoder_module(
                 **args,
                 output_attentions=encoder_module.config[0].output_attentions,
@@ -1118,18 +1183,15 @@ class MultimodalModel(nn.Module):
             torch.tensor(list(self.token_ids.values()), device=input_ids.device),
         )
         input_ids_masked = input_ids.clone()
-        input_ids_masked[token_mask] = 0
+        input_ids_masked[token_mask] = self.language_model.config.eos_token_id
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids_masked)
 
-        inputs_embeds, bitfield_attention_mask = self.merge_encoder_outputs(
+        inputs_embeds, attention_mask = self.merge_encoder_outputs(
             encoders_outputs=encoders_outputs,
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
         )
-
-        if attention_mask is None:
-            attention_mask = bitfield_attention_mask
 
         # remove inputs that the language model doesn't accept
         language_model_inputs = dict(
@@ -1138,12 +1200,5 @@ class MultimodalModel(nn.Module):
             attention_mask=attention_mask,
         )
         language_model_inputs.update(kwargs)
-
-        language_model_arguments = list(
-            inspect.signature(self.language_model.forward).parameters.keys()
-        )
-        for key in list(language_model_inputs.keys()):
-            if key not in language_model_arguments:
-                language_model_inputs.pop(key)
 
         return self.language_model.generate(**language_model_inputs)
