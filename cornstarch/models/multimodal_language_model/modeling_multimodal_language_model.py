@@ -1013,6 +1013,11 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
+            if hasattr(encoder_module.module, "main_input_name"):
+                # if the main input is not in args, this encoder should not be executed
+                if encoder_module.module.main_input_name not in args:
+                    continue
+
             if "output_attentions" in self.encoders_args[modal_key]:
                 args["output_attentions"] = output_attentions
             if "output_hidden_states" in self.encoders_args[modal_key]:
