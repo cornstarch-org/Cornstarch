@@ -1,6 +1,6 @@
 <div align="center">
 
-![Cornstarch Logo](https://raw.githubusercontent.com/cornstarch-org/Cornstarch/refs/heads/main/docs/assets/images/cornstarch.svg)
+![Cornstarch Logo](https://cornstarch-org.github.io/assets/images/cornstarch.svg)
 
 <h1>Cornstarch<br>
 Build, Train, Run Your Own Multimodal Model</h1>
@@ -17,7 +17,7 @@ Cornstarch provides
 
 ## Install and Run
 
-Please refer to [our document](https://cornstarch-org.github.io/getting_started)!
+Please refer to [our document](https://cornstarch-org.github.io/getting_started/installation/)!
 
 ## Research
 
