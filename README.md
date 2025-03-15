@@ -21,7 +21,7 @@ Please refer to [our document](https://cornstarch-org.github.io/getting_started/
 
 ## Research
 
-A technial report will be released very soon.
+A technical report will be released very soon.
 
 ## Contact
 
