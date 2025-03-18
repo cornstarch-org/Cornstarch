@@ -13,10 +13,8 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 from transformers.modeling_outputs import ModelOutput
-from transformers.modeling_utils import PreTrainedModel
 
 from cornstarch.models.multimodal_language_model import (
-    ModalEncoderModule,
     MultimodalModel,
 )
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_plugin import (

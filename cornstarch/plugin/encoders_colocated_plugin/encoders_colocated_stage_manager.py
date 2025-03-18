@@ -99,12 +99,6 @@ class EncodersColocatedPipelineStageManager(MultiModalPipelineStageManager):
         llm_num_stages = self.pg_mesh.llm_template[0].num_stages
 
         encoder_stage_indices = list(range(encoder_num_stages))
-        llm_stage_indices = list(
-            range(
-                encoder_num_stages,
-                encoder_num_stages + self.pg_mesh.llm_template[0].num_stages,
-            )
-        )
 
         for i in range(len(coords)):
             # As encoders are always before llm, we can use the pipeline axis to determine the stage.
