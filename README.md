@@ -19,9 +19,10 @@ Cornstarch provides
 
 Please refer to [our document](https://cornstarch-org.github.io/getting_started/installation/)!
 
-## Research
+## Research Papers
 
-A technical report will be released very soon.
+- [Cornstarch: Distributed Multimodal Training Must Be Multimodality-Aware](https://arxiv.org/abs/2503.11367)
+- [Oobleck: Resilient Distributed Training of Large Models Using Pipeline Templates](https://arxiv.org/abs/2309.08125)
 
 ## Contact
 
