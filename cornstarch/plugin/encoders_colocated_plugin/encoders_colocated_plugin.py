@@ -20,15 +20,17 @@ from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
-from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
 
 from cornstarch.models.multimodal_language_model import (
-    ModalEncoderModule,
     MultimodalModel,
 )
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
     EncodersColocatedPipelineStageManager,
+)
+from cornstarch.plugin.encoders_colocated_plugin.one_f_one_b import (
+    OneForwardOneBackwardSchedule,
 )
 from cornstarch.plugin.encoders_colocated_plugin.process_group_mesh import (
     EncodersColocatedProcessGroupMesh,
@@ -38,12 +40,9 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultimodalParallelModule,
 )
 
-# from cornstarch.plugin.encoders_colocated_plugin.one_f_one_b import (
-#     OneForwardOneBackwardSchedule,
+# from cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b import (
+#     MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
 # )
-from cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b import (
-    MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
-)
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
@@ -121,6 +120,7 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[tuple[tuple[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -166,58 +166,40 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
         assert "decoder" not in self.my_modal_name, "TODO: decoder forward"
 
         if self.my_modal_name == "language_model":
-            if stage_manager.is_first_stage(check_only_in_modal=True):
-                # There may be multiple encoder_output_{modal_key}s here.
-                # Merge them so that we can pass them to the language model.
-                num_tokens_per_modal = kwargs["num_tokens_per_modal"]
-                encoders_outputs = torch.split(
-                    hidden_states, num_tokens_per_modal.tolist()[0], dim=1
-                )
+            token_mask = torch.isin(
+                input_ids,
+                torch.tensor(list(module.token_ids.values()), device=input_ids.device),
+            )
+            labels_masked = labels.clone()
+            labels_masked[token_mask] = -100
 
-                # encoders_outputs = [
-                #     kwargs[f"encoder_output_{modal_key}"]
-                #     for modal_key in module.encoders.keys()
-                # ]
-                # assert all(
-                #     isinstance(output, torch.Tensor) for output in encoders_outputs
-                # )
+            if stage_manager.is_first_stage(check_only_in_modal=True):
+
+                encoders_outputs: dict[str, tuple[torch.Tensor]] = {}
+
+                for modal_key in module.encoders.keys():
+                    if f"encoder_outputs_{modal_key}" not in kwargs:
+                        continue
+                    # make a tuple so that in merge_encoder_outputs the actual values are taken
+                    encoders_outputs[modal_key] = (
+                        kwargs[f"encoder_outputs_{modal_key}"],
+                    )
 
                 # step 2. merge encoded multimodal features into text embeddings
-                inputs_embeds = module.language_model.get_input_embeddings()(input_ids)
+                # mask out special tokens from input_ids to avoid out of index error
+                # and use it as an input to embedding.
+                input_ids_masked = input_ids.clone()
+                input_ids_masked[token_mask] = 0
+                inputs_embeds = module.language_model.get_input_embeddings()(
+                    input_ids_masked
+                )
 
                 # step 3. merge encoder outputs to llm inputs_embeds
-                encoders_inputs: dict[str, dict] = {}
-                # merging functions accept either BaseModelOutput or tuple of tensors,
-                # and the first tensor (last_hidden_state) is merged.
-                encoders_outputs_dict: dict[str, tuple[torch.Tensor]] = {}
-                for modal_key, encoder_outputs in zip(
-                    module.encoders.keys(), encoders_outputs
-                ):
-                    encoder_module: ModalEncoderModule = getattr(
-                        module, f"{modal_key}_encoder"
-                    )
-                    encoder_inputs = {
-                        arg: kwargs[arg]
-                        for arg in module.encoders_args[modal_key]
-                        if arg in kwargs
-                    }
-
-                    for additional_arg in encoder_module.additional_args:
-                        if additional_arg in kwargs:
-                            encoder_inputs[additional_arg] = kwargs[additional_arg]
-
-                    encoders_inputs[modal_key] = encoder_inputs
-                    encoders_outputs_dict[modal_key] = (encoder_outputs,)
-
-                inputs_embeds, attention_mask, position_ids, labels = (
-                    module.merge_encoder_outputs(
-                        encoder_inputs=encoders_inputs,
-                        encoder_outputs=encoders_outputs_dict,
-                        input_ids=input_ids,
-                        inputs_embeds=inputs_embeds,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                    )
+                inputs_embeds, attention_mask = module.merge_encoder_outputs(
+                    encoders_outputs=encoders_outputs,
+                    input_ids=input_ids,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
                 )
 
                 # step 4. run llm with merged inputs_embeds
@@ -225,15 +207,35 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                     input_ids=None,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
+                    position_embeddings=position_embeddings,
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds,
                     hidden_states=None,
-                    labels=labels,
+                    labels=labels_masked,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
+
+                language_model_inputs.update(kwargs)
+
+                if module.preprocess_llm_callback is not None:
+                    # filter out inputs that the preprocess_llm_callback doesn't accept
+                    callback_arguments = list(
+                        inspect.signature(
+                            module.preprocess_llm_callback
+                        ).parameters.keys()
+                    )
+
+                    callback_inputs = {
+                        key: value
+                        for key, value in language_model_inputs.items()
+                        if key in callback_arguments
+                    }
+
+                    callback_outputs = module.preprocess_llm_callback(**callback_inputs)
+                    language_model_inputs.update(callback_outputs)
             else:
                 assert inputs_embeds is None
 
@@ -241,10 +243,11 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                     input_ids=None,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
+                    position_embeddings=position_embeddings,
                     past_key_values=past_key_values,
                     inputs_embeds=None,
                     hidden_states=hidden_states,
-                    labels=labels,
+                    labels=labels_masked,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
@@ -260,13 +263,16 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                     language_model_inputs.pop(key)
 
             result = module.language_model(**language_model_inputs)
-            if not self.stage_manager.is_last_stage(check_only_in_modal=True):
-                assert isinstance(result, dict)
+
+            # bitfield attention mask cannot be generated in the following stages.
+            # Add attention mask to the result.
+            if isinstance(result, dict):
                 result["attention_mask"] = attention_mask
             return result
         else:
             assert isinstance(self.my_modal_name, list)
-            encoder_outputs = {}
+            encoders_outputs = {}
+
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 for modal_key, encoder_module in module.encoders.items():
                     assert hidden_states is None
@@ -280,71 +286,36 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                         if additional_arg in kwargs:
                             encoder_inputs[additional_arg] = kwargs[additional_arg]
 
-                    encoder_outputs[modal_key] = encoder_module(
+                    if encoder_module.module.main_input_name not in encoder_inputs:
+                        continue
+
+                    encoders_outputs[modal_key] = encoder_module(
                         **encoder_inputs,
                         output_attentions=output_attentions,
                         output_hidden_states=output_hidden_states,
                         return_dict=return_dict,
                     )
-
             else:
-                num_tokens_per_modal = kwargs["num_tokens_per_modal"]
-                encoders_outputs = torch.split(
-                    hidden_states, num_tokens_per_modal.tolist()[0], dim=1
-                )
+                for modal_key, encoder_module in module.encoders.items():
+                    if f"encoder_outputs_{modal_key}" not in kwargs:
+                        continue
 
-                for index, (modal_key, encoder_module) in enumerate(
-                    module.encoders.items()
-                ):
-                    previous_stage_output: dict = encoders_outputs[index]
-                    encoder_outputs[modal_key] = encoder_module(
-                        hidden_states=previous_stage_output,
+                    encoder_inputs = kwargs[f"encoder_outputs_{modal_key}"]
+                    encoders_outputs[modal_key] = encoder_module(
+                        hidden_states=encoder_inputs,
                         output_attentions=output_attentions,
                         output_hidden_states=output_hidden_states,
                         return_dict=return_dict,
                     )
 
-                # Different from multimodal_parallel_plugin, where all encoder outputs
-                # are merged at the end of encoder modules after going through the projector
-                # and thus have the same dimension, here hidden_states from encoders
-                # might have different dimension, thus `torch.cat`() is not applicable.
-                # Thus, instead of merging encoder outputs, we return them as is,
-                # but just with the prefix `hidden_states`.
-
-            num_tokens_per_modal = torch.tensor(
-                [
-                    [
-                        (
-                            encoder_output[0].size(1)
-                            if isinstance(encoder_output, OrderedDict)
-                            else encoder_output["hidden_states"].size(1)
-                        )
-                        for modal_key, encoder_output in encoder_outputs.items()
-                    ]
-                ],
-                device="cuda",
-            )
+            # merge hidden_states tensors into a list.
             return {
-                "hidden_states": torch.cat(
-                    [
-                        (
-                            encoder_output[0]
-                            if isinstance(encoder_output, OrderedDict)
-                            else encoder_output["hidden_states"]
-                        )
-                        for encoder_output in encoder_outputs.values()
-                    ],
-                    dim=1,
-                ),
-                "num_tokens_per_modal": num_tokens_per_modal,
-            }
-            return {
-                f"encoder_output_{modal_key}": (
-                    encoder_output[0]
-                    if isinstance(encoder_output, OrderedDict)
-                    else encoder_output
+                f"encoder_outputs_{modal_key}": (
+                    encoder_outputs[0]
+                    if isinstance(encoder_outputs, OrderedDict)
+                    else encoder_outputs["hidden_states"]
                 )
-                for modal_key, encoder_output in encoder_outputs.items()
+                for modal_key, encoder_outputs in encoders_outputs.items()
             }
 
 
@@ -470,10 +441,11 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
-        self.schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
+        self.schedule = OneForwardOneBackwardSchedule(
             self.stage_manager,
             self.num_microbatches,
             self.microbatch_size,
+            enable_metadata_cache=False,
         )
 
         self.shard_config.tensor_parallel_process_group = self.tp_group
