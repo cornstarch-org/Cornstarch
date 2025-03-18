@@ -1035,7 +1035,7 @@ class MultimodalModel(nn.Module):
             torch.tensor(list(self.token_ids.values()), device=input_ids.device),
         )
         input_ids_masked = input_ids.clone()
-        input_ids_masked[token_mask] = self.language_model.config.eos_token_id
+        input_ids_masked[token_mask] = 0
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids_masked)
 
         labels_masked = labels.clone()

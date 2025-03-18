@@ -298,6 +298,10 @@ class OneForwardOneBackwardSchedule(PipelineSchedule):
         micro_batch = self.load_micro_batch()
         # for the first stage, input_obj is None
         # for the non-first stage, input_obj is the output of the previous stage and it's must be a dict
+        if input_obj is not None and isinstance(micro_batch, dict):
+            for key in input_obj.keys():
+                micro_batch.pop(key, None)
+
         output_obj = model_forward(model, micro_batch, input_obj)
         if self.stage_manager.is_last_stage(check_only_in_modal=False):
             loss = criterion(output_obj, micro_batch) / self.num_microbatches
@@ -354,6 +358,8 @@ class OneForwardOneBackwardSchedule(PipelineSchedule):
             for k, v in input_obj.items():
                 if isinstance(v, torch.Tensor) and v.grad is not None:
                     input_obj_grad[k] = v.grad
+                elif isinstance(v, list):
+                    input_obj_grad[k] = [item.grad for item in v]
         return input_obj_grad
 
     def run_forward_only(
