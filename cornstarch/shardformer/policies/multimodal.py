@@ -57,25 +57,29 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
 
         policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
+        sp_size = self.shard_config.sequence_parallel_size or None
+
         if self.shard_config.enable_tensor_parallelism:
-            # TODO: check if input is in parallel
             policy[MultimodalProjector] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
-                        "projection",
+                        "projection.linear",
                         target_module=Linear1D_Row,
                         ignore_if_not_exist=True,
-                        kwargs=dict(parallel_input=False),
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
-                        "in_proj",
+                        "projection.in_proj",
                         target_module=Linear1D_Col,
                         ignore_if_not_exist=True,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
-                        "out_proj",
+                        "projection.out_proj",
                         target_module=Linear1D_Row,
                         ignore_if_not_exist=True,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     # TODO: add qformer layers
                 ]
