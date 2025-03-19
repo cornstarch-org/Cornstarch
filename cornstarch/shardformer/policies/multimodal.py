@@ -3,6 +3,7 @@ from typing import Any, Dict, cast
 
 import torch.distributed as dist
 from colossalai.shardformer.layer import Linear1D_Col, Linear1D_Row
+from colossalai.shardformer.layer._operation import gather_forward_split_backward
 from colossalai.shardformer.policies.auto_policy import _fullname
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -59,30 +60,51 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
 
         sp_mode = self.shard_config.sequence_parallelism_mode or None
         sp_size = self.shard_config.sequence_parallel_size or None
+        sp_group = self.shard_config.sequence_parallel_process_group or None
+
+        if self.shard_config.enable_sequence_parallelism and sp_mode == "ring_attn":
+            # Gather forward result by replacing projector.post_projection
+            self.append_or_create_submodule_replacement(
+                ModulePolicyDescription(
+                    sub_module_replacement=[
+                        SubModuleReplacementDescription(
+                            "post_projection",
+                            target_module=gather_forward_split_backward,
+                            kwargs=dict(
+                                process_group=sp_group,
+                            ),
+                        )
+                    ]
+                )
+            )
 
         if self.shard_config.enable_tensor_parallelism:
-            policy[MultimodalProjector] = ModulePolicyDescription(
-                sub_module_replacement=[
-                    SubModuleReplacementDescription(
-                        "projection.linear",
-                        target_module=Linear1D_Row,
-                        ignore_if_not_exist=True,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
-                    ),
-                    SubModuleReplacementDescription(
-                        "projection.in_proj",
-                        target_module=Linear1D_Col,
-                        ignore_if_not_exist=True,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
-                    ),
-                    SubModuleReplacementDescription(
-                        "projection.out_proj",
-                        target_module=Linear1D_Row,
-                        ignore_if_not_exist=True,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
-                    ),
-                    # TODO: add qformer layers
-                ]
+            self.append_or_create_submodule_replacement(
+                ModulePolicyDescription(
+                    sub_module_replacement=[
+                        SubModuleReplacementDescription(
+                            "projection.linear",
+                            target_module=Linear1D_Row,
+                            ignore_if_not_exist=True,
+                            kwargs=dict(seq_parallel_mode=sp_mode),
+                        ),
+                        SubModuleReplacementDescription(
+                            "projection.in_proj",
+                            target_module=Linear1D_Col,
+                            ignore_if_not_exist=True,
+                            kwargs=dict(seq_parallel_mode=sp_mode),
+                        ),
+                        SubModuleReplacementDescription(
+                            "projection.out_proj",
+                            target_module=Linear1D_Row,
+                            ignore_if_not_exist=True,
+                            kwargs=dict(seq_parallel_mode=sp_mode),
+                        ),
+                        # TODO: add qformer layers
+                    ]
+                ),
+                policy=policy,
+                target_key=MultimodalProjector,
             )
 
         return policy
