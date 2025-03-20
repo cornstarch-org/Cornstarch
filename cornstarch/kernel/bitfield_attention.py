@@ -176,7 +176,8 @@ def get_num_computation_block_per_query_block(
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=4, num_stages=1),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=8, num_stages=1),
+        # triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=1),
         # This config has a race condition when EVEN_M == False, disabling it for now.
         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
     ],
@@ -820,13 +821,13 @@ def init_to_zero(name):
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": False},
+            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False},
             num_warps=8,
             num_stages=1,
             pre_hook=init_to_zero("DQ"),
         ),
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": True},
+            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True},
             num_warps=8,
             num_stages=1,
             pre_hook=init_to_zero("DQ"),
