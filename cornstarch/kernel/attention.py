@@ -47,16 +47,23 @@ import torch
 import triton
 import triton.language as tl
 
+BLOCK = 128
 
-# Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
-# @triton.autotune(
-#     configs=[
-#         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=4, num_stages=1),
-#         # This config has a race condition when EVEN_M == False, disabling it for now.
-#         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
-#     ],
-#     key=['CACHE_KEY_SEQLEN_Q', 'CACHE_KEY_SEQLEN_K', 'BIAS_TYPE', 'IS_CAUSAL', 'BLOCK_HEADDIM']
-# )
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": BLOCK, "BLOCK_N": BLOCK}, num_warps=4, num_stages=1),
+        # This config has a race condition when EVEN_M == False, disabling it for now.
+        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
+    ],
+    key=[
+        "CACHE_KEY_SEQLEN_Q",
+        "CACHE_KEY_SEQLEN_K",
+        "BIAS_TYPE",
+        "IS_CAUSAL",
+        "BLOCK_HEADDIM",
+    ],
+)
 @triton.heuristics(
     {
         "EVEN_M": lambda args: args["seqlen_q"] % args["BLOCK_M"] == 0,
@@ -575,17 +582,7 @@ def _bwd_kernel_one_col_block(
                 mask=(offs_m_curr[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
                 other=0.0,
             )
-        # if EVEN_M:
-        #     if EVEN_HEADDIM:
-        #         do = tl.load(do_ptrs)
-        #     else:
-        #         do = tl.load(do_ptrs, mask=offs_d[None, :] < headdim, other=0.0)
-        # else:
-        #     if EVEN_HEADDIM:
-        #         do = tl.load(do_ptrs, mask=offs_m_curr[:, None] < seqlen_q, other=0.0)
-        #     else:
-        #         do = tl.load(do_ptrs, mask=(offs_m_curr[:, None] < seqlen_q)
-        #                                    & (offs_d[None, :] < headdim), other=0.0)
+
         dv += tl.dot(tl.trans(p.to(do.dtype)), do)
         # compute dp = dot(v, do)
         # There seems to be a race condition when headdim=48/96, and dq, dk are wrong.
@@ -691,23 +688,11 @@ def init_to_zero(name):
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": False},
+            {"BLOCK_M": BLOCK, "BLOCK_N": BLOCK, "SEQUENCE_PARALLEL": False},
             num_warps=8,
             num_stages=1,
             pre_hook=init_to_zero("DQ"),
         ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": True},
-            num_warps=8,
-            num_stages=1,
-            pre_hook=init_to_zero("DQ"),
-        ),
-        # Other configs seem to give wrong results when seqlen_q % 128 != 0, disabling them for now
-        # # Kernel is buggy (give wrong result) if we set BLOCK_m=128, BLOCK_n=64, num_warps=*4*
-        # triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False}, num_warps=8, num_stages=1, pre_hook=init_to_zero('DQ')),
-        # triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True}, num_warps=8, num_stages=1, pre_hook=init_to_zero('DQ')),
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False}, num_warps=4, num_stages=1, pre_hook=init_to_zero('DQ')),
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True}, num_warps=4, num_stages=1, pre_hook=init_to_zero('DQ')),
     ],
     key=[
         "CACHE_KEY_SEQLEN_Q",
@@ -903,7 +888,7 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    seqlen_q_rounded = math.ceil(seqlen_q / 128) * 128
+    seqlen_q_rounded = math.ceil(seqlen_q / BLOCK) * BLOCK
     lse = torch.empty(
         (batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32
     )
@@ -913,8 +898,6 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
     o = torch.empty_like(q)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
-    BLOCK = 128
-    num_warps = 4 if d <= 64 else 8
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
     _fwd_kernel[grid](
         q,
@@ -950,10 +933,10 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
         bias_type,
         causal,
         BLOCK_HEADDIM,
-        BLOCK_M=BLOCK,
-        BLOCK_N=BLOCK,
-        num_warps=num_warps,
-        num_stages=1,
+        # BLOCK_M=BLOCK,
+        # BLOCK_N=BLOCK,
+        # num_warps=num_warps,
+        # num_stages=1,
     )
     return o, lse, softmax_scale  # softmax_scale could have been updated
 
@@ -968,7 +951,7 @@ def _flash_attn_backward(
     _, seqlen_k, _, _ = k.shape
     # assert d in {16, 32, 64, 128}
     assert d <= 128
-    seqlen_q_rounded = math.ceil(seqlen_q / 128) * 128
+    seqlen_q_rounded = math.ceil(seqlen_q / BLOCK) * BLOCK
     assert lse.shape == (batch, nheads, seqlen_q_rounded)
     assert q.stride(-1) == k.stride(-1) == v.stride(-1) == o.stride(-1) == 1
     assert dq.stride(-1) == dk.stride(-1) == dv.stride(-1) == 1
@@ -976,7 +959,6 @@ def _flash_attn_backward(
     # dq_accum = torch.zeros_like(q, dtype=torch.float32)
     dq_accum = torch.empty_like(q, dtype=torch.float32)
     delta = torch.empty_like(lse)
-    # delta = torch.zeros_like(lse)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
@@ -994,7 +976,7 @@ def _flash_attn_backward(
         seqlen_q,
         seqlen_q_rounded,
         d,
-        BLOCK_M=128,
+        BLOCK_M=BLOCK,
         BLOCK_HEADDIM=BLOCK_HEADDIM,
     )
 
@@ -1019,9 +1001,6 @@ def _flash_attn_backward(
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    # BLOCK_M = 128
-    # BLOCK_N = 64
-    # num_warps = 4
     grid = lambda META: (
         triton.cdiv(seqlen_k, META["BLOCK_N"]) if META["SEQUENCE_PARALLEL"] else 1,
         batch * nheads,
@@ -1078,116 +1057,6 @@ def _flash_attn_backward(
         # num_stages=1,
     )
     dq.copy_(dq_accum)
-
-
-class FlashAttnQKVPackedFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, qkv, bias=None, causal=False, softmax_scale=None):
-        """
-        qkv: (batch, seqlen, 3, nheads, headdim)
-        bias: optional, shape broadcastible to (batch, nheads, seqlen, seqlen).
-            For example, ALiBi mask for causal would have shape (1, nheads, 1, seqlen).
-            ALiBi mask for non-causal would have shape (1, nheads, seqlen, seqlen)
-        """
-        # Make sure that the last dimension is contiguous
-        if qkv.stride(-1) != 1:
-            qkv = qkv.contiguous()
-        o, lse, ctx.softmax_scale = _flash_attn_forward(
-            qkv[:, :, 0],
-            qkv[:, :, 1],
-            qkv[:, :, 2],
-            bias=bias,
-            causal=causal,
-            softmax_scale=softmax_scale,
-        )
-        ctx.save_for_backward(qkv, o, lse, bias)
-        ctx.causal = causal
-        return o
-
-    @staticmethod
-    def backward(ctx, do):
-        qkv, o, lse, bias = ctx.saved_tensors
-        assert not ctx.needs_input_grad[
-            1
-        ], "FlashAttention does not support bias gradient yet"
-        # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
-        # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
-        with torch.inference_mode():
-            dqkv = torch.empty_like(qkv)
-            _flash_attn_backward(
-                do,
-                qkv[:, :, 0],
-                qkv[:, :, 1],
-                qkv[:, :, 2],
-                o,
-                lse,
-                dqkv[:, :, 0],
-                dqkv[:, :, 1],
-                dqkv[:, :, 2],
-                bias=bias,
-                causal=ctx.causal,
-                softmax_scale=ctx.softmax_scale,
-            )
-        return dqkv, None, None, None
-
-
-flash_attn_qkvpacked_func = FlashAttnQKVPackedFunc.apply
-
-
-class FlashAttnKVPackedFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q, kv, bias=None, causal=False, softmax_scale=None):
-        """
-        q: (batch, seqlen_q, nheads, headdim)
-        kv: (batch, seqlen_k, 2, nheads, headdim)
-        bias: optional, shape broadcastible to (batch, nheads, seqlen_q, seqlen_k).
-            For example, ALiBi mask for causal would have shape (1, nheads, 1, seqlen_k).
-            ALiBi mask for non-causal would have shape (1, nheads, seqlen_q, seqlen_k)
-        """
-        # Make sure that the last dimension is contiguous
-        q, kv = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, kv]]
-        o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q,
-            kv[:, :, 0],
-            kv[:, :, 1],
-            bias=bias,
-            causal=causal,
-            softmax_scale=softmax_scale,
-        )
-        ctx.save_for_backward(q, kv, o, lse, bias)
-        ctx.causal = causal
-        return o
-
-    @staticmethod
-    def backward(ctx, do):
-        q, kv, o, lse, bias = ctx.saved_tensors
-        if len(ctx.needs_input_grad) >= 3:
-            assert not ctx.needs_input_grad[
-                2
-            ], "FlashAttention does not support bias gradient yet"
-        # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
-        # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
-        with torch.inference_mode():
-            dq = torch.empty_like(q)
-            dkv = torch.empty_like(kv)
-            _flash_attn_backward(
-                do,
-                q,
-                kv[:, :, 0],
-                kv[:, :, 1],
-                o,
-                lse,
-                dq,
-                dkv[:, :, 0],
-                dkv[:, :, 1],
-                bias=bias,
-                causal=ctx.causal,
-                softmax_scale=ctx.softmax_scale,
-            )
-        return dq, dkv, None, None, None
-
-
-flash_attn_kvpacked_func = FlashAttnKVPackedFunc.apply
 
 
 class FlashAttnFunc(torch.autograd.Function):
