@@ -688,7 +688,7 @@ def init_to_zero(name):
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_M": BLOCK, "BLOCK_N": BLOCK, "SEQUENCE_PARALLEL": False},
+            {"BLOCK_M": BLOCK, "BLOCK_N": BLOCK},
             num_warps=8,
             num_stages=1,
             pre_hook=init_to_zero("DQ"),
@@ -756,7 +756,6 @@ def _bwd_kernel(
     BIAS_TYPE: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
-    SEQUENCE_PARALLEL: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
     EVEN_HEADDIM: tl.constexpr,
@@ -779,79 +778,41 @@ def _bwd_kernel(
     # pointer to row-wise quantities in value-like data
     D += off_hb * seqlen_q_rounded
     LSE += off_hb * seqlen_q_rounded
-    if not SEQUENCE_PARALLEL:
-        num_block_n = tl.cdiv(seqlen_k, BLOCK_N)
-        for start_n in range(0, num_block_n):
-            _bwd_kernel_one_col_block(
-                start_n,
-                Q,
-                K,
-                V,
-                Bias,
-                DO,
-                DQ,
-                DK,
-                DV,
-                LSE,
-                D,
-                softmax_scale,
-                stride_qm,
-                stride_kn,
-                stride_vn,
-                stride_bm,
-                stride_dom,
-                stride_dqm,
-                stride_dkn,
-                stride_dvn,
-                seqlen_q,
-                seqlen_k,
-                headdim,
-                ATOMIC_ADD=False,
-                BIAS_TYPE=BIAS_TYPE,
-                IS_CAUSAL=IS_CAUSAL,
-                BLOCK_HEADDIM=BLOCK_HEADDIM,
-                EVEN_M=EVEN_M,
-                EVEN_N=EVEN_N,
-                EVEN_HEADDIM=EVEN_HEADDIM,
-                BLOCK_M=BLOCK_M,
-                BLOCK_N=BLOCK_N,
-            )
-    else:
-        start_n = tl.program_id(0)
-        _bwd_kernel_one_col_block(
-            start_n,
-            Q,
-            K,
-            V,
-            Bias,
-            DO,
-            DQ,
-            DK,
-            DV,
-            LSE,
-            D,
-            softmax_scale,
-            stride_qm,
-            stride_kn,
-            stride_vn,
-            stride_bm,
-            stride_dom,
-            stride_dqm,
-            stride_dkn,
-            stride_dvn,
-            seqlen_q,
-            seqlen_k,
-            headdim,
-            ATOMIC_ADD=True,
-            BIAS_TYPE=BIAS_TYPE,
-            IS_CAUSAL=IS_CAUSAL,
-            BLOCK_HEADDIM=BLOCK_HEADDIM,
-            EVEN_M=EVEN_M,
-            EVEN_N=EVEN_N,
-            EVEN_HEADDIM=EVEN_HEADDIM,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-        )
+    start_n = tl.program_id(0)
+    _bwd_kernel_one_col_block(
+        start_n,
+        Q,
+        K,
+        V,
+        Bias,
+        DO,
+        DQ,
+        DK,
+        DV,
+        LSE,
+        D,
+        softmax_scale,
+        stride_qm,
+        stride_kn,
+        stride_vn,
+        stride_bm,
+        stride_dom,
+        stride_dqm,
+        stride_dkn,
+        stride_dvn,
+        seqlen_q,
+        seqlen_k,
+        headdim,
+        ATOMIC_ADD=True,
+        BIAS_TYPE=BIAS_TYPE,
+        IS_CAUSAL=IS_CAUSAL,
+        BLOCK_HEADDIM=BLOCK_HEADDIM,
+        EVEN_M=EVEN_M,
+        EVEN_N=EVEN_N,
+        EVEN_HEADDIM=EVEN_HEADDIM,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+    )
 
 
 def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
@@ -1001,10 +962,7 @@ def _flash_attn_backward(
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    grid = lambda META: (
-        triton.cdiv(seqlen_k, META["BLOCK_N"]) if META["SEQUENCE_PARALLEL"] else 1,
-        batch * nheads,
-    )
+    grid = lambda META: (triton.cdiv(seqlen_k, META["BLOCK_N"]), batch * nheads)
     _bwd_kernel[grid](
         q,
         k,
@@ -1051,7 +1009,6 @@ def _flash_attn_backward(
         bias_type,
         causal,
         BLOCK_HEADDIM,
-        # SEQUENCE_PARALLEL=False,
         # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         # num_warps=num_warps,
         # num_stages=1,
