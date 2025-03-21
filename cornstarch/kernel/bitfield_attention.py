@@ -93,22 +93,17 @@ def get_submask_from_bitfield_mask(
     q_modality_bits = (q_bitfield_mask & ((1 << 62) - 1))[:, None]
     kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1))[None, :]
 
-    return tl.where(
+    return (
         (
-            (
-                causal_mask
-                & (is_text_token == True)
-                & ((q_modality_bits & kv_modality_bits) > 0)
-            )
-            | (
-                (is_text_token == False)
-                & (q_modality_bits == kv_modality_bits)
-                & (q_bitfield_mask[:, None] > 0)
-            )
-        ),
-        1,
-        0,
-    )
+            causal_mask
+            & (is_text_token == True)
+            & ((q_modality_bits & kv_modality_bits) > 0)
+        ) | (
+            (is_text_token == False)
+            & (q_modality_bits == kv_modality_bits)
+            & (q_bitfield_mask[:, None] > 0)
+        )
+    ).to(tl.int32)
 
 
 @triton.jit
@@ -130,7 +125,7 @@ def compute_num_block_computation(
         - seqlen: tl.constexpr
     """
 
-    BLOCK_SIZE: tl.constexpr = 128
+    BLOCK_SIZE: tl.constexpr = 64
 
     batch_size = tl.program_id(0)
     offset = tl.program_id(1) * BLOCK_SIZE
@@ -161,12 +156,12 @@ def get_num_computation_block_per_query_block(
 ) -> torch.Tensor:
     # attention_mask: (batch_size, seqlen)
     batch_size, seqlen = attention_mask.shape
-    num_blocks = math.ceil(seqlen / 128)
+    num_blocks = math.ceil(seqlen / 64)
     out = torch.empty(
         (batch_size, num_blocks), dtype=torch.int32, device=attention_mask.device
     )
 
-    grid = lambda META: (batch_size, triton.cdiv(seqlen, 128))
+    grid = lambda META: (batch_size, triton.cdiv(seqlen, 64))
     compute_num_block_computation[grid](
         attention_mask, out, attention_mask.stride(0), out.stride(0), seqlen
     )
@@ -174,15 +169,14 @@ def get_num_computation_block_per_query_block(
 
 
 # Disabling autotune for now, set num_warps=4 if headdim=64 and num_warps=8 if headdim=128
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=8, num_stages=1),
-        # triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=1),
-        # This config has a race condition when EVEN_M == False, disabling it for now.
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
-    ],
-    key=["CACHE_KEY_SEQLEN_Q", "CACHE_KEY_SEQLEN_K", "BIAS_TYPE", "BLOCK_HEADDIM"],
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
+#         # This config has a race condition when EVEN_M == False, disabling it for now.
+#         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
+#     ],
+#     key=["CACHE_KEY_SEQLEN_Q", "CACHE_KEY_SEQLEN_K", "BIAS_TYPE", "BLOCK_HEADDIM"],
+# )
 @triton.heuristics(
     {"EVEN_HEADDIM": lambda args: args["headdim"] == args["BLOCK_HEADDIM"]}
 )
@@ -818,29 +812,29 @@ def init_to_zero(name):
     return lambda nargs: nargs[name].zero_()
 
 
-@triton.autotune(
-    configs=[
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False},
-            num_warps=8,
-            num_stages=1,
-            pre_hook=init_to_zero("DQ"),
-        ),
-        triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True},
-            num_warps=8,
-            num_stages=1,
-            pre_hook=init_to_zero("DQ"),
-        ),
-        # Other configs seem to give wrong results when seqlen_q % 128 != 0, disabling them for now
-        # # Kernel is buggy (give wrong result) if we set BLOCK_m=128, BLOCK_n=64, num_warps=*4*
-        # triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False}, num_warps=8, num_stages=1, pre_hook=init_to_zero('DQ')),
-        # triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True}, num_warps=8, num_stages=1, pre_hook=init_to_zero('DQ')),
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False}, num_warps=4, num_stages=1, pre_hook=init_to_zero('DQ')),
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True}, num_warps=4, num_stages=1, pre_hook=init_to_zero('DQ')),
-    ],
-    key=["CACHE_KEY_SEQLEN_Q", "CACHE_KEY_SEQLEN_K", "BIAS_TYPE", "BLOCK_HEADDIM"],
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config(
+#             {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": False},
+#             num_warps=8,
+#             num_stages=1,
+#             pre_hook=init_to_zero("DQ"),
+#         ),
+#         triton.Config(
+#             {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": True},
+#             num_warps=8,
+#             num_stages=1,
+#             pre_hook=init_to_zero("DQ"),
+#         ),
+#         # Other configs seem to give wrong results when seqlen_q % 128 != 0, disabling them for now
+#         # # Kernel is buggy (give wrong result) if we set BLOCK_m=128, BLOCK_n=64, num_warps=*4*
+#         # triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False}, num_warps=8, num_stages=1, pre_hook=init_to_zero('DQ')),
+#         # triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True}, num_warps=8, num_stages=1, pre_hook=init_to_zero('DQ')),
+#         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False}, num_warps=4, num_stages=1, pre_hook=init_to_zero('DQ')),
+#         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True}, num_warps=4, num_stages=1, pre_hook=init_to_zero('DQ')),
+#     ],
+#     key=["CACHE_KEY_SEQLEN_Q", "CACHE_KEY_SEQLEN_K", "BIAS_TYPE", "BLOCK_HEADDIM"],
+# )
 @triton.heuristics(
     {"EVEN_HEADDIM": lambda args: args["headdim"] == args["BLOCK_HEADDIM"]}
 )
@@ -1052,6 +1046,7 @@ def _bitfield_attn_forward(
     )
     o = torch.full_like(q, torch.nan)
 
+    BLOCK_SIZE = 64
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
     _fwd_kernel[grid](
@@ -1091,10 +1086,10 @@ def _bitfield_attn_forward(
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type,
         BLOCK_HEADDIM,
-        # BLOCK_M=BLOCK,
-        # BLOCK_N=BLOCK,
-        # num_warps=num_warps,
-        # num_stages=1,
+        BLOCK_M=BLOCK_SIZE,
+        BLOCK_N=BLOCK_SIZE,
+        num_warps=4,
+        num_stages=1,
     )
     return o, lse, softmax_scale  # softmax_scale could have been updated
 
@@ -1135,6 +1130,7 @@ def _bitfield_attn_backward(
     delta = torch.empty_like(lse)  # intermediate results for softmax gradient
     # delta = torch.zeros_like(lse)
 
+    BLOCK_SIZE = 64
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
     # compute delta for softmax backward: delta = tl.sum(o * do, axis=1)
@@ -1152,7 +1148,7 @@ def _bitfield_attn_backward(
         seqlen_qs,
         seqlen_q_rounded,
         d,
-        BLOCK_M=128,
+        BLOCK_M=BLOCK_SIZE,
         BLOCK_HEADDIM=BLOCK_HEADDIM,
     )
 
@@ -1234,9 +1230,10 @@ def _bitfield_attn_backward(
         bias_type,
         BLOCK_HEADDIM,
         # SEQUENCE_PARALLEL=False,
-        # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        # num_warps=num_warps,
-        # num_stages=1,
+        BLOCK_M=BLOCK_SIZE,
+        BLOCK_N=BLOCK_SIZE,
+        num_warps=4,
+        num_stages=1,
     )
     dq.copy_(dq_accum)
 
