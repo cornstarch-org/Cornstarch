@@ -98,7 +98,8 @@ def get_submask_from_bitfield_mask(
             causal_mask
             & (is_text_token == True)
             & ((q_modality_bits & kv_modality_bits) > 0)
-        ) | (
+        )
+        | (
             (is_text_token == False)
             & (q_modality_bits == kv_modality_bits)
             & (q_bitfield_mask[:, None] > 0)
@@ -125,7 +126,7 @@ def compute_num_block_computation(
         - seqlen: tl.constexpr
     """
 
-    BLOCK_SIZE: tl.constexpr = 64
+    BLOCK_SIZE: tl.constexpr = 128
 
     batch_size = tl.program_id(0)
     offset = tl.program_id(1) * BLOCK_SIZE
@@ -1037,7 +1038,8 @@ def _bitfield_attn_forward(
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    seqlen_q_rounded = math.ceil(max(seqlen_qs) / 128) * 128
+    BLOCK_SIZE = 128
+    seqlen_q_rounded = math.ceil(max(seqlen_qs) / BLOCK_SIZE) * BLOCK_SIZE
     lse = torch.empty(
         (batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32
     )
@@ -1046,7 +1048,6 @@ def _bitfield_attn_forward(
     )
     o = torch.full_like(q, torch.nan)
 
-    BLOCK_SIZE = 64
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
     _fwd_kernel[grid](
@@ -1117,9 +1118,10 @@ def _bitfield_attn_backward(
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
 
+    BLOCK_SIZE = 128
     # assert d in {16, 32, 64, 128}
     assert d <= 128
-    seqlen_q_rounded = math.ceil(max(seqlen_qs) / 128) * 128
+    seqlen_q_rounded = math.ceil(max(seqlen_qs) / BLOCK_SIZE) * BLOCK_SIZE
     assert lse.shape == (batch, nheads, seqlen_q_rounded)
     assert q.stride(-1) == k.stride(-1) == v.stride(-1) == o.stride(-1) == 1
     assert dq.stride(-1) == dk.stride(-1) == dv.stride(-1) == 1
@@ -1130,7 +1132,6 @@ def _bitfield_attn_backward(
     delta = torch.empty_like(lse)  # intermediate results for softmax gradient
     # delta = torch.zeros_like(lse)
 
-    BLOCK_SIZE = 64
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
     # compute delta for softmax backward: delta = tl.sum(o * do, axis=1)
@@ -1173,9 +1174,6 @@ def _bitfield_attn_backward(
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    # BLOCK_M = 128
-    # BLOCK_N = 128
-    # num_warps = 4
     grid = lambda META: (
         triton.cdiv(seqlen_k, META["BLOCK_N"]) if META["SEQUENCE_PARALLEL"] else 1,
         batch * nheads,
@@ -1229,7 +1227,7 @@ def _bitfield_attn_backward(
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type,
         BLOCK_HEADDIM,
-        # SEQUENCE_PARALLEL=False,
+        SEQUENCE_PARALLEL=False,
         BLOCK_M=BLOCK_SIZE,
         BLOCK_N=BLOCK_SIZE,
         num_warps=4,
