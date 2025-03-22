@@ -532,7 +532,7 @@ class TestContextParallelBatchSplitUtilClass:
 
 
 @instantiate_parametrized_tests
-class TestContextParallelismClass(GlooDistributedTestBase):
+class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
 
     @property
     def world_size(self) -> int:
@@ -666,3 +666,10 @@ class TestContextParallelismClass(GlooDistributedTestBase):
             rtol=5e-3,
             atol=5e-3,
         )
+
+
+@instantiate_parametrized_tests
+class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
