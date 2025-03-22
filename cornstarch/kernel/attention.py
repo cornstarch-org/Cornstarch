@@ -48,11 +48,14 @@ import triton
 import triton.language as tl
 
 BLOCK = 128
+num_warps = 4
 
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": BLOCK, "BLOCK_N": BLOCK}, num_warps=4, num_stages=1),
+        triton.Config(
+            {"BLOCK_M": BLOCK, "BLOCK_N": BLOCK}, num_warps=num_warps, num_stages=1
+        ),
         # This config has a race condition when EVEN_M == False, disabling it for now.
         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
     ],
@@ -683,7 +686,9 @@ def _bwd_kernel_one_col_block(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": BLOCK, "BLOCK_N": BLOCK}, num_warps=4, num_stages=1),
+        triton.Config(
+            {"BLOCK_M": BLOCK, "BLOCK_N": BLOCK}, num_warps=num_warps, num_stages=1
+        ),
     ],
     key=[
         "CACHE_KEY_SEQLEN_Q",
