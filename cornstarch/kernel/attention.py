@@ -47,14 +47,15 @@ import torch
 import triton
 import triton.language as tl
 
-BLOCK = 128
+BLOCK_M = 128
+BLOCK_N = 32
 num_warps = 4
 
 
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_M": BLOCK, "BLOCK_N": BLOCK}, num_warps=num_warps, num_stages=1
+            {"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N}, num_warps=num_warps, num_stages=1
         ),
         # This config has a race condition when EVEN_M == False, disabling it for now.
         # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
@@ -680,7 +681,7 @@ def _bwd_kernel_one_col_block(
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_M": BLOCK, "BLOCK_N": BLOCK}, num_warps=num_warps, num_stages=1
+            {"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N}, num_warps=num_warps, num_stages=1
         ),
     ],
     key=[
@@ -835,7 +836,7 @@ def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None):
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    seqlen_q_rounded = math.ceil(seqlen_q / BLOCK) * BLOCK
+    seqlen_q_rounded = math.ceil(seqlen_q / BLOCK_M) * BLOCK_M
     lse = torch.empty(
         (batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32
     )
@@ -897,7 +898,7 @@ def _flash_attn_backward(
     _, seqlen_k, _, _ = k.shape
     # assert d in {16, 32, 64, 128}
     assert d <= 128
-    seqlen_q_rounded = math.ceil(seqlen_q / BLOCK) * BLOCK
+    seqlen_q_rounded = math.ceil(seqlen_q / BLOCK_M) * BLOCK_M
     assert lse.shape == (batch, nheads, seqlen_q_rounded)
     assert q.stride(-1) == k.stride(-1) == v.stride(-1) == o.stride(-1) == 1
     assert dq.stride(-1) == dk.stride(-1) == dv.stride(-1) == 1
@@ -921,7 +922,7 @@ def _flash_attn_backward(
         seqlen_q,
         seqlen_q_rounded,
         d,
-        BLOCK_M=BLOCK,
+        BLOCK_M=BLOCK_M,
         BLOCK_HEADDIM=BLOCK_HEADDIM,
     )
 
