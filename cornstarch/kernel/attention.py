@@ -56,9 +56,7 @@ num_warps = 4
     configs=[
         triton.Config(
             {"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N}, num_warps=num_warps, num_stages=1
-        ),
-        # This config has a race condition when EVEN_M == False, disabling it for now.
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=1),
+        )
     ],
     key=[
         "CACHE_KEY_SEQLEN_Q",
@@ -118,9 +116,7 @@ def _fwd_kernel(
     off_hb = tl.program_id(1)
     off_b = off_hb // nheads
     off_h = off_hb % nheads
-    # off_b = tl.program_id(1)
-    # off_h = tl.program_id(2)
-    # off_hb = off_b * nheads + off_h
+
     # initialize offsets
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
@@ -876,14 +872,8 @@ def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None):
         d,
         seqlen_q // 32,
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
-        # Can't use kwargs here because triton autotune expects key to be args, not kwargs
-        # BLOCK_HEADDIM=d,
         bias_type,
         BLOCK_HEADDIM,
-        # BLOCK_M=BLOCK,
-        # BLOCK_N=BLOCK,
-        # num_warps=num_warps,
-        # num_stages=1,
     )
     return o, lse, softmax_scale  # softmax_scale could have been updated
 
@@ -989,13 +979,8 @@ def _flash_attn_backward(
         d,
         seqlen_q // 32,
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
-        # Can't use kwargs here because triton autotune expects key to be args, not kwargs
-        # BLOCK_HEADDIM=d,
         bias_type,
         BLOCK_HEADDIM,
-        # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        # num_warps=num_warps,
-        # num_stages=1,
     )
     dq.copy_(dq_accum)
 
@@ -1055,7 +1040,6 @@ def flash_attn_func(q, k, v, bias=None, softmax_scale=None):
         k (torch.Tensor): Key tensor of shape (batch_size, seqlen_k, nheads, headdim).
         v (torch.Tensor): Value tensor of shape (batch_size, seqlen_k, nheads, headdim).
         bias (torch.Tensor, optional): Bias tensor broadcastable to (batch, nheads, seqlen_q, seqlen_k). Default is None.
-        causal (bool, optional): Whether to apply causal masking. Default is False.
         softmax_scale (float, optional): Scaling factor for the softmax. Default is None.
 
     Returns:
