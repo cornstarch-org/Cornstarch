@@ -8,6 +8,7 @@ from colossalai.accelerator import get_accelerator
 from torch import nn
 from transformers.integrations.flash_attention import flash_attention_forward
 
+from cornstarch.kernel.attention import flash_attn_func
 from cornstarch.kernel.bitfield_attention import bitfield_attn_func
 
 
@@ -43,6 +44,32 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         batch, num_key_value_heads, n_rep, slen, head_dim
     )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
+def flash_attention_with_mask_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, None]:
+    key = repeat_kv(key, module.num_key_value_groups)
+    value = repeat_kv(value, module.num_key_value_groups)
+
+    # FA2 uses non-transposed inputs
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
+
+    attn_output = flash_attn_func(
+        query,
+        key,
+        value,
+        mask=attention_mask,
+    )
+
+    return attn_output, None
 
 
 def bitfield_attention_forward(
