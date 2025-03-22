@@ -13,8 +13,12 @@ from torch.testing._internal.common_utils import (
 )
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
+from cornstarch.kernel.attention import flash_attn_func
 from cornstarch.kernel.bitfield_attention import bitfield_attn_func
 from cornstarch.kernel.interface import BitfieldUtils
+from cornstarch.shardformer.layers.context_parallel_attention import (
+    ContextParallelAttentionWithMask,
+)
 from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
     ContextParallelBitfieldAttention,
 )
@@ -673,3 +677,67 @@ class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase)
     @property
     def world_size(self) -> int:
         return 2
+
+    @parametrize("batch_size", [1, 2, 4], name_fn=lambda x: f"bs={x}")
+    @parametrize("seq_len", [64, 256, 336, 400, 1024], name_fn=lambda x: f"seq={x}")
+    def test(self, batch_size: int, seq_len: int):
+        query, key, value = torch.unbind(
+            torch.randn(
+                (3, batch_size, seq_len, 8, 64), device="cuda", dtype=torch.bfloat16
+            ).normal_(mean=0, std=0.5),
+        )
+
+        for t in [query, key, value]:
+            t.requires_grad_()
+
+        mask = torch.tril(
+            torch.full(
+                (batch_size, seq_len, seq_len), True, dtype=torch.bool, device="cuda"
+            )
+        )
+
+        ref_out: torch.Tensor = flash_attn_func(query, key, value, mask=mask)
+
+        local_query = (
+            torch.chunk(query, self.world_size, dim=1)[self.rank]
+            .requires_grad_()
+            .contiguous()
+        )
+
+        local_key = (
+            torch.chunk(key, self.world_size, dim=1)[self.rank]
+            .requires_grad_()
+            .contiguous()
+        )
+
+        local_value = (
+            torch.chunk(value, self.world_size, dim=1)[self.rank]
+            .requires_grad_()
+            .contiguous()
+        )
+
+        assert (
+            local_key.shape
+            == local_value.shape
+            == (batch_size, seq_len // self.world_size, 8, 64)
+        )
+
+        seqlen_per_rank = torch.tensor(
+            [seq_len // self.world_size] * self.world_size, device="cuda"
+        )
+
+        cp_out: torch.Tensor = ContextParallelAttentionWithMask.apply(
+            local_query,
+            local_key,
+            local_value,
+            mask,
+            seqlen_per_rank,
+            dist.GroupMember.WORLD,
+        )
+
+        torch.testing.assert_close(
+            torch.chunk(ref_out, self.world_size, dim=1)[self.rank],
+            cp_out,
+            rtol=5e-3,
+            atol=5e-3,
+        )
