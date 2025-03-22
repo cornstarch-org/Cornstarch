@@ -186,7 +186,7 @@ def test_my_flash_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int
     mask = torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int64)
 
     reference_out = reference_attention(q, k, v, mask)
-    triton_out = my_flash_attn_func_triton(q, k, v, causal=False)
+    triton_out = my_flash_attn_func_triton(q, k, v)
 
     g = torch.randn_like(reference_out)
     dq_ref, dk_ref, dv_ref = torch.autograd.grad(reference_out, (q, k, v), g)

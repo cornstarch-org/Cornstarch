@@ -63,7 +63,6 @@ num_warps = 4
         "CACHE_KEY_SEQLEN_Q",
         "CACHE_KEY_SEQLEN_K",
         "BIAS_TYPE",
-        "IS_CAUSAL",
         "BLOCK_HEADDIM",
     ],
 )
@@ -107,7 +106,6 @@ def _fwd_kernel(
     CACHE_KEY_SEQLEN_Q,
     CACHE_KEY_SEQLEN_K,
     BIAS_TYPE: tl.constexpr,
-    IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
@@ -180,7 +178,7 @@ def _fwd_kernel(
                 other=0.0,
             )
     # loop over k, v and update accumulator
-    end_n = seqlen_k if not IS_CAUSAL else tl.minimum((start_m + 1) * BLOCK_M, seqlen_k)
+    end_n = seqlen_k
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
@@ -214,10 +212,7 @@ def _fwd_kernel(
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
-        if IS_CAUSAL:
-            qk += tl.where(
-                offs_m[:, None] >= (start_n + offs_n)[None, :], 0, float("-inf")
-            )
+
         if BIAS_TYPE != "none":
             if BIAS_TYPE == "vector":
                 if EVEN_N:
@@ -441,7 +436,6 @@ def _bwd_kernel_one_col_block(
     headdim,
     ATOMIC_ADD: tl.constexpr,
     BIAS_TYPE: tl.constexpr,
-    IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
@@ -450,7 +444,7 @@ def _bwd_kernel_one_col_block(
     BLOCK_N: tl.constexpr,
 ):
     # We need to make sure begin_m is a multiple of BLOCK_M (not BLOCK_N)
-    begin_m = 0 if not IS_CAUSAL else ((start_n * BLOCK_N) // BLOCK_M) * BLOCK_M
+    begin_m = 0
     # initialize row/col offsets
     offs_qm = begin_m + tl.arange(0, BLOCK_M)
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -539,8 +533,7 @@ def _bwd_kernel_one_col_block(
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk = tl.where(offs_n[None, :] < seqlen_k, qk, float("-inf"))
-        if IS_CAUSAL:
-            qk = tl.where(offs_m_curr[:, None] >= (offs_n[None, :]), qk, float("-inf"))
+
         if BIAS_TYPE != "none":
             tl.debug_barrier()  # Race condition otherwise
             if BIAS_TYPE == "vector":
@@ -694,7 +687,6 @@ def _bwd_kernel_one_col_block(
         "CACHE_KEY_SEQLEN_Q",
         "CACHE_KEY_SEQLEN_K",
         "BIAS_TYPE",
-        "IS_CAUSAL",
         "BLOCK_HEADDIM",
     ],
 )
@@ -750,7 +742,6 @@ def _bwd_kernel(
     CACHE_KEY_SEQLEN_Q,
     CACHE_KEY_SEQLEN_K,
     BIAS_TYPE: tl.constexpr,
-    IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
@@ -801,7 +792,6 @@ def _bwd_kernel(
         headdim,
         ATOMIC_ADD=True,
         BIAS_TYPE=BIAS_TYPE,
-        IS_CAUSAL=IS_CAUSAL,
         BLOCK_HEADDIM=BLOCK_HEADDIM,
         EVEN_M=EVEN_M,
         EVEN_N=EVEN_N,
@@ -811,7 +801,7 @@ def _bwd_kernel(
     )
 
 
-def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
+def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
@@ -886,9 +876,8 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
         seqlen_q // 32,
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
         # Can't use kwargs here because triton autotune expects key to be args, not kwargs
-        # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
+        # BLOCK_HEADDIM=d,
         bias_type,
-        causal,
         BLOCK_HEADDIM,
         # BLOCK_M=BLOCK,
         # BLOCK_N=BLOCK,
@@ -899,7 +888,7 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
 
 
 def _flash_attn_backward(
-    do, q, k, v, o, lse, dq, dk, dv, bias=None, causal=False, softmax_scale=None
+    do, q, k, v, o, lse, dq, dk, dv, bias=None, softmax_scale=None
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
@@ -1000,9 +989,8 @@ def _flash_attn_backward(
         seqlen_q // 32,
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
         # Can't use kwargs here because triton autotune expects key to be args, not kwargs
-        # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
+        # BLOCK_HEADDIM=d,
         bias_type,
-        causal,
         BLOCK_HEADDIM,
         # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         # num_warps=num_warps,
@@ -1013,7 +1001,7 @@ def _flash_attn_backward(
 
 class FlashAttnFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, bias=None, causal=False, softmax_scale=None):
+    def forward(ctx, q, k, v, bias=None, softmax_scale=None):
         """
         q: (batch_size, seqlen_q, nheads, headdim)
         k, v: (batch_size, seqlen_k, nheads, headdim)
@@ -1024,10 +1012,9 @@ class FlashAttnFunc(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
         o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, bias=bias, causal=causal, softmax_scale=softmax_scale
+            q, k, v, bias=bias, softmax_scale=softmax_scale
         )
         ctx.save_for_backward(q, k, v, o, lse, bias)
-        ctx.causal = causal
         return o
 
     @staticmethod
@@ -1053,13 +1040,12 @@ class FlashAttnFunc(torch.autograd.Function):
                 dk,
                 dv,
                 bias=bias,
-                causal=ctx.causal,
                 softmax_scale=ctx.softmax_scale,
             )
         return dq, dk, dv, None, None, None
 
 
-def flash_attn_func(q, k, v, bias=None, causal=False, softmax_scale=None):
+def flash_attn_func(q, k, v, bias=None, softmax_scale=None):
     """
     Wrapper function for FlashAttnFunc.apply to allow default values for optional arguments.
 
@@ -1074,4 +1060,4 @@ def flash_attn_func(q, k, v, bias=None, causal=False, softmax_scale=None):
     Returns:
         torch.Tensor: Output tensor of shape (batch_size, seqlen_q, nheads, headdim).
     """
-    return FlashAttnFunc.apply(q, k, v, bias, causal, softmax_scale)
+    return FlashAttnFunc.apply(q, k, v, bias, softmax_scale)
