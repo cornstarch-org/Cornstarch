@@ -193,7 +193,7 @@ def _fwd_kernel(
                 submask_ptr,
                 mask=(offs_m[:, None] < seqlen_q) & (offs_n_curr[None, :] < seqlen_k),
                 other=0,
-            )
+            ).to(tl.int32)
 
         # -- compute qk ----
         if (
@@ -228,7 +228,7 @@ def _fwd_kernel(
             qk += tl.where(offs_n_curr[None, :] < seqlen_k, 0, float("-inf"))
 
         if Mask is not None:
-            qk += tl.where(submask > 0, 0, float("-inf"))
+            qk = tl.where(submask > 0, qk, float("-inf"))
 
         if BIAS_TYPE != "none":
             if BIAS_TYPE == "vector":
@@ -528,11 +528,25 @@ def _bwd_kernel_one_col_block(
                 mask=(offs_n[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
                 other=0.0,
             )
+
+    stride_mb = seqlen_q * seqlen_k
+
     # loop over rows
     num_block_m = tl.cdiv(seqlen_q, BLOCK_M)
     for start_m in range(begin_m, num_block_m * BLOCK_M, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         offs_m_curr = start_m + offs_m
+
+        if Mask is not None:
+            submask_ptr = (
+                Mask + off_b * stride_mb + offs_m_curr[:, None] * seqlen_k + offs_n
+            )
+            submask = tl.load(
+                submask_ptr,
+                mask=(offs_m_curr[:, None] < seqlen_q) & (offs_n[None, :] < seqlen_k),
+                other=0,
+            ).to(tl.int32)
+
         # load q, k, v, do on-chip
         # Same bug as below. Otherwise gives wrong result for headdim=40, seqlen=(128, 117)
         if EVEN_M & EVEN_HEADDIM:
@@ -552,6 +566,9 @@ def _bwd_kernel_one_col_block(
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk = tl.where(offs_n[None, :] < seqlen_k, qk, float("-inf"))
+
+        if Mask is not None:
+            qk = tl.where(submask > 0, qk, float("-inf"))
 
         if BIAS_TYPE != "none":
             tl.debug_barrier()  # Race condition otherwise
@@ -866,7 +883,7 @@ def _flash_attn_forward(
     )
 
     if mask is not None:
-        assert mask.dtype is torch.int64
+        assert mask.dtype is torch.bool
         assert mask.is_cuda
         assert mask.shape == (
             batch,
