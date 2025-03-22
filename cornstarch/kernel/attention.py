@@ -258,6 +258,12 @@ def _fwd_kernel(
         else:
             m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, lse_i)
             p = tl.exp(qk * softmax_scale - m_ij[:, None])
+
+        # if all elements are masked for a token, qk output is -inf
+        # and softmax(qk) is nan. We need to set the output to 0.0
+        p = tl.where(p != p, 0.0, p)
+        m_ij = tl.where(m_ij == float("-inf"), 0.0, m_ij)
+
         l_ij = tl.sum(p, 1)
 
         # scale acc_o

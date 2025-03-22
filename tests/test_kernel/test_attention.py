@@ -72,23 +72,23 @@ def test_my_flash_attention(dtype: torch.dtype, head_dim: int, seqlen: tuple[int
     # mask = torch.randint(0, 2, (batch_size, seqlen_q, seqlen_k), device=device, dtype=torch.int64)
 
     # 2. Causal mask
+    # mask = torch.tril(
+    #     torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.bool),
+    #     diagonal=0,
+    # )
+
+    # 3. Multimodal mask
     mask = torch.tril(
         torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.bool),
         diagonal=0,
     )
-
-    # 3. Multimodal mask
-    # mask = torch.tril(
-    #     torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int64),
-    #     diagonal=0,
-    # )
-    # mask[:, 12:24, :] = 0
-    # mask[:, 12:24, 12:24] = 1
-    # mask[:, 36:56, :] = 0
-    # mask[:, 36:56, 36:56] = 1
+    mask[:, 12:24, :] = False
+    mask[:, 12:24, 12:24] = True
+    mask[:, 36:56, :] = False
+    mask[:, 36:56, 36:56] = True
 
     # 4. Full mask
-    # mask = torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.int64)
+    # mask = torch.ones(batch_size, seqlen_q, seqlen_k, device=device, dtype=torch.bool)
 
     reference_out = sdpa(
         q.transpose(1, 2),
