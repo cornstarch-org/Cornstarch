@@ -681,18 +681,9 @@ def _bwd_kernel_one_col_block(
     )
 
 
-def init_to_zero(name):
-    return lambda nargs: nargs[name].zero_()
-
-
 @triton.autotune(
     configs=[
-        triton.Config(
-            {"BLOCK_M": BLOCK, "BLOCK_N": BLOCK},
-            num_warps=8,
-            num_stages=1,
-            pre_hook=init_to_zero("DQ"),
-        ),
+        triton.Config({"BLOCK_M": BLOCK, "BLOCK_N": BLOCK}, num_warps=4, num_stages=1),
     ],
     key=[
         "CACHE_KEY_SEQLEN_Q",
@@ -917,8 +908,7 @@ def _flash_attn_backward(
     assert q.stride(-1) == k.stride(-1) == v.stride(-1) == o.stride(-1) == 1
     assert dq.stride(-1) == dk.stride(-1) == dv.stride(-1) == 1
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
-    # dq_accum = torch.zeros_like(q, dtype=torch.float32)
-    dq_accum = torch.empty_like(q, dtype=torch.float32)
+    dq_accum = torch.zeros_like(q, dtype=torch.float32)
     delta = torch.empty_like(lse)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
