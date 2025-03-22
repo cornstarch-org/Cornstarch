@@ -192,121 +192,123 @@ def _fwd_kernel(
             submask = tl.load(
                 submask_ptr,
                 mask=(offs_m[:, None] < seqlen_q) & (offs_n_curr[None, :] < seqlen_k),
-                other=0,
-            ).to(tl.int32)
+                other=False,
+            )
 
-        # -- compute qk ----
-        if (
-            EVEN_N & EVEN_M
-        ):  # If we just do "if EVEN_N", there seems to be some race condition
-            if EVEN_HEADDIM:
-                k = tl.load(k_ptrs + start_n * stride_kn)
-            else:
-                k = tl.load(
-                    k_ptrs + start_n * stride_kn,
-                    mask=offs_d[None, :] < headdim,
-                    other=0.0,
-                )
-        else:
-            if EVEN_HEADDIM:
-                k = tl.load(
-                    k_ptrs + start_n * stride_kn,
-                    mask=offs_n_curr[:, None] < seqlen_k,
-                    other=0.0,
-                )
-            else:
-                k = tl.load(
-                    k_ptrs + start_n * stride_kn,
-                    mask=(offs_n_curr[:, None] < seqlen_k)
-                    & (offs_d[None, :] < headdim),
-                    other=0.0,
-                )
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, tl.trans(k))
-        # Trying to combine the two masks seem to make the result wrong
-        if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
-            qk += tl.where(offs_n_curr[None, :] < seqlen_k, 0, float("-inf"))
-
-        if Mask is not None:
-            qk = tl.where(submask > 0, qk, float("-inf"))
-
-        if BIAS_TYPE != "none":
-            if BIAS_TYPE == "vector":
-                if EVEN_N:
-                    bias = tl.load(b_ptrs + start_n).to(tl.float32)
+        # Only compute qk if there's at least one unmasked element
+        if Mask is None or tl.sum(submask.to(tl.int32)) > 0:
+            # -- compute qk ----
+            if (
+                EVEN_N & EVEN_M
+            ):  # If we just do "if EVEN_N", there seems to be some race condition
+                if EVEN_HEADDIM:
+                    k = tl.load(k_ptrs + start_n * stride_kn)
                 else:
-                    bias = tl.load(
-                        b_ptrs + start_n, mask=offs_n_curr < seqlen_k, other=0.0
-                    ).to(tl.float32)
-                bias = bias[None, :]
-            elif BIAS_TYPE == "matrix":
-                if EVEN_M & EVEN_N:
-                    bias = tl.load(b_ptrs + start_n).to(tl.float32)
-                else:
-                    bias = tl.load(
-                        b_ptrs + start_n,
-                        mask=(offs_m[:, None] < seqlen_q)
-                        & (offs_n_curr[None, :] < seqlen_k),
+                    k = tl.load(
+                        k_ptrs + start_n * stride_kn,
+                        mask=offs_d[None, :] < headdim,
                         other=0.0,
-                    ).to(tl.float32)
-            # Slightly faster to multiply the softmax_scale in the tl.exp below since the compiler
-            # can then fuse the mult and add into an fma instruction. But if we have bias we need to
-            # to multiply with softmax_scale here.
-            qk = qk * softmax_scale + bias
-            m_ij = tl.maximum(tl.max(qk, 1), lse_i)
-            p = tl.exp(qk - m_ij[:, None])
-        else:
-            m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, lse_i)
-            p = tl.exp(qk * softmax_scale - m_ij[:, None])
-
-        # if all elements are masked for a token, qk output is -inf
-        # and softmax(qk) is nan. We need to set the output to 0.0
-        p = tl.where(p != p, 0.0, p)
-        m_ij = tl.where(m_ij == float("-inf"), 0.0, m_ij)
-
-        l_ij = tl.sum(p, 1)
-
-        # scale acc_o
-        acc_o_scale = tl.exp(m_i - m_ij)
-
-        # # -- update output accumulator --
-        # BUG: have to store and immediately load
-        tl.store(t_ptrs, acc_o_scale)
-        acc_o_scale = tl.load(t_ptrs)
-        acc_o = acc_o * acc_o_scale[:, None]
-        # update acc_o
-        if (
-            EVEN_N & EVEN_M
-        ):  # If we just do "if EVEN_N", there seems to be some race condition
-            if EVEN_HEADDIM:
-                v = tl.load(v_ptrs + start_n * stride_vn)
+                    )
             else:
-                v = tl.load(
-                    v_ptrs + start_n * stride_vn,
-                    mask=offs_d[None, :] < headdim,
-                    other=0.0,
-                )
-        else:
-            if EVEN_HEADDIM:
-                v = tl.load(
-                    v_ptrs + start_n * stride_vn,
-                    mask=offs_n_curr[:, None] < seqlen_k,
-                    other=0.0,
-                )
-            else:
-                v = tl.load(
-                    v_ptrs + start_n * stride_vn,
-                    mask=(offs_n_curr[:, None] < seqlen_k)
-                    & (offs_d[None, :] < headdim),
-                    other=0.0,
-                )
-        p = p.to(v.dtype)
-        acc_o += tl.dot(p, v)
+                if EVEN_HEADDIM:
+                    k = tl.load(
+                        k_ptrs + start_n * stride_kn,
+                        mask=offs_n_curr[:, None] < seqlen_k,
+                        other=0.0,
+                    )
+                else:
+                    k = tl.load(
+                        k_ptrs + start_n * stride_kn,
+                        mask=(offs_n_curr[:, None] < seqlen_k)
+                        & (offs_d[None, :] < headdim),
+                        other=0.0,
+                    )
+            qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+            qk += tl.dot(q, tl.trans(k))
+            # Trying to combine the two masks seem to make the result wrong
+            if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
+                qk += tl.where(offs_n_curr[None, :] < seqlen_k, 0, float("-inf"))
 
-        # -- update statistics
-        m_i = m_ij
-        l_i_new = tl.exp(lse_i - m_ij) + l_ij
-        lse_i = m_ij + tl.log(l_i_new)
+            if Mask is not None:
+                qk = tl.where(submask, qk, float("-inf"))
+
+            if BIAS_TYPE != "none":
+                if BIAS_TYPE == "vector":
+                    if EVEN_N:
+                        bias = tl.load(b_ptrs + start_n).to(tl.float32)
+                    else:
+                        bias = tl.load(
+                            b_ptrs + start_n, mask=offs_n_curr < seqlen_k, other=0.0
+                        ).to(tl.float32)
+                    bias = bias[None, :]
+                elif BIAS_TYPE == "matrix":
+                    if EVEN_M & EVEN_N:
+                        bias = tl.load(b_ptrs + start_n).to(tl.float32)
+                    else:
+                        bias = tl.load(
+                            b_ptrs + start_n,
+                            mask=(offs_m[:, None] < seqlen_q)
+                            & (offs_n_curr[None, :] < seqlen_k),
+                            other=0.0,
+                        ).to(tl.float32)
+                # Slightly faster to multiply the softmax_scale in the tl.exp below since the compiler
+                # can then fuse the mult and add into an fma instruction. But if we have bias we need to
+                # to multiply with softmax_scale here.
+                qk = qk * softmax_scale + bias
+                m_ij = tl.maximum(tl.max(qk, 1), lse_i)
+                p = tl.exp(qk - m_ij[:, None])
+            else:
+                m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, lse_i)
+                p = tl.exp(qk * softmax_scale - m_ij[:, None])
+
+            # if all elements are masked for a token, qk output is -inf
+            # and softmax(qk) is nan. We need to set the output to 0.0
+            p = tl.where(p != p, 0.0, p)
+            m_ij = tl.where(m_ij == float("-inf"), 0.0, m_ij)
+
+            l_ij = tl.sum(p, 1)
+
+            # scale acc_o
+            acc_o_scale = tl.exp(m_i - m_ij)
+
+            # # -- update output accumulator --
+            # BUG: have to store and immediately load
+            tl.store(t_ptrs, acc_o_scale)
+            acc_o_scale = tl.load(t_ptrs)
+            acc_o = acc_o * acc_o_scale[:, None]
+            # update acc_o
+            if (
+                EVEN_N & EVEN_M
+            ):  # If we just do "if EVEN_N", there seems to be some race condition
+                if EVEN_HEADDIM:
+                    v = tl.load(v_ptrs + start_n * stride_vn)
+                else:
+                    v = tl.load(
+                        v_ptrs + start_n * stride_vn,
+                        mask=offs_d[None, :] < headdim,
+                        other=0.0,
+                    )
+            else:
+                if EVEN_HEADDIM:
+                    v = tl.load(
+                        v_ptrs + start_n * stride_vn,
+                        mask=offs_n_curr[:, None] < seqlen_k,
+                        other=0.0,
+                    )
+                else:
+                    v = tl.load(
+                        v_ptrs + start_n * stride_vn,
+                        mask=(offs_n_curr[:, None] < seqlen_k)
+                        & (offs_d[None, :] < headdim),
+                        other=0.0,
+                    )
+            p = p.to(v.dtype)
+            acc_o += tl.dot(p, v)
+
+            # -- update statistics
+            m_i = m_ij
+            l_i_new = tl.exp(lse_i - m_ij) + l_ij
+            lse_i = m_ij + tl.log(l_i_new)
 
     o_scale = tl.exp(m_i - lse_i)
     # BUG: have to store and immediately load
@@ -550,151 +552,154 @@ def _bwd_kernel_one_col_block(
             submask = tl.load(
                 submask_ptr,
                 mask=(offs_m_curr[:, None] < seqlen_q) & (offs_n[None, :] < seqlen_k),
-                other=0,
-            ).to(tl.int32)
+                other=False,
+            )
 
-        # load q, k, v, do on-chip
-        # Same bug as below. Otherwise gives wrong result for headdim=40, seqlen=(128, 117)
-        if EVEN_M & EVEN_HEADDIM:
-            q = tl.load(q_ptrs)
-        else:
-            if EVEN_HEADDIM:
-                q = tl.load(q_ptrs, mask=offs_m_curr[:, None] < seqlen_q, other=0.0)
+        # Only compute qk if there's at least one unmasked element
+        if Mask is None or tl.sum(submask.to(tl.int32)) > 0:
+            # load q, k, v, do on-chip
+            # Same bug as below. Otherwise gives wrong result for headdim=40, seqlen=(128, 117)
+            if EVEN_M & EVEN_HEADDIM:
+                q = tl.load(q_ptrs)
             else:
-                q = tl.load(
-                    q_ptrs,
+                if EVEN_HEADDIM:
+                    q = tl.load(q_ptrs, mask=offs_m_curr[:, None] < seqlen_q, other=0.0)
+                else:
+                    q = tl.load(
+                        q_ptrs,
+                        mask=(offs_m_curr[:, None] < seqlen_q)
+                        & (offs_d[None, :] < headdim),
+                        other=0.0,
+                    )
+            # recompute p = softmax(qk, dim=-1).T
+            qk = tl.dot(q, tl.trans(k))
+            # Trying to combine the two masks seem to make the result wrong
+            if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
+                qk = tl.where(offs_n[None, :] < seqlen_k, qk, float("-inf"))
+
+            if Mask is not None:
+                qk = tl.where(submask, qk, float("-inf"))
+
+            if BIAS_TYPE != "none":
+                tl.debug_barrier()  # Race condition otherwise
+                if BIAS_TYPE == "vector":
+                    if EVEN_N:
+                        bias = tl.load(b_ptrs).to(tl.float32)
+                    else:
+                        bias = tl.load(b_ptrs, mask=offs_n < seqlen_k, other=0.0).to(
+                            tl.float32
+                        )
+                    bias = bias[None, :]
+                elif BIAS_TYPE == "matrix":
+                    if EVEN_M & EVEN_N:
+                        bias = tl.load(b_ptrs).to(tl.float32)
+                    else:
+                        bias = tl.load(
+                            b_ptrs,
+                            mask=(offs_m_curr[:, None] < seqlen_q)
+                            & (offs_n[None, :] < seqlen_k),
+                            other=0.0,
+                        ).to(tl.float32)
+                qk = qk * softmax_scale + bias
+            # There seems to be a race condition when headdim=48/96, and dq, dk, dv are wrong.
+            # Also wrong for headdim=64.
+            if not (EVEN_M & EVEN_HEADDIM):
+                tl.debug_barrier()
+            lse_i = tl.load(LSE + offs_m_curr, mask=offs_m_curr < seqlen_q, other=0.0)
+            if BIAS_TYPE == "none":
+                p = tl.exp(qk * softmax_scale - lse_i[:, None])
+            else:
+                p = tl.exp(qk - lse_i[:, None])
+            # compute dv
+            # [2022-10-30] TD: A Triton bug: if EVEN_M=True and EVEN_HEADDIM=False, if we call
+            # do = tl.load(do_ptrs, mask=offs_d[None, :] < headdim, other=0.0), we get wrong outputs
+            # in the case of headdim=48/96, seqlen_q & seqlen_k >= 512. If headdim=40 or seqlen < 512,
+            # the output is correct.
+            if EVEN_M & EVEN_HEADDIM:
+                do = tl.load(do_ptrs)
+            else:
+                # [2022-11-01] TD: Triton bug, there's a race condition if we just use m_mask and not d_mask.
+                do = tl.load(
+                    do_ptrs,
                     mask=(offs_m_curr[:, None] < seqlen_q)
                     & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
-        # recompute p = softmax(qk, dim=-1).T
-        qk = tl.dot(q, tl.trans(k))
-        # Trying to combine the two masks seem to make the result wrong
-        if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
-            qk = tl.where(offs_n[None, :] < seqlen_k, qk, float("-inf"))
 
-        if Mask is not None:
-            qk = tl.where(submask > 0, qk, float("-inf"))
-
-        if BIAS_TYPE != "none":
-            tl.debug_barrier()  # Race condition otherwise
-            if BIAS_TYPE == "vector":
-                if EVEN_N:
-                    bias = tl.load(b_ptrs).to(tl.float32)
-                else:
-                    bias = tl.load(b_ptrs, mask=offs_n < seqlen_k, other=0.0).to(
-                        tl.float32
-                    )
-                bias = bias[None, :]
-            elif BIAS_TYPE == "matrix":
-                if EVEN_M & EVEN_N:
-                    bias = tl.load(b_ptrs).to(tl.float32)
-                else:
-                    bias = tl.load(
-                        b_ptrs,
-                        mask=(offs_m_curr[:, None] < seqlen_q)
-                        & (offs_n[None, :] < seqlen_k),
-                        other=0.0,
-                    ).to(tl.float32)
-            qk = qk * softmax_scale + bias
-        # There seems to be a race condition when headdim=48/96, and dq, dk, dv are wrong.
-        # Also wrong for headdim=64.
-        if not (EVEN_M & EVEN_HEADDIM):
-            tl.debug_barrier()
-        lse_i = tl.load(LSE + offs_m_curr, mask=offs_m_curr < seqlen_q, other=0.0)
-        if BIAS_TYPE == "none":
-            p = tl.exp(qk * softmax_scale - lse_i[:, None])
-        else:
-            p = tl.exp(qk - lse_i[:, None])
-        # compute dv
-        # [2022-10-30] TD: A Triton bug: if EVEN_M=True and EVEN_HEADDIM=False, if we call
-        # do = tl.load(do_ptrs, mask=offs_d[None, :] < headdim, other=0.0), we get wrong outputs
-        # in the case of headdim=48/96, seqlen_q & seqlen_k >= 512. If headdim=40 or seqlen < 512,
-        # the output is correct.
-        if EVEN_M & EVEN_HEADDIM:
-            do = tl.load(do_ptrs)
-        else:
-            # [2022-11-01] TD: Triton bug, there's a race condition if we just use m_mask and not d_mask.
-            do = tl.load(
-                do_ptrs,
-                mask=(offs_m_curr[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
-                other=0.0,
-            )
-
-        dv += tl.dot(tl.trans(p.to(do.dtype)), do)
-        # compute dp = dot(v, do)
-        # There seems to be a race condition when headdim=48/96, and dq, dk are wrong.
-        # Also wrong for headdim=128, seqlen=(108, 256), and ATOMIC_ADD=True
-        # Also wrong for headdim=64, seqlen=(1023, 1024), and ATOMIC_ADD=False
-        if not (EVEN_M & EVEN_HEADDIM):
-            tl.debug_barrier()
-        dp = tl.dot(do, tl.trans(v))
-        # There's a race condition for headdim=48
-        if not EVEN_HEADDIM:
-            tl.debug_barrier()
-        # compute ds = p * (dp - delta[:, None])
-        # Putting the subtraction after the dp matmul (instead of before) is slightly faster
-        Di = tl.load(D + offs_m_curr, mask=offs_m_curr < seqlen_q, other=0.0)
-        # Converting ds to q.dtype here reduces register pressure and makes it much faster
-        # for BLOCK_HEADDIM=128
-        ds = (p * (dp - Di[:, None]) * softmax_scale).to(q.dtype)
-        # compute dk = dot(ds.T, q)
-        dk += tl.dot(tl.trans(ds), q)
-        # compute dq
-        if not (
-            EVEN_M & EVEN_HEADDIM
-        ):  # Otherewise there's a race condition when BIAS_TYPE='matrix'
-            tl.debug_barrier()
-        if not ATOMIC_ADD:
-            if EVEN_M & EVEN_HEADDIM:  # Race condition if we just do EVEN_M
-                dq = tl.load(dq_ptrs, eviction_policy="evict_last")
-                dq += tl.dot(ds, k)
-                tl.store(dq_ptrs, dq, eviction_policy="evict_last")
-            else:
-                if EVEN_HEADDIM:
-                    dq = tl.load(
-                        dq_ptrs,
-                        mask=offs_m_curr[:, None] < seqlen_q,
-                        other=0.0,
-                        eviction_policy="evict_last",
-                    )
+            dv += tl.dot(tl.trans(p.to(do.dtype)), do)
+            # compute dp = dot(v, do)
+            # There seems to be a race condition when headdim=48/96, and dq, dk are wrong.
+            # Also wrong for headdim=128, seqlen=(108, 256), and ATOMIC_ADD=True
+            # Also wrong for headdim=64, seqlen=(1023, 1024), and ATOMIC_ADD=False
+            if not (EVEN_M & EVEN_HEADDIM):
+                tl.debug_barrier()
+            dp = tl.dot(do, tl.trans(v))
+            # There's a race condition for headdim=48
+            if not EVEN_HEADDIM:
+                tl.debug_barrier()
+            # compute ds = p * (dp - delta[:, None])
+            # Putting the subtraction after the dp matmul (instead of before) is slightly faster
+            Di = tl.load(D + offs_m_curr, mask=offs_m_curr < seqlen_q, other=0.0)
+            # Converting ds to q.dtype here reduces register pressure and makes it much faster
+            # for BLOCK_HEADDIM=128
+            ds = (p * (dp - Di[:, None]) * softmax_scale).to(q.dtype)
+            # compute dk = dot(ds.T, q)
+            dk += tl.dot(tl.trans(ds), q)
+            # compute dq
+            if not (
+                EVEN_M & EVEN_HEADDIM
+            ):  # Otherewise there's a race condition when BIAS_TYPE='matrix'
+                tl.debug_barrier()
+            if not ATOMIC_ADD:
+                if EVEN_M & EVEN_HEADDIM:  # Race condition if we just do EVEN_M
+                    dq = tl.load(dq_ptrs, eviction_policy="evict_last")
                     dq += tl.dot(ds, k)
-                    tl.store(
-                        dq_ptrs,
-                        dq,
-                        mask=offs_m_curr[:, None] < seqlen_q,
-                        eviction_policy="evict_last",
-                    )
+                    tl.store(dq_ptrs, dq, eviction_policy="evict_last")
                 else:
-                    dq = tl.load(
-                        dq_ptrs,
-                        mask=(offs_m_curr[:, None] < seqlen_q)
-                        & (offs_d[None, :] < headdim),
-                        other=0.0,
-                        eviction_policy="evict_last",
-                    )
-                    dq += tl.dot(ds, k)
-                    tl.store(
-                        dq_ptrs,
-                        dq,
-                        mask=(offs_m_curr[:, None] < seqlen_q)
-                        & (offs_d[None, :] < headdim),
-                        eviction_policy="evict_last",
-                    )
-        else:  # If we're parallelizing across the seqlen_k dimension
-            dq = tl.dot(ds, k)
-            if EVEN_M & EVEN_HEADDIM:  # Race condition if we just do EVEN_M
-                tl.atomic_add(dq_ptrs, dq)
-            else:
-                if EVEN_HEADDIM:
-                    tl.atomic_add(dq_ptrs, dq, mask=offs_m_curr[:, None] < seqlen_q)
+                    if EVEN_HEADDIM:
+                        dq = tl.load(
+                            dq_ptrs,
+                            mask=offs_m_curr[:, None] < seqlen_q,
+                            other=0.0,
+                            eviction_policy="evict_last",
+                        )
+                        dq += tl.dot(ds, k)
+                        tl.store(
+                            dq_ptrs,
+                            dq,
+                            mask=offs_m_curr[:, None] < seqlen_q,
+                            eviction_policy="evict_last",
+                        )
+                    else:
+                        dq = tl.load(
+                            dq_ptrs,
+                            mask=(offs_m_curr[:, None] < seqlen_q)
+                            & (offs_d[None, :] < headdim),
+                            other=0.0,
+                            eviction_policy="evict_last",
+                        )
+                        dq += tl.dot(ds, k)
+                        tl.store(
+                            dq_ptrs,
+                            dq,
+                            mask=(offs_m_curr[:, None] < seqlen_q)
+                            & (offs_d[None, :] < headdim),
+                            eviction_policy="evict_last",
+                        )
+            else:  # If we're parallelizing across the seqlen_k dimension
+                dq = tl.dot(ds, k)
+                if EVEN_M & EVEN_HEADDIM:  # Race condition if we just do EVEN_M
+                    tl.atomic_add(dq_ptrs, dq)
                 else:
-                    tl.atomic_add(
-                        dq_ptrs,
-                        dq,
-                        mask=(offs_m_curr[:, None] < seqlen_q)
-                        & (offs_d[None, :] < headdim),
-                    )
+                    if EVEN_HEADDIM:
+                        tl.atomic_add(dq_ptrs, dq, mask=offs_m_curr[:, None] < seqlen_q)
+                    else:
+                        tl.atomic_add(
+                            dq_ptrs,
+                            dq,
+                            mask=(offs_m_curr[:, None] < seqlen_q)
+                            & (offs_d[None, :] < headdim),
+                        )
 
         # increment pointers
         dq_ptrs += BLOCK_M * stride_dqm
