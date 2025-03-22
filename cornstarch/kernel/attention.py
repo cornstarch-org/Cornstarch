@@ -176,10 +176,25 @@ def _fwd_kernel(
                 mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
                 other=0.0,
             )
+
+    stride_mb = seqlen_q * seqlen_k
+
     # loop over k, v and update accumulator
     end_n = seqlen_k
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
+        offs_n_curr = start_n + offs_n
+
+        if Mask is not None:
+            submask_ptr = (
+                Mask + off_b * stride_mb + offs_m[:, None] * seqlen_k + offs_n_curr
+            )
+            submask = tl.load(
+                submask_ptr,
+                mask=(offs_m[:, None] < seqlen_q) & (offs_n_curr[None, :] < seqlen_k),
+                other=0,
+            )
+
         # -- compute qk ----
         if (
             EVEN_N & EVEN_M
@@ -196,13 +211,13 @@ def _fwd_kernel(
             if EVEN_HEADDIM:
                 k = tl.load(
                     k_ptrs + start_n * stride_kn,
-                    mask=(start_n + offs_n)[:, None] < seqlen_k,
+                    mask=offs_n_curr[:, None] < seqlen_k,
                     other=0.0,
                 )
             else:
                 k = tl.load(
                     k_ptrs + start_n * stride_kn,
-                    mask=((start_n + offs_n)[:, None] < seqlen_k)
+                    mask=(offs_n_curr[:, None] < seqlen_k)
                     & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
@@ -210,7 +225,10 @@ def _fwd_kernel(
         qk += tl.dot(q, tl.trans(k))
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
-            qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
+            qk += tl.where(offs_n_curr[None, :] < seqlen_k, 0, float("-inf"))
+
+        if Mask is not None:
+            qk += tl.where(submask > 0, 0, float("-inf"))
 
         if BIAS_TYPE != "none":
             if BIAS_TYPE == "vector":
@@ -218,7 +236,7 @@ def _fwd_kernel(
                     bias = tl.load(b_ptrs + start_n).to(tl.float32)
                 else:
                     bias = tl.load(
-                        b_ptrs + start_n, mask=(start_n + offs_n) < seqlen_k, other=0.0
+                        b_ptrs + start_n, mask=offs_n_curr < seqlen_k, other=0.0
                     ).to(tl.float32)
                 bias = bias[None, :]
             elif BIAS_TYPE == "matrix":
@@ -228,7 +246,7 @@ def _fwd_kernel(
                     bias = tl.load(
                         b_ptrs + start_n,
                         mask=(offs_m[:, None] < seqlen_q)
-                        & ((start_n + offs_n)[None, :] < seqlen_k),
+                        & (offs_n_curr[None, :] < seqlen_k),
                         other=0.0,
                     ).to(tl.float32)
             # Slightly faster to multiply the softmax_scale in the tl.exp below since the compiler
@@ -266,13 +284,13 @@ def _fwd_kernel(
             if EVEN_HEADDIM:
                 v = tl.load(
                     v_ptrs + start_n * stride_vn,
-                    mask=(start_n + offs_n)[:, None] < seqlen_k,
+                    mask=offs_n_curr[:, None] < seqlen_k,
                     other=0.0,
                 )
             else:
                 v = tl.load(
                     v_ptrs + start_n * stride_vn,
-                    mask=((start_n + offs_n)[:, None] < seqlen_k)
+                    mask=(offs_n_curr[:, None] < seqlen_k)
                     & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
@@ -411,6 +429,7 @@ def _bwd_store_dk_dv(
 @triton.jit
 def _bwd_kernel_one_col_block(
     start_n,
+    off_b,
     Q,
     K,
     V,
@@ -559,7 +578,7 @@ def _bwd_kernel_one_col_block(
         # Also wrong for headdim=64.
         if not (EVEN_M & EVEN_HEADDIM):
             tl.debug_barrier()
-        lse_i = tl.load(LSE + offs_m_curr)
+        lse_i = tl.load(LSE + offs_m_curr, mask=offs_m_curr < seqlen_q, other=0.0)
         if BIAS_TYPE == "none":
             p = tl.exp(qk * softmax_scale - lse_i[:, None])
         else:
@@ -592,7 +611,7 @@ def _bwd_kernel_one_col_block(
             tl.debug_barrier()
         # compute ds = p * (dp - delta[:, None])
         # Putting the subtraction after the dp matmul (instead of before) is slightly faster
-        Di = tl.load(D + offs_m_curr)
+        Di = tl.load(D + offs_m_curr, mask=offs_m_curr < seqlen_q, other=0.0)
         # Converting ds to q.dtype here reduces register pressure and makes it much faster
         # for BLOCK_HEADDIM=128
         ds = (p * (dp - Di[:, None]) * softmax_scale).to(q.dtype)
@@ -653,6 +672,7 @@ def _bwd_kernel_one_col_block(
                         mask=(offs_m_curr[:, None] < seqlen_q)
                         & (offs_d[None, :] < headdim),
                     )
+
         # increment pointers
         dq_ptrs += BLOCK_M * stride_dqm
         q_ptrs += BLOCK_M * stride_qm
@@ -769,6 +789,7 @@ def _bwd_kernel(
     start_n = tl.program_id(0)
     _bwd_kernel_one_col_block(
         start_n,
+        off_b,
         Q,
         K,
         V,
@@ -843,6 +864,15 @@ def _flash_attn_forward(
     bias_strides = (
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
+
+    if mask is not None:
+        assert mask.dtype is torch.int64
+        assert mask.is_cuda
+        assert mask.shape == (
+            batch,
+            seqlen_q,
+            seqlen_k,
+        ), f"Expected mask shape ({batch, seqlen_q, seqlen_k}), got {mask.shape}"
 
     seqlen_q_rounded = math.ceil(seqlen_q / BLOCK_M) * BLOCK_M
     lse = torch.empty(
@@ -1031,7 +1061,7 @@ class FlashAttnFunc(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
         o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, bias=bias, softmax_scale=softmax_scale
+            q, k, v, bias=bias, mask=mask, softmax_scale=softmax_scale
         )
         ctx.save_for_backward(q, k, v, o, lse, bias, mask)
         return o
