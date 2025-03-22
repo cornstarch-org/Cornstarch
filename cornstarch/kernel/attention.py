@@ -42,6 +42,7 @@ than CUDA forward + backward.
 """
 
 import math
+from typing import Optional
 
 import torch
 import triton
@@ -78,6 +79,7 @@ def _fwd_kernel(
     K,
     V,
     Bias,
+    Mask,
     Out,
     Lse,
     TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
@@ -413,6 +415,7 @@ def _bwd_kernel_one_col_block(
     K,
     V,
     Bias,
+    Mask,
     DO,
     DQ,
     DK,
@@ -700,6 +703,7 @@ def _bwd_kernel(
     K,
     V,
     Bias,
+    Mask,
     DO,
     DQ,
     DK,
@@ -769,6 +773,7 @@ def _bwd_kernel(
         K,
         V,
         Bias,
+        Mask,
         DO,
         DQ,
         DK,
@@ -798,7 +803,14 @@ def _bwd_kernel(
     )
 
 
-def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None):
+def _flash_attn_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    mask: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
@@ -848,6 +860,7 @@ def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None):
         k,
         v,
         bias,
+        mask,
         o,
         lse,
         tmp,
@@ -879,7 +892,18 @@ def _flash_attn_forward(q, k, v, bias=None, softmax_scale=None):
 
 
 def _flash_attn_backward(
-    do, q, k, v, o, lse, dq, dk, dv, bias=None, softmax_scale=None
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    lse: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    mask: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
@@ -943,6 +967,7 @@ def _flash_attn_backward(
         k,
         v,
         bias,
+        mask,
         do,
         dq_accum,
         dk,
@@ -987,7 +1012,15 @@ def _flash_attn_backward(
 
 class FlashAttnFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, bias=None, softmax_scale=None):
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        softmax_scale: Optional[float] = None,
+    ):
         """
         q: (batch_size, seqlen_q, nheads, headdim)
         k, v: (batch_size, seqlen_k, nheads, headdim)
@@ -1000,12 +1033,12 @@ class FlashAttnFunc(torch.autograd.Function):
         o, lse, ctx.softmax_scale = _flash_attn_forward(
             q, k, v, bias=bias, softmax_scale=softmax_scale
         )
-        ctx.save_for_backward(q, k, v, o, lse, bias)
+        ctx.save_for_backward(q, k, v, o, lse, bias, mask)
         return o
 
     @staticmethod
-    def backward(ctx, do):
-        q, k, v, o, lse, bias = ctx.saved_tensors
+    def backward(ctx, do: torch.Tensor):
+        q, k, v, o, lse, bias, mask = ctx.saved_tensors
         assert not ctx.needs_input_grad[
             3
         ], "FlashAttention does not support bias gradient yet"
@@ -1026,12 +1059,20 @@ class FlashAttnFunc(torch.autograd.Function):
                 dk,
                 dv,
                 bias=bias,
+                mask=mask,
                 softmax_scale=ctx.softmax_scale,
             )
         return dq, dk, dv, None, None, None
 
 
-def flash_attn_func(q, k, v, bias=None, softmax_scale=None):
+def flash_attn_func(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    mask: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+):
     """
     Wrapper function for FlashAttnFunc.apply to allow default values for optional arguments.
 
@@ -1045,4 +1086,4 @@ def flash_attn_func(q, k, v, bias=None, softmax_scale=None):
     Returns:
         torch.Tensor: Output tensor of shape (batch_size, seqlen_q, nheads, headdim).
     """
-    return FlashAttnFunc.apply(q, k, v, bias, softmax_scale)
+    return FlashAttnFunc.apply(q, k, v, bias, mask, softmax_scale)
