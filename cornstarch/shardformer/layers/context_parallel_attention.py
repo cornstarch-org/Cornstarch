@@ -66,16 +66,20 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
         with torch.cuda.stream(stream):
             for head_index in range(0, nheads, heads_stride):
                 dist.all_gather(
-                    gathered_kv[head_index // heads_stride][0].split(
-                        seqlen_per_rank.tolist(), dim=1
+                    list(
+                        gathered_kv[head_index // heads_stride][0].split(
+                            seqlen_per_rank.tolist(), dim=1
+                        )
                     ),
                     k[:, :, head_index : head_index + heads_stride, :].contiguous(),
                     group=sp_group,
                     async_op=True,
                 )
                 dist.all_gather(
-                    gathered_kv[head_index // heads_stride][1].split(
-                        seqlen_per_rank.tolist(), dim=1
+                    list(
+                        gathered_kv[head_index // heads_stride][1].split(
+                            seqlen_per_rank.tolist(), dim=1
+                        )
                     ),
                     v[:, :, head_index : head_index + heads_stride, :].contiguous(),
                     group=sp_group,
@@ -154,16 +158,20 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
         with torch.cuda.stream(stream):
             for head_index in range(0, nheads, heads_stride):
                 dist.all_gather(
-                    gathered_kv[head_index // heads_stride][0].split(
-                        seqlen_per_rank.tolist(), dim=1
+                    list(
+                        gathered_kv[head_index // heads_stride][0].split(
+                            seqlen_per_rank.tolist(), dim=1
+                        )
                     ),
                     k[:, :, head_index : head_index + heads_stride, :].contiguous(),
                     group=sp_group,
                     async_op=True,
                 )
                 dist.all_gather(
-                    gathered_kv[head_index // heads_stride][1].split(
-                        seqlen_per_rank.tolist(), dim=1
+                    list(
+                        gathered_kv[head_index // heads_stride][1].split(
+                            seqlen_per_rank.tolist(), dim=1
+                        )
                     ),
                     v[:, :, head_index : head_index + heads_stride, :].contiguous(),
                     group=sp_group,
@@ -193,9 +201,8 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
                 device=k.device,
             )
 
-            dgkv = torch.full(
+            dgkv = torch.zeros(
                 (2, batch, total_seqlen, heads_stride, d),
-                torch.nan,
                 dtype=k.dtype,
                 device=k.device,
             )
@@ -216,10 +223,14 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
             )
 
             dist.reduce_scatter(
-                dkv[0], dgkv[0].split(seqlen_per_rank.tolist(), dim=1), group=sp_group
+                dkv[0],
+                list(dgkv[0].split(seqlen_per_rank.tolist(), dim=1)),
+                group=sp_group,
             )
             dist.reduce_scatter(
-                dkv[1], dgkv[1].split(seqlen_per_rank.tolist(), dim=1), group=sp_group
+                dkv[1],
+                list(dgkv[1].split(seqlen_per_rank.tolist(), dim=1)),
+                group=sp_group,
             )
 
             dqs.append(dq.clone())
