@@ -716,6 +716,8 @@ class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase)
             .contiguous()
         )
 
+        local_mask = torch.chunk(mask, self.world_size, dim=1)[self.rank]
+
         assert (
             local_key.shape
             == local_value.shape
@@ -730,7 +732,7 @@ class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase)
             local_query,
             local_key,
             local_value,
-            mask,
+            local_mask,
             seqlen_per_rank,
             dist.GroupMember.WORLD,
         )
@@ -738,6 +740,37 @@ class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase)
         torch.testing.assert_close(
             torch.chunk(ref_out, self.world_size, dim=1)[self.rank],
             cp_out,
+            rtol=5e-3,
+            atol=5e-3,
+        )
+
+        # ========================================================================
+        # Check backward
+        # ========================================================================
+
+        dout = torch.randn_like(ref_out).normal_(mean=0, std=0.5)
+        ref_dq, ref_dk, ref_dv = torch.autograd.grad(ref_out, [query, key, value], dout)
+
+        cp_dout = torch.chunk(dout, self.world_size, dim=1)[self.rank].contiguous()
+        cp_dq, cp_dk, cp_dv = torch.autograd.grad(
+            cp_out, [local_query, local_key, local_value], cp_dout
+        )
+
+        torch.testing.assert_close(
+            torch.chunk(ref_dq, self.world_size, dim=1)[self.rank].contiguous(),
+            cp_dq,
+            rtol=5e-3,
+            atol=5e-3,
+        )
+        torch.testing.assert_close(
+            torch.chunk(ref_dk, self.world_size, dim=1)[self.rank].contiguous(),
+            cp_dk,
+            rtol=5e-3,
+            atol=5e-3,
+        )
+        torch.testing.assert_close(
+            torch.chunk(ref_dv, self.world_size, dim=1)[self.rank].contiguous(),
+            cp_dv,
             rtol=5e-3,
             atol=5e-3,
         )

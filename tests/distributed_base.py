@@ -85,13 +85,13 @@ class GlooDistributedTestBase(MultiProcessTestCase):
 
         try:
             dist.barrier()
-        except RuntimeError:
+            dist.destroy_process_group()
+        except (ValueError, RuntimeError):
             # Some processes may be hung due to synchronization error,
             # and return an error as other processes closed the connection.
             # Simply ignore the error here.
             pass
 
-        dist.destroy_process_group()
 
     def reset_seed(self):
         torch.manual_seed(0)

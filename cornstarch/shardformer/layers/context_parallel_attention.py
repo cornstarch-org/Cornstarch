@@ -193,7 +193,7 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
                 device=k.device,
             )
 
-            dgkv = torch.empty(
+            dgkv = torch.full(
                 (2, batch, total_seqlen, heads_stride, d),
                 torch.nan,
                 dtype=k.dtype,
@@ -216,10 +216,10 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
             )
 
             dist.reduce_scatter(
-                dgkv[0], dkv[0].split(seqlen_per_rank.tolist(), dim=1), group=sp_group
+                dkv[0], dgkv[0].split(seqlen_per_rank.tolist(), dim=1), group=sp_group
             )
             dist.reduce_scatter(
-                dgkv[1], dkv[1].split(seqlen_per_rank.tolist(), dim=1), group=sp_group
+                dkv[1], dgkv[1].split(seqlen_per_rank.tolist(), dim=1), group=sp_group
             )
 
             dqs.append(dq.clone())
