@@ -1088,10 +1088,10 @@ class MultimodalModel(nn.Module):
         language_model_arguments = list(
             inspect.signature(self.language_model.forward).parameters.keys()
         )
-        if "kwargs" not in language_model_arguments:
-            for key in list(language_model_inputs.keys()):
-                if key not in language_model_arguments:
-                    language_model_inputs.pop(key)
+        # if "kwargs" not in language_model_arguments:
+        for key in list(language_model_inputs.keys()):
+            if key not in language_model_arguments:
+                language_model_inputs.pop(key)
 
         return self.language_model(**language_model_inputs)
 
