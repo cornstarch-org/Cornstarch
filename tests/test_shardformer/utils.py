@@ -40,7 +40,7 @@ from transformers.modeling_utils import (
 )
 
 from cornstarch.kernel.interface import (
-    bitfield_attention_forward,
+    cornstarch_attention_forward,
     create_bitfield_attention_mask,
 )
 from cornstarch.models.multimodal_language_model import (
@@ -60,7 +60,7 @@ from cornstarch.shardformer.shard.shard_config import ContextParallelDistributio
 
 from ..distributed_base import GlooDistributedTestBase
 
-ALL_ATTENTION_FUNCTIONS.update({"bitfield_attention": bitfield_attention_forward})
+ALL_ATTENTION_FUNCTIONS.update({"cornstarch_attention": cornstarch_attention_forward})
 
 
 class ModelClassBase(ABC):
@@ -382,7 +382,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
-        if sharded_model.unwrap().config._attn_implementation == "bitfield_attention":
+        if sharded_model.unwrap().config._attn_implementation == "cornstarch_attention":
             shard_test_data["attention_mask"] = create_bitfield_attention_mask(
                 shard_test_data["input_ids"]
             )

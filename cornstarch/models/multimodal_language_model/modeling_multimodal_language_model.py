@@ -34,14 +34,14 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 from transformers.utils import logging
 
 from cornstarch.kernel.interface import (
-    bitfield_attention_forward,
-    create_bitfield_attention_mask,
+    cornstarch_attention_forward,
+    materialize_attention_mask_from_bitfield_mask,
 )
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 logger = logging.get_logger(__name__)
 
-ALL_ATTENTION_FUNCTIONS.update({"bitfield_attention": bitfield_attention_forward})
+ALL_ATTENTION_FUNCTIONS.update({"cornstarch_attention": cornstarch_attention_forward})
 
 
 class LlavaNextModel:
@@ -717,9 +717,9 @@ class MultimodalModel(nn.Module):
             "Please check if the language model is from HuggingFace Transformers."
         )
 
-        language_model.config._attn_implementation = "bitfield_attention"
+        language_model.config._attn_implementation = "cornstarch_attention"
         language_model._update_causal_mask = MethodType(
-            MultimodalModel.check_bitfield_attention_mask,
+            materialize_attention_mask_from_bitfield_mask,
             language_model,
         )
 
@@ -744,23 +744,6 @@ class MultimodalModel(nn.Module):
             return Qwen2VLModel(config).from_pretrained(*args, **kwargs)
         else:
             raise NotImplementedError
-
-    @staticmethod
-    def check_bitfield_attention_mask(
-        self, attention_mask: torch.Tensor, *args, **kwargs
-    ):
-        """
-        A replacement function for Model._update_causal_mask() to avoid updating the attention mask.
-        Plus, it checks if the attention mask is a bitfield attention mask.
-        """
-        if self.training:
-            assert (
-                attention_mask is not None
-                and attention_mask.dtype == torch.int64
-                and (attention_mask > 1).any()
-            ), "The attention mask should be a bitfield attention mask."
-
-        return attention_mask
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         if gradient_checkpointing_kwargs is None:
@@ -910,15 +893,25 @@ class MultimodalModel(nn.Module):
                 dim=1
             )
 
-        attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
-        for i, sequence_length in enumerate(sequence_lengths.tolist()):
-            attention_mask[i, sequence_length:] = 0
-
-        # attention_mask = create_bitfield_attention_mask(input_ids, self.token_ids)
+        # attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
         # for i, sequence_length in enumerate(sequence_lengths.tolist()):
         #     attention_mask[i, sequence_length:] = 0
 
+        attention_mask = self.create_bitfield_attention_mask(input_ids)
+        for i, sequence_length in enumerate(sequence_lengths.tolist()):
+            attention_mask[i, sequence_length:] = 0
+
         return inputs_embeds, attention_mask
+
+    def create_bitfield_attention_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Create a bitfield attention mask for the input_ids.
+        """
+        attention_mask = torch.full_like(input_ids, 1, dtype=torch.int64)
+        for index, token_id in enumerate(self.token_ids.values()):
+            attention_mask[input_ids == token_id] = 1 << (index + 1)
+
+        return attention_mask
 
     def forward(
         self,

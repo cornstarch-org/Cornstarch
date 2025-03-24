@@ -46,7 +46,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-def flash_attention_with_mask_forward(
+def cornstarch_attention_forward(
     module: nn.Module,
     query: torch.Tensor,
     key: torch.Tensor,
@@ -70,6 +70,25 @@ def flash_attention_with_mask_forward(
     )
 
     return attn_output, None
+
+
+def materialize_attention_mask_from_bitfield_mask(
+    self: nn.Module, attention_mask: torch.Tensor, *args, **kwargs
+) -> torch.Tensor:
+    if attention_mask.dtype == torch.bool:
+        return attention_mask
+
+    causal_mask = torch.tril(
+        torch.ones(
+            attention_mask.shape[0],
+            attention_mask.shape[1],
+            attention_mask.shape[1],
+            dtype=torch.bool,
+            device=attention_mask.device,
+        )
+    )
+    bit_eq = attention_mask.unsqueeze(-1) == attention_mask.unsqueeze(-2)
+    return bit_eq & causal_mask
 
 
 def bitfield_attention_forward(
