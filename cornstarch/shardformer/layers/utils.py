@@ -13,8 +13,8 @@ from cornstarch.shardformer.shard.shard_config import ContextParallelDistributio
 class ContextParallelBatchSplitUtils:
     # Context parallel cache for offsets per rank.
     # Each tensor in the lists is a tensor of offsets for a rank.
-    # Each tensor is a 1D tensor of shape (local_seqlen).
-    context_parallel_offsets_cache: Optional[list[torch.Tensor]] = None
+    # Each tensor is a 2D tensor of shape (cp_world_size, local_seqlen).
+    context_parallel_offsets_cache: Optional[torch.Tensor] = None
 
     @classmethod
     def clear_cache(cls: ContextParallelBatchSplitUtils):
@@ -23,12 +23,16 @@ class ContextParallelBatchSplitUtils:
     @classmethod
     def set_context_parallel_offsets_cache(
         cls: ContextParallelBatchSplitUtils,
-        offsets_per_rank: list[np.ndarray],
+        offsets_per_rank: list[np.ndarray] | torch.Tensor,
+        device: torch.device = None,
     ):
-        offsets_per_rank = [
-            torch.tensor(offsets, dtype=torch.int32, device="cpu")
-            for offsets in offsets_per_rank
-        ]
+        if device is None:
+            device = get_accelerator().get_current_device()
+
+        if isinstance(offsets_per_rank, list):
+            offsets_per_rank = torch.tensor(
+                np.stack(offsets_per_rank, axis=0), dtype=torch.long, device=device
+            )
 
         cls.context_parallel_offsets_cache = offsets_per_rank
 
@@ -47,102 +51,106 @@ class ContextParallelBatchSplitUtils:
                 len(offsets_per_rank)
                 for offsets_per_rank in cls.context_parallel_offsets_cache
             ],
-            dtype=torch.int32,
+            dtype=torch.long,
             device=device,
         )
 
     @classmethod
     def get_context_parallel_offsets_cache(
-        cls: ContextParallelBatchSplitUtils,
-        sp_rank: int = -1,
-        device: torch.device = None,
-    ) -> Optional[torch.Tensor | list[torch.Tensor]]:
-        if device is None:
-            device = get_accelerator().get_current_device()
-
+        cls: ContextParallelBatchSplitUtils, sp_rank: int = -1
+    ) -> Optional[torch.Tensor]:
         assert sp_rank == -1 or sp_rank >= 0
         if cls.context_parallel_offsets_cache is None:
             return None
 
         offsets = cls.context_parallel_offsets_cache
         if sp_rank == -1:
-            return [o.to(device) for o in offsets]
+            return offsets
         else:
-            return offsets[sp_rank].to(device)
+            return offsets[sp_rank]
+
+    @classmethod
+    def create_context_parallel_split(
+        cls: ContextParallelBatchSplitUtils,
+        attention_mask: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        dist_mode: ContextParallelDistributionMode,
+    ):
+        """
+        Based on attention_mask and distribution mode,
+        creates a context parallel split across ranks and set offsets cache.
+        After setting the cache, states (hidden_states and labels) can be split using the offsets.
+        """
+        if cls.context_parallel_offsets_cache is not None:
+            return
+
+        assert attention_mask is not None and attention_mask.ndim in [2, 3]
+
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+
+        if sp_size == 1:
+            return
+
+        if attention_mask.ndim == 2:
+            batch_size, seq_len = attention_mask.shape
+        else:
+            batch_size, seq_len = attention_mask.shape[:2]
+
+        if seq_len < 128 * sp_size:
+            return
+
+        if cls.context_parallel_offsets_cache is None:
+            if dist_mode == ContextParallelDistributionMode.UNIFORM:
+                cls.create_context_parallel_split_uniform(attention_mask, sp_group)
+            elif dist_mode == ContextParallelDistributionMode.ZIGZAG:
+                cls.create_context_parallel_split_zigzag(attention_mask, sp_group)
+            elif dist_mode == ContextParallelDistributionMode.MAKESPAN_MIN:
+                cls.create_context_parallel_split_makespan_minimization(
+                    attention_mask, sp_group
+                )
+
+    @classmethod
+    def create_context_parallel_split_uniform(
+        cls: ContextParallelBatchSplitUtils,
+        attention_mask: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+    ):
+        assert attention_mask.ndim in [2, 3]
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+
+        if attention_mask.ndim == 2:
+            batch_size, seq_len = attention_mask.shape
+        else:
+            batch_size, seq_len = attention_mask.shape[:2]
+
+        if cls.context_parallel_offsets_cache is not None:
+            return
+
+        chunked_offsets = np.array_split(np.arange(seq_len), sp_size)
+        cls.set_context_parallel_offsets_cache(chunked_offsets)
 
     @classmethod
     def split_batch(
         cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
-        attention_mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
-        dist_mode: ContextParallelDistributionMode,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns:
-        - torch.Tensor (batch_size, local_seqlen, num_heads, headdim):
-            the split batch
-        - torch.Tensor (batch_size, local_seqlen, seqlen):
-            local attention mask
-        """
-        assert attention_mask is not None, "Attention mask must be provided."
-
-        if dist_mode == ContextParallelDistributionMode.UNIFORM:
-            return cls.split_batch_uniform(batch, attention_mask, sp_group)
-        elif dist_mode == ContextParallelDistributionMode.ZIGZAG:
-            return cls.split_batch_zigzag(batch, attention_mask, sp_group)
-        elif dist_mode == ContextParallelDistributionMode.MAKESPAN_MIN:
-            return cls.split_batch_makespan_minimization(
-                batch, attention_mask, sp_group
-            )
-
-    @classmethod
-    def split_batch_uniform(
-        cls: ContextParallelBatchSplitUtils,
-        batch: torch.Tensor,
-        attention_mask: torch.Tensor,
-        sp_group: dist.ProcessGroup,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        split batch and attention mask evenly.
-        """
-        assert (
-            batch is not None
-            and attention_mask is not None
-            and attention_mask.ndim in [2, 3]
-        )
+    ) -> torch.Tensor:
+        assert cls.context_parallel_offsets_cache is not None, "Offsets must be set."
 
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
-        if sp_size == 1:
-            return batch, attention_mask
 
-        assert batch.shape[:2] == attention_mask.shape[:2]
         batch_size, seq_len = batch.shape[:2]
-
-        # If sequence is too short, no need to split.
-        if seq_len < 128 * sp_size:
-            return batch, attention_mask
-
-        if cls.context_parallel_offsets_cache is None:
-            chunked_offsets = np.array_split(np.arange(seq_len), sp_size)
-            cls.set_context_parallel_offsets_cache(chunked_offsets)
-
-        local_offsets = cls.context_parallel_offsets_cache[sp_rank].to(
-            dtype=torch.int64, device=batch.device
-        )
+        if sp_size == 1 or seq_len < 128 * sp_size:
+            return batch
 
         row_indices = torch.arange(
-            batch.shape[0], device=batch.device, dtype=torch.int64
+            batch_size, dtype=torch.int64, device=batch.device
         ).unsqueeze(1)
 
-        local_batch = batch[row_indices, local_offsets]
-        if attention_mask.ndim == 2:
-            return local_batch, None
-
-        local_attention_mask = attention_mask[row_indices, local_offsets]
-
-        return local_batch, local_attention_mask
+        return batch[row_indices, cls.context_parallel_offsets_cache[sp_rank]]
 
     # """
     # Context parallel cache for local sequence lengths and offsets per rank.

@@ -59,6 +59,7 @@ class LlamaModelForwards:
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
+        context_parallel_offsets: Optional[torch.Tensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -123,18 +124,6 @@ class LlamaModelForwards:
             ContextParallelDistributionMode.UNIFORM,
         )
 
-        """
-        NOTE(insujang): attention mask can be either 2D or 3D tensor.
-        For 2D tensor, it is either legacy causal mask or BitAttentionMask for AnyMask,
-        which can be determined by its attribute `cornstarch_is_bitattention`.
-        For 3D tensor, it is AnyMask manually created by the user.
-
-        If RingAttention is used (sp_mode == "ring_attn"), Cornstarch uses FlexAttention
-        which automatically converts all types of attention mask properly, hence
-        there is no need to update attention mask here.
-        In other cases, we need to update attention mask to be compatible with the model.
-        """
-
         attn_mask = self._update_causal_mask(
             attention_mask,
             hidden_states,
@@ -151,11 +140,21 @@ class LlamaModelForwards:
                     "Cornstarch context parallelism is only supported with cornstarch attention. "
                     f"Got {self.config._attn_implementation}"
                 )
-                hidden_states, attn_mask = ContextParallelBatchSplitUtils.split_batch(
+
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    hidden_states, sp_group, dist_mode=cp_dist_mode
+                )
+                if context_parallel_offsets is None:
+                    context_parallel_offsets = (
+                        ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
+                    )
+
+                hidden_states = ContextParallelBatchSplitUtils.split_batch(
                     hidden_states,
-                    attn_mask,
                     sp_group,
-                    dist_mode=cp_dist_mode,
+                )
+                attn_mask = ContextParallelBatchSplitUtils.split_batch(
+                    attn_mask, sp_group
                 )
                 position_ids = (
                     ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache(
@@ -169,6 +168,11 @@ class LlamaModelForwards:
 
             # Recompute position embeddings
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        else:
+            ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
+                context_parallel_offsets
+            )
+            attn_mask = ContextParallelBatchSplitUtils.split_batch(attn_mask, sp_group)
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
@@ -218,14 +222,17 @@ class LlamaModelForwards:
             if output_attentions:
                 all_self_attentions += (layer_outputs[1],)
 
+        context_parallel_offsets = (
+            ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
+        )
         ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
             outputs = {
                 "hidden_states": hidden_states,
                 "cache_position": cache_position,
-                "position_ids": position_ids,
                 "position_embeddings": position_embeddings,
+                "context_parallel_offsets": context_parallel_offsets,
             }
             if output_hidden_states:
                 outputs["all_hidden_states"] = all_hidden_states
@@ -271,6 +278,7 @@ class LlamaModelForwards:
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
+        context_parallel_offsets: Optional[torch.Tensor] = None,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
@@ -317,12 +325,16 @@ class LlamaModelForwards:
                 f"Got {self.config._attn_implementation}"
             )
 
-            labels, _ = ContextParallelBatchSplitUtils.split_batch(
-                labels,
-                attention_mask,
-                sp_group,
-                dist_mode=cp_dist_mode,
-            )
+            if context_parallel_offsets is not None:
+                ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
+                    context_parallel_offsets
+                )
+            else:
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    attention_mask, sp_group, dist_mode=cp_dist_mode
+                )
+
+            labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = LlamaModelForwards.llama_model_forward(
@@ -343,10 +355,10 @@ class LlamaModelForwards:
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
+            context_parallel_offsets=context_parallel_offsets,
+            **kwargs,
         )
         past_key_values = None
-
-        ContextParallelBatchSplitUtils.clear_cache()
 
         stage_manager = shard_config.pipeline_stage_manager
         if not (stage_manager is None or stage_manager.is_last_stage()):
