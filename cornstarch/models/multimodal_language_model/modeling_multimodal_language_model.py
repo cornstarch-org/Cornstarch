@@ -819,6 +819,9 @@ class MultimodalModel(nn.Module):
             for p in self.language_model.parameters():
                 p.requires_grad_(llm_mode)
 
+    def eval(self):
+        super().train(False)
+
     def set_modality_token_ids(
         self, token_ids: dict[str, int], new_num_tokens: int = 0
     ):
