@@ -120,15 +120,31 @@ class ContextParallelBatchSplitUtils:
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
 
-        if attention_mask.ndim == 2:
-            batch_size, seq_len = attention_mask.shape
-        else:
-            batch_size, seq_len = attention_mask.shape[:2]
-
         if cls.context_parallel_offsets_cache is not None:
             return
 
+        batch_size, seq_len = attention_mask.shape[:2]
         chunked_offsets = np.array_split(np.arange(seq_len), sp_size)
+        cls.set_context_parallel_offsets_cache(chunked_offsets)
+
+    @classmethod
+    def create_context_parallel_split_zigzag(
+        cls: ContextParallelBatchSplitUtils,
+        attention_mask: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+    ):
+        assert attention_mask.ndim in [2, 3]
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+
+        batch_size, seq_len = attention_mask.shape[:2]
+        # Divide indices into 2*sp_size chunks.
+        chunked_offsets = np.array_split(np.arange(seq_len), sp_size * 2)
+        # Merge the first half and the second half in reverse order.
+        chunked_offsets = [
+            np.concatenate([chunked_offsets[i], chunked_offsets[-i - 1]])
+            for i in range(sp_size)
+        ]
         cls.set_context_parallel_offsets_cache(chunked_offsets)
 
     @classmethod
