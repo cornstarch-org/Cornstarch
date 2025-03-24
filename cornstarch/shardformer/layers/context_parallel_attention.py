@@ -8,7 +8,7 @@ from cornstarch.kernel.attention import _flash_attn_backward, _flash_attn_forwar
 from cornstarch.kernel.interface import repeat_kv
 
 
-class ContextParallelAttentionWithMask(torch.autograd.Function):
+class ContextParallelCornstarchAttention(torch.autograd.Function):
 
     stream: torch.cuda.Stream = None
 
@@ -31,10 +31,10 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
             columns should be aligned with the order of gathered kv
         seqlen_per_rank: (world_size(sp_group),)
         """
-        if ContextParallelAttentionWithMask.stream is None:
-            ContextParallelAttentionWithMask.stream = torch.cuda.Stream()
+        if ContextParallelCornstarchAttention.stream is None:
+            ContextParallelCornstarchAttention.stream = torch.cuda.Stream()
 
-        stream = ContextParallelAttentionWithMask.stream
+        stream = ContextParallelCornstarchAttention.stream
 
         batch, seqlen_q, nheads, d = q.shape
         _, seqlen_kv, _, _ = k.shape
@@ -129,7 +129,7 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: torch.autograd.function.FunctionCtx, do: torch.Tensor):
-        stream = ContextParallelAttentionWithMask.stream
+        stream = ContextParallelCornstarchAttention.stream
 
         q, k, v, bias, mask, seqlen_per_rank = ctx.saved_tensors
         heads_stride: int = ctx.heads_stride
@@ -249,7 +249,7 @@ class ContextParallelAttentionWithMask(torch.autograd.Function):
         )
 
 
-def context_parallel_flash_attention_with_mask_forward(
+def context_parallel_cornstarch_attention(
     module: nn.Module,
     query: torch.Tensor,
     key: torch.Tensor,
@@ -272,7 +272,7 @@ def context_parallel_flash_attention_with_mask_forward(
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
 
-    attn_output = ContextParallelAttentionWithMask.apply(
+    attn_output = ContextParallelCornstarchAttention.apply(
         query, key, value, attention_mask, seqlen_per_rank, sp_group, bias, heads_stride
     )
 

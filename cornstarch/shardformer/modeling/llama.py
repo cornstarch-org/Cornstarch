@@ -28,9 +28,8 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.processing_utils import Unpack
 
-from cornstarch.kernel.interface import BitfieldUtils
-from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
-    context_parallel_bitfield_attention_forward,
+from cornstarch.shardformer.layers.context_parallel_attention import (
+    context_parallel_cornstarch_attention,
 )
 from cornstarch.shardformer.layers.utils import (
     ContextParallelBatchSplitUtils,
@@ -136,38 +135,33 @@ class LlamaModelForwards:
         In other cases, we need to update attention mask to be compatible with the model.
         """
 
-        if self.config._attn_implementation == "bitfield_attention":
-            if BitfieldUtils.sequence_lengths_cache is None:
-                sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
-                BitfieldUtils.set_sequence_lengths_cache(sequence_lengths.tolist())
-            attn_mask = attention_mask
-        else:
-            # causal mask
-            attn_mask = self._update_causal_mask(
-                attention_mask,
-                hidden_states,
-                cache_position,
-                past_key_values,
-                output_attentions,
-            )
+        attn_mask = self._update_causal_mask(
+            attention_mask,
+            hidden_states,
+            cache_position,
+            past_key_values,
+            output_attentions,
+        )
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
             if sp_mode == "ring_attn":
-                assert self.config._attn_implementation == "bitfield_attention", (
-                    "Cornstarch context parallelism is only supported with bitfield_attention. "
+                assert self.config._attn_implementation == "cornstarch_attention", (
+                    "Cornstarch context parallelism is only supported with cornstarch attention. "
                     f"Got {self.config._attn_implementation}"
                 )
-                sequence_lengths = BitfieldUtils.sequence_lengths_cache[0]
-                hidden_states, _, offsets = ContextParallelBatchSplitUtils.split_batch(
+                hidden_states, attn_mask = ContextParallelBatchSplitUtils.split_batch(
                     hidden_states,
-                    sequence_lengths,
                     attn_mask,
                     sp_group,
                     dist_mode=cp_dist_mode,
-                )  # shape: [B, L // sp_size, ...]
-                position_ids = offsets
+                )
+                position_ids = (
+                    ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache(
+                        dist.get_rank(sp_group)
+                    ).unsqueeze(0)
+                )
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
@@ -183,22 +177,10 @@ class LlamaModelForwards:
             start_idx, end_idx = (0, len(self.layers))
 
         kwargs = {}
-        if self.config._attn_implementation == "bitfield_attention":
-            seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache()
-            seqlen_qs = seqlen_ks
-            if sp_mode == "ring_attn":
-                seqlen_qs, offsets = (
-                    ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache()
-                )
-                indices_perm, indices_inverse_perm = (
-                    ContextParallelBatchSplitUtils.get_permutate_cache()
-                )
-                kwargs["indices_perm"] = indices_perm
-                kwargs["indices_inverse_perm"] = indices_inverse_perm
-
-            kwargs["seqlen_qs"] = seqlen_qs
-            kwargs["seqlen_ks"] = seqlen_ks
-            kwargs["offsets"] = offsets
+        if sp_mode == "ring_attn":
+            kwargs["seqlen_per_rank"] = (
+                ContextParallelBatchSplitUtils.get_seqlen_per_rank()
+            )
 
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
@@ -227,9 +209,6 @@ class LlamaModelForwards:
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
-                    seqlen_qs=seqlen_qs,
-                    seqlen_ks=seqlen_ks,
-                    offsets=offsets,
                     **flash_attn_kwargs,
                     **kwargs,
                 )
@@ -239,7 +218,6 @@ class LlamaModelForwards:
             if output_attentions:
                 all_self_attentions += (layer_outputs[1],)
 
-        BitfieldUtils.clear_cache()
         ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
@@ -334,23 +312,16 @@ class LlamaModelForwards:
                 ContextParallelDistributionMode.UNIFORM,
             )
 
-            assert self.config._attn_implementation == "bitfield_attention", (
-                "Cornstarch context parallelism is only supported with bitfield_attention. "
+            assert self.config._attn_implementation == "cornstarch_attention", (
+                "Cornstarch context parallelism is only supported with cornstarch_attention. "
                 f"Got {self.config._attn_implementation}"
             )
 
-            # NOTE(Runyu): ColossalAI uses attention_mask.bool().all() to judge if the input is var len version, which is a hack way. But in multi-modal model training, it is not good to use this way.
-            # Currently, we don't don't support varlen version, so here we assume the input is non-varlen version.
-            # TODO(Runyu): We should use a better way to judge if the input is var len version.
-            # TODO(Runyu): support var len version
-            sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
-            labels, _, _ = ContextParallelBatchSplitUtils.split_batch(
+            labels, _ = ContextParallelBatchSplitUtils.split_batch(
                 labels,
-                sequence_lengths,
                 attention_mask,
                 sp_group,
                 dist_mode=cp_dist_mode,
-                is_label=True,
             )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
@@ -375,7 +346,6 @@ class LlamaModelForwards:
         )
         past_key_values = None
 
-        BitfieldUtils.clear_cache()
         ContextParallelBatchSplitUtils.clear_cache()
 
         stage_manager = shard_config.pipeline_stage_manager
@@ -481,13 +451,13 @@ class LlamaAttentionForwards:
             )
 
         if sp_mode == "ring_attn":
-            assert self.config._attn_implementation == "bitfield_attention", (
-                "Cornstarch context parallelism is only supported with bitfield_attention. "
+            assert self.config._attn_implementation == "cornstarch_attention", (
+                "Cornstarch context parallelism is only supported with cornstarch_attention. "
                 f"Got {self.config._attn_implementation}"
             )
 
             attention_interface: Callable = functools.partial(
-                context_parallel_bitfield_attention_forward, sp_group=sp_group
+                context_parallel_cornstarch_attention, sp_group=sp_group
             )
         else:
             attention_interface: Callable = eager_attention_forward

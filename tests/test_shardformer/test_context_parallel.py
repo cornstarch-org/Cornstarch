@@ -17,7 +17,7 @@ from cornstarch.kernel.attention import flash_attn_func
 from cornstarch.kernel.bitfield_attention import bitfield_attn_func
 from cornstarch.kernel.interface import BitfieldUtils
 from cornstarch.shardformer.layers.context_parallel_attention import (
-    ContextParallelAttentionWithMask,
+    ContextParallelCornstarchAttention,
 )
 from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
     ContextParallelBitfieldAttention,
@@ -728,7 +728,7 @@ class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase)
             [seq_len // self.world_size] * self.world_size, device="cuda"
         )
 
-        cp_out: torch.Tensor = ContextParallelAttentionWithMask.apply(
+        cp_out: torch.Tensor = ContextParallelCornstarchAttention.apply(
             local_query,
             local_key,
             local_value,
