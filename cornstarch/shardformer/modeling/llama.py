@@ -28,6 +28,7 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.processing_utils import Unpack
 
+from cornstarch.kernel.interface import materialize_attention_mask_from_bitfield_mask
 from cornstarch.shardformer.layers.context_parallel_attention import (
     context_parallel_cornstarch_attention,
 )
@@ -153,9 +154,6 @@ class LlamaModelForwards:
                     hidden_states,
                     sp_group,
                 )
-                attn_mask = ContextParallelBatchSplitUtils.split_batch(
-                    attn_mask, sp_group
-                )
                 position_ids = (
                     ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache(
                         dist.get_rank(sp_group)
@@ -172,7 +170,11 @@ class LlamaModelForwards:
             ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
                 context_parallel_offsets
             )
+
+        if sp_mode == "ring_attn":
+            # Split attention mask after shuffling it
             attn_mask = ContextParallelBatchSplitUtils.split_batch(attn_mask, sp_group)
+            attn_mask = ContextParallelBatchSplitUtils.shuffle_attention_mask(attn_mask)
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
@@ -330,6 +332,9 @@ class LlamaModelForwards:
                     context_parallel_offsets
                 )
             else:
+                attention_mask = self.model._update_causal_mask(
+                    attention_mask=attention_mask
+                )
                 ContextParallelBatchSplitUtils.create_context_parallel_split(
                     attention_mask, sp_group, dist_mode=cp_dist_mode
                 )

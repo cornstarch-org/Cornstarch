@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Optional
 
+import heapq
 import numpy as np
 import torch
 import torch.distributed as dist
 from colossalai.accelerator import get_accelerator
 
 from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
+from cornstarch.kernel.attention import BLOCK_M, BLOCK_N
 
 
 class ContextParallelBatchSplitUtils:
@@ -75,6 +77,7 @@ class ContextParallelBatchSplitUtils:
         attention_mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
         dist_mode: ContextParallelDistributionMode,
+        **kwargs,
     ):
         """
         Based on attention_mask and distribution mode,
@@ -102,12 +105,16 @@ class ContextParallelBatchSplitUtils:
 
         if cls.context_parallel_offsets_cache is None:
             if dist_mode == ContextParallelDistributionMode.UNIFORM:
-                cls.create_context_parallel_split_uniform(attention_mask, sp_group)
+                cls.create_context_parallel_split_uniform(
+                    attention_mask, sp_group, **kwargs
+                )
             elif dist_mode == ContextParallelDistributionMode.ZIGZAG:
-                cls.create_context_parallel_split_zigzag(attention_mask, sp_group)
+                cls.create_context_parallel_split_zigzag(
+                    attention_mask, sp_group, **kwargs
+                )
             elif dist_mode == ContextParallelDistributionMode.MAKESPAN_MIN:
                 cls.create_context_parallel_split_makespan_minimization(
-                    attention_mask, sp_group
+                    attention_mask, sp_group, **kwargs
                 )
 
     @classmethod
@@ -148,6 +155,77 @@ class ContextParallelBatchSplitUtils:
         cls.set_context_parallel_offsets_cache(chunked_offsets)
 
     @classmethod
+    def create_context_parallel_split_makespan_minimization(
+        cls: ContextParallelBatchSplitUtils,
+        attention_mask: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        attention_block_exec_time: float = 1.0,
+        linear_block_exec_time: float = 1.0,
+    ):
+        assert attention_mask.ndim == 3
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+
+        batch_size, seq_len = attention_mask.shape[:2]
+
+        # Compress the attention mask.
+        num_blocks_to_compute_in_attention = (
+            attention_mask.reshape(
+                attention_mask.shape[0],
+                seq_len // BLOCK_M,
+                BLOCK_M,
+                seq_len // BLOCK_N,
+                BLOCK_N,
+            )
+            .any(dim=(2, 4))
+            .sum(dim=2)
+        )
+
+        # Blocks with the same row-index across batches are merged into one block.
+        # workloads_per_block: (num_blocks)
+        workloads_per_block = (
+            num_blocks_to_compute_in_attention * attention_block_exec_time
+            + linear_block_exec_time
+        ).sum(dim=0)
+        workloads_per_block, indices = torch.sort(
+            workloads_per_block, stable=True, descending=True
+        )
+
+        # (total_workload, sp_rank)
+        loads_per_rank: list[tuple[int, int]] = []
+        for i in range(sp_size):
+            heapq.heappush(loads_per_rank, (0, i))
+
+        # offsets per rank
+        assigned_block_indices_per_rank: list[np.ndarray] = [
+            np.array([], dtype=np.int64) for _ in range(sp_size)
+        ]
+
+        for i, block_workload in zip(
+            indices.numpy(force=True), workloads_per_block.numpy(force=True)
+        ):
+            # Pick the rank with the minimum workloads
+            load, rank = heapq.heappop(loads_per_rank)
+
+            # Assign this row block to the rank
+            heapq.heappush(
+                loads_per_rank,
+                (load + block_workload.item(), rank),
+            )
+
+            assigned_block_indices_per_rank[rank] = np.append(
+                assigned_block_indices_per_rank[rank], i
+            )
+
+        # expand assigned_block_indices_per_rank
+        # for each element in each np.ndarray, expand it to (i, i+1, ..., i+BLOCK_M-1)
+        chunked_offsets = [
+            (indices[:, None] * BLOCK_M + np.arange(BLOCK_M)).ravel()
+            for indices in assigned_block_indices_per_rank
+        ]
+        cls.set_context_parallel_offsets_cache(chunked_offsets)
+
+    @classmethod
     def split_batch(
         cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
@@ -162,11 +240,29 @@ class ContextParallelBatchSplitUtils:
         if sp_size == 1 or seq_len < 128 * sp_size:
             return batch
 
-        row_indices = torch.arange(
-            batch_size, dtype=torch.int64, device=batch.device
-        ).unsqueeze(1)
+        return batch[:, cls.context_parallel_offsets_cache[sp_rank]]
 
-        return batch[row_indices, cls.context_parallel_offsets_cache[sp_rank]]
+    @classmethod
+    def shuffle_attention_mask(
+        cls: ContextParallelBatchSplitUtils,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        When kvs are gathered, they are not reordered in the original order,
+        instead simply concatenated.
+        This function shuffles the attention mask's columns to match the order of the kvs.
+        """
+
+        def inverse_permutation(perm: torch.Tensor) -> torch.Tensor:
+            inv = torch.empty_like(perm)
+            inv[perm] = torch.arange(perm.shape[0], device=perm.device)
+            return inv
+
+        merged_offsets = inverse_permutation(
+            cls.context_parallel_offsets_cache.view(-1)
+        )
+
+        return mask[:, :, merged_offsets].contiguous()
 
     # """
     # Context parallel cache for local sequence lengths and offsets per rank.
