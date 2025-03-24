@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import heapq
 from typing import Optional
 
-import heapq
 import numpy as np
 import torch
 import torch.distributed as dist
 from colossalai.accelerator import get_accelerator
 
-from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
 from cornstarch.kernel.attention import BLOCK_M, BLOCK_N
+from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
 
 
 class ContextParallelBatchSplitUtils:
@@ -122,6 +122,7 @@ class ContextParallelBatchSplitUtils:
         cls: ContextParallelBatchSplitUtils,
         attention_mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
+        **kwargs,
     ):
         assert attention_mask.ndim in [2, 3]
         sp_size = dist.get_world_size(sp_group)
@@ -139,6 +140,7 @@ class ContextParallelBatchSplitUtils:
         cls: ContextParallelBatchSplitUtils,
         attention_mask: torch.Tensor,
         sp_group: dist.ProcessGroup,
+        **kwargs,
     ):
         assert attention_mask.ndim in [2, 3]
         sp_size = dist.get_world_size(sp_group)
