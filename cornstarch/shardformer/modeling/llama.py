@@ -28,7 +28,6 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.processing_utils import Unpack
 
-from cornstarch.kernel.interface import materialize_attention_mask_from_bitfield_mask
 from cornstarch.shardformer.layers.context_parallel_attention import (
     context_parallel_cornstarch_attention,
 )
