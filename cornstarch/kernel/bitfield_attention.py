@@ -62,7 +62,6 @@ BLOCK_N = 32
         "CACHE_KEY_SEQLEN_Q",
         "CACHE_KEY_SEQLEN_K",
         "BIAS_TYPE",
-        "IS_CAUSAL",
         "BLOCK_HEADDIM",
     ],
 )
@@ -691,7 +690,6 @@ def init_to_zero(name):
         "CACHE_KEY_SEQLEN_Q",
         "CACHE_KEY_SEQLEN_K",
         "BIAS_TYPE",
-        "IS_CAUSAL",
         "BLOCK_HEADDIM",
     ],
 )
@@ -886,8 +884,6 @@ def _flash_attn_forward(
         d,
         seqlen_q // 32,
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
-        # Can't use kwargs here because triton autotune expects key to be args, not kwargs
-        # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type,
         BLOCK_HEADDIM,
     )
@@ -919,10 +915,8 @@ def _flash_attn_backward(
     assert q.stride(-1) == k.stride(-1) == v.stride(-1) == o.stride(-1) == 1
     assert dq.stride(-1) == dk.stride(-1) == dv.stride(-1) == 1
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
-    # dq_accum = torch.zeros_like(q, dtype=torch.float32)
     dq_accum = torch.empty_like(q, dtype=torch.float32)
     delta = torch.empty_like(lse)
-    # delta = torch.zeros_like(lse)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
@@ -1007,8 +1001,6 @@ def _flash_attn_backward(
         d,
         seqlen_q // 32,
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
-        # Can't use kwargs here because triton autotune expects key to be args, not kwargs
-        # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type,
         BLOCK_HEADDIM,
     )
