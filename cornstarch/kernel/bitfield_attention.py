@@ -106,7 +106,6 @@ def _fwd_kernel(
     CACHE_KEY_SEQLEN_Q,
     CACHE_KEY_SEQLEN_K,
     BIAS_TYPE: tl.constexpr,
-    IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
@@ -176,7 +175,7 @@ def _fwd_kernel(
                 other=0.0,
             )
     # loop over k, v and update accumulator
-    end_n = seqlen_k if not IS_CAUSAL else tl.minimum((start_m + 1) * BLOCK_M, seqlen_k)
+    end_n = seqlen_k
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
@@ -210,10 +209,7 @@ def _fwd_kernel(
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
-        if IS_CAUSAL:
-            qk += tl.where(
-                offs_m[:, None] >= (start_n + offs_n)[None, :], 0, float("-inf")
-            )
+
         if BIAS_TYPE != "none":
             if BIAS_TYPE == "vector":
                 if EVEN_N:
@@ -437,7 +433,6 @@ def _bwd_kernel_one_col_block(
     headdim,
     ATOMIC_ADD: tl.constexpr,
     BIAS_TYPE: tl.constexpr,
-    IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
@@ -446,7 +441,7 @@ def _bwd_kernel_one_col_block(
     BLOCK_N: tl.constexpr,
 ):
     # We need to make sure begin_m is a multiple of BLOCK_M (not BLOCK_N)
-    begin_m = 0 if not IS_CAUSAL else ((start_n * BLOCK_N) // BLOCK_M) * BLOCK_M
+    begin_m = 0
     # initialize row/col offsets
     offs_qm = begin_m + tl.arange(0, BLOCK_M)
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -535,8 +530,7 @@ def _bwd_kernel_one_col_block(
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk = tl.where(offs_n[None, :] < seqlen_k, qk, float("-inf"))
-        if IS_CAUSAL:
-            qk = tl.where(offs_m_curr[:, None] >= (offs_n[None, :]), qk, float("-inf"))
+
         if BIAS_TYPE != "none":
             tl.debug_barrier()  # Race condition otherwise
             if BIAS_TYPE == "vector":
@@ -753,7 +747,6 @@ def _bwd_kernel(
     CACHE_KEY_SEQLEN_Q,
     CACHE_KEY_SEQLEN_K,
     BIAS_TYPE: tl.constexpr,
-    IS_CAUSAL: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
@@ -804,7 +797,6 @@ def _bwd_kernel(
         headdim,
         ATOMIC_ADD=True,
         BIAS_TYPE=BIAS_TYPE,
-        IS_CAUSAL=IS_CAUSAL,
         BLOCK_HEADDIM=BLOCK_HEADDIM,
         EVEN_M=EVEN_M,
         EVEN_N=EVEN_N,
@@ -814,7 +806,13 @@ def _bwd_kernel(
     )
 
 
-def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
+def _flash_attn_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
@@ -891,14 +889,23 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
         # Can't use kwargs here because triton autotune expects key to be args, not kwargs
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type,
-        causal,
         BLOCK_HEADDIM,
     )
     return o, lse, softmax_scale  # softmax_scale could have been updated
 
 
 def _flash_attn_backward(
-    do, q, k, v, o, lse, dq, dk, dv, bias=None, causal=False, softmax_scale=None
+    do: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    lse: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
@@ -1003,15 +1010,21 @@ def _flash_attn_backward(
         # Can't use kwargs here because triton autotune expects key to be args, not kwargs
         # IS_CAUSAL=causal, BLOCK_HEADDIM=d,
         bias_type,
-        causal,
         BLOCK_HEADDIM,
     )
     dq.copy_(dq_accum)
 
 
-class FlashAttnFunc(torch.autograd.Function):
+class BitfieldAttnFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, bias=None, causal=False, softmax_scale=None):
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        softmax_scale: Optional[float] = None,
+    ):
         """
         q: (batch_size, seqlen_q, nheads, headdim)
         k, v: (batch_size, seqlen_k, nheads, headdim)
@@ -1022,14 +1035,13 @@ class FlashAttnFunc(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
         o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, bias=bias, causal=causal, softmax_scale=softmax_scale
+            q, k, v, bias=bias, softmax_scale=softmax_scale
         )
         ctx.save_for_backward(q, k, v, o, lse, bias)
-        ctx.causal = causal
         return o
 
     @staticmethod
-    def backward(ctx, do):
+    def backward(ctx, do: torch.Tensor):
         q, k, v, o, lse, bias = ctx.saved_tensors
         assert not ctx.needs_input_grad[
             3
@@ -1051,18 +1063,16 @@ class FlashAttnFunc(torch.autograd.Function):
                 dk,
                 dv,
                 bias=bias,
-                causal=ctx.causal,
                 softmax_scale=ctx.softmax_scale,
             )
         return dq, dk, dv, None, None, None
 
 
-def flash_attn_func(
+def bitfield_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-    causal: bool = False,
     softmax_scale: Optional[float] = None,
 ) -> torch.Tensor:
-    return FlashAttnFunc.apply(q, k, v, bias, causal, softmax_scale)
+    return BitfieldAttnFunc.apply(q, k, v, bias, softmax_scale)
