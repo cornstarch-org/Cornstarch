@@ -52,6 +52,74 @@ BLOCK_M = 128
 BLOCK_N = 32
 
 
+@triton.jit
+def _materialize_compressed_mask(
+    Mask,
+    Out,
+    stride_maskb,
+    stride_outb,
+    stride_outm,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """
+    Create a compressed mask from the bitfield mask.
+    For the bitfield mask of shape (batch_size, seq_len),
+    it creates a compressed mask of shape (batch_size, seq_len // BLOCK_M, seq_len // BLOCK_N),
+    where each element is
+    - 0 if all bits in the corresponding BLOCK_M x BLOCK_N block are 0 (maksed out)
+    - 1 if some bits in the corresponding BLOCK_M x BLOCK_N block are 1 (not masked out)
+    - 2 if all bits in the corresponding BLOCK_M x BLOCK_N block are 1
+    """
+    off_b = tl.program_id(0)
+    start_m = tl.program_id(1)
+    start_n = tl.program_id(2)
+
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    q_bitfield_mask = tl.load(Mask + off_b * stride_maskb + offs_m)
+    offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    kv_bitfield_mask = tl.load(Mask + off_b * stride_maskb + offs_n)
+
+    bit_eq = q_bitfield_mask[:, None] == kv_bitfield_mask[None, :]
+    causal_mask = offs_m[:, None] >= offs_n[None, :]
+
+    value = causal_mask & bit_eq
+    value_sum = tl.sum(value.to(tl.int64))
+
+    result = 0
+    if value_sum > 0:
+        result = 1
+    if value_sum == BLOCK_M * BLOCK_N:
+        result = 2
+
+    out_ptr = Out + off_b * stride_outb + start_m * stride_outm + start_n
+    tl.store(out_ptr, result)
+
+
+def materialize_compressed_mask_from_bitfield_mask(mask: torch.Tensor) -> torch.Tensor:
+    batch_size, seq_len = mask.shape
+    grid = (batch_size, seq_len // BLOCK_M, seq_len // BLOCK_N)
+
+    out = torch.zeros(
+        (batch_size, seq_len // BLOCK_M, seq_len // BLOCK_N),
+        dtype=torch.int8,
+        device=mask.device,
+    )
+
+    _materialize_compressed_mask[grid](
+        mask,
+        out,
+        mask.stride(0),
+        out.stride(0),
+        out.stride(1),
+        BLOCK_M,
+        BLOCK_N,
+    )
+
+    return out
+
+
 @triton.autotune(
     configs=[
         triton.Config(
