@@ -53,6 +53,31 @@ BLOCK_N = 32
 
 
 @triton.jit
+def _materialize_bitfield_mask_block(
+    Bitfield_mask,
+    off_m,
+    off_n,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    offs_m = off_m + tl.arange(0, BLOCK_M)
+    offs_n = off_n + tl.arange(0, BLOCK_N)
+
+    q_bitfield_mask = tl.load(Bitfield_mask + offs_m)
+    kv_bitfield_mask = tl.load(Bitfield_mask + offs_n)
+
+    causal_mask = offs_m[:, None] >= offs_n[None, :]
+    is_text_token = ((q_bitfield_mask & 1) > 0)[:, None]
+
+    q_modality_bits = (q_bitfield_mask & ((1 << 62) - 1))[:, None]
+    kv_modality_bits = (kv_bitfield_mask & ((1 << 62) - 1))[None, :]
+
+    return (
+        causal_mask & is_text_token & ((q_modality_bits & kv_modality_bits) > 0)
+    ) | ((is_text_token == False) & (q_modality_bits == kv_modality_bits))
+
+
+@triton.jit
 def _materialize_compressed_mask(
     Mask,
     Out,
@@ -75,17 +100,15 @@ def _materialize_compressed_mask(
     start_m = tl.program_id(1)
     start_n = tl.program_id(2)
 
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    q_bitfield_mask = tl.load(Mask + off_b * stride_maskb + offs_m)
-    offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    submask = _materialize_bitfield_mask_block(
+        Mask + off_b * stride_maskb,
+        start_m * BLOCK_M,
+        start_n * BLOCK_N,
+        BLOCK_M,
+        BLOCK_N,
+    )
 
-    kv_bitfield_mask = tl.load(Mask + off_b * stride_maskb + offs_n)
-
-    bit_eq = q_bitfield_mask[:, None] == kv_bitfield_mask[None, :]
-    causal_mask = offs_m[:, None] >= offs_n[None, :]
-
-    value = causal_mask & bit_eq
-    value_sum = tl.sum(value.to(tl.int64))
+    value_sum = tl.sum(submask.to(tl.int64))
 
     result = 0
     if value_sum > 0:
@@ -147,6 +170,8 @@ def _fwd_kernel(
     V,
     Bias,
     Out,
+    Bitfield_mask,  # (batch_size, seqlen)
+    Compressed_mask,  # (batch_size, seqlen // BLOCK_M, seqlen // BLOCK_N)
     Lse,
     TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale,
@@ -165,6 +190,9 @@ def _fwd_kernel(
     stride_ob,
     stride_oh,
     stride_om,
+    stride_bmb,
+    stride_cmb,
+    stride_cmm,
     nheads,
     seqlen_q,
     seqlen_k,
@@ -241,113 +269,135 @@ def _fwd_kernel(
                 mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
                 other=0.0,
             )
+
+    cm_base_ptr = Compressed_mask + off_b * stride_cmb + start_m * stride_cmm
+
     # loop over k, v and update accumulator
     end_n = seqlen_k
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
-        # -- compute qk ----
-        if (
-            EVEN_N & EVEN_M
-        ):  # If we just do "if EVEN_N", there seems to be some race condition
-            if EVEN_HEADDIM:
-                k = tl.load(k_ptrs + start_n * stride_kn)
-            else:
-                k = tl.load(
-                    k_ptrs + start_n * stride_kn,
-                    mask=offs_d[None, :] < headdim,
-                    other=0.0,
-                )
-        else:
-            if EVEN_HEADDIM:
-                k = tl.load(
-                    k_ptrs + start_n * stride_kn,
-                    mask=(start_n + offs_n)[:, None] < seqlen_k,
-                    other=0.0,
-                )
-            else:
-                k = tl.load(
-                    k_ptrs + start_n * stride_kn,
-                    mask=((start_n + offs_n)[:, None] < seqlen_k)
-                    & (offs_d[None, :] < headdim),
-                    other=0.0,
-                )
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, tl.trans(k))
-        # Trying to combine the two masks seem to make the result wrong
-        if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
-            qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
 
-        if BIAS_TYPE != "none":
-            if BIAS_TYPE == "vector":
-                if EVEN_N:
-                    bias = tl.load(b_ptrs + start_n).to(tl.float32)
+        compressed_mask = tl.load(cm_base_ptr + start_n // BLOCK_N)
+        if compressed_mask > 0:
+            # compressed_mask is either 1 or 2. Need computation
+            # if the value is 2, no need of masking out
+
+            # -- compute qk ----
+            if (
+                EVEN_N & EVEN_M
+            ):  # If we just do "if EVEN_N", there seems to be some race condition
+                if EVEN_HEADDIM:
+                    k = tl.load(k_ptrs + start_n * stride_kn)
                 else:
-                    bias = tl.load(
-                        b_ptrs + start_n, mask=(start_n + offs_n) < seqlen_k, other=0.0
-                    ).to(tl.float32)
-                bias = bias[None, :]
-            elif BIAS_TYPE == "matrix":
-                if EVEN_M & EVEN_N:
-                    bias = tl.load(b_ptrs + start_n).to(tl.float32)
-                else:
-                    bias = tl.load(
-                        b_ptrs + start_n,
-                        mask=(offs_m[:, None] < seqlen_q)
-                        & ((start_n + offs_n)[None, :] < seqlen_k),
+                    k = tl.load(
+                        k_ptrs + start_n * stride_kn,
+                        mask=offs_d[None, :] < headdim,
                         other=0.0,
-                    ).to(tl.float32)
-            # Slightly faster to multiply the softmax_scale in the tl.exp below since the compiler
-            # can then fuse the mult and add into an fma instruction. But if we have bias we need to
-            # to multiply with softmax_scale here.
-            qk = qk * softmax_scale + bias
-            m_ij = tl.maximum(tl.max(qk, 1), lse_i)
-            p = tl.exp(qk - m_ij[:, None])
-        else:
-            m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, lse_i)
-            p = tl.exp(qk * softmax_scale - m_ij[:, None])
-        l_ij = tl.sum(p, 1)
-
-        # scale acc_o
-        acc_o_scale = tl.exp(m_i - m_ij)
-
-        # # -- update output accumulator --
-        # BUG: have to store and immediately load
-        tl.store(t_ptrs, acc_o_scale)
-        acc_o_scale = tl.load(t_ptrs)
-        acc_o = acc_o * acc_o_scale[:, None]
-        # update acc_o
-        if (
-            EVEN_N & EVEN_M
-        ):  # If we just do "if EVEN_N", there seems to be some race condition
-            if EVEN_HEADDIM:
-                v = tl.load(v_ptrs + start_n * stride_vn)
+                    )
             else:
-                v = tl.load(
-                    v_ptrs + start_n * stride_vn,
-                    mask=offs_d[None, :] < headdim,
-                    other=0.0,
-                )
-        else:
-            if EVEN_HEADDIM:
-                v = tl.load(
-                    v_ptrs + start_n * stride_vn,
-                    mask=(start_n + offs_n)[:, None] < seqlen_k,
-                    other=0.0,
-                )
-            else:
-                v = tl.load(
-                    v_ptrs + start_n * stride_vn,
-                    mask=((start_n + offs_n)[:, None] < seqlen_k)
-                    & (offs_d[None, :] < headdim),
-                    other=0.0,
-                )
-        p = p.to(v.dtype)
-        acc_o += tl.dot(p, v)
+                if EVEN_HEADDIM:
+                    k = tl.load(
+                        k_ptrs + start_n * stride_kn,
+                        mask=(start_n + offs_n)[:, None] < seqlen_k,
+                        other=0.0,
+                    )
+                else:
+                    k = tl.load(
+                        k_ptrs + start_n * stride_kn,
+                        mask=((start_n + offs_n)[:, None] < seqlen_k)
+                        & (offs_d[None, :] < headdim),
+                        other=0.0,
+                    )
+            qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+            qk += tl.dot(q, tl.trans(k))
+            # Trying to combine the two masks seem to make the result wrong
+            if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
+                qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
 
-        # -- update statistics
-        m_i = m_ij
-        l_i_new = tl.exp(lse_i - m_ij) + l_ij
-        lse_i = m_ij + tl.log(l_i_new)
+            if compressed_mask == 1:
+                # mask out the qk after materializing the mask block
+                mask_block = _materialize_bitfield_mask_block(
+                    Bitfield_mask + off_b * stride_bmb,
+                    start_m * BLOCK_M,
+                    start_n,
+                    BLOCK_M,
+                    BLOCK_N,
+                )
+                qk += tl.where(mask_block, 0, float("-inf"))
+
+            if BIAS_TYPE != "none":
+                if BIAS_TYPE == "vector":
+                    if EVEN_N:
+                        bias = tl.load(b_ptrs + start_n).to(tl.float32)
+                    else:
+                        bias = tl.load(
+                            b_ptrs + start_n,
+                            mask=(start_n + offs_n) < seqlen_k,
+                            other=0.0,
+                        ).to(tl.float32)
+                    bias = bias[None, :]
+                elif BIAS_TYPE == "matrix":
+                    if EVEN_M & EVEN_N:
+                        bias = tl.load(b_ptrs + start_n).to(tl.float32)
+                    else:
+                        bias = tl.load(
+                            b_ptrs + start_n,
+                            mask=(offs_m[:, None] < seqlen_q)
+                            & ((start_n + offs_n)[None, :] < seqlen_k),
+                            other=0.0,
+                        ).to(tl.float32)
+                # Slightly faster to multiply the softmax_scale in the tl.exp below since the compiler
+                # can then fuse the mult and add into an fma instruction. But if we have bias we need to
+                # to multiply with softmax_scale here.
+                qk = qk * softmax_scale + bias
+                m_ij = tl.maximum(tl.max(qk, 1), lse_i)
+                p = tl.exp(qk - m_ij[:, None])
+            else:
+                m_ij = tl.maximum(tl.max(qk, 1) * softmax_scale, lse_i)
+                p = tl.exp(qk * softmax_scale - m_ij[:, None])
+            l_ij = tl.sum(p, 1)
+
+            # scale acc_o
+            acc_o_scale = tl.exp(m_i - m_ij)
+
+            # # -- update output accumulator --
+            # BUG: have to store and immediately load
+            tl.store(t_ptrs, acc_o_scale)
+            acc_o_scale = tl.load(t_ptrs)
+            acc_o = acc_o * acc_o_scale[:, None]
+            # update acc_o
+            if (
+                EVEN_N & EVEN_M
+            ):  # If we just do "if EVEN_N", there seems to be some race condition
+                if EVEN_HEADDIM:
+                    v = tl.load(v_ptrs + start_n * stride_vn)
+                else:
+                    v = tl.load(
+                        v_ptrs + start_n * stride_vn,
+                        mask=offs_d[None, :] < headdim,
+                        other=0.0,
+                    )
+            else:
+                if EVEN_HEADDIM:
+                    v = tl.load(
+                        v_ptrs + start_n * stride_vn,
+                        mask=(start_n + offs_n)[:, None] < seqlen_k,
+                        other=0.0,
+                    )
+                else:
+                    v = tl.load(
+                        v_ptrs + start_n * stride_vn,
+                        mask=((start_n + offs_n)[:, None] < seqlen_k)
+                        & (offs_d[None, :] < headdim),
+                        other=0.0,
+                    )
+            p = p.to(v.dtype)
+            acc_o += tl.dot(p, v)
+
+            # -- update statistics
+            m_i = m_ij
+            l_i_new = tl.exp(lse_i - m_ij) + l_ij
+            lse_i = m_ij + tl.log(l_i_new)
 
     o_scale = tl.exp(m_i - lse_i)
     # BUG: have to store and immediately load
@@ -876,6 +926,7 @@ def _flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    bitfield_mask: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
 ):
@@ -921,6 +972,8 @@ def _flash_attn_forward(
     )
     o = torch.empty_like(q)
 
+    compressed_mask = materialize_compressed_mask_from_bitfield_mask(bitfield_mask)
+
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
     _fwd_kernel[grid](
@@ -929,6 +982,8 @@ def _flash_attn_forward(
         v,
         bias,
         o,
+        bitfield_mask,
+        compressed_mask,
         lse,
         tmp,
         softmax_scale,
@@ -945,6 +1000,9 @@ def _flash_attn_forward(
         o.stride(0),
         o.stride(2),
         o.stride(1),
+        bitfield_mask.stride(0),
+        compressed_mask.stride(0),
+        compressed_mask.stride(1),
         nheads,
         seqlen_q,
         seqlen_k,
@@ -1082,6 +1140,7 @@ class BitfieldAttnFunc(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        bitfield_mask: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
     ):
@@ -1095,7 +1154,7 @@ class BitfieldAttnFunc(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
         o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, bias=bias, softmax_scale=softmax_scale
+            q, k, v, bitfield_mask, bias=bias, softmax_scale=softmax_scale
         )
         ctx.save_for_backward(q, k, v, o, lse, bias)
         return o
@@ -1132,7 +1191,8 @@ def bitfield_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    bitfield_mask: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
 ) -> torch.Tensor:
-    return BitfieldAttnFunc.apply(q, k, v, bias, softmax_scale)
+    return BitfieldAttnFunc.apply(q, k, v, bitfield_mask, bias, softmax_scale)
