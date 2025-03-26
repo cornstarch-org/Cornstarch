@@ -115,12 +115,6 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             current_k = gathered_kv[head_index // heads_stride][0]
             current_v = gathered_kv[head_index // heads_stride][1]
 
-            # Make sure that the last dimension is contiguous
-            current_q, current_k, current_v = [
-                x if x.stride(-1) == 1 else x.contiguous()
-                for x in [current_q, current_k, current_v]
-            ]
-
             o, lse, softmax_scale_out = _bitfield_attn_forward(
                 current_q,
                 current_k,
