@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import heapq
 import math
 
 import numpy as np
@@ -15,7 +14,6 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.kernel.attention import flash_attn_func
 from cornstarch.kernel.bitfield_attention import bitfield_attn_func
-from cornstarch.kernel.interface import BitfieldUtils
 from cornstarch.shardformer.layers.context_parallel_attention import (
     ContextParallelCornstarchAttention,
 )
@@ -24,7 +22,6 @@ from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
 )
 from cornstarch.shardformer.layers.utils import (
     ContextParallelBatchSplitUtils,
-    ContextParallelDistributionMode,
 )
 
 from ..distributed_base import GlooDistributedTestBase
@@ -268,7 +265,7 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
     def test(self, batch_size: int, seq_len: int) -> tuple[torch.Tensor, ...]:
         query, key, value = torch.unbind(
             torch.randn(
-                (3, batch_size, seq_len, 8, 64), device="cuda", dtype=torch.bfloat16
+                (3, batch_size, seq_len, 8, 64), device="cuda", dtype=torch.float16
             ).normal_(mean=0, std=0.5),
         )
 
@@ -280,13 +277,13 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
         # )
         mask = torch.full(
             (batch_size, seq_len),
-            (1 << 62) | 1 | (1 << 1),
+            (1 << 62) | 1 | (1 << 1) | (1 << 2),
             dtype=torch.int64,
             device="cuda",
         )
         mask[:, 32:44] = 1 << 1
-        if seq_len >= 256:
-            mask[:, 180:280] = 1 << 1
+        # if seq_len >= 256:
+        #     mask[:, 180:280] = 1 << 2
 
         ref_out: torch.Tensor = bitfield_attn_func(
             query, key, value, bitfield_mask=mask

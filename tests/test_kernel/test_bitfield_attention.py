@@ -95,11 +95,7 @@ def test_materialize_bitfield_mask(size: str):
     converted_full_mask = torch.empty(
         (batch_size, seq_len, seq_len), dtype=torch.bool, device=device
     )
-    grid = lambda META: (
-        batch_size,
-        triton.cdiv(seq_len, META["BLOCK_M"]),
-        triton.cdiv(seq_len, META["BLOCK_N"]),
-    )
+    grid = (batch_size, triton.cdiv(seq_len, BLOCK_M), triton.cdiv(seq_len, BLOCK_N))
     materialize_bitfield_mask_block[grid](
         bitfield_mask,
         converted_full_mask,
@@ -107,8 +103,6 @@ def test_materialize_bitfield_mask(size: str):
         converted_full_mask.stride(0),
         converted_full_mask.stride(1),
         seq_len,
-        None,
-        None,
         BLOCK_M,
         BLOCK_N,
     )

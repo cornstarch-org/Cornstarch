@@ -154,18 +154,18 @@ def materialize_compressed_mask_from_bitfield_mask(
     offsets_k: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     batch_size, seq_len = mask.shape
-    grid = (batch_size, triton.cdiv(seq_len, BLOCK_M), triton.cdiv(seq_len, BLOCK_N))
-
     seqlen_q = seq_len if offsets_q is None else len(offsets_q)
     seqlen_k = seq_len if offsets_k is None else len(offsets_k)
 
+    shape = (batch_size, triton.cdiv(seqlen_q, BLOCK_M), triton.cdiv(seqlen_k, BLOCK_N))
+
     out = torch.zeros(
-        (batch_size, triton.cdiv(seqlen_q, BLOCK_M), triton.cdiv(seqlen_k, BLOCK_N)),
+        shape,
         dtype=torch.int8,
         device=mask.device,
     )
 
-    _materialize_compressed_mask[grid](
+    _materialize_compressed_mask[shape](
         mask,
         out,
         mask.stride(0),
