@@ -22,7 +22,10 @@ from cornstarch.shardformer.layers.context_parallel_attention import (
 from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
     ContextParallelBitfieldAttention,
 )
-from cornstarch.shardformer.layers.utils import ContextParallelBatchSplitUtils
+from cornstarch.shardformer.layers.utils import (
+    ContextParallelBatchSplitUtils,
+    ContextParallelDistributionMode,
+)
 
 from ..distributed_base import GlooDistributedTestBase
 
@@ -81,7 +84,6 @@ class TestContextParallelBatchSplitUtilClass:
         if dist.is_initialized():
             dist.destroy_process_group()
 
-        BitfieldUtils.clear_cache()
         ContextParallelBatchSplitUtils.clear_cache()
 
     @pytest.mark.parametrize(
@@ -108,10 +110,13 @@ class TestContextParallelBatchSplitUtilClass:
                 "fake", rank=rank, world_size=world_size, store=store
             )
 
-            split_data = ContextParallelBatchSplitUtils.split_batch_uniform(
-                data,
-                torch.tensor([seqlen], device="cuda"),
+            ContextParallelBatchSplitUtils.create_context_parallel_split_uniform(
                 mask,
+                sp_group=dist.GroupMember.WORLD,
+            )
+
+            split_data = ContextParallelBatchSplitUtils.split_batch(
+                data,
                 sp_group=dist.GroupMember.WORLD,
             )
 
@@ -122,76 +127,7 @@ class TestContextParallelBatchSplitUtilClass:
                 start_offset = expected_seqlen_per_rank * rank
                 end_offset = min(expected_seqlen_per_rank * (rank + 1), seqlen)
 
-            torch.testing.assert_close(data[:, start_offset:end_offset], split_data[0])
-            assert split_data[1].item() == end_offset - start_offset
-            assert torch.equal(
-                split_data[2],
-                torch.arange(start_offset, end_offset, device="cuda").unsqueeze(0),
-            )
-
-    @pytest.mark.parametrize(
-        "seqlens",
-        [
-            [57, 256],
-            [57, 256, 335],
-            [57, 256, 335, 684],
-            [335, 684, 1024],
-            [57, 1024, 2003],
-            [1024, 2003, 3712],
-        ],
-        ids=lambda x: f"seq={x}",
-    )
-    @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
-    def test_split_batch_uniform_multibatch(self, seqlens: list[int], world_size: int):
-        batch_size = len(seqlens)
-        max_seqlen = max(seqlens)
-
-        data = torch.randn(
-            (batch_size, max_seqlen, self.num_heads, self.head_dim),
-            device="cuda",
-        )
-        mask = torch.nested.nested_tensor(
-            [
-                torch.full((seqlen,), 1 << 1, dtype=torch.int64, device="cuda")
-                for seqlen in seqlens
-            ],
-            device="cuda",
-        ).to_padded_tensor(padding=0)
-
-        store = FakeStore()
-        for rank in range(world_size):
-            self.teardown_method()
-
-            dist.init_process_group(
-                "fake", rank=rank, world_size=world_size, store=store
-            )
-
-            split_data = ContextParallelBatchSplitUtils.split_batch_uniform(
-                data,
-                torch.tensor(seqlens, device="cuda"),
-                mask,
-                sp_group=dist.GroupMember.WORLD,
-            )
-
-            for i in range(batch_size):
-                seqlen = seqlens[i]
-                if world_size == 1 or max_seqlen < 128 * world_size:
-                    start_offset, end_offset = 0, seqlen
-                #     torch.testing.assert_close(data, split_data)
-                else:
-                    expected_seqlen_per_rank = math.ceil(seqlen / world_size)
-                    start_offset = expected_seqlen_per_rank * rank
-                    end_offset = min(expected_seqlen_per_rank * (rank + 1), seqlen)
-
-                torch.testing.assert_close(
-                    data[i, start_offset:end_offset],
-                    split_data[0][i, : end_offset - start_offset],
-                )
-                assert split_data[1][i].item() == end_offset - start_offset
-                assert torch.equal(
-                    split_data[2][i, : end_offset - start_offset],
-                    torch.arange(start_offset, end_offset, device="cuda"),
-                )
+            torch.testing.assert_close(data[:, start_offset:end_offset], split_data)
 
     @pytest.mark.parametrize(
         "seqlen",
@@ -217,17 +153,19 @@ class TestContextParallelBatchSplitUtilClass:
                 "fake", rank=rank, world_size=world_size, store=store
             )
 
-            split_data = ContextParallelBatchSplitUtils.split_batch_zigzag(
-                data,
-                torch.tensor([seqlen], device="cuda"),
+            ContextParallelBatchSplitUtils.create_context_parallel_split_zigzag(
                 mask,
+                sp_group=dist.GroupMember.WORLD,
+            )
+
+            split_data = ContextParallelBatchSplitUtils.split_batch(
+                data,
                 sp_group=dist.GroupMember.WORLD,
             )
 
             if world_size == 1 or seqlen < 128 * world_size:
                 expected_split_data = data
                 expected_indices = np.arange(seqlen)
-                expected_seqlen = seqlen
             else:
                 num_chunks = world_size * 2
                 base_size = seqlen // num_chunks
@@ -248,99 +186,10 @@ class TestContextParallelBatchSplitUtilClass:
                 expected_first = chunks[rank]
                 expected_second = chunks[-rank - 1]
                 expected_indices = np.concatenate([expected_first, expected_second])
-                expected_seqlen = len(expected_indices)
 
                 expected_split_data = data[:, expected_indices, :, :]
 
-            torch.testing.assert_close(expected_split_data, split_data[0])
-            assert split_data[1].item() == expected_seqlen
-            assert torch.equal(
-                split_data[2],
-                torch.tensor(expected_indices, device="cuda").unsqueeze(0),
-            )
-
-    @pytest.mark.parametrize(
-        "seqlens",
-        [
-            [57, 256],
-            [57, 256, 335],
-            [57, 256, 335, 684],
-            [335, 684, 1024],
-            [57, 1024, 2003],
-            [1024, 2003, 3712],
-        ],
-        ids=lambda x: f"seq={x}",
-    )
-    @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
-    def test_split_batch_zigzag_multibatch(self, seqlens: list[int], world_size: int):
-        batch_size = len(seqlens)
-        max_seqlen = max(seqlens)
-
-        data = torch.randn(
-            (batch_size, max_seqlen, self.num_heads, self.head_dim),
-            device="cuda",
-        )
-        mask = torch.nested.nested_tensor(
-            [
-                torch.full((seqlen,), 1 << 1, dtype=torch.int64, device="cuda")
-                for seqlen in seqlens
-            ],
-            device="cuda",
-        ).to_padded_tensor(padding=0)
-
-        store = FakeStore()
-        for rank in range(world_size):
-            self.teardown_method()
-
-            dist.init_process_group(
-                "fake", rank=rank, world_size=world_size, store=store
-            )
-
-            split_data = ContextParallelBatchSplitUtils.split_batch_zigzag(
-                data,
-                torch.tensor(seqlens, device="cuda"),
-                mask,
-                sp_group=dist.GroupMember.WORLD,
-            )
-
-            for i in range(batch_size):
-                seqlen = seqlens[i]
-                if world_size == 1 or max_seqlen < 128 * world_size:
-                    expected_split_data = data[i, :seqlen]
-                    expected_indices = np.arange(seqlen)
-                    expected_seqlen = seqlen
-                else:
-                    num_chunks = world_size * 2
-                    base_size = seqlen // num_chunks
-                    remainder = seqlen % num_chunks
-                    chunk_sizes = [
-                        base_size + 1 if i < remainder else base_size
-                        for i in range(num_chunks)
-                    ]
-
-                    indices = np.arange(seqlen)
-                    chunks = []
-                    start = 0
-                    for size in chunk_sizes:
-                        chunks.append(indices[start : start + size])
-                        start += size
-
-                    # Each rank should get its corresponding chunk and the symmetric one.
-                    expected_first = chunks[rank]
-                    expected_second = chunks[-rank - 1]
-                    expected_indices = np.concatenate([expected_first, expected_second])
-                    expected_seqlen = len(expected_indices)
-
-                    expected_split_data = data[i, expected_indices]
-
-                torch.testing.assert_close(
-                    expected_split_data, split_data[0][i, :expected_seqlen]
-                )
-                assert split_data[1][i].item() == expected_seqlen
-                assert torch.equal(
-                    split_data[2][i, :expected_seqlen],
-                    torch.tensor(expected_indices, device="cuda"),
-                )
+            torch.testing.assert_close(expected_split_data, split_data)
 
     @pytest.mark.parametrize(
         "seqlen",
@@ -360,12 +209,14 @@ class TestContextParallelBatchSplitUtilClass:
         )
 
         if mask_type == "causal":
-            mask = torch.full(
-                (batch_size, seqlen), (1 << 62) | 1, dtype=torch.int64, device="cuda"
+            mask = torch.tril(
+                torch.ones(
+                    (batch_size, seqlen, seqlen), dtype=torch.bool, device="cuda"
+                )
             )
         elif mask_type == "full":
-            mask = torch.full(
-                (batch_size, seqlen), 1 << 1, dtype=torch.int64, device="cuda"
+            mask = torch.ones(
+                (batch_size, seqlen, seqlen), dtype=torch.bool, device="cuda"
             )
 
         store = FakeStore()
@@ -376,19 +227,19 @@ class TestContextParallelBatchSplitUtilClass:
                 "fake", rank=rank, world_size=world_size, store=store
             )
 
-            split_data = (
-                ContextParallelBatchSplitUtils.split_batch_makespan_minimization(
-                    data,
-                    torch.tensor([seqlen], device="cuda"),
-                    mask,
-                    sp_group=dist.GroupMember.WORLD,
-                )
+            ContextParallelBatchSplitUtils.create_context_parallel_split_makespan_minimization(
+                mask,
+                sp_group=dist.GroupMember.WORLD,
+            )
+
+            split_data = ContextParallelBatchSplitUtils.split_batch(
+                data,
+                sp_group=dist.GroupMember.WORLD,
             )
 
             if world_size == 1 or seqlen <= 128 * 4:
                 expected_split_data = data
                 expected_indices = torch.arange(seqlen, device="cuda")
-                expected_seqlen = seqlen
             else:
                 num_blocks = math.ceil(seqlen / 128)
 
@@ -399,140 +250,10 @@ class TestContextParallelBatchSplitUtilClass:
 
                 expected_indices = torch.nonzero(assignments == rank, as_tuple=True)[0]
                 expected_indices = expected_indices[expected_indices < data.shape[1]]
-                expected_seqlen = len(expected_indices)
 
                 expected_split_data = data[:, expected_indices]
 
-            torch.testing.assert_close(expected_split_data, split_data[0])
-            assert split_data[1].item() == expected_seqlen
-            assert torch.equal(split_data[2], expected_indices.unsqueeze(0))
-
-    @pytest.mark.parametrize(
-        "seqlens",
-        [
-            [57, 256],
-            [57, 256, 335],
-            [57, 256, 335, 684],
-            [335, 684, 1024],
-            [57, 1024, 2003],
-            [1024, 2003, 3712],
-        ],
-        ids=lambda x: f"seq={x}",
-    )
-    @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
-    def test_split_batch_makespan_min_multibatch(
-        self, seqlens: list[int], world_size: int
-    ):
-        batch_size = len(seqlens)
-        max_seqlen = max(seqlens)
-
-        data = torch.randn(
-            (batch_size, max_seqlen, self.num_heads, self.head_dim),
-            device="cuda",
-        )
-
-        mask = [
-            (
-                torch.full((seqlen,), (1 << 62) | 1, dtype=torch.int64, device="cuda")
-                if index % 2 == 0
-                else torch.full((seqlen,), 1 << 1, dtype=torch.int64, device="cuda")
-            )
-            for index, seqlen in enumerate(seqlens)
-        ]
-        mask = torch.nested.nested_tensor(mask, device="cuda").to_padded_tensor(
-            padding=0
-        )
-
-        # makespan minimization computes workloads across batches,
-        # does can be pre-computed and deterministric regardless of rank.
-        if world_size == 1 or max_seqlen <= 128 * world_size:
-            expected_indices = [[np.arange(seqlen) for seqlen in seqlens]] * world_size
-            expected_seqlens = [seqlens] * world_size
-
-        else:
-            workloads: list[tuple[int, int]] = []  # (total_workloads, sp_rank)
-
-            for i in range(world_size):
-                heapq.heappush(workloads, (0, i))
-
-            num_tokens_per_block = [[] for _ in range(batch_size)]
-            for i in range(batch_size):
-                num_blocks = math.ceil(seqlens[i] / 128)
-                remaining_tokens = seqlens[i]
-
-                for _ in range(num_blocks):
-                    num_tokens = min(remaining_tokens, 128)
-                    num_tokens_per_block[i].append(num_tokens)
-                    remaining_tokens -= num_tokens
-
-            expected_indices = [
-                [[] for _ in range(batch_size)] for _ in range(world_size)
-            ]
-            expected_seqlens = [[0] * batch_size for _ in range(world_size)]
-            for i in range(batch_size):
-                seqlen = seqlens[i]
-                num_blocks = math.ceil(seqlen / 128)
-
-                if i % 2 == 0:
-                    # causal mask. workload will be 1, 2, 3, ...
-                    for block_index in reversed(range(num_blocks)):
-                        load, sp_rank = heapq.heappop(workloads)
-                        heapq.heappush(workloads, (load + block_index + 1, sp_rank))
-                        expected_indices[sp_rank][i].append(block_index)
-                        expected_seqlens[sp_rank][i] += num_tokens_per_block[i][
-                            block_index
-                        ]
-                else:
-                    # full mask. workload will be N, N, N, ...
-                    for block_index in range(num_blocks):
-                        load, sp_rank = heapq.heappop(workloads)
-                        heapq.heappush(workloads, (load + num_blocks, sp_rank))
-                        expected_indices[sp_rank][i].append(block_index)
-                        expected_seqlens[sp_rank][i] += num_tokens_per_block[i][
-                            block_index
-                        ]
-
-            for sp_rank in range(world_size):
-                for i in range(batch_size):
-                    if expected_indices[sp_rank][i]:
-                        expected_indices[sp_rank][i] = np.concatenate(
-                            [
-                                np.arange(
-                                    (s := sum(num_tokens_per_block[i][:idx])),
-                                    s + num_tokens_per_block[i][idx],
-                                )
-                                for idx in sorted(expected_indices[sp_rank][i])
-                            ]
-                        )
-
-        store = FakeStore()
-        for rank in range(world_size):
-            self.teardown_method()
-
-            dist.init_process_group(
-                "fake", rank=rank, world_size=world_size, store=store
-            )
-
-            split_data = (
-                ContextParallelBatchSplitUtils.split_batch_makespan_minimization(
-                    data,
-                    torch.tensor(seqlens, device="cuda"),
-                    mask,
-                    sp_group=dist.GroupMember.WORLD,
-                )
-            )
-
-            for i in range(batch_size):
-                expected_split_data = data[i, expected_indices[rank][i]]
-                expected_seqlen = expected_seqlens[rank][i]
-                torch.testing.assert_close(
-                    expected_split_data, split_data[0][i, :expected_seqlen]
-                )
-                assert split_data[1][i].item() == expected_seqlen
-                assert torch.equal(
-                    split_data[2][i, :expected_seqlen],
-                    torch.tensor(expected_indices[rank][i], device="cuda"),
-                )
+            torch.testing.assert_close(expected_split_data, split_data)
 
 
 @instantiate_parametrized_tests
