@@ -57,8 +57,7 @@ def _materialize_bitfield_mask_block(
     Bitfield_mask,
     off_m,
     off_n,
-    seqlen_q,
-    seqlen_k,
+    seq_len,
     indices_q,
     indices_k,
     BLOCK_M: tl.constexpr,
@@ -71,8 +70,8 @@ def _materialize_bitfield_mask_block(
         offs_m = off_m + tl.arange(0, BLOCK_M)
         offs_n = off_n + tl.arange(0, BLOCK_N)
 
-    q_bitfield_mask = tl.load(Bitfield_mask + offs_m, mask=offs_m < seqlen_q, other=0)
-    kv_bitfield_mask = tl.load(Bitfield_mask + offs_n, mask=offs_n < seqlen_k, other=0)
+    q_bitfield_mask = tl.load(Bitfield_mask + offs_m, mask=offs_m < seq_len, other=0)
+    kv_bitfield_mask = tl.load(Bitfield_mask + offs_n, mask=offs_n < seq_len, other=0)
 
     causal_mask = offs_m[:, None] >= offs_n[None, :]
     is_text_token = ((q_bitfield_mask & 1) > 0)[:, None]
@@ -96,8 +95,7 @@ def _materialize_compressed_mask(
     stride_maskb,
     stride_outb,
     stride_outm,
-    seqlen_q,
-    seqlen_k,
+    seq_len,
     indices_q,
     indices_k,
     BLOCK_M: tl.constexpr,
@@ -120,8 +118,7 @@ def _materialize_compressed_mask(
         Mask + off_b * stride_maskb,
         start_m * BLOCK_M,
         start_n * BLOCK_N,
-        seqlen_q,
-        seqlen_k,
+        seq_len,
         indices_q,
         indices_k,
         BLOCK_M,
@@ -148,8 +145,11 @@ def materialize_compressed_mask_from_bitfield_mask(
     batch_size, seq_len = mask.shape
     grid = (batch_size, triton.cdiv(seq_len, BLOCK_M), triton.cdiv(seq_len, BLOCK_N))
 
+    seqlen_q = seq_len if offsets_q is None else len(offsets_q)
+    seqlen_k = seq_len if offsets_k is None else len(offsets_k)
+
     out = torch.zeros(
-        (batch_size, triton.cdiv(seq_len, BLOCK_M), triton.cdiv(seq_len, BLOCK_N)),
+        (batch_size, triton.cdiv(seqlen_q, BLOCK_M), triton.cdiv(seqlen_k, BLOCK_N)),
         dtype=torch.int8,
         device=mask.device,
     )
@@ -160,8 +160,7 @@ def materialize_compressed_mask_from_bitfield_mask(
         mask.stride(0),
         out.stride(0),
         out.stride(1),
-        seq_len,
-        seq_len,
+        seqlen_k,
         offsets_q,
         offsets_k,
         BLOCK_M,
@@ -350,7 +349,6 @@ def _fwd_kernel(
                     Bitfield_mask + off_b * stride_bmb,
                     start_m * BLOCK_M,
                     start_n,
-                    seqlen_q,
                     seqlen_k,
                     offsets_q,
                     offsets_k,
@@ -704,7 +702,6 @@ def _bwd_kernel_one_col_block(
                     Bitfield_mask,
                     start_m,
                     start_n * BLOCK_N,
-                    seqlen_q,
                     seqlen_k,
                     offsets_q,
                     offsets_k,

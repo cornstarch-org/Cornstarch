@@ -46,8 +46,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
         seqlen_per_rank = [len(offsets) for offsets in offsets_per_rank]
         total_seqlen = sum(seqlen_per_rank)
-        sp_rank = dist.get_rank(sp_group)
-        offsets_q = offsets_per_rank[sp_rank]
+        offsets_q = offsets_per_rank[dist.get_rank(sp_group)]
         offsets_kv = torch.cat(offsets_per_rank, dim=0)
 
         assert bitfield_mask.shape == (batch, total_seqlen)
@@ -164,14 +163,12 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
         seqlen_per_rank = [len(offsets) for offsets in offsets_per_rank]
         total_seqlen = sum(seqlen_per_rank)
-        sp_size = dist.get_world_size(sp_group)
-        offsets_q = offsets_per_rank[sp_size]
+        offsets_q = offsets_per_rank[dist.get_rank(sp_group)]
         offsets_kv = torch.cat(offsets_per_rank, dim=0)
 
         per_head_events: list[torch.cuda.Event] = []
 
         # pre-allocate memory for k and v gathering for all heads
-        total_seqlen = seqlen_per_rank.sum().item()
         gathered_kv = [
             torch.empty(
                 (2, batch, total_seqlen, heads_stride, d),
@@ -253,14 +250,10 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             )
 
             dist.reduce_scatter(
-                dkv[0],
-                list(dgkv[0].split(seqlen_per_rank.tolist(), dim=1)),
-                group=sp_group,
+                dkv[0], list(dgkv[0].split(seqlen_per_rank, dim=1)), group=sp_group
             )
             dist.reduce_scatter(
-                dkv[1],
-                list(dgkv[1].split(seqlen_per_rank.tolist(), dim=1)),
-                group=sp_group,
+                dkv[1], list(dgkv[1].split(seqlen_per_rank, dim=1)), group=sp_group
             )
 
             dqs.append(dq.clone())
