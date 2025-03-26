@@ -132,10 +132,10 @@ def _materialize_compressed_mask(
 
 def materialize_compressed_mask_from_bitfield_mask(mask: torch.Tensor) -> torch.Tensor:
     batch_size, seq_len = mask.shape
-    grid = (batch_size, seq_len // BLOCK_M, seq_len // BLOCK_N)
+    grid = (batch_size, triton.cdiv(seq_len, BLOCK_M), triton.cdiv(seq_len, BLOCK_N))
 
     out = torch.zeros(
-        (batch_size, seq_len // BLOCK_M, seq_len // BLOCK_N),
+        (batch_size, triton.cdiv(seq_len, BLOCK_M), triton.cdiv(seq_len, BLOCK_N)),
         dtype=torch.int8,
         device=mask.device,
     )
