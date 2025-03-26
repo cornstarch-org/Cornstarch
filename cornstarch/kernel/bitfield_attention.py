@@ -65,16 +65,8 @@ def _materialize_bitfield_mask_block(
     BLOCK_N: tl.constexpr,
 ):
     if indices_q is not None:
-        offs_m = tl.load(
-            indices_q + off_m + tl.arange(0, BLOCK_M),
-            # mask=(off_m + tl.arange(0, BLOCK_M)) < seqlen_q,
-            # other=seqlen_k,
-        )
-        offs_n = tl.load(
-            indices_k + off_n + tl.arange(0, BLOCK_N),
-            # mask=(off_n + tl.arange(0, BLOCK_N)) < seqlen_k,
-            # other=seqlen_k,
-        )
+        offs_m = tl.load(indices_q + off_m + tl.arange(0, BLOCK_M))
+        offs_n = tl.load(indices_k + off_n + tl.arange(0, BLOCK_N))
     else:
         offs_m = off_m + tl.arange(0, BLOCK_M)
         offs_n = off_n + tl.arange(0, BLOCK_N)
@@ -91,7 +83,7 @@ def _materialize_bitfield_mask_block(
     return (
         causal_mask & is_text_token & ((q_modality_bits & kv_modality_bits) > 0)
     ) | (
-        (is_text_token == False)
+        (is_text_token == False)  # noqa: E712
         & (q_modality_bits == kv_modality_bits)
         & (q_modality_bits > 0)
     )
@@ -1035,7 +1027,7 @@ def _bitfield_attn_forward(
     o = torch.empty_like(q)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
-    grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
+    grid = (triton.cdiv(seqlen_q, BLOCK_M), batch * nheads)
     _fwd_kernel[grid](
         q,
         k,
@@ -1111,7 +1103,7 @@ def _bitfield_attn_backward(
     delta = torch.empty_like(lse)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
-    grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
+    grid = (triton.cdiv(seqlen_q, BLOCK_M), batch * nheads)
     _bwd_preprocess_do_o_dot[grid](
         o,
         do,
@@ -1151,7 +1143,7 @@ def _bitfield_attn_backward(
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    grid = lambda META: (triton.cdiv(seqlen_k, META["BLOCK_N"]), batch * nheads)
+    grid = (triton.cdiv(seqlen_k, BLOCK_N), batch * nheads)
     _bwd_kernel[grid](
         q,
         k,
