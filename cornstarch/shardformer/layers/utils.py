@@ -15,8 +15,8 @@ from cornstarch.shardformer.shard.shard_config import ContextParallelDistributio
 class ContextParallelBatchSplitUtils:
     # Context parallel cache for offsets per rank.
     # Each tensor in the lists is a tensor of offsets for a rank.
-    # Each tensor is a 2D tensor of shape (cp_world_size, local_seqlen).
-    context_parallel_offsets_cache: Optional[torch.Tensor] = None
+    # Each tensor is a 1D tensor of shape (local_seqlen).
+    context_parallel_offsets_cache: Optional[list[torch.Tensor]] = None
 
     @classmethod
     def clear_cache(cls: ContextParallelBatchSplitUtils):
@@ -25,16 +25,17 @@ class ContextParallelBatchSplitUtils:
     @classmethod
     def set_context_parallel_offsets_cache(
         cls: ContextParallelBatchSplitUtils,
-        offsets_per_rank: list[np.ndarray] | torch.Tensor,
+        offsets_per_rank: list[np.ndarray] | list[torch.Tensor],
         device: torch.device = None,
     ):
         if device is None:
             device = get_accelerator().get_current_device()
 
-        if isinstance(offsets_per_rank, list):
-            offsets_per_rank = torch.tensor(
-                np.stack(offsets_per_rank, axis=0), dtype=torch.long, device=device
-            )
+        if isinstance(offsets_per_rank[0], np.ndarray):
+            offsets_per_rank = [
+                torch.tensor(offsets, dtype=torch.long, device=device)
+                for offsets in offsets_per_rank
+            ]
 
         cls.context_parallel_offsets_cache = offsets_per_rank
 
@@ -168,15 +169,47 @@ class ContextParallelBatchSplitUtils:
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
 
-        batch_size, seq_len = attention_mask.shape[:2]
+        batch_size, seqlen_q, seqlen_k = attention_mask.shape
+        original_seqlen_q = seqlen_q
+        original_seqlen_k = seqlen_k
+
+        if seqlen_q % BLOCK_M != 0:
+            attention_mask = torch.cat(
+                [
+                    attention_mask,
+                    torch.zeros(
+                        batch_size,
+                        BLOCK_M - seqlen_q % BLOCK_M,
+                        seqlen_k,
+                        device=attention_mask.device,
+                    ),
+                ],
+                dim=1,
+            )
+            seqlen_q = attention_mask.shape[1]
+
+        if seqlen_k % BLOCK_N != 0:
+            attention_mask = torch.cat(
+                [
+                    attention_mask,
+                    torch.zeros(
+                        batch_size,
+                        seqlen_q,
+                        BLOCK_N - seqlen_k % BLOCK_N,
+                        device=attention_mask.device,
+                    ),
+                ],
+                dim=2,
+            )
+            seqlen_k = attention_mask.shape[2]
 
         # Compress the attention mask.
         num_blocks_to_compute_in_attention = (
             attention_mask.reshape(
                 attention_mask.shape[0],
-                seq_len // BLOCK_M,
+                seqlen_q // BLOCK_M,
                 BLOCK_M,
-                seq_len // BLOCK_N,
+                seqlen_k // BLOCK_N,
                 BLOCK_N,
             )
             .any(dim=(2, 4))
@@ -219,12 +252,23 @@ class ContextParallelBatchSplitUtils:
                 assigned_block_indices_per_rank[rank], i
             )
 
+        # Sorted assigned block indices
+        assigned_block_indices_per_rank = [
+            np.sort(indices) for indices in assigned_block_indices_per_rank
+        ]
+
         # expand assigned_block_indices_per_rank
         # for each element in each np.ndarray, expand it to (i, i+1, ..., i+BLOCK_M-1)
         chunked_offsets = [
             (indices[:, None] * BLOCK_M + np.arange(BLOCK_M)).ravel()
             for indices in assigned_block_indices_per_rank
         ]
+
+        # Remove overflowed indices
+        chunked_offsets = [
+            offsets[offsets < original_seqlen_k] for offsets in chunked_offsets
+        ]
+
         cls.set_context_parallel_offsets_cache(chunked_offsets)
 
     @classmethod
