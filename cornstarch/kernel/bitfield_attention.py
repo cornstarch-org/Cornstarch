@@ -773,12 +773,13 @@ def _bwd_kernel_one_col_block(
                         mask=(offs_m_curr[:, None] < seqlen_q)
                         & (offs_d[None, :] < headdim),
                     )
-            # increment pointers
-            dq_ptrs += BLOCK_M * stride_dqm
-            q_ptrs += BLOCK_M * stride_qm
-            do_ptrs += BLOCK_M * stride_dom
-            if BIAS_TYPE == "matrix":
-                b_ptrs += BLOCK_M * stride_bm
+
+        # increment pointers
+        dq_ptrs += BLOCK_M * stride_dqm
+        q_ptrs += BLOCK_M * stride_qm
+        do_ptrs += BLOCK_M * stride_dom
+        if BIAS_TYPE == "matrix":
+            b_ptrs += BLOCK_M * stride_bm
 
     # write-back
     dv_ptrs = DV + (offs_n[:, None] * stride_dvn + offs_d[None, :])
