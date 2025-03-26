@@ -571,7 +571,6 @@ def _bwd_kernel_one_col_block(
     seqlen_q,
     seqlen_k,
     headdim,
-    ATOMIC_ADD: tl.constexpr,
     BIAS_TYPE: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     EVEN_M: tl.constexpr,
@@ -760,56 +759,20 @@ def _bwd_kernel_one_col_block(
                 EVEN_M & EVEN_HEADDIM
             ):  # Otherewise there's a race condition when BIAS_TYPE='matrix'
                 tl.debug_barrier()
-            if not ATOMIC_ADD:
-                if EVEN_M & EVEN_HEADDIM:  # Race condition if we just do EVEN_M
-                    dq = tl.load(dq_ptrs, eviction_policy="evict_last")
-                    dq += tl.dot(ds, k)
-                    tl.store(dq_ptrs, dq, eviction_policy="evict_last")
+
+            dq = tl.dot(ds, k)
+            if EVEN_M & EVEN_HEADDIM:  # Race condition if we just do EVEN_M
+                tl.atomic_add(dq_ptrs, dq)
+            else:
+                if EVEN_HEADDIM:
+                    tl.atomic_add(dq_ptrs, dq, mask=offs_m_curr[:, None] < seqlen_q)
                 else:
-                    if EVEN_HEADDIM:
-                        dq = tl.load(
-                            dq_ptrs,
-                            mask=offs_m_curr[:, None] < seqlen_q,
-                            other=0.0,
-                            eviction_policy="evict_last",
-                        )
-                        dq += tl.dot(ds, k)
-                        tl.store(
-                            dq_ptrs,
-                            dq,
-                            mask=offs_m_curr[:, None] < seqlen_q,
-                            eviction_policy="evict_last",
-                        )
-                    else:
-                        dq = tl.load(
-                            dq_ptrs,
-                            mask=(offs_m_curr[:, None] < seqlen_q)
-                            & (offs_d[None, :] < headdim),
-                            other=0.0,
-                            eviction_policy="evict_last",
-                        )
-                        dq += tl.dot(ds, k)
-                        tl.store(
-                            dq_ptrs,
-                            dq,
-                            mask=(offs_m_curr[:, None] < seqlen_q)
-                            & (offs_d[None, :] < headdim),
-                            eviction_policy="evict_last",
-                        )
-            else:  # If we're parallelizing across the seqlen_k dimension
-                dq = tl.dot(ds, k)
-                if EVEN_M & EVEN_HEADDIM:  # Race condition if we just do EVEN_M
-                    tl.atomic_add(dq_ptrs, dq)
-                else:
-                    if EVEN_HEADDIM:
-                        tl.atomic_add(dq_ptrs, dq, mask=offs_m_curr[:, None] < seqlen_q)
-                    else:
-                        tl.atomic_add(
-                            dq_ptrs,
-                            dq,
-                            mask=(offs_m_curr[:, None] < seqlen_q)
-                            & (offs_d[None, :] < headdim),
-                        )
+                    tl.atomic_add(
+                        dq_ptrs,
+                        dq,
+                        mask=(offs_m_curr[:, None] < seqlen_q)
+                        & (offs_d[None, :] < headdim),
+                    )
             # increment pointers
             dq_ptrs += BLOCK_M * stride_dqm
             q_ptrs += BLOCK_M * stride_qm
@@ -967,7 +930,6 @@ def _bwd_kernel(
         seqlen_q,
         seqlen_k,
         headdim,
-        ATOMIC_ADD=True,
         BIAS_TYPE=BIAS_TYPE,
         BLOCK_HEADDIM=BLOCK_HEADDIM,
         EVEN_M=EVEN_M,
