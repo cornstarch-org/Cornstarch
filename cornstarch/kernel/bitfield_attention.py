@@ -65,8 +65,16 @@ def _materialize_bitfield_mask_block(
     BLOCK_N: tl.constexpr,
 ):
     if indices_q is not None:
-        offs_m = tl.load(indices_q + off_m + tl.arange(0, BLOCK_M))
-        offs_n = tl.load(indices_k + off_n + tl.arange(0, BLOCK_N))
+        offs_m = tl.load(
+            indices_q + off_m + tl.arange(0, BLOCK_M),
+            mask=off_m + tl.arange(0, BLOCK_M) < seqlen_q,
+            other=seqlen_k,
+        )
+        offs_n = tl.load(
+            indices_k + off_n + tl.arange(0, BLOCK_N),
+            mask=off_n + tl.arange(0, BLOCK_N) < seqlen_k,
+            other=seqlen_k,
+        )
     else:
         offs_m = off_m + tl.arange(0, BLOCK_M)
         offs_n = off_n + tl.arange(0, BLOCK_N)
@@ -133,7 +141,11 @@ def _materialize_compressed_mask(
     result = 0
     if value_sum > 0:
         result = 1
-    if value_sum == BLOCK_M * BLOCK_N:
+
+    full_mask_value = (
+        seqlen_q % BLOCK_M if (start_m + 1) * BLOCK_M > seqlen_q else BLOCK_M
+    ) * (seqlen_k % BLOCK_N if (start_n + 1) * BLOCK_N > seqlen_k else BLOCK_N)
+    if value_sum == full_mask_value:
         result = 2
 
     out_ptr = Out + off_b * stride_outb + start_m * stride_outm + start_n
