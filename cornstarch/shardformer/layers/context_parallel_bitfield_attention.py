@@ -7,24 +7,24 @@ import torch.nn as nn
 from cornstarch.kernel.bitfield_attention import (
     _bitfield_attn_backward,
     _bitfield_attn_forward,
+    materialize_compressed_mask_from_bitfield_mask,
 )
 from cornstarch.kernel.interface import repeat_kv
 
 
 class ContextParallelBitfieldAttention(torch.autograd.Function):
+
+    stream: torch.cuda.Stream = None
+
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        mask: torch.Tensor,
+        bitfield_mask: torch.Tensor,
+        offsets_per_rank: list[torch.Tensor],
         sp_group: dist.ProcessGroup,
-        seqlen_qs: list[torch.Tensor],
-        seqlen_ks: torch.Tensor,
-        offsets: list[torch.Tensor],
-        indices_perm: torch.Tensor,
-        indices_inverse_perm: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         softmax_scale: Optional[float] = None,
         heads_stride: int = 1,
@@ -36,14 +36,23 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         heads_k_stride: number of key/value heads to transfer
         in a single pipelined all-gather operation.
         """
-        # shape constraints
-        sp_world_size = dist.get_world_size(sp_group)
-        sp_rank = dist.get_rank(sp_group)
+        if ContextParallelBitfieldAttention.stream is None:
+            ContextParallelBitfieldAttention.stream = torch.cuda.Stream()
+
+        stream = ContextParallelBitfieldAttention.stream
 
         batch, seqlen_q, nheads, d = q.shape
-        _, seqlen_k, _, _ = k.shape
-        assert k.shape == (batch, seqlen_k, nheads, d)
-        assert v.shape == (batch, seqlen_k, nheads, d)
+        _, seqlen_kv, _, _ = k.shape
+
+        seqlen_per_rank = [len(offsets) for offsets in offsets_per_rank]
+        total_seqlen = sum(seqlen_per_rank)
+        sp_rank = dist.get_rank(sp_group)
+        offsets_q = offsets_per_rank[sp_rank]
+        offsets_kv = torch.cat(offsets_per_rank, dim=0)
+
+        assert bitfield_mask.shape == (batch, total_seqlen)
+        assert k.shape == (batch, seqlen_kv, nheads, d)
+        assert v.shape == (batch, seqlen_kv, nheads, d)
         assert (
             nheads % heads_stride == 0
         ), "number of heads must be divisible by heads_stride"
@@ -51,112 +60,86 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
         assert q.is_cuda and k.is_cuda and v.is_cuda
 
-        local_seqlen_per_rank = [
-            max(seqlen_qs_per_rank).item() for seqlen_qs_per_rank in seqlen_qs
-        ]
-        assert mask.shape == (
-            batch,
-            sum(local_seqlen_per_rank),
-        ), f"Expected mask shape ({batch}, {sum(local_seqlen_per_rank)}), but got {mask.shape}"
+        per_head_events: list[torch.cuda.Event] = []
 
-        gathered_k = [
+        # pre-allocate memory for k and v gathering for all ranks
+        gathered_kv = [
             torch.empty(
-                (batch, local_seqlen, heads_stride, d),
+                (2, batch, total_seqlen, heads_stride, d),
                 dtype=k.dtype,
                 device=k.device,
             )
-            for local_seqlen in local_seqlen_per_rank
-        ]
-        gathered_v = [
-            torch.empty(
-                (batch, local_seqlen, heads_stride, d),
-                dtype=v.dtype,
-                device=v.device,
-            )
-            for local_seqlen in local_seqlen_per_rank
+            for _ in range(nheads // heads_stride)
         ]
 
-        gk_work = dist.all_gather(
-            gathered_k,
-            k[:, :, :heads_stride, :].contiguous(),
-            group=sp_group,
-            async_op=True,
-        )
-        gv_work = dist.all_gather(
-            gathered_v,
-            v[:, :, :heads_stride, :].contiguous(),
-            group=sp_group,
-            async_op=True,
-        )
-
-        unsqueezed_indices_perm = (
-            indices_perm.unsqueeze(2).unsqueeze(3).expand(-1, -1, heads_stride, d)
-        )
+        # Initialize allgather works asynchronously
+        with torch.cuda.stream(stream):
+            for head_index in range(0, nheads, heads_stride):
+                dist.all_gather(
+                    list(
+                        gathered_kv[head_index // heads_stride][0].split(
+                            seqlen_per_rank, dim=1
+                        )
+                    ),
+                    k[:, :, head_index : head_index + heads_stride, :].contiguous(),
+                    group=sp_group,
+                    async_op=True,
+                )
+                dist.all_gather(
+                    list(
+                        gathered_kv[head_index // heads_stride][1].split(
+                            seqlen_per_rank, dim=1
+                        )
+                    ),
+                    v[:, :, head_index : head_index + heads_stride, :].contiguous(),
+                    group=sp_group,
+                    async_op=True,
+                )
+                event = torch.cuda.Event()
+                event.record(stream)
+                per_head_events.append(event)
 
         os: list[torch.Tensor] = []
         lses: list[torch.Tensor] = []
         softmax_scales: list[torch.Tensor] = []
 
-        head_index = 0
-        while head_index < nheads:
-            gk_work.wait()
-            gv_work.wait()
+        assert len(per_head_events) == nheads // heads_stride
+        compressed_mask = materialize_compressed_mask_from_bitfield_mask(
+            bitfield_mask, offsets_q, offsets_kv
+        )
+
+        for head_index in range(0, nheads, heads_stride):
+            event = per_head_events[head_index // heads_stride]
+            torch.cuda.current_stream().wait_event(event)
 
             current_q = q[:, :, head_index : head_index + heads_stride, :].contiguous()
-            current_k = torch.cat(gathered_k, dim=1)
-            current_k = torch.gather(
-                current_k, dim=1, index=unsqueezed_indices_perm
-            ).contiguous()
-            current_v = torch.cat(gathered_v, dim=1)
-            current_v = torch.gather(
-                current_v, dim=1, index=unsqueezed_indices_perm
-            ).contiguous()
+            current_k = gathered_kv[head_index // heads_stride][0]
+            current_v = gathered_kv[head_index // heads_stride][1]
 
-            head_index += heads_stride
-            # prefetch next heads
-            if head_index < nheads:
-                gk_work = dist.all_gather(
-                    gathered_k,
-                    k[:, :, head_index : head_index + heads_stride, :].contiguous(),
-                    group=sp_group,
-                    async_op=True,
-                )
-                gv_work = dist.all_gather(
-                    gathered_v,
-                    v[:, :, head_index : head_index + heads_stride, :].contiguous(),
-                    group=sp_group,
-                    async_op=True,
-                )
+            # Make sure that the last dimension is contiguous
+            current_q, current_k, current_v = [
+                x if x.stride(-1) == 1 else x.contiguous()
+                for x in [current_q, current_k, current_v]
+            ]
 
-            o, lse, softmax_scale = _bitfield_attn_forward(
+            o, lse, softmax_scale_out = _bitfield_attn_forward(
                 current_q,
                 current_k,
                 current_v,
+                bitfield_mask,
+                compressed_mask,
+                offsets_q,
+                offsets_kv,
                 bias=bias,
                 softmax_scale=softmax_scale,
-                mask=mask,
-                seqlen_qs=seqlen_qs[sp_rank],
-                seqlen_ks=seqlen_ks,
-                offsets=offsets[sp_rank],
             )
 
             os.append(o)
             lses.append(lse)
-            softmax_scales.append(softmax_scale)
+            softmax_scales.append(softmax_scale_out)
 
-        ctx.save_for_backward(
-            q,
-            k,
-            v,
-            bias,
-            mask,
-            seqlen_qs[sp_rank],
-            seqlen_ks,
-            offsets[sp_rank],
-            indices_perm,
-            indices_inverse_perm,
-        )
-        ctx.local_seqlen_per_rank = local_seqlen_per_rank
+        ctx.save_for_backward(q, k, v, bias, bitfield_mask, compressed_mask)
+        ctx.offsets_per_rank = offsets_per_rank
         ctx.heads_stride = heads_stride
         ctx.os = os
         ctx.lses = lses
@@ -167,19 +150,9 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: torch.autograd.function.FunctionCtx, do: torch.Tensor):
-        (
-            q,
-            k,
-            v,
-            bias,
-            mask,
-            seqlen_qs,
-            seqlen_ks,
-            offsets,
-            indices_perm,
-            indices_inverse_perm,
-        ) = ctx.saved_tensors
-        local_seqlen_per_rank = ctx.local_seqlen_per_rank
+        stream = ContextParallelBitfieldAttention.stream
+        (q, k, v, bias, bitfield_mask, compressed_mask) = ctx.saved_tensors
+        offsets_per_rank: list[torch.Tensor] = ctx.offsets_per_rank
         heads_stride: int = ctx.heads_stride
         os: list[torch.Tensor] = ctx.os
         lses: list[torch.Tensor] = ctx.lses
@@ -187,142 +160,123 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         sp_group: dist.ProcessGroup = ctx.sp_group
 
         batch, seqlen_q, nheads, d = q.shape
-        _, seqlen_k, _, _ = k.shape
+        _, seqlen_kv, _, _ = k.shape
 
-        gathered_k = [
+        seqlen_per_rank = [len(offsets) for offsets in offsets_per_rank]
+        total_seqlen = sum(seqlen_per_rank)
+        sp_size = dist.get_world_size(sp_group)
+        offsets_q = offsets_per_rank[sp_size]
+        offsets_kv = torch.cat(offsets_per_rank, dim=0)
+
+        per_head_events: list[torch.cuda.Event] = []
+
+        # pre-allocate memory for k and v gathering for all heads
+        total_seqlen = seqlen_per_rank.sum().item()
+        gathered_kv = [
             torch.empty(
-                (batch, local_seqlen, heads_stride, d), dtype=k.dtype, device=k.device
+                (2, batch, total_seqlen, heads_stride, d),
+                dtype=k.dtype,
+                device=k.device,
             )
-            for local_seqlen in local_seqlen_per_rank
-        ]
-        gathered_v = [
-            torch.empty(
-                (batch, local_seqlen, heads_stride, d), dtype=v.dtype, device=v.device
-            )
-            for local_seqlen in local_seqlen_per_rank
+            for _ in range(nheads // heads_stride)
         ]
 
-        gk_work = dist.all_gather(
-            gathered_k,
-            k[:, :, :heads_stride, :].contiguous(),
-            group=sp_group,
-            async_op=True,
-        )
-        gv_work = dist.all_gather(
-            gathered_v,
-            v[:, :, :heads_stride, :].contiguous(),
-            group=sp_group,
-            async_op=True,
-        )
+        # Initialize allgather works asynchronously
+        with torch.cuda.stream(stream):
+            for head_index in range(0, nheads, heads_stride):
+                dist.all_gather(
+                    list(
+                        gathered_kv[head_index // heads_stride][0].split(
+                            seqlen_per_rank, dim=1
+                        )
+                    ),
+                    k[:, :, head_index : head_index + heads_stride, :].contiguous(),
+                    group=sp_group,
+                    async_op=True,
+                )
+                dist.all_gather(
+                    list(
+                        gathered_kv[head_index // heads_stride][1].split(
+                            seqlen_per_rank, dim=1
+                        )
+                    ),
+                    v[:, :, head_index : head_index + heads_stride, :].contiguous(),
+                    group=sp_group,
+                    async_op=True,
+                )
+                event = torch.cuda.Event()
+                event.record(stream)
+                per_head_events.append(event)
 
         dqs: list[torch.Tensor] = []
         dks: list[torch.Tensor] = []
         dvs: list[torch.Tensor] = []
 
-        head_index = 0
+        assert len(per_head_events) == nheads // heads_stride
+        for head_index in range(0, nheads, heads_stride):
+            event = per_head_events[head_index // heads_stride]
+            torch.cuda.current_stream().wait_event(event)
 
-        unsqueezed_indices_perm = (
-            indices_perm.unsqueeze(2).unsqueeze(3).expand(-1, -1, heads_stride, d)
-        )
-        unsqueezed_indices_inverse_perm = (
-            indices_inverse_perm.unsqueeze(2)
-            .unsqueeze(3)
-            .expand(-1, -1, heads_stride, d)
-        )
+            dq = torch.empty(
+                (batch, seqlen_q, heads_stride, d),
+                dtype=q.dtype,
+                device=q.device,
+            )
+            dkv = torch.empty(
+                (2, batch, seqlen_kv, heads_stride, d),
+                dtype=k.dtype,
+                device=k.device,
+            )
 
-        dq = torch.empty(
-            (batch, seqlen_q, heads_stride, d), dtype=q.dtype, device=q.device
-        )
-        dk = torch.empty(
-            (batch, seqlen_k, heads_stride, d), dtype=k.dtype, device=k.device
-        )
-        dv = torch.empty(
-            (batch, seqlen_k, heads_stride, d), dtype=v.dtype, device=v.device
-        )
-        dgk = torch.full(
-            (batch, sum(local_seqlen_per_rank), heads_stride, d),
-            torch.nan,
-            dtype=k.dtype,
-            device=k.device,
-        )
-        dgv = torch.full(
-            (batch, sum(local_seqlen_per_rank), heads_stride, d),
-            torch.nan,
-            dtype=v.dtype,
-            device=v.device,
-        )
-
-        while head_index < nheads:
-            gk_work.wait()
-            gv_work.wait()
-
-            current_q = q[:, :, head_index : head_index + heads_stride, :]
-            current_k = torch.cat(gathered_k, dim=1)
-            current_k = torch.gather(
-                current_k, dim=1, index=unsqueezed_indices_perm
-            ).contiguous()
-            current_v = torch.cat(gathered_v, dim=1)
-            current_v = torch.gather(
-                current_v, dim=1, index=unsqueezed_indices_perm
-            ).contiguous()
-
-            head_index += heads_stride
-            # prefetch next heads
-            if head_index < nheads:
-                gk_work = dist.all_gather(
-                    gathered_k,
-                    k[:, :, head_index : head_index + heads_stride, :].contiguous(),
-                    group=sp_group,
-                    async_op=True,
-                )
-                gv_work = dist.all_gather(
-                    gathered_v,
-                    v[:, :, head_index : head_index + heads_stride, :].contiguous(),
-                    group=sp_group,
-                    async_op=True,
-                )
-
-            o = os.pop(0)
-            lse = lses.pop(0)
-            softmax_scale = softmax_scales.pop(0)
+            dgkv = torch.zeros(
+                (2, batch, total_seqlen, heads_stride, d),
+                dtype=k.dtype,
+                device=k.device,
+            )
 
             _bitfield_attn_backward(
-                do[:, :, head_index - heads_stride : head_index, :],
-                current_q,
-                current_k,
-                current_v,
-                o,
-                lse,
-                dq,
-                dgk,
-                dgv,
+                do=do[:, :, head_index : head_index + heads_stride, :],
+                q=q[:, :, head_index : head_index + heads_stride, :],
+                k=gathered_kv[head_index // heads_stride][0],
+                v=gathered_kv[head_index // heads_stride][1],
+                o=os[head_index // heads_stride],
+                bitfield_mask=bitfield_mask,
+                compressed_mask=compressed_mask,
+                lse=lses[head_index // heads_stride],
+                dq=dq,
+                dk=dgkv[0],
+                dv=dgkv[1],
+                offsets_q=offsets_q,
+                offsets_k=offsets_kv,
                 bias=bias,
-                softmax_scale=softmax_scale,
-                mask=mask,
-                seqlen_qs=seqlen_qs,
-                seqlen_ks=seqlen_ks,
-                offsets=offsets,
+                softmax_scale=softmax_scales[head_index // heads_stride],
             )
 
-            dgk = torch.gather(dgk, dim=1, index=unsqueezed_indices_inverse_perm)
-            dgv = torch.gather(dgv, dim=1, index=unsqueezed_indices_inverse_perm)
-
             dist.reduce_scatter(
-                dk, list(dgk.split(local_seqlen_per_rank, dim=1)), group=sp_group
+                dkv[0],
+                list(dgkv[0].split(seqlen_per_rank.tolist(), dim=1)),
+                group=sp_group,
             )
             dist.reduce_scatter(
-                dv, list(dgv.split(local_seqlen_per_rank, dim=1)), group=sp_group
+                dkv[1],
+                list(dgkv[1].split(seqlen_per_rank.tolist(), dim=1)),
+                group=sp_group,
             )
 
             dqs.append(dq.clone())
-            dks.append(dk.clone())
-            dvs.append(dv.clone())
+            dks.append(dkv[0].clone())
+            dvs.append(dkv[1].clone())
 
         return (
             torch.cat(dqs, dim=2),
             torch.cat(dks, dim=2),
             torch.cat(dvs, dim=2),
-            *[None] * 10,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
 
 
@@ -331,13 +285,9 @@ def context_parallel_bitfield_attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: torch.Tensor,
+    bitfield_mask: torch.Tensor,
+    offsets_per_rank: list[torch.Tensor],
     sp_group: dist.ProcessGroup,
-    seqlen_qs: list[torch.Tensor],
-    seqlen_ks: torch.Tensor,
-    offsets: list[torch.Tensor],
-    indices_perm: torch.Tensor,
-    indices_inverse_perm: torch.Tensor,
     heads_stride: int = 1,
     dropout: float = 0.0,
     scaling: Optional[float] = None,
@@ -346,7 +296,7 @@ def context_parallel_bitfield_attention_forward(
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
     assert (
-        attention_mask is not None and attention_mask.dtype == torch.int64
+        bitfield_mask is not None and bitfield_mask.dtype == torch.int64
     ), "Bitfield attention requires an attention mask of type torch.int64."
 
     key = repeat_kv(key, module.num_key_value_groups)
@@ -361,13 +311,9 @@ def context_parallel_bitfield_attention_forward(
         query,
         key,
         value,
-        attention_mask,
+        bitfield_mask,
+        offsets_per_rank,
         sp_group,
-        seqlen_qs,
-        seqlen_ks,
-        offsets,
-        indices_perm,
-        indices_inverse_perm,
         None,
         None,
         heads_stride,

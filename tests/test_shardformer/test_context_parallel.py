@@ -288,7 +288,9 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
         if seq_len >= 256:
             mask[:, 180:280] = 1 << 1
 
-        ref_out: torch.Tensor = bitfield_attn_func(query, key, value, None, None, mask)
+        ref_out: torch.Tensor = bitfield_attn_func(
+            query, key, value, bitfield_mask=mask
+        )
 
         local_query = (
             torch.chunk(query, self.world_size, dim=1)[self.rank]
@@ -312,46 +314,17 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
             == (batch_size, seq_len // self.world_size, 8, 64)
         )
 
-        sequence_lengths = [seq_len] * batch_size
-
-        local_sequence_lengths_per_rank = [
-            t.shape[1] for t in torch.chunk(query, self.world_size, dim=1)
-        ]
-        local_sequence_lengths = [
-            [local_sequence_lengths_per_rank[r] for _ in range(batch_size)]
-            for r in range(self.world_size)
-        ]
-
         offsets_per_rank = torch.chunk(
-            torch.arange(query.shape[1], device="cpu"), self.world_size, dim=0
+            torch.arange(query.shape[1], device="cuda"), self.world_size, dim=0
         )
-        offsets = [
-            [offsets_per_rank[r].numpy() for _ in range(batch_size)]
-            for r in range(self.world_size)
-        ]
-
-        BitfieldUtils.set_sequence_lengths_cache(sequence_lengths)
-        ContextParallelBatchSplitUtils.set_context_parallel_sequence_lengths_cache(
-            local_sequence_lengths, offsets
-        )
-
-        seqlen_ks = BitfieldUtils.get_sequence_lengths_cache()[0]
-        seqlen_qs, offsets = (
-            ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache()
-        )
-        perm, inverse_perm = ContextParallelBatchSplitUtils.get_permutate_cache()
 
         cp_out: torch.Tensor = ContextParallelBitfieldAttention.apply(
             local_query,
             local_key,
             local_value,
             mask,
+            offsets_per_rank,
             dist.GroupMember.WORLD,
-            seqlen_qs,
-            seqlen_ks,
-            offsets,
-            perm,
-            inverse_perm,
         )
 
         torch.testing.assert_close(
