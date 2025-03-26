@@ -33,6 +33,7 @@ def materialize_bitfield_mask_block(
         start_m * BLOCK_M,
         start_n * BLOCK_N,
         seqlen,
+        seqlen,
         None,
         None,
         BLOCK_M,
