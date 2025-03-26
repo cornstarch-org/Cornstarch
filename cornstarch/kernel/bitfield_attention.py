@@ -59,11 +59,17 @@ def _materialize_bitfield_mask_block(
     off_n,
     seqlen_q,
     seqlen_k,
+    indices_q,
+    indices_k,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    offs_m = off_m + tl.arange(0, BLOCK_M)
-    offs_n = off_n + tl.arange(0, BLOCK_N)
+    if indices_q is not None:
+        offs_m = tl.load(indices_q + off_m + tl.arange(0, BLOCK_M))
+        offs_n = tl.load(indices_k + off_n + tl.arange(0, BLOCK_N))
+    else:
+        offs_m = off_m + tl.arange(0, BLOCK_M)
+        offs_n = off_n + tl.arange(0, BLOCK_N)
 
     q_bitfield_mask = tl.load(Bitfield_mask + offs_m, mask=offs_m < seqlen_q, other=0)
     kv_bitfield_mask = tl.load(Bitfield_mask + offs_n, mask=offs_n < seqlen_k, other=0)
@@ -92,6 +98,8 @@ def _materialize_compressed_mask(
     stride_outm,
     seqlen_q,
     seqlen_k,
+    indices_q,
+    indices_k,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -114,6 +122,8 @@ def _materialize_compressed_mask(
         start_n * BLOCK_N,
         seqlen_q,
         seqlen_k,
+        indices_q,
+        indices_k,
         BLOCK_M,
         BLOCK_N,
     )
@@ -130,7 +140,11 @@ def _materialize_compressed_mask(
     tl.store(out_ptr, result)
 
 
-def materialize_compressed_mask_from_bitfield_mask(mask: torch.Tensor) -> torch.Tensor:
+def materialize_compressed_mask_from_bitfield_mask(
+    mask: torch.Tensor,
+    offsets_q: Optional[torch.Tensor] = None,
+    offsets_k: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     batch_size, seq_len = mask.shape
     grid = (batch_size, triton.cdiv(seq_len, BLOCK_M), triton.cdiv(seq_len, BLOCK_N))
 
@@ -148,6 +162,8 @@ def materialize_compressed_mask_from_bitfield_mask(mask: torch.Tensor) -> torch.
         out.stride(1),
         seq_len,
         seq_len,
+        offsets_q,
+        offsets_k,
         BLOCK_M,
         BLOCK_N,
     )
@@ -209,6 +225,8 @@ def _fwd_kernel(
     seqlen_q,
     seqlen_k,
     seqlen_q_rounded,
+    offsets_q,
+    offsets_k,
     headdim,
     CACHE_KEY_SEQLEN_Q,
     CACHE_KEY_SEQLEN_K,
@@ -334,6 +352,8 @@ def _fwd_kernel(
                     start_n,
                     seqlen_q,
                     seqlen_k,
+                    offsets_q,
+                    offsets_k,
                     BLOCK_M,
                     BLOCK_N,
                 )
@@ -570,6 +590,8 @@ def _bwd_kernel_one_col_block(
     stride_cmm,
     seqlen_q,
     seqlen_k,
+    offsets_q,
+    offsets_k,
     headdim,
     BIAS_TYPE: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
@@ -684,6 +706,8 @@ def _bwd_kernel_one_col_block(
                     start_n * BLOCK_N,
                     seqlen_q,
                     seqlen_k,
+                    offsets_q,
+                    offsets_k,
                     BLOCK_M,
                     BLOCK_N,
                 )
@@ -872,6 +896,8 @@ def _bwd_kernel(
     seqlen_q,
     seqlen_k,
     seqlen_q_rounded,
+    offsets_q,
+    offsets_k,
     headdim,
     CACHE_KEY_SEQLEN_Q,
     CACHE_KEY_SEQLEN_K,
@@ -930,6 +956,8 @@ def _bwd_kernel(
         stride_cmm,
         seqlen_q,
         seqlen_k,
+        offsets_q,
+        offsets_k,
         headdim,
         BIAS_TYPE=BIAS_TYPE,
         BLOCK_HEADDIM=BLOCK_HEADDIM,
@@ -947,6 +975,8 @@ def _bitfield_attn_forward(
     v: torch.Tensor,
     bitfield_mask: torch.Tensor,
     compressed_mask: torch.Tensor,
+    offsets_q: Optional[torch.Tensor] = None,
+    offsets_k: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
 ):
@@ -1025,6 +1055,8 @@ def _bitfield_attn_forward(
         seqlen_q,
         seqlen_k,
         seqlen_q_rounded,
+        offsets_q,
+        offsets_k,
         d,
         seqlen_q // 32,
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
@@ -1046,6 +1078,8 @@ def _bitfield_attn_backward(
     dq: torch.Tensor,
     dk: torch.Tensor,
     dv: torch.Tensor,
+    offsets_q: Optional[torch.Tensor] = None,
+    offsets_k: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
 ):
@@ -1149,6 +1183,8 @@ def _bitfield_attn_backward(
         seqlen_q,
         seqlen_k,
         seqlen_q_rounded,
+        offsets_q,
+        offsets_k,
         d,
         seqlen_q // 32,
         seqlen_k // 32,  # key for triton cache (limit number of compilations)

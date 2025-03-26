@@ -35,6 +35,8 @@ def materialize_bitfield_mask_block(
         start_n * BLOCK_N,
         seqlen_q,
         seqlen_k,
+        None,
+        None,
         BLOCK_M,
         BLOCK_N,
     )
@@ -107,6 +109,8 @@ def test_materialize_bitfield_mask(size: str):
         converted_full_mask.stride(1),
         seq_len,
         seq_len,
+        None,
+        None,
         BLOCK_M,
         BLOCK_N,
     )
