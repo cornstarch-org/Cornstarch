@@ -47,7 +47,7 @@ def materialize_bitfield_mask_block(
     tl.store(
         out_ptr,
         submask,
-        mask=(offs_m < seqlen_q)[:, None] & (offs_n < seqlen_k)[None, :],
+        mask=(offs_m < seqlen)[:, None] & (offs_n < seqlen)[None, :],
     )
 
 
