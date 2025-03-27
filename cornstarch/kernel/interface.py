@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-import numpy as np
 import torch
-from colossalai.accelerator import get_accelerator
 from torch import nn
 from transformers.integrations.flash_attention import flash_attention_forward
 
