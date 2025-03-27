@@ -33,10 +33,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 )
 from transformers.utils import logging
 
-from cornstarch.kernel.interface import (
-    cornstarch_attention_forward,
-    materialize_attention_mask_from_bitfield_mask,
-)
+from cornstarch.kernel.interface import cornstarch_attention_forward
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 logger = logging.get_logger(__name__)
@@ -717,11 +714,7 @@ class MultimodalModel(nn.Module):
             "Please check if the language model is from HuggingFace Transformers."
         )
 
-        language_model.config._attn_implementation = "cornstarch_attention"
-        language_model._update_causal_mask = MethodType(
-            materialize_attention_mask_from_bitfield_mask,
-            language_model,
-        )
+        language_model.config._attn_implementation = "bitfield_attention"
 
     @classmethod
     def from_pretrained_multimodal_model(

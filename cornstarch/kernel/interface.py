@@ -72,25 +72,6 @@ def cornstarch_attention_forward(
     return attn_output, None
 
 
-def materialize_attention_mask_from_bitfield_mask(
-    self: nn.Module, attention_mask: torch.Tensor, *args, **kwargs
-) -> torch.Tensor:
-    if attention_mask.ndim == 3:
-        return attention_mask
-
-    causal_mask = torch.tril(
-        torch.ones(
-            attention_mask.shape[0],
-            attention_mask.shape[1],
-            attention_mask.shape[1],
-            dtype=torch.bool,
-            device=attention_mask.device,
-        )
-    )
-    bit_eq = attention_mask.unsqueeze(-1) == attention_mask.unsqueeze(-2)
-    return bit_eq & causal_mask
-
-
 def bitfield_attention_forward(
     module: nn.Module,
     query: torch.Tensor,

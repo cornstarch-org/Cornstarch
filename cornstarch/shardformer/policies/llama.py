@@ -31,7 +31,6 @@ from cornstarch.shardformer.modeling.llama import (
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
-from cornstarch.kernel.interface import materialize_attention_mask_from_bitfield_mask
 
 
 class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
@@ -271,15 +270,6 @@ class LlamaPolicy(PipelineTemplatePolicyBase, Policy):
                     suffix="norm",
                     target_module=FusedRMSNorm,
                 ),
-                policy=policy,
-                target_key=LlamaModel,
-            )
-
-        if sp_mode == "ring_attn":
-            self.append_or_create_method_replacement(
-                description={
-                    "_update_causal_mask": materialize_attention_mask_from_bitfield_mask
-                },
                 policy=policy,
                 target_key=LlamaModel,
             )
