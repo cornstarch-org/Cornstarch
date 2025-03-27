@@ -126,9 +126,9 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
     )
     @parametrize(
         "attention",
-        ["cornstarch_attention", "flash_attention_2", "eager"],
+        ["bitfield_attention", "flash_attention_2", "eager"],
         name_fn=lambda x: {
-            "cornstarch_attention": "ca",
+            "bitfield_attention": "bam",
             "flash_attention_2": "fa",
             "eager": "eager",
         }[x],
@@ -153,9 +153,9 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
     )
     @parametrize(
         "attention",
-        ["cornstarch_attention", "flash_attention_2", "eager"],
+        ["bitfield_attention", "flash_attention_2", "eager"],
         name_fn=lambda x: {
-            "cornstarch_attention": "ca",
+            "bitfield_attention": "bam",
             "flash_attention_2": "fa",
             "eager": "eager",
         }[x],
@@ -202,7 +202,7 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
         self.run_hybrid_parallel(
             tp_size,
             pp_size,
-            "cornstarch_attention",
+            "bitfield_attention",
             "bf16",
             "ring_attn",
             context_parallel_dist_mode,

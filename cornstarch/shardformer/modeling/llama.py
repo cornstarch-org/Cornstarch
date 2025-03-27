@@ -28,8 +28,8 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.processing_utils import Unpack
 
-from cornstarch.shardformer.layers.context_parallel_attention import (
-    context_parallel_cornstarch_attention,
+from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
+    context_parallel_bitfield_attention_forward,
 )
 from cornstarch.shardformer.layers.utils import (
     ContextParallelBatchSplitUtils,
@@ -124,19 +124,22 @@ class LlamaModelForwards:
             ContextParallelDistributionMode.UNIFORM,
         )
 
-        attn_mask = self._update_causal_mask(
-            attention_mask,
-            hidden_states,
-            cache_position,
-            past_key_values,
-            output_attentions,
-        )
+        if self.config._attn_implementation == "bitfield_attention":
+            attn_mask = attention_mask
+        else:
+            attn_mask = self._update_causal_mask(
+                attention_mask,
+                hidden_states,
+                cache_position,
+                past_key_values,
+                output_attentions,
+            )
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
             if sp_mode == "ring_attn":
-                assert self.config._attn_implementation == "cornstarch_attention", (
+                assert self.config._attn_implementation == "bitfield_attention", (
                     "Cornstarch context parallelism is only supported with cornstarch attention. "
                     f"Got {self.config._attn_implementation}"
                 )
@@ -165,12 +168,11 @@ class LlamaModelForwards:
 
             # Recompute position embeddings
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        else:
+
+        if sp_mode == "ring_attn":
             ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
                 context_parallel_offsets
             )
-
-        if sp_mode == "ring_attn":
             # Split attention mask after shuffling it
             attn_mask = ContextParallelBatchSplitUtils.split_batch(attn_mask, sp_group)
             attn_mask = ContextParallelBatchSplitUtils.shuffle_attention_mask(attn_mask)
@@ -233,12 +235,13 @@ class LlamaModelForwards:
                 "hidden_states": hidden_states,
                 "cache_position": cache_position,
                 "position_embeddings": position_embeddings,
-                "context_parallel_offsets": context_parallel_offsets,
             }
             if output_hidden_states:
                 outputs["all_hidden_states"] = all_hidden_states
             if output_attentions:
                 outputs["all_self_attentions"] = all_self_attentions
+            if context_parallel_offsets is not None:
+                outputs["context_parallel_offsets"] = context_parallel_offsets
             return outputs
 
         hidden_states = self.norm(hidden_states)
@@ -321,7 +324,7 @@ class LlamaModelForwards:
                 ContextParallelDistributionMode.UNIFORM,
             )
 
-            assert self.config._attn_implementation == "cornstarch_attention", (
+            assert self.config._attn_implementation == "bitfield_attention", (
                 "Cornstarch context parallelism is only supported with cornstarch_attention. "
                 f"Got {self.config._attn_implementation}"
             )
@@ -467,13 +470,13 @@ class LlamaAttentionForwards:
             )
 
         if sp_mode == "ring_attn":
-            assert self.config._attn_implementation == "cornstarch_attention", (
-                "Cornstarch context parallelism is only supported with cornstarch_attention. "
+            assert self.config._attn_implementation == "bitfield_attention", (
+                "Cornstarch context parallelism is only supported with bitfield_attention. "
                 f"Got {self.config._attn_implementation}"
             )
 
             attention_interface: Callable = functools.partial(
-                context_parallel_cornstarch_attention, sp_group=sp_group
+                context_parallel_bitfield_attention_forward, sp_group=sp_group
             )
         else:
             attention_interface: Callable = eager_attention_forward

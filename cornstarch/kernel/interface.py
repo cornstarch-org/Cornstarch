@@ -132,19 +132,7 @@ def bitfield_attention_forward(
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
 
-    seq_lens, offsets = BitfieldUtils.get_sequence_lengths_cache()
-
-    attn_output = bitfield_attn_func(
-        query,
-        key,
-        value,
-        None,
-        None,
-        attention_mask,
-        seq_lens,
-        seq_lens,
-        offsets,
-    )
+    attn_output = bitfield_attn_func(query, key, value, bitfield_mask=attention_mask)
 
     return attn_output, None
 
