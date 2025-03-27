@@ -115,6 +115,27 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
         }
         return super().postprocess_data_for_original_model(new_data, precision)
 
+    @parametrize("model_name", vision_models.keys(), name_fn=lambda m: m)
+    @parametrize(
+        "tp_size, pp_size",
+        [(4, 1), (1, 1), (2, 2), (1, 4)],
+        name_fn=lambda tp, pp: f"tp{tp}_pp{pp}",
+    )
+    def test_context_parallel(
+        self,
+        model_name: str,
+        tp_size: int,
+        pp_size: int,
+    ):
+        self.set_model(vision_models[model_name]())
+        self.run_hybrid_parallel(
+            tp_size,
+            pp_size,
+            "flash_attention_2",
+            "bf16",
+            "ring_attn",
+        )
+
 
 @instantiate_parametrized_tests
 class LanguageHybridParallel(ColossalaiHybridParallelBase):

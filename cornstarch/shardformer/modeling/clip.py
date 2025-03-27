@@ -148,7 +148,7 @@ class CLIPVisionModelForwards:
                 outputs["encoder_states"] = encoder_states
             if output_attentions:
                 outputs["attentions"] = all_attentions
-            if sp_mode == "ring_attn":
+            if sp_mode == "ring_attn" and offsets_per_rank is not None:
                 outputs["offsets_per_rank"] = offsets_per_rank
             return outputs
 

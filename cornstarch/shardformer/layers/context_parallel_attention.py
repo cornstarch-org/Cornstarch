@@ -46,7 +46,15 @@ class ContextParallelFlashAttention(torch.autograd.Function):
         per_head_events: list[torch.cuda.Event] = []
 
         # pre-allocate memory for k and v gathering for all heads
-        seqlen_per_rank = [seqlen_kv] * dist.get_world_size(sp_group)
+        seqlen_per_rank = [
+            torch.empty(1, dtype=torch.long, device=k.device)
+            for _ in range(dist.get_world_size(sp_group))
+        ]
+        dist.all_gather(
+            seqlen_per_rank, torch.tensor(seqlen_kv, device=k.device), group=sp_group
+        )
+
+        seqlen_per_rank = [seqlen.item() for seqlen in seqlen_per_rank]
         total_seqlen = sum(seqlen_per_rank)
         gathered_kv = [
             torch.empty(
@@ -116,6 +124,7 @@ class ContextParallelFlashAttention(torch.autograd.Function):
             lses.append(lse)
 
         ctx.save_for_backward(q, k, v)
+        ctx.seqlen_per_rank = seqlen_per_rank
         ctx.heads_stride = heads_stride
         ctx.os = os
         ctx.lses = lses
@@ -129,6 +138,7 @@ class ContextParallelFlashAttention(torch.autograd.Function):
         stream = ContextParallelFlashAttention.stream
 
         q, k, v = ctx.saved_tensors
+        seqlen_per_rank: list[int] = ctx.seqlen_per_rank
         heads_stride: int = ctx.heads_stride
         os: list[torch.Tensor] = ctx.os
         lses: list[torch.Tensor] = ctx.lses
@@ -141,7 +151,6 @@ class ContextParallelFlashAttention(torch.autograd.Function):
         per_head_events: list[torch.cuda.Event] = []
 
         # pre-allocate memory for k and v gathering for all heads
-        seqlen_per_rank = [seqlen_kv] * dist.get_world_size(sp_group)
         total_seqlen = sum(seqlen_per_rank)
         gathered_kv = [
             torch.empty(
@@ -252,7 +261,6 @@ def context_parallel_flash_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     sp_group: dist.ProcessGroup,
-    is_causal: bool = False,
     heads_stride: int = 1,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
@@ -266,7 +274,7 @@ def context_parallel_flash_attention(
     value = value.transpose(1, 2)
 
     attn_output = ContextParallelFlashAttention.apply(
-        query, key, value, sp_group, is_causal, heads_stride
+        query, key, value, sp_group, heads_stride
     )
 
     return attn_output, None

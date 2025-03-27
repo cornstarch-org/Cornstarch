@@ -361,13 +361,13 @@ class ContextParallelBatchSplitUtils:
         batch: torch.Tensor,
         sp_group: dist.ProcessGroup,
     ) -> torch.Tensor:
-        assert cls.context_parallel_offsets_cache is not None, "Offsets must be set."
-
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
-
         batch_size, seq_len = batch.shape[:2]
-        if sp_size == 1 or seq_len < 128 * sp_size:
+
+        # if context length is too small
+        if cls.context_parallel_offsets_cache is None:
+            assert sp_size == 1 or seq_len < 128 * sp_size
             return batch
 
         return batch[:, cls.context_parallel_offsets_cache[sp_rank]]
