@@ -1,6 +1,5 @@
 import functools
 import itertools
-import warnings
 from typing import List, cast
 
 from colossalai.shardformer.layer import (
@@ -20,7 +19,10 @@ from transformers.models.clip.configuration_clip import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPVisionTransformer
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.clip import CLIPVisionModelForwards
+from cornstarch.shardformer.modeling.clip import (
+    CLIPVisionAttentionForwards,
+    CLIPVisionModelForwards,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -92,15 +94,9 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
             "flash_attention_2": CLIPFlashAttention2,
             "sdpa": CLIPSdpaAttention,
         }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
+        # attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
-
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "CLIP doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
-            )
 
         tp_size = self.shard_config.tensor_parallel_size
         num_heads = config.num_attention_heads
@@ -117,19 +113,23 @@ class CLIPVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement = {}
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
+        attention_attribute_replacement["is_causal"] = False
 
-        policy[attn_cls] = ModulePolicyDescription(
-            attribute_replacement=attention_attribute_replacement
+        attn_policy = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    CLIPVisionAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
         )
+        for attn_impl in ATTN_IMPLEMENTATION.values():
+            policy[attn_impl] = attn_policy
 
         if self.shard_config.enable_flash_attention:
             attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
                 not is_flash_attn_greater_or_equal("2.1.0")
-            )
-
-            policy[attn_cls] = ModulePolicyDescription(
-                attribute_replacement=attention_attribute_replacement,
-                method_replacement={"forward": CLIPFlashAttention2.forward},
             )
 
             policy[CLIPVisionTransformer] = ModulePolicyDescription(
