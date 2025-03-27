@@ -173,9 +173,6 @@ class LlamaModelForwards:
             ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
                 context_parallel_offsets
             )
-            # Split attention mask after shuffling it
-            attn_mask = ContextParallelBatchSplitUtils.split_batch(attn_mask, sp_group)
-            attn_mask = ContextParallelBatchSplitUtils.shuffle_attention_mask(attn_mask)
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
@@ -185,8 +182,8 @@ class LlamaModelForwards:
 
         kwargs = {}
         if sp_mode == "ring_attn":
-            kwargs["seqlen_per_rank"] = (
-                ContextParallelBatchSplitUtils.get_seqlen_per_rank()
+            kwargs["offsets_per_rank"] = (
+                ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
             )
 
         for decoder_layer in self.layers[start_idx:end_idx]:
@@ -329,16 +326,16 @@ class LlamaModelForwards:
                 f"Got {self.config._attn_implementation}"
             )
 
-            if context_parallel_offsets is not None:
-                ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
-                    context_parallel_offsets
-                )
-            else:
-                attention_mask = self.model._update_causal_mask(
-                    attention_mask=attention_mask
-                )
+            if context_parallel_offsets is None:
+                # This is the first stage. Create offsets
+                assert stage_manager is None or stage_manager.is_first_stage()
                 ContextParallelBatchSplitUtils.create_context_parallel_split(
                     attention_mask, sp_group, dist_mode=cp_dist_mode
+                )
+            else:
+                # Set given offsets cache to batch split utils
+                ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
+                    context_parallel_offsets
                 )
 
             labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)

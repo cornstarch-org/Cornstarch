@@ -305,7 +305,7 @@ class ContextParallelBatchSplitUtils:
             return inv
 
         merged_offsets = inverse_permutation(
-            cls.context_parallel_offsets_cache.view(-1)
+            torch.cat(cls.context_parallel_offsets_cache, dim=0)
         )
 
         return mask[:, :, merged_offsets].contiguous()
