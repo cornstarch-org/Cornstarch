@@ -310,18 +310,23 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
             query, key, value, bitfield_mask=mask
         )
 
+        seq_len = query.size(1)
+        base_chunk = (seq_len // self.world_size // 128) * 128
+        chunk_sizes = [base_chunk] * (self.world_size - 1)
+        chunk_sizes.append(seq_len - sum(chunk_sizes))
+
         local_query = (
-            torch.chunk(query, self.world_size, dim=1)[self.rank]
+            torch.split(query, chunk_sizes, dim=1)[self.rank]
             .requires_grad_()
             .contiguous()
         )
         local_key = (
-            torch.chunk(key, self.world_size, dim=1)[self.rank]
+            torch.split(key, chunk_sizes, dim=1)[self.rank]
             .requires_grad_()
             .contiguous()
         )
         local_value = (
-            torch.chunk(value, self.world_size, dim=1)[self.rank]
+            torch.split(value, chunk_sizes, dim=1)[self.rank]
             .requires_grad_()
             .contiguous()
         )
@@ -329,11 +334,11 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
         assert (
             local_key.shape
             == local_value.shape
-            == (batch_size, seq_len // self.world_size, 8, 64)
+            == (batch_size, chunk_sizes[self.rank], 8, 64)
         )
 
-        offsets_per_rank = torch.chunk(
-            torch.arange(query.shape[1], device="cuda"), self.world_size, dim=0
+        offsets_per_rank = torch.split(
+            torch.arange(query.shape[1], device="cuda"), chunk_sizes, dim=0
         )
         ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
             offsets_per_rank
@@ -353,7 +358,7 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
         )
 
         torch.testing.assert_close(
-            torch.chunk(ref_out, self.world_size, dim=1)[self.rank].contiguous(),
+            torch.split(ref_out, chunk_sizes, dim=1)[self.rank].contiguous(),
             cp_out,
             rtol=5e-3,
             atol=5e-3,
@@ -366,25 +371,25 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
         dout = torch.randn_like(ref_out).normal_(mean=0, std=0.5)
         ref_dq, ref_dk, ref_dv = torch.autograd.grad(ref_out, [query, key, value], dout)
 
-        cp_dout = torch.chunk(dout, self.world_size, dim=1)[self.rank].contiguous()
+        cp_dout = torch.split(dout, chunk_sizes, dim=1)[self.rank].contiguous()
         cp_dq, cp_dk, cp_dv = torch.autograd.grad(
             cp_out, [local_query, local_key, local_value], cp_dout
         )
 
         torch.testing.assert_close(
-            torch.chunk(ref_dq, self.world_size, dim=1)[self.rank].contiguous(),
+            torch.split(ref_dq, chunk_sizes, dim=1)[self.rank].contiguous(),
             cp_dq,
             rtol=5e-3,
             atol=5e-3,
         )
         torch.testing.assert_close(
-            torch.chunk(ref_dk, self.world_size, dim=1)[self.rank].contiguous(),
+            torch.split(ref_dk, chunk_sizes, dim=1)[self.rank].contiguous(),
             cp_dk,
             rtol=5e-3,
             atol=5e-3,
         )
         torch.testing.assert_close(
-            torch.chunk(ref_dv, self.world_size, dim=1)[self.rank].contiguous(),
+            torch.split(ref_dv, chunk_sizes, dim=1)[self.rank].contiguous(),
             cp_dv,
             rtol=5e-3,
             atol=5e-3,

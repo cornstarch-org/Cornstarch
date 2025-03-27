@@ -128,10 +128,12 @@ def all_gather_gloo(
 ):
     assert isinstance(tensor_list, list)
 
-    cpu_tensor_list = [t.to("cpu") for t in tensor_list]
-    tensor = tensor.to("cpu")
+    cpu_tensor_list = [torch.empty_like(t, device="cpu") for t in tensor_list]
+    for rank in range(dist.get_world_size(group)):
+        if rank == dist.get_rank(group):
+            cpu_tensor_list[rank].copy_(tensor)
 
-    torch.distributed.distributed_c10d.all_gather(cpu_tensor_list, tensor, group=group)
+        dist.broadcast(cpu_tensor_list[rank], group=group, group_src=rank)
 
     for t, ct in zip(tensor_list, cpu_tensor_list):
         t.copy_(ct)
