@@ -6,16 +6,16 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+from torch.nn.functional import scaled_dot_product_attention as sdpa
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
-from cornstarch.kernel.attention import flash_attn_func
 from cornstarch.kernel.bitfield_attention import BitfieldUtils, bitfield_attn_func
 from cornstarch.shardformer.layers.context_parallel_attention import (
-    ContextParallelCornstarchAttention,
+    ContextParallelFlashAttention,
 )
 from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
     ContextParallelBitfieldAttention,
@@ -286,7 +286,7 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
     def test(self, batch_size: int, seq_len: int) -> tuple[torch.Tensor, ...]:
         query, key, value = torch.unbind(
             torch.randn(
-                (3, batch_size, seq_len, 8, 64), device="cuda", dtype=torch.float16
+                (3, batch_size, seq_len, 8, 64), device="cuda", dtype=torch.bfloat16
             ).normal_(mean=0, std=0.5),
         )
 
@@ -335,12 +335,19 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
         offsets_per_rank = torch.chunk(
             torch.arange(query.shape[1], device="cuda"), self.world_size, dim=0
         )
+        ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
+            offsets_per_rank
+        )
+        compressed_mask = ContextParallelBatchSplitUtils.get_local_compressed_mask(
+            mask, dist.GroupMember.WORLD
+        )
 
         cp_out: torch.Tensor = ContextParallelBitfieldAttention.apply(
             local_query,
             local_key,
             local_value,
             mask,
+            compressed_mask,
             offsets_per_rank,
             dist.GroupMember.WORLD,
         )
@@ -385,7 +392,7 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
 
 
 @instantiate_parametrized_tests
-class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase):
+class TestFlashAttentionContextParallelismClass(GlooDistributedTestBase):
     @property
     def world_size(self) -> int:
         return 2
@@ -402,13 +409,12 @@ class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase)
         for t in [query, key, value]:
             t.requires_grad_()
 
-        mask = torch.tril(
-            torch.full(
-                (batch_size, seq_len, seq_len), True, dtype=torch.bool, device="cuda"
-            )
-        )
-
-        ref_out: torch.Tensor = flash_attn_func(query, key, value, mask=mask)
+        ref_out: torch.Tensor = sdpa(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            is_causal=False,
+        ).transpose(1, 2)
 
         local_query = (
             torch.chunk(query, self.world_size, dim=1)[self.rank]
@@ -428,24 +434,16 @@ class TestFlashAttentionWithMaskContextParallelismClass(GlooDistributedTestBase)
             .contiguous()
         )
 
-        local_mask = torch.chunk(mask, self.world_size, dim=1)[self.rank]
-
         assert (
             local_key.shape
             == local_value.shape
             == (batch_size, seq_len // self.world_size, 8, 64)
         )
 
-        seqlen_per_rank = torch.tensor(
-            [seq_len // self.world_size] * self.world_size, device="cuda"
-        )
-
-        cp_out: torch.Tensor = ContextParallelCornstarchAttention.apply(
+        cp_out: torch.Tensor = ContextParallelFlashAttention.apply(
             local_query,
             local_key,
             local_value,
-            local_mask,
-            seqlen_per_rank,
             dist.GroupMember.WORLD,
         )
 

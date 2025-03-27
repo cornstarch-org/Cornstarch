@@ -1,14 +1,12 @@
-from typing import Optional
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 
-from cornstarch.kernel.attention import _flash_attn_backward, _flash_attn_forward
 from cornstarch.kernel.interface import repeat_kv
 
 
-class ContextParallelCornstarchAttention(torch.autograd.Function):
+class ContextParallelFlashAttention(torch.autograd.Function):
 
     stream: torch.cuda.Stream = None
 
@@ -18,10 +16,7 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        mask: torch.Tensor,
-        seqlen_per_rank: torch.Tensor,
         sp_group: dist.ProcessGroup,
-        bias: Optional[torch.Tensor] = None,
         heads_stride: int = 1,
     ) -> torch.Tensor:
         """
@@ -31,15 +26,14 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
             columns should be aligned with the order of gathered kv
         seqlen_per_rank: (world_size(sp_group),)
         """
-        if ContextParallelCornstarchAttention.stream is None:
-            ContextParallelCornstarchAttention.stream = torch.cuda.Stream()
+        if ContextParallelFlashAttention.stream is None:
+            ContextParallelFlashAttention.stream = torch.cuda.Stream()
 
-        stream = ContextParallelCornstarchAttention.stream
+        stream = ContextParallelFlashAttention.stream
 
         batch, seqlen_q, nheads, d = q.shape
         _, seqlen_kv, _, _ = k.shape
 
-        assert mask.shape == (batch, seqlen_q, seqlen_per_rank.sum().item())
         assert k.shape == (batch, seqlen_kv, nheads, d)
         assert v.shape == (batch, seqlen_kv, nheads, d)
         assert (
@@ -52,7 +46,8 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
         per_head_events: list[torch.cuda.Event] = []
 
         # pre-allocate memory for k and v gathering for all heads
-        total_seqlen = seqlen_per_rank.sum().item()
+        seqlen_per_rank = [seqlen_kv] * dist.get_world_size(sp_group)
+        total_seqlen = sum(seqlen_per_rank)
         gathered_kv = [
             torch.empty(
                 (2, batch, total_seqlen, heads_stride, d),
@@ -68,7 +63,7 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
                 dist.all_gather(
                     list(
                         gathered_kv[head_index // heads_stride][0].split(
-                            seqlen_per_rank.tolist(), dim=1
+                            seqlen_per_rank, dim=1
                         )
                     ),
                     k[:, :, head_index : head_index + heads_stride, :].contiguous(),
@@ -78,7 +73,7 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
                 dist.all_gather(
                     list(
                         gathered_kv[head_index // heads_stride][1].split(
-                            seqlen_per_rank.tolist(), dim=1
+                            seqlen_per_rank, dim=1
                         )
                     ),
                     v[:, :, head_index : head_index + heads_stride, :].contiguous(),
@@ -91,8 +86,8 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
 
         os: list[torch.Tensor] = []
         lses: list[torch.Tensor] = []
-        softmax_scales: list[torch.Tensor] = []
 
+        softmax_scale = q.shape[-1] ** (-0.5)
         assert len(per_head_events) == nheads // heads_stride
         for head_index in range(0, nheads, heads_stride):
             event = per_head_events[head_index // heads_stride]
@@ -103,39 +98,41 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
             current_v = gathered_kv[head_index // heads_stride][1]
             assert current_k.is_contiguous() and current_v.is_contiguous()
 
-            o, lse, softmax_scale = _flash_attn_forward(
-                current_q, current_k, current_v, bias, mask
+            o, lse, _, _ = _flash_attn_forward(
+                current_q,
+                current_k,
+                current_v,
+                dropout_p=0.0,
+                softmax_scale=softmax_scale,
+                causal=False,
+                window_size_left=-1,
+                window_size_right=-1,
+                softcap=0.0,
+                alibi_slopes=None,
+                return_softmax=False,
             )
 
             os.append(o)
             lses.append(lse)
-            softmax_scales.append(softmax_scale)
 
-        ctx.save_for_backward(
-            q,
-            k,
-            v,
-            bias,
-            mask,
-            seqlen_per_rank,
-        )
+        ctx.save_for_backward(q, k, v)
         ctx.heads_stride = heads_stride
         ctx.os = os
         ctx.lses = lses
-        ctx.softmax_scales = softmax_scales
+        ctx.softmax_scale = softmax_scale
         ctx.sp_group = sp_group
 
         return torch.cat(os, dim=2)
 
     @staticmethod
     def backward(ctx: torch.autograd.function.FunctionCtx, do: torch.Tensor):
-        stream = ContextParallelCornstarchAttention.stream
+        stream = ContextParallelFlashAttention.stream
 
-        q, k, v, bias, mask, seqlen_per_rank = ctx.saved_tensors
+        q, k, v = ctx.saved_tensors
         heads_stride: int = ctx.heads_stride
         os: list[torch.Tensor] = ctx.os
         lses: list[torch.Tensor] = ctx.lses
-        softmax_scales: list[torch.Tensor] = ctx.softmax_scales
+        softmax_scale: float = ctx.softmax_scale
         sp_group: dist.ProcessGroup = ctx.sp_group
 
         batch, seqlen_q, nheads, d = q.shape
@@ -144,7 +141,8 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
         per_head_events: list[torch.cuda.Event] = []
 
         # pre-allocate memory for k and v gathering for all heads
-        total_seqlen = seqlen_per_rank.sum().item()
+        seqlen_per_rank = [seqlen_kv] * dist.get_world_size(sp_group)
+        total_seqlen = sum(seqlen_per_rank)
         gathered_kv = [
             torch.empty(
                 (2, batch, total_seqlen, heads_stride, d),
@@ -160,7 +158,7 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
                 dist.all_gather(
                     list(
                         gathered_kv[head_index // heads_stride][0].split(
-                            seqlen_per_rank.tolist(), dim=1
+                            seqlen_per_rank, dim=1
                         )
                     ),
                     k[:, :, head_index : head_index + heads_stride, :].contiguous(),
@@ -170,7 +168,7 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
                 dist.all_gather(
                     list(
                         gathered_kv[head_index // heads_stride][1].split(
-                            seqlen_per_rank.tolist(), dim=1
+                            seqlen_per_rank, dim=1
                         )
                     ),
                     v[:, :, head_index : head_index + heads_stride, :].contiguous(),
@@ -208,29 +206,30 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
             )
 
             _flash_attn_backward(
-                do=do[:, :, head_index : head_index + heads_stride, :],
+                dout=do[:, :, head_index : head_index + heads_stride, :],
                 q=q[:, :, head_index : head_index + heads_stride, :],
                 k=gathered_kv[head_index // heads_stride][0],
                 v=gathered_kv[head_index // heads_stride][1],
-                o=os[head_index // heads_stride],
-                lse=lses[head_index // heads_stride],
+                out=os[head_index // heads_stride],
+                softmax_lse=lses[head_index // heads_stride],
                 dq=dq,
                 dk=dgkv[0],
                 dv=dgkv[1],
-                bias=bias,
-                mask=mask,
-                softmax_scale=softmax_scales[head_index // heads_stride],
+                dropout_p=0.0,
+                softmax_scale=softmax_scale,
+                causal=False,
+                window_size_left=-1,
+                window_size_right=-1,
+                softcap=0.0,
+                alibi_slopes=None,
+                deterministic=False,
             )
 
             dist.reduce_scatter(
-                dkv[0],
-                list(dgkv[0].split(seqlen_per_rank.tolist(), dim=1)),
-                group=sp_group,
+                dkv[0], list(dgkv[0].split(seqlen_per_rank, dim=1)), group=sp_group
             )
             dist.reduce_scatter(
-                dkv[1],
-                list(dgkv[1].split(seqlen_per_rank.tolist(), dim=1)),
-                group=sp_group,
+                dkv[1], list(dgkv[1].split(seqlen_per_rank, dim=1)), group=sp_group
             )
 
             dqs.append(dq.clone())
@@ -244,25 +243,19 @@ class ContextParallelCornstarchAttention(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
         )
 
 
-def context_parallel_cornstarch_attention(
+def context_parallel_flash_attention(
     module: nn.Module,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: torch.Tensor,
-    seqlen_per_rank: torch.Tensor,
     sp_group: dist.ProcessGroup,
-    bias: Optional[torch.Tensor] = None,
+    is_causal: bool = False,
     heads_stride: int = 1,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
-    assert attention_mask is not None and attention_mask.dtype == torch.bool
-
     if query.shape[1] > key.shape[1]:
         key = repeat_kv(key, module.num_key_value_groups)
         value = repeat_kv(value, module.num_key_value_groups)
@@ -272,8 +265,8 @@ def context_parallel_cornstarch_attention(
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
 
-    attn_output = ContextParallelCornstarchAttention.apply(
-        query, key, value, attention_mask, seqlen_per_rank, sp_group, bias, heads_stride
+    attn_output = ContextParallelFlashAttention.apply(
+        query, key, value, sp_group, is_causal, heads_stride
     )
 
     return attn_output, None
