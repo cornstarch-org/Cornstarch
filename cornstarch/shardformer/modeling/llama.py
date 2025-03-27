@@ -363,7 +363,6 @@ class LlamaModelForwards:
         )
         past_key_values = None
 
-        stage_manager = shard_config.pipeline_stage_manager
         if not (stage_manager is None or stage_manager.is_last_stage()):
             return outputs
 

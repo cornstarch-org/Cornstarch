@@ -28,7 +28,7 @@ from transformers.models.mistral.modeling_mistral import (
 )
 from transformers.processing_utils import Unpack
 
-from cornstarch.kernel.interface import BitfieldUtils
+from cornstarch.kernel.bitfield_attention import BitfieldUtils
 from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
     context_parallel_bitfield_attention_forward,
 )
@@ -125,9 +125,6 @@ class MistralModelForwards:
         )
 
         if self.config._attn_implementation == "bitfield_attention":
-            if BitfieldUtils.sequence_lengths_cache is None:
-                sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
-                BitfieldUtils.set_sequence_lengths_cache(sequence_lengths.tolist())
             attn_mask = attention_mask
         else:
             # causal mask
@@ -140,6 +137,7 @@ class MistralModelForwards:
             )
 
         # Support SP + PP. Later stages have already received the split input.
+        offsets_per_rank = flash_attn_kwargs.get("offsets_per_rank", None)
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
             if sp_mode == "ring_attn":
@@ -147,15 +145,23 @@ class MistralModelForwards:
                     "Cornstarch context parallelism is only supported with bitfield_attention. "
                     f"Got {self.config._attn_implementation}"
                 )
-                sequence_lengths = BitfieldUtils.sequence_lengths_cache[0]
-                hidden_states, _, offsets = ContextParallelBatchSplitUtils.split_batch(
+
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    attention_mask, sp_group, dist_mode=cp_dist_mode
+                )
+                offsets_per_rank = (
+                    ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
+                )
+
+                hidden_states = ContextParallelBatchSplitUtils.split_batch(
                     hidden_states,
-                    sequence_lengths,
-                    attn_mask,
                     sp_group,
-                    dist_mode=cp_dist_mode,
-                )  # shape: [B, L // sp_size, ...]
-                position_ids = offsets
+                )
+                position_ids = (
+                    ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache(
+                        dist.get_rank(sp_group)
+                    ).unsqueeze(0)
+                )
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
@@ -164,6 +170,10 @@ class MistralModelForwards:
             # Recompute position embeddings
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
+        ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
+            offsets_per_rank
+        )
+
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
@@ -171,22 +181,15 @@ class MistralModelForwards:
             start_idx, end_idx = (0, len(self.layers))
 
         kwargs = {}
-        if self.config._attn_implementation == "bitfield_attention":
-            seqlen_ks, offsets = BitfieldUtils.get_sequence_lengths_cache()
-            seqlen_qs = seqlen_ks
-            if sp_mode == "ring_attn":
-                seqlen_qs, offsets = (
-                    ContextParallelBatchSplitUtils.get_context_parallel_sequence_lengths_cache()
-                )
-                indices_perm, indices_inverse_perm = (
-                    ContextParallelBatchSplitUtils.get_permutate_cache()
-                )
-                kwargs["indices_perm"] = indices_perm
-                kwargs["indices_inverse_perm"] = indices_inverse_perm
-
-            kwargs["seqlen_qs"] = seqlen_qs
-            kwargs["seqlen_ks"] = seqlen_ks
-            kwargs["offsets"] = offsets
+        if sp_mode == "ring_attn":
+            kwargs.update(
+                {
+                    "compressed_mask": ContextParallelBatchSplitUtils.get_local_compressed_mask(
+                        attn_mask, sp_group
+                    ),
+                    "offsets_per_rank": offsets_per_rank,
+                }
+            )
 
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
@@ -231,13 +234,13 @@ class MistralModelForwards:
             outputs = {
                 "hidden_states": hidden_states,
                 "cache_position": cache_position,
-                "position_ids": position_ids,
                 "position_embeddings": position_embeddings,
             }
             if output_hidden_states:
                 outputs["all_hidden_states"] = all_hidden_states
             if output_attentions:
                 outputs["all_self_attentions"] = all_self_attentions
+            outputs.update(kwargs)
             return outputs
 
         hidden_states = self.norm(hidden_states)
@@ -294,6 +297,19 @@ class MistralModelForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
+        stage_manager = shard_config.pipeline_stage_manager
+        if stage_manager is not None:
+            if output_attentions:
+                logger.warning_once(
+                    "output_attentions=True is not supported for pipeline models at the moment."
+                )
+                output_attentions = False
+            if output_hidden_states:
+                logger.warning_once(
+                    "output_hidden_states=True is not supported for pipeline models at the moment."
+                )
+                output_hidden_states = False
+
         if (
             shard_config.sequence_parallelism_mode == "ring_attn"
             and shard_config.parallel_output
@@ -307,18 +323,23 @@ class MistralModelForwards:
             )
 
             assert self.config._attn_implementation == "bitfield_attention", (
-                "Cornstarch context parallelism is only supported with bitfield_attention. "
+                "Cornstarch context parallelism is only supported with cornstarch_attention. "
                 f"Got {self.config._attn_implementation}"
             )
 
-            sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
-            labels, _, _ = ContextParallelBatchSplitUtils.split_batch(
-                labels,
-                sequence_lengths,
-                attention_mask,
-                sp_group,
-                dist_mode=cp_dist_mode,
-            )
+            if "offsets_per_rank" not in kwargs:
+                # This is the first stage. Create offsets
+                assert stage_manager is None or stage_manager.is_first_stage()
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    attention_mask, sp_group, dist_mode=cp_dist_mode
+                )
+            else:
+                # Set given offsets cache to batch split utils
+                ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
+                    kwargs["offsets_per_rank"]
+                )
+
+            labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = MistralModelForwards.mistral_model_forward(
@@ -345,7 +366,6 @@ class MistralModelForwards:
         BitfieldUtils.clear_cache()
         ContextParallelBatchSplitUtils.clear_cache()
 
-        stage_manager = shard_config.pipeline_stage_manager
         if not (stage_manager is None or stage_manager.is_last_stage()):
             return outputs
 

@@ -184,9 +184,13 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
             },
         )
 
+        policy[Gemma2DecoderLayer] = ModulePolicyDescription(
+            attribute_replacement={"is_sliding": False}
+        )
+
         if self.shard_config.enable_tensor_parallelism:
-            policy[Gemma2DecoderLayer] = ModulePolicyDescription(
-                sub_module_replacement=[
+            self.append_or_create_submodule_replacement(
+                [
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
                         target_module=Linear1D_Col,
@@ -216,6 +220,8 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
                         target_module=Linear1D_Row,
                     ),
                 ],
+                policy=policy,
+                target=Gemma2DecoderLayer,
             )
 
         embedding_cls = None
