@@ -40,25 +40,6 @@ class ContextParallelBatchSplitUtils:
         cls.context_parallel_offsets_cache = offsets_per_rank
 
     @classmethod
-    def get_seqlen_per_rank(
-        cls: ContextParallelBatchSplitUtils, device: torch.device = None
-    ) -> Optional[torch.Tensor]:
-        if device is None:
-            device = get_accelerator().get_current_device()
-
-        if cls.context_parallel_offsets_cache is None:
-            return None
-
-        return torch.tensor(
-            [
-                len(offsets_per_rank)
-                for offsets_per_rank in cls.context_parallel_offsets_cache
-            ],
-            dtype=torch.long,
-            device=device,
-        )
-
-    @classmethod
     def get_context_parallel_offsets_cache(
         cls: ContextParallelBatchSplitUtils, sp_rank: int = -1
     ) -> Optional[torch.Tensor]:
@@ -287,25 +268,3 @@ class ContextParallelBatchSplitUtils:
             return batch
 
         return batch[:, cls.context_parallel_offsets_cache[sp_rank]]
-
-    @classmethod
-    def shuffle_attention_mask(
-        cls: ContextParallelBatchSplitUtils,
-        mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        When kvs are gathered, they are not reordered in the original order,
-        instead simply concatenated.
-        This function shuffles the attention mask's columns to match the order of the kvs.
-        """
-
-        def inverse_permutation(perm: torch.Tensor) -> torch.Tensor:
-            inv = torch.empty_like(perm)
-            inv[perm] = torch.arange(perm.shape[0], device=perm.device)
-            return inv
-
-        merged_offsets = inverse_permutation(
-            torch.cat(cls.context_parallel_offsets_cache, dim=0)
-        )
-
-        return mask[:, :, merged_offsets].contiguous()
