@@ -13,7 +13,7 @@ from torch.testing._internal.common_utils import (
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from cornstarch.kernel.attention import flash_attn_func
-from cornstarch.kernel.bitfield_attention import bitfield_attn_func
+from cornstarch.kernel.bitfield_attention import BitfieldUtils, bitfield_attn_func
 from cornstarch.shardformer.layers.context_parallel_attention import (
     ContextParallelCornstarchAttention,
 )
@@ -81,6 +81,7 @@ class TestContextParallelBatchSplitUtilClass:
         if dist.is_initialized():
             dist.destroy_process_group()
 
+        BitfieldUtils.clear_cache()
         ContextParallelBatchSplitUtils.clear_cache()
 
     @pytest.mark.parametrize(
@@ -195,8 +196,9 @@ class TestContextParallelBatchSplitUtilClass:
     )
     @pytest.mark.parametrize("world_size", [1, 4], ids=["world=1", "world=4"])
     @pytest.mark.parametrize("mask_type", ["causal", "full"])
+    @pytest.mark.parametrize("mask_repr", ["bitfield", "full"])
     def test_split_batch_makespan_min_singlebatch(
-        self, seqlen: int, world_size: int, mask_type: str
+        self, seqlen: int, world_size: int, mask_type: str, mask_repr: str
     ):
         batch_size = 1
 
@@ -206,15 +208,28 @@ class TestContextParallelBatchSplitUtilClass:
         )
 
         if mask_type == "causal":
-            mask = torch.tril(
-                torch.ones(
+            if mask_repr == "bitfield":
+                mask = torch.full(
+                    (batch_size, seqlen),
+                    (1 << 62) | 1,
+                    dtype=torch.int64,
+                    device="cuda",
+                )
+            else:
+                mask = torch.tril(
+                    torch.ones(
+                        (batch_size, seqlen, seqlen), dtype=torch.bool, device="cuda"
+                    )
+                )
+        elif mask_type == "full":
+            if mask_repr == "bitfield":
+                mask = torch.full(
+                    (batch_size, seqlen), (1 << 1), dtype=torch.int64, device="cuda"
+                )
+            else:
+                mask = torch.ones(
                     (batch_size, seqlen, seqlen), dtype=torch.bool, device="cuda"
                 )
-            )
-        elif mask_type == "full":
-            mask = torch.ones(
-                (batch_size, seqlen, seqlen), dtype=torch.bool, device="cuda"
-            )
 
         store = FakeStore()
         for rank in range(world_size):
@@ -224,10 +239,16 @@ class TestContextParallelBatchSplitUtilClass:
                 "fake", rank=rank, world_size=world_size, store=store
             )
 
-            ContextParallelBatchSplitUtils.create_context_parallel_split_makespan_minimization(
-                mask,
-                sp_group=dist.GroupMember.WORLD,
-            )
+            if mask_repr == "bitfield":
+                ContextParallelBatchSplitUtils.create_context_parallel_split_bitfield_makespan_minimization(
+                    mask,
+                    sp_group=dist.GroupMember.WORLD,
+                )
+            else:
+                ContextParallelBatchSplitUtils.create_context_parallel_split_makespan_minimization(
+                    mask,
+                    sp_group=dist.GroupMember.WORLD,
+                )
 
             split_data = ContextParallelBatchSplitUtils.split_batch(
                 data,

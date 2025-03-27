@@ -5,7 +5,6 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from cornstarch.kernel.bitfield_attention import (
-    BitfieldUtils,
     _bitfield_attn_backward,
     _bitfield_attn_forward,
 )
@@ -23,6 +22,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         k: torch.Tensor,
         v: torch.Tensor,
         bitfield_mask: torch.Tensor,
+        compressed_mask: torch.Tensor,
         offsets_per_rank: list[torch.Tensor],
         sp_group: dist.ProcessGroup,
         bias: Optional[torch.Tensor] = None,
@@ -103,10 +103,6 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         softmax_scales: list[torch.Tensor] = []
 
         assert len(per_head_events) == nheads // heads_stride
-        compressed_mask = BitfieldUtils.materialize_compressed_mask_from_bitfield_mask(
-            bitfield_mask, offsets_q, offsets_kv
-        )
-
         for head_index in range(0, nheads, heads_stride):
             event = per_head_events[head_index // heads_stride]
             torch.cuda.current_stream().wait_event(event)

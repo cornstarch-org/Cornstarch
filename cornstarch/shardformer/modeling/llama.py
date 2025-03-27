@@ -187,8 +187,13 @@ class LlamaModelForwards:
 
         kwargs = {}
         if sp_mode == "ring_attn":
-            kwargs["offsets_per_rank"] = (
-                ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
+            kwargs.update(
+                {
+                    "compressed_mask": ContextParallelBatchSplitUtils.get_local_compressed_mask(
+                        attn_mask, sp_group
+                    ),
+                    "offsets_per_rank": ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache(),
+                }
             )
 
         for decoder_layer in self.layers[start_idx:end_idx]:

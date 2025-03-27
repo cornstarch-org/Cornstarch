@@ -9,6 +9,7 @@ import torch.distributed as dist
 from colossalai.accelerator import get_accelerator
 
 from cornstarch.kernel.attention import BLOCK_M, BLOCK_N
+from cornstarch.kernel.bitfield_attention import BitfieldUtils
 from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
 
 
@@ -42,7 +43,7 @@ class ContextParallelBatchSplitUtils:
     @classmethod
     def get_context_parallel_offsets_cache(
         cls: ContextParallelBatchSplitUtils, sp_rank: int = -1
-    ) -> Optional[torch.Tensor]:
+    ) -> Optional[torch.Tensor | list[torch.Tensor]]:
         assert sp_rank == -1 or sp_rank >= 0
         if cls.context_parallel_offsets_cache is None:
             return None
@@ -77,10 +78,7 @@ class ContextParallelBatchSplitUtils:
         if sp_size == 1:
             return
 
-        if attention_mask.ndim == 2:
-            batch_size, seq_len = attention_mask.shape
-        else:
-            batch_size, seq_len = attention_mask.shape[:2]
+        batch_size, seq_len = attention_mask.shape[:2]
 
         if seq_len < 128 * sp_size:
             return
@@ -95,9 +93,14 @@ class ContextParallelBatchSplitUtils:
                     attention_mask, sp_group, **kwargs
                 )
             elif dist_mode == ContextParallelDistributionMode.MAKESPAN_MIN:
-                cls.create_context_parallel_split_makespan_minimization(
-                    attention_mask, sp_group, **kwargs
-                )
+                if attention_mask.ndim == 2:
+                    cls.create_context_parallel_split_bitfield_makespan_minimization(
+                        attention_mask, sp_group, **kwargs
+                    )
+                elif attention_mask.ndim == 3:
+                    cls.create_context_parallel_split_makespan_minimization(
+                        attention_mask, sp_group, **kwargs
+                    )
 
     @classmethod
     def create_context_parallel_split_uniform(
@@ -136,6 +139,77 @@ class ContextParallelBatchSplitUtils:
             np.concatenate([chunked_offsets[i], chunked_offsets[-i - 1]])
             for i in range(sp_size)
         ]
+        cls.set_context_parallel_offsets_cache(chunked_offsets)
+
+    @classmethod
+    def create_context_parallel_split_bitfield_makespan_minimization(
+        cls: ContextParallelBatchSplitUtils,
+        bitfield_mask: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        attention_block_exec_time: float = 1.0,
+        linear_block_exec_time: float = 1.0,
+    ):
+        assert bitfield_mask.ndim == 2
+        sp_size = dist.get_world_size(sp_group)
+        sp_rank = dist.get_rank(sp_group)
+
+        batch_size, seqlen = bitfield_mask.shape
+        compressed_mask = BitfieldUtils.materialize_compressed_mask_from_bitfield_mask(
+            bitfield_mask
+        )
+
+        # 1D tensor of shape (ceil(seqlen_q, BLOCK_N))
+        num_blocks_to_compute_in_attention = torch.sum(compressed_mask > 0, dim=(0, 2))
+
+        workloads_per_block = (
+            num_blocks_to_compute_in_attention * attention_block_exec_time
+            + linear_block_exec_time
+        )
+        workloads_per_block, indices = torch.sort(
+            workloads_per_block, stable=True, descending=True
+        )
+
+        # (total_workload, sp_rank)
+        loads_per_rank: list[tuple[int, int]] = []
+        for i in range(sp_size):
+            heapq.heappush(loads_per_rank, (0, i))
+
+        # offsets per rank
+        assigned_block_indices_per_rank: list[np.ndarray] = [
+            np.array([], dtype=np.int64) for _ in range(sp_size)
+        ]
+
+        for i, block_workload in zip(
+            indices.numpy(force=True), workloads_per_block.numpy(force=True)
+        ):
+            # Pick the rank with the minimum workloads
+            load, rank = heapq.heappop(loads_per_rank)
+
+            # Assign this row block to the rank
+            heapq.heappush(
+                loads_per_rank,
+                (load + block_workload.item(), rank),
+            )
+
+            assigned_block_indices_per_rank[rank] = np.append(
+                assigned_block_indices_per_rank[rank], i
+            )
+
+        # Sorted assigned block indices
+        assigned_block_indices_per_rank = [
+            np.sort(indices) for indices in assigned_block_indices_per_rank
+        ]
+
+        # expand assigned_block_indices_per_rank
+        # for each element in each np.ndarray, expand it to (i, i+1, ..., i+BLOCK_M-1)
+        chunked_offsets = [
+            (indices[:, None] * BLOCK_M + np.arange(BLOCK_M)).ravel()
+            for indices in assigned_block_indices_per_rank
+        ]
+
+        # Remove overflowed indices
+        chunked_offsets = [offsets[offsets < seqlen] for offsets in chunked_offsets]
+
         cls.set_context_parallel_offsets_cache(chunked_offsets)
 
     @classmethod
@@ -251,6 +325,30 @@ class ContextParallelBatchSplitUtils:
         ]
 
         cls.set_context_parallel_offsets_cache(chunked_offsets)
+
+    @classmethod
+    def get_local_compressed_mask(
+        cls: ContextParallelBatchSplitUtils,
+        bitfield_mask: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+    ) -> torch.Tensor:
+        compressed_mask = BitfieldUtils.materialize_compressed_mask_from_bitfield_mask(
+            bitfield_mask
+        )
+
+        # load offsets cache
+        offsets_per_rank = cls.get_context_parallel_offsets_cache()
+        offsets_q = offsets_per_rank[dist.get_rank(sp_group)][:, ::BLOCK_M]
+        offsets_kv_per_rank = torch.cat(
+            [offsets[::BLOCK_N] for offsets in offsets_per_rank], dim=0
+        )
+
+        # Filter out the rows with offsets_q
+        local_compressed_mask = compressed_mask[:, offsets_q]
+        # Shuffle columns with offsets_kv_per_rank
+        local_compressed_mask = local_compressed_mask[:, :, offsets_kv_per_rank]
+
+        return local_compressed_mask
 
     @classmethod
     def split_batch(

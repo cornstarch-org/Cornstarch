@@ -173,22 +173,16 @@ class BitfieldUtils:
 
     @classmethod
     def materialize_compressed_mask_from_bitfield_mask(
-        cls: BitfieldUtils,
-        bitfield_mask: torch.Tensor,
-        offsets_q: Optional[torch.Tensor] = None,
-        offsets_k: Optional[torch.Tensor] = None,
+        cls: BitfieldUtils, bitfield_mask: torch.Tensor
     ) -> torch.Tensor:
         if cls.compressed_mask_cache is not None:
             return cls.compressed_mask_cache
 
         batch_size, seq_len = bitfield_mask.shape
-        seqlen_q = seq_len if offsets_q is None else len(offsets_q)
-        seqlen_k = seq_len if offsets_k is None else len(offsets_k)
-
         shape = (
             batch_size,
-            triton.cdiv(seqlen_q, BLOCK_M),
-            triton.cdiv(seqlen_k, BLOCK_N),
+            triton.cdiv(seq_len, BLOCK_M),
+            triton.cdiv(seq_len, BLOCK_N),
         )
 
         out = torch.zeros(
@@ -203,10 +197,10 @@ class BitfieldUtils:
             bitfield_mask.stride(0),
             out.stride(0),
             out.stride(1),
-            seqlen_q,
-            seqlen_k,
-            offsets_q,
-            offsets_k,
+            seq_len,
+            seq_len,
+            None,
+            None,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             num_warps=4,
