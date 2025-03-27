@@ -5,9 +5,9 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from cornstarch.kernel.bitfield_attention import (
+    BitfieldUtils,
     _bitfield_attn_backward,
     _bitfield_attn_forward,
-    materialize_compressed_mask_from_bitfield_mask,
 )
 from cornstarch.kernel.interface import repeat_kv
 
@@ -103,7 +103,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         softmax_scales: list[torch.Tensor] = []
 
         assert len(per_head_events) == nheads // heads_stride
-        compressed_mask = materialize_compressed_mask_from_bitfield_mask(
+        compressed_mask = BitfieldUtils.materialize_compressed_mask_from_bitfield_mask(
             bitfield_mask, offsets_q, offsets_kv
         )
 

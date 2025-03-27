@@ -28,6 +28,7 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.processing_utils import Unpack
 
+from cornstarch.kernel.bitfield_attention import BitfieldUtils
 from cornstarch.shardformer.layers.context_parallel_bitfield_attention import (
     context_parallel_bitfield_attention_forward,
 )
@@ -144,13 +145,17 @@ class LlamaModelForwards:
                     f"Got {self.config._attn_implementation}"
                 )
 
-                ContextParallelBatchSplitUtils.create_context_parallel_split(
-                    hidden_states, sp_group, dist_mode=cp_dist_mode
-                )
                 if context_parallel_offsets is None:
+                    ContextParallelBatchSplitUtils.create_context_parallel_split(
+                        attention_mask, sp_group, dist_mode=cp_dist_mode
+                    )
                     context_parallel_offsets = (
                         ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
                     )
+
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    hidden_states, sp_group, dist_mode=cp_dist_mode
+                )
 
                 hidden_states = ContextParallelBatchSplitUtils.split_batch(
                     hidden_states,
@@ -225,6 +230,8 @@ class LlamaModelForwards:
         context_parallel_offsets = (
             ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
         )
+
+        BitfieldUtils.clear_cache()
         ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):

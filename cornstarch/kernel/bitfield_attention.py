@@ -41,6 +41,8 @@ than CUDA forward + backward.
 - Triton version supports attention bias, while CUDA version doesn't.
 """
 
+from __future__ import annotations
+
 import math
 from typing import Optional
 
@@ -152,39 +154,66 @@ def _materialize_compressed_mask(
     tl.store(out_ptr, result)
 
 
-def materialize_compressed_mask_from_bitfield_mask(
-    mask: torch.Tensor,
-    offsets_q: Optional[torch.Tensor] = None,
-    offsets_k: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    batch_size, seq_len = mask.shape
-    seqlen_q = seq_len if offsets_q is None else len(offsets_q)
-    seqlen_k = seq_len if offsets_k is None else len(offsets_k)
+class BitfieldUtils:
+    """
+    Cache a compressed mask from the bitfield mask.
+    compressed_mask_cache: torch.Tensor of shape
+        (batch_size, ceil(seqlen_q, BLOCK_M), ceil(seqlen_k, BLOCK_N))
+        where each element can be 0, 1, or 2.
+        0: all masked out, no need of computation
+        1: partially masked out, need to materialize and apply the mask
+        2: fully unmasked, no need of materializing and applying the mask
+    """
 
-    shape = (batch_size, triton.cdiv(seqlen_q, BLOCK_M), triton.cdiv(seqlen_k, BLOCK_N))
+    compressed_mask_cache: Optional[torch.Tensor] = None
 
-    out = torch.zeros(
-        shape,
-        dtype=torch.int8,
-        device=mask.device,
-    )
+    @classmethod
+    def clear_cache(cls: BitfieldUtils):
+        cls.compressed_mask_cache = None
 
-    _materialize_compressed_mask[shape](
-        mask,
-        out,
-        mask.stride(0),
-        out.stride(0),
-        out.stride(1),
-        seqlen_q,
-        seqlen_k,
-        offsets_q,
-        offsets_k,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        num_warps=4,
-    )
+    @classmethod
+    def materialize_compressed_mask_from_bitfield_mask(
+        cls: BitfieldUtils,
+        bitfield_mask: torch.Tensor,
+        offsets_q: Optional[torch.Tensor] = None,
+        offsets_k: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if cls.compressed_mask_cache is not None:
+            return cls.compressed_mask_cache
 
-    return out
+        batch_size, seq_len = bitfield_mask.shape
+        seqlen_q = seq_len if offsets_q is None else len(offsets_q)
+        seqlen_k = seq_len if offsets_k is None else len(offsets_k)
+
+        shape = (
+            batch_size,
+            triton.cdiv(seqlen_q, BLOCK_M),
+            triton.cdiv(seqlen_k, BLOCK_N),
+        )
+
+        out = torch.zeros(
+            shape,
+            dtype=torch.int8,
+            device=bitfield_mask.device,
+        )
+
+        _materialize_compressed_mask[shape](
+            bitfield_mask,
+            out,
+            bitfield_mask.stride(0),
+            out.stride(0),
+            out.stride(1),
+            seqlen_q,
+            seqlen_k,
+            offsets_q,
+            offsets_k,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            num_warps=4,
+        )
+        cls.compressed_mask_cache = out
+
+        return out
 
 
 @triton.autotune(
@@ -1231,7 +1260,9 @@ class BitfieldAttentionFunction(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
 
-        compressed_mask = materialize_compressed_mask_from_bitfield_mask(bitfield_mask)
+        compressed_mask = BitfieldUtils.materialize_compressed_mask_from_bitfield_mask(
+            bitfield_mask
+        )
 
         o, lse, ctx.softmax_scale = _bitfield_attn_forward(
             q,
