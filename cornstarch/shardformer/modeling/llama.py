@@ -60,7 +60,6 @@ class LlamaModelForwards:
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
-        context_parallel_offsets: Optional[torch.Tensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -137,6 +136,7 @@ class LlamaModelForwards:
             )
 
         # Support SP + PP. Later stages have already received the split input.
+        offsets_per_rank = flash_attn_kwargs.get("offsets_per_rank", None)
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
             if sp_mode == "ring_attn":
@@ -145,16 +145,11 @@ class LlamaModelForwards:
                     f"Got {self.config._attn_implementation}"
                 )
 
-                if context_parallel_offsets is None:
-                    ContextParallelBatchSplitUtils.create_context_parallel_split(
-                        attention_mask, sp_group, dist_mode=cp_dist_mode
-                    )
-                    context_parallel_offsets = (
-                        ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
-                    )
-
                 ContextParallelBatchSplitUtils.create_context_parallel_split(
-                    hidden_states, sp_group, dist_mode=cp_dist_mode
+                    attention_mask, sp_group, dist_mode=cp_dist_mode
+                )
+                offsets_per_rank = (
+                    ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
                 )
 
                 hidden_states = ContextParallelBatchSplitUtils.split_batch(
@@ -174,10 +169,9 @@ class LlamaModelForwards:
             # Recompute position embeddings
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        if sp_mode == "ring_attn":
-            ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
-                context_parallel_offsets
-            )
+        ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
+            offsets_per_rank
+        )
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
@@ -192,7 +186,7 @@ class LlamaModelForwards:
                     "compressed_mask": ContextParallelBatchSplitUtils.get_local_compressed_mask(
                         attn_mask, sp_group
                     ),
-                    "offsets_per_rank": ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache(),
+                    "offsets_per_rank": offsets_per_rank,
                 }
             )
 
@@ -232,10 +226,6 @@ class LlamaModelForwards:
             if output_attentions:
                 all_self_attentions += (layer_outputs[1],)
 
-        context_parallel_offsets = (
-            ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
-        )
-
         BitfieldUtils.clear_cache()
         ContextParallelBatchSplitUtils.clear_cache()
 
@@ -249,8 +239,7 @@ class LlamaModelForwards:
                 outputs["all_hidden_states"] = all_hidden_states
             if output_attentions:
                 outputs["all_self_attentions"] = all_self_attentions
-            if context_parallel_offsets is not None:
-                outputs["context_parallel_offsets"] = context_parallel_offsets
+            outputs.update(kwargs)
             return outputs
 
         hidden_states = self.norm(hidden_states)
@@ -291,7 +280,6 @@ class LlamaModelForwards:
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
-        context_parallel_offsets: Optional[torch.Tensor] = None,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
@@ -338,7 +326,7 @@ class LlamaModelForwards:
                 f"Got {self.config._attn_implementation}"
             )
 
-            if context_parallel_offsets is None:
+            if "offsets_per_rank" not in kwargs:
                 # This is the first stage. Create offsets
                 assert stage_manager is None or stage_manager.is_first_stage()
                 ContextParallelBatchSplitUtils.create_context_parallel_split(
@@ -347,7 +335,7 @@ class LlamaModelForwards:
             else:
                 # Set given offsets cache to batch split utils
                 ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
-                    context_parallel_offsets
+                    kwargs["offsets_per_rank"]
                 )
 
             labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)
@@ -371,7 +359,6 @@ class LlamaModelForwards:
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
-            context_parallel_offsets=context_parallel_offsets,
             **kwargs,
         )
         past_key_values = None

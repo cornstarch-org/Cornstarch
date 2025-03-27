@@ -260,6 +260,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -269,6 +270,7 @@ def context_parallel_bitfield_attention_forward(
     key: torch.Tensor,
     value: torch.Tensor,
     bitfield_mask: torch.Tensor,
+    compressed_mask: torch.Tensor,
     offsets_per_rank: list[torch.Tensor],
     sp_group: dist.ProcessGroup,
     heads_stride: int = 1,
@@ -295,6 +297,7 @@ def context_parallel_bitfield_attention_forward(
         key,
         value,
         bitfield_mask,
+        compressed_mask,
         offsets_per_rank,
         sp_group,
         None,

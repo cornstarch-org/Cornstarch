@@ -29,6 +29,10 @@ class ContextParallelBatchSplitUtils:
         offsets_per_rank: list[np.ndarray] | list[torch.Tensor],
         device: torch.device = None,
     ):
+        if offsets_per_rank is None:
+            cls.context_parallel_offsets_cache = None
+            return
+
         if device is None:
             device = get_accelerator().get_current_device()
 
@@ -338,9 +342,10 @@ class ContextParallelBatchSplitUtils:
 
         # load offsets cache
         offsets_per_rank = cls.get_context_parallel_offsets_cache()
-        offsets_q = offsets_per_rank[dist.get_rank(sp_group)][:, ::BLOCK_M]
-        offsets_kv_per_rank = torch.cat(
-            [offsets[::BLOCK_N] for offsets in offsets_per_rank], dim=0
+        offsets_q = offsets_per_rank[dist.get_rank(sp_group)][::BLOCK_M] // BLOCK_M
+        offsets_kv_per_rank = (
+            torch.cat([offsets[::BLOCK_N] for offsets in offsets_per_rank], dim=0)
+            // BLOCK_N
         )
 
         # Filter out the rows with offsets_q
