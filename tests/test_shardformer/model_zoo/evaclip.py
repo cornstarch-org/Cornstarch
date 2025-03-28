@@ -18,6 +18,7 @@ class EvaCLIPModelBase(ModelClassBase):
                 num_attention_heads=8,
                 num_hidden_layers=4,
                 use_cache=False,
+                patch_size=14,
             ),
         )
         self.col_layers_to_check = [

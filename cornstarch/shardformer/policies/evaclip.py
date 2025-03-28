@@ -109,13 +109,8 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
         )
 
         config: CLIPVisionConfig = self.model.config
-        policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "EvaCLIP doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
-            )
+        policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
         tp_size = self.shard_config.tensor_parallel_size
         num_heads = config.num_attention_heads
@@ -132,22 +127,28 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement = {}
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
+        attention_attribute_replacement["is_causal"] = False
+
+        policy[EvaCLIPAttention] = ModulePolicyDescription(
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    EvaCLIPAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
+        )
 
         if self.shard_config.enable_flash_attention:
             attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
                 not is_flash_attn_greater_or_equal("2.1.0")
             )
 
-        policy[EvaCLIPAttention] = ModulePolicyDescription(
-            attribute_replacement=attention_attribute_replacement,
-            method_replacement={
-                "forward": (
-                    EvaCLIPAttentionForwards.flash_attention_forward
-                    if self.shard_config.enable_flash_attention
-                    else EvaCLIPAttentionForwards.sdpa_forward
-                )
-            },
-        )
+            policy[EvaCLIPVisionTransformer] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2",
+                }
+            )
 
         if self.shard_config.enable_tensor_parallelism:
             policy[EvaCLIPEncoderLayer] = ModulePolicyDescription(

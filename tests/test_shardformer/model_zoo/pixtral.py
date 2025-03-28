@@ -51,5 +51,10 @@ class PixtralVisionModelBase(ModelClassBase):
         image_size = self.config.image_size
         num_channels = self.config.num_channels
         return {
-            "pixel_values": torch.randn(num_batch, num_channels, image_size, image_size)
+            "pixel_values": torch.randn(
+                num_batch, num_channels, image_size, image_size
+            ),
+            "image_sizes": torch.tensor(
+                [[image_size, image_size] for _ in range(num_batch)]
+            ),
         }

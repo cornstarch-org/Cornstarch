@@ -43,7 +43,6 @@ class CLIPVisionModelForwards:
         encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
-        **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = (
             output_attentions
@@ -88,20 +87,20 @@ class CLIPVisionModelForwards:
         sp_size = shard_config.sequence_parallel_size
 
         # Support SP + PP. Later stages have already received the split input.
-        offsets_per_rank = kwargs.get("offsets_per_rank", None)
-        split_input = stage_manager is None or stage_manager.is_first_stage()
-        if split_input and sp_mode == "ring_attn":
-            ContextParallelBatchSplitUtils.create_context_parallel_split(
-                # fake attention mask
-                torch.empty(hidden_states.shape[:2], device="meta"),
-                sp_group,
-                dist_mode=ContextParallelDistributionMode.UNIFORM,
-            )
+        if sp_mode == "ring_attn":
+            split_input = stage_manager is None or stage_manager.is_first_stage()
+            if split_input:
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    # fake attention mask
+                    torch.empty(hidden_states.shape[:2], device="meta"),
+                    sp_group,
+                    dist_mode=ContextParallelDistributionMode.UNIFORM,
+                )
 
-            hidden_states = ContextParallelBatchSplitUtils.split_batch(
-                hidden_states,
-                sp_group,
-            )
+                hidden_states = ContextParallelBatchSplitUtils.split_batch(
+                    hidden_states,
+                    sp_group,
+                )
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layers))
@@ -137,9 +136,6 @@ class CLIPVisionModelForwards:
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        offsets_per_rank = (
-            ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache()
-        )
         ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
@@ -148,8 +144,6 @@ class CLIPVisionModelForwards:
                 outputs["encoder_states"] = encoder_states
             if output_attentions:
                 outputs["attentions"] = all_attentions
-            if sp_mode == "ring_attn" and offsets_per_rank is not None:
-                outputs["offsets_per_rank"] = offsets_per_rank
             return outputs
 
         encoder_outputs = BaseModelOutput(
@@ -183,7 +177,6 @@ class CLIPVisionModelForwards:
         encoder_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
-        **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         return CLIPVisionModelForwards.clip_vision_transformer_forward(
             self.vision_model,
@@ -196,7 +189,6 @@ class CLIPVisionModelForwards:
             encoder_states=encoder_states,
             all_attentions=all_attentions,
             shard_config=shard_config,
-            **kwargs,
         )
 
 

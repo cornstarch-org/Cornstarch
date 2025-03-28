@@ -90,7 +90,6 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
             "eager": Dinov2SelfAttention,
             "sdpa": Dinov2SdpaSelfAttention,
         }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
 
@@ -118,17 +117,19 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement["attention_probs_dropout_prob"] = (
             config.attention_probs_dropout_prob
         )
+        attention_attribute_replacement["is_causal"] = False
 
-        policy[attn_cls] = ModulePolicyDescription(
+        attn_policy = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
-                "forward": (
-                    Dinov2SelfAttentionForwards.flash_attention_forward
-                    if self.shard_config.enable_flash_attention
-                    else Dinov2SelfAttentionForwards.sdpa_forward
-                ),
+                "forward": functools.partial(
+                    Dinov2SelfAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
             },
         )
+        for attn_impl in ATTN_IMPLEMENTATION.values():
+            policy[attn_impl] = attn_policy
 
         if self.shard_config.enable_tensor_parallelism:
             policy[Dinov2Embeddings] = ModulePolicyDescription(

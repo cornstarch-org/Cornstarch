@@ -15,11 +15,15 @@ from colossalai.shardformer.policies.base_policy import (
     SubModuleReplacementDescription,
 )
 from transformers import PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
 from transformers.models.pixtral.modeling_pixtral import PixtralVisionModel
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.pixtral import PixtralVisionModelForwards
+from cornstarch.shardformer.modeling.pixtral import (
+    PixtralVisionAttentionForwards,
+    PixtralVisionModelForwards,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -80,18 +84,6 @@ class PixtralVisionModelPolicy(PipelineTemplatePolicyBase, Policy):
         config: PixtralVisionConfig = self.model.config
         policy = {}
 
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "PixtralVisionModel doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
-            )
-
-        if self.shard_config.enable_flash_attention:
-            self.shard_config.enable_flash_attention = False
-            warnings.warn(
-                "PixtralVisionModel doesn't support flash attention now, will ignore the flash attention flag."
-            )
-
         tp_size = self.shard_config.tensor_parallel_size
         num_heads = config.num_attention_heads
         hidden_size = config.hidden_size
@@ -107,10 +99,28 @@ class PixtralVisionModelPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement = {}
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
+        attention_attribute_replacement["is_causal"] = False
 
         policy[PixtralAttention] = ModulePolicyDescription(
-            attribute_replacement=attention_attribute_replacement
+            attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    PixtralVisionAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
         )
+
+        if self.shard_config.enable_flash_attention:
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
+            )
+
+            policy[PixtralVisionModel] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2",
+                }
+            )
 
         if self.shard_config.enable_tensor_parallelism:
             policy[PixtralAttentionLayer] = ModulePolicyDescription(
