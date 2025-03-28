@@ -62,6 +62,7 @@ class Gemma2ModelForwards:
         all_self_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross
+        offsets_per_rank: Optional[list[torch.Tensor]] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -174,7 +175,6 @@ class Gemma2ModelForwards:
             )
 
         # Support SP + PP. Later stages have already received the split input.
-        offsets_per_rank = flash_attn_kwargs.get("offsets_per_rank", None)
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
             if sp_mode == "ring_attn":
@@ -319,7 +319,8 @@ class Gemma2ModelForwards:
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_self_attentions: Optional[Tuple[torch.FloatTensor]] = (),
         shard_config: ShardConfig = None,
-        **loss_kwargs,
+        offsets_per_rank: Optional[list[torch.Tensor]] = None,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -365,14 +366,19 @@ class Gemma2ModelForwards:
                 f"Got {self.config._attn_implementation}"
             )
 
-            sequence_lengths: torch.Tensor = torch.ne(attention_mask, 0).sum(dim=1)
-            labels = ContextParallelBatchSplitUtils.split_batch(
-                labels,
-                sequence_lengths,
-                attention_mask,
-                sp_group,
-                dist_mode=cp_dist_mode,
-            )
+            if offsets_per_rank is None:
+                # This is the first stage. Create offsets
+                assert stage_manager is None or stage_manager.is_first_stage()
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    attention_mask, sp_group, dist_mode=cp_dist_mode
+                )
+            else:
+                # Set given offsets cache to batch split utils
+                ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
+                    offsets_per_rank
+                )
+
+            labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = Gemma2ModelForwards.gemma2_model_forward(
@@ -393,7 +399,8 @@ class Gemma2ModelForwards:
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
-            **loss_kwargs,
+            offsets_per_rank=offsets_per_rank,
+            **kwargs,
         )
 
         BitfieldUtils.clear_cache()

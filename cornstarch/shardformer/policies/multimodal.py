@@ -65,17 +65,14 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
         if self.shard_config.enable_sequence_parallelism and sp_mode == "ring_attn":
             # Gather forward result by replacing projector.post_projection
             policy[MultimodalProjector] = ModulePolicyDescription(
-                sub_module_replacement=[
-                    SubModuleReplacementDescription(
-                        "post_projection",
-                        target_module=gather_forward_split_backward,
-                        kwargs=dict(
-                            process_group=sp_group,
-                            dim=1,
-                            grad_scale=sp_size,
-                        ),
-                    )
-                ]
+                attribute_replacement={
+                    "post_projection": functools.partial(
+                        gather_forward_split_backward,
+                        dim=1,
+                        process_group=sp_group,
+                        grad_scale=sp_size,
+                    ),
+                }
             )
 
         if self.shard_config.enable_tensor_parallelism:

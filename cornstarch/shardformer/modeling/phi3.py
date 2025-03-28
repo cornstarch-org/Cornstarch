@@ -60,6 +60,7 @@ class Phi3ModelForwards:
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
+        offsets_per_rank: Optional[list[torch.Tensor]] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -137,7 +138,6 @@ class Phi3ModelForwards:
             )
 
         # Support SP + PP. Later stages have already received the split input.
-        offsets_per_rank = flash_attn_kwargs.get("offsets_per_rank", None)
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
             if sp_mode == "ring_attn":
@@ -281,6 +281,7 @@ class Phi3ModelForwards:
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
+        offsets_per_rank: Optional[list[torch.Tensor]] = None,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
@@ -327,7 +328,7 @@ class Phi3ModelForwards:
                 f"Got {self.config._attn_implementation}"
             )
 
-            if "offsets_per_rank" not in kwargs:
+            if offsets_per_rank is None:
                 # This is the first stage. Create offsets
                 assert stage_manager is None or stage_manager.is_first_stage()
                 ContextParallelBatchSplitUtils.create_context_parallel_split(
@@ -336,7 +337,7 @@ class Phi3ModelForwards:
             else:
                 # Set given offsets cache to batch split utils
                 ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
-                    kwargs["offsets_per_rank"]
+                    offsets_per_rank
                 )
 
             labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)
@@ -360,6 +361,7 @@ class Phi3ModelForwards:
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
+            offsets_per_rank=offsets_per_rank,
             **kwargs,
         )
 

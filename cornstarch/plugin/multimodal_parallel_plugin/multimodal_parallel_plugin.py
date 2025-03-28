@@ -236,6 +236,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
+                    **kwargs,
                 )
 
                 language_model_inputs.update(kwargs)
@@ -272,12 +273,14 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
+                    **kwargs,
                 )
 
             # remove inputs that the language model doesn't accept
             language_model_arguments = list(
                 inspect.signature(module.language_model.forward).parameters.keys()
             )
+
             for key in list(language_model_inputs.keys()):
                 if key not in language_model_arguments:
                     language_model_inputs.pop(key)
@@ -612,6 +615,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             module = self.language_model_plugin.configure(
                 module, llm_shard_config, self.stage_manager
             )
+            module.config._attn_implementation = "bitfield_attention"
             model.add_module("language_model", module)
 
             model = MultimodalParallelModule(

@@ -385,10 +385,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
-        if sharded_model.unwrap().config._attn_implementation == "bitfield_attention":
-            shard_test_data["attention_mask"] = create_bitfield_attention_mask(
-                shard_test_data["input_ids"]
-            )
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()
@@ -818,6 +814,9 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         sharded_model, sharded_optimizer, criterion, booster = self.parallelize_model(
             sharded_model, tp_size, module_pp_size, llm_sp_mode, test_config, precision
         )
+
+        org_model.update_language_model_to_use_bitfield_attention_mask()
+        sharded_model.unwrap().update_language_model_to_use_bitfield_attention_mask()
 
         return (
             org_model,

@@ -63,6 +63,7 @@ class MixtralModelForwards:
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
+        offsets_per_rank: Optional[list[torch.Tensor]] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, MoeModelOutputWithPast]:
         output_attentions = (
@@ -146,7 +147,6 @@ class MixtralModelForwards:
             )
 
         # Support SP + PP. Later stages have already received the split input.
-        offsets_per_rank = flash_attn_kwargs.get("offsets_per_rank", None)
         split_input = stage_manager is None or stage_manager.is_first_stage()
         if split_input:
             if sp_mode == "ring_attn":
@@ -299,6 +299,7 @@ class MixtralModelForwards:
         all_router_logits: Optional[Tuple[torch.Tensor]] = (),
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
+        offsets_per_rank: Optional[list[torch.Tensor]] = None,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         output_attentions = (
@@ -347,11 +348,11 @@ class MixtralModelForwards:
             )
 
             assert self.config._attn_implementation == "bitfield_attention", (
-                "Cornstarch context parallelism is only supported with cornstarch_attention. "
+                "Cornstarch context parallelism is only supported with bitfield_attention. "
                 f"Got {self.config._attn_implementation}"
             )
 
-            if "offsets_per_rank" not in kwargs:
+            if offsets_per_rank is None:
                 # This is the first stage. Create offsets
                 assert stage_manager is None or stage_manager.is_first_stage()
                 ContextParallelBatchSplitUtils.create_context_parallel_split(
@@ -360,7 +361,7 @@ class MixtralModelForwards:
             else:
                 # Set given offsets cache to batch split utils
                 ContextParallelBatchSplitUtils.set_context_parallel_offsets_cache(
-                    kwargs["offsets_per_rank"]
+                    offsets_per_rank
                 )
 
             labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)
@@ -386,6 +387,7 @@ class MixtralModelForwards:
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
             force_sp_gather=False,
+            offsets_per_rank=offsets_per_rank,
             **kwargs,
         )
 

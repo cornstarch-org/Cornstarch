@@ -718,9 +718,8 @@ class MultimodalModel(nn.Module):
         self.token_ids: dict[str, int] = None
         self.preprocess_llm_callback = preprocess_llm_callback
 
-    def update_language_model_to_use_bitfield_attention_mask(
-        self, language_model: PreTrainedModel
-    ):
+    def update_language_model_to_use_bitfield_attention_mask(self):
+        language_model = self.language_model
         if isinstance(language_model, PeftModel):
             language_model = language_model.get_base_model()
 
@@ -741,6 +740,10 @@ class MultimodalModel(nn.Module):
             "Please check if the language model is from HuggingFace Transformers."
         )
 
+        language_model._update_causal_mask = MethodType(
+            MultimodalModel.check_bitfield_attention_mask,
+            language_model,
+        )
         language_model.config._attn_implementation = "bitfield_attention"
 
     @classmethod
@@ -834,6 +837,23 @@ class MultimodalModel(nn.Module):
         """
         self.token_ids = token_ids
 
+    @staticmethod
+    def check_bitfield_attention_mask(
+        self, attention_mask: torch.Tensor, *args, **kwargs
+    ):
+        """
+        A replacement function for Model._update_causal_mask() to avoid updating the attention mask.
+        Plus, it checks if the attention mask is a bitfield attention mask.
+        """
+        if self.training:
+            assert (
+                attention_mask is not None
+                and attention_mask.dtype == torch.int64
+                and (attention_mask > 1).any()
+            ), "The attention mask should be a bitfield attention mask."
+
+        return attention_mask
+
     def merge_encoder_outputs(
         self,
         encoders_outputs: dict[str, BaseModelOutput | tuple],
@@ -913,11 +933,11 @@ class MultimodalModel(nn.Module):
                 dim=1
             )
 
-        # attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
-        # for i, sequence_length in enumerate(sequence_lengths.tolist()):
-        #     attention_mask[i, sequence_length:] = 0
+        if self.language_model.config._attn_implementation == "bitfield_attention":
+            attention_mask = self.create_bitfield_attention_mask(input_ids)
+        else:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
 
-        attention_mask = self.create_bitfield_attention_mask(input_ids)
         for i, sequence_length in enumerate(sequence_lengths.tolist()):
             attention_mask[i, sequence_length:] = 0
 
