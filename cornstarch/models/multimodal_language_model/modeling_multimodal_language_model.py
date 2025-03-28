@@ -33,12 +33,12 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 )
 from transformers.utils import logging
 
-from cornstarch.kernel.interface import cornstarch_attention_forward
+from cornstarch.kernel.interface import bitfield_attention_forward
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 logger = logging.get_logger(__name__)
 
-ALL_ATTENTION_FUNCTIONS.update({"cornstarch_attention": cornstarch_attention_forward})
+ALL_ATTENTION_FUNCTIONS.update({"bitfield_attention": bitfield_attention_forward})
 
 
 class LlavaNextModel:
