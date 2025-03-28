@@ -1,6 +1,7 @@
 import copy
 
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 from cornstarch.models.evaclip import EvaCLIPVisionConfig, EvaCLIPVisionModel
@@ -34,7 +35,9 @@ class EvaCLIPModelBase(ModelClassBase):
             "vision_model.encoder.layers[0].layer_norm2",
         ]
 
-    def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:
+    def loss_fn(
+        self, x: BaseModelOutputWithPooling, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return x.pooler_output.mean()
 
     # HF does not provide EvaCLIP flash attention yet.

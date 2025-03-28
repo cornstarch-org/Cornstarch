@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
     Qwen2VLVisionConfig,
@@ -33,7 +34,9 @@ class Qwen2VisionTransformerBase(ModelClassBase):
             "blocks[0].norm2",
         ]
 
-    def loss_fn(self, x: torch.Tensor) -> torch.Tensor:
+    def loss_fn(
+        self, x: torch.Tensor, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return x.mean()
 
     def data_gen_fn(self, num_batch: int) -> dict:

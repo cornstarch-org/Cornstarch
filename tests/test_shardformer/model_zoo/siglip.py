@@ -1,4 +1,6 @@
 import torch
+import torch.distributed as dist
+from colossalai.shardformer.layer._operation import reduce_forward
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.siglip import SiglipVisionConfig, SiglipVisionModel
 
@@ -15,6 +17,8 @@ class SiglipModelBase(ModelClassBase):
                 num_attention_heads=8,
                 num_hidden_layers=4,
                 use_cache=False,
+                image_size=224,
+                patch_size=14,
             ),
         )
         self.col_layers_to_check = [
@@ -30,8 +34,18 @@ class SiglipModelBase(ModelClassBase):
             "vision_model.encoder.layers[0].layer_norm2",
         ]
 
-    def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:
-        return x.pooler_output.mean()
+    def loss_fn(
+        self, x: BaseModelOutputWithPooling, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
+        sp_size = dist.get_world_size(sp_group)
+        if sp_group is not None and sp_size > 1:
+            output = (
+                reduce_forward(x.pooler_output, sp_group, grad_scale=sp_size) / sp_size
+            ).mean()
+        else:
+            output = x.pooler_output.mean()
+
+        return output
 
     def data_gen_fn(self, num_batch: int) -> dict:
         image_size = self.config.image_size

@@ -1,6 +1,8 @@
 import copy
 
 import torch
+import torch.distributed as dist
+from colossalai.shardformer.layer._operation import reduce_forward
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.vit import ViTConfig, ViTModel
@@ -36,16 +38,20 @@ class ViTModelBase(ModelClassBase):
             "encoder.layer[0].layernorm_after",
         ]
 
-    def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:
-        return x.pooler_output.mean()
+    def loss_fn(
+        self, x: BaseModelOutputWithPooling, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
+        sp_size = dist.get_world_size(sp_group)
+        if sp_group is not None and sp_size > 1:
+            # need to clone to avoid in-place operation error
+            # in tanh activation
+            output = reduce_forward(
+                x.pooler_output.clone(), sp_group, grad_scale=sp_size
+            ).mean()
+        else:
+            output = x.pooler_output.mean()
 
-    # ViT does not support FlashAttention.
-    # Use eager implementation
-    def model_fn(self) -> PreTrainedModel:
-        config = copy.deepcopy(self.config)
-        config.pad_token_id = config.eos_token_id
-        config._attn_implementation = "eager"
-        return self.model_class(config)
+        return output
 
     def data_gen_fn(self, num_batch: int) -> dict:
         image_size = self.config.image_size

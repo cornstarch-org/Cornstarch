@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
@@ -31,7 +32,9 @@ class Gemma2ModelBase(ModelClassBase):
         self.col_layers_to_check = ["layers[0].self_attn.o_proj"]
         self.row_layers_to_check = ["layers[0].self_attn.q_proj", "embed_tokens"]
 
-    def loss_fn(self, x: BaseModelOutputWithPast) -> torch.Tensor:
+    def loss_fn(
+        self, x: BaseModelOutputWithPast, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return torch.nn.functional.mse_loss(
             x.last_hidden_state, torch.ones_like(x.last_hidden_state)
         )
@@ -54,7 +57,9 @@ class Gemma2ForCausalLMBase(ModelClassBase):
             "model.embed_tokens",
         ]
 
-    def loss_fn(self, x: CausalLMOutputWithPast) -> torch.Tensor:
+    def loss_fn(
+        self, x: CausalLMOutputWithPast, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return x.loss
 
     def data_gen_fn(self, num_batch: int) -> dict:

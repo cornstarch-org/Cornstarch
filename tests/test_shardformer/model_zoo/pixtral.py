@@ -1,6 +1,7 @@
 import copy
 
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
@@ -36,7 +37,9 @@ class PixtralVisionModelBase(ModelClassBase):
             "transformer.layers[0].ffn_norm",
         ]
 
-    def loss_fn(self, x: BaseModelOutput) -> torch.Tensor:
+    def loss_fn(
+        self, x: BaseModelOutput, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return x.last_hidden_state.mean()
 
     # PixtralVisionModel does not support FlashAttention.

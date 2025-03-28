@@ -1,6 +1,7 @@
 import copy
 
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
@@ -23,7 +24,9 @@ class Dinov2ModelBase(ModelClassBase):
         self.col_layers_to_check = ["encoder.layer[0].attention.output.dense"]
         self.row_layers_to_check = ["encoder.layer[0].attention.attention.query"]
 
-    def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:
+    def loss_fn(
+        self, x: BaseModelOutputWithPooling, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return x.pooler_output.mean()
 
     # HF does not provide Dinov2 flash attention yet.

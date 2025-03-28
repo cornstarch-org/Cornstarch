@@ -116,7 +116,7 @@ class ViTModelPolicy(PipelineTemplatePolicyBase, Policy):
             policy[ViTModel] = ModulePolicyDescription(
                 attribute_replacement={
                     "config._attn_implementation": "flash_attention_2"
-                }
+                },
             )
 
         if self.shard_config.enable_tensor_parallelism:

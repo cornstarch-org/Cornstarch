@@ -1,4 +1,5 @@
 import copy
+import functools
 import re
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -74,7 +75,9 @@ class ModelClassBase(ABC):
         self.config = config
 
     @abstractmethod
-    def loss_fn(self, x: ModelOutput) -> torch.Tensor: ...
+    def loss_fn(
+        self, x: ModelOutput, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor: ...
 
     @abstractmethod
     def data_gen_fn(self, num_batch: int) -> dict: ...
@@ -368,14 +371,14 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         org_model: nn.Module,
         sharded_model: nn.Module,
         sharded_optimizer: Optimizer,
-        criterion: Callable[[torch.Tensor], torch.Tensor],
+        criterion: Callable[[torch.Tensor, dist.ProcessGroup], torch.Tensor],
         output_transform_fn: Callable,
         booster: Booster,
         precision: torch.dtype,
     ):
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
-            loss = criterion(outputs)
+            loss = criterion(outputs, sharded_model.sp_group)
             return loss
 
         data = self.model.data_gen_fn(self.microbatch_size * self.num_microbatches)
@@ -416,7 +419,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 sharded_output = sharded_model(*shard_test_data)
             else:
                 sharded_output = sharded_model(**shard_test_data)
-            sharded_loss = criterion(sharded_output)
+            sharded_loss = _criterion(sharded_output, shard_test_data)
             sharded_optimizer.backward(sharded_loss)
 
         return org_loss, org_output, sharded_loss, sharded_output

@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
 
@@ -23,7 +24,9 @@ class WhisperEncoderBase(ModelClassBase):
         self.row_layers_to_check = ["layers[0].self_attn.q_proj"]
         self.col_layers_to_check = ["layers[0].self_attn.out_proj"]
 
-    def loss_fn(self, x: BaseModelOutput) -> torch.Tensor:
+    def loss_fn(
+        self, x: BaseModelOutput, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return torch.nn.functional.mse_loss(
             x.last_hidden_state, torch.ones_like(x.last_hidden_state)
         )

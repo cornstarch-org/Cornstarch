@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 
@@ -33,7 +34,9 @@ class CLIPModelBase(ModelClassBase):
             "vision_model.pre_layrnorm",
         ]
 
-    def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:
+    def loss_fn(
+        self, x: BaseModelOutputWithPooling, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return x.pooler_output.mean()
 
     def data_gen_fn(self, num_batch: int) -> dict:

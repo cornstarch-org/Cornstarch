@@ -15,7 +15,6 @@ from transformers.models.vit.modeling_vit import (
     eager_attention_forward,
     logger,
 )
-from transformers.processing_utils import Unpack
 
 from cornstarch.shardformer.layers.context_parallel_attention import (
     context_parallel_flash_attention,
