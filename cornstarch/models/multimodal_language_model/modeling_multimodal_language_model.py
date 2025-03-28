@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+from collections import OrderedDict
 from types import MethodType
 from typing import Any, Callable, Optional, Union
 
@@ -334,7 +335,7 @@ class MultimodalProjector(PreTrainedModel):
 
     config_class = MultimodalProjectorConfig
     base_model_prefix = ""
-    main_input_name = "inputs_embeds"
+    main_input_name = "hidden_states"
     supports_gradient_checkpointing = True
 
     config: MultimodalProjectorConfig
@@ -351,24 +352,47 @@ class MultimodalProjector(PreTrainedModel):
             self.projection = projection
         else:
             if config.projection_type == "linear":
-                self.projection = nn.Linear(
-                    in_features=config.in_features,
-                    out_features=config.out_features,
+                self.projection = nn.Sequential(
+                    OrderedDict(
+                        [
+                            (
+                                "linear",
+                                nn.Linear(
+                                    in_features=config.in_features,
+                                    out_features=config.out_features,
+                                ),
+                            )
+                        ]
+                    )
                 )
             elif config.projection_type == "mlp":
                 self.projection = nn.Sequential(
-                    nn.Linear(
-                        in_features=config.in_features,
-                        out_features=config.out_features,
-                    ),
-                    get_activation(config.activation),
-                    nn.Linear(
-                        in_features=config.out_features,
-                        out_features=config.out_features,
-                    ),
+                    OrderedDict(
+                        [
+                            (
+                                "in_proj",
+                                nn.Linear(
+                                    in_features=config.in_features,
+                                    out_features=config.out_features,
+                                ),
+                            ),
+                            ("activation", get_activation(config.activation)),
+                            (
+                                "out_proj",
+                                nn.Linear(
+                                    in_features=config.out_features,
+                                    out_features=config.out_features,
+                                ),
+                            ),
+                        ]
+                    )
                 )
             elif config.projection_type == "qformer":
                 raise NotImplementedError
+
+        # shardformer creates a module and assigns it to self.post_projection
+        # if context parallelism is enabled
+        self.post_projection: nn.Module = None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -380,6 +404,9 @@ class MultimodalProjector(PreTrainedModel):
             outputs = self._gradient_checkpointing_func(self.projection, hidden_states)
         else:
             outputs = self.projection(hidden_states)
+
+        if self.post_projection is not None:
+            outputs = self.post_projection(outputs)
 
         if not return_dict:
             return tuple(outputs)
