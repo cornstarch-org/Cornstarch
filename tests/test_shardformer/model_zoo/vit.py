@@ -1,11 +1,9 @@
-import copy
-
 import torch
 import torch.distributed as dist
-from colossalai.shardformer.layer._operation import reduce_forward
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.modeling_utils import PreTrainedModel
 from transformers.models.vit import ViTConfig, ViTModel
+
+from cornstarch.shardformer.layers.operation import gather_forward_split_backward
 
 from ..utils import ModelClassBase
 
@@ -43,13 +41,12 @@ class ViTModelBase(ModelClassBase):
     ) -> torch.Tensor:
         sp_size = dist.get_world_size(sp_group)
         if sp_group is not None and sp_size > 1:
-            # need to clone to avoid in-place operation error
-            # in tanh activation
-            output = reduce_forward(
-                x.pooler_output.clone(), sp_group, grad_scale=sp_size
-            ).mean()
+            gathered_states = gather_forward_split_backward(
+                x.last_hidden_state, dim=1, process_group=sp_group, grad_scale=sp_size
+            )
+            output = gathered_states.mean()
         else:
-            output = x.pooler_output.mean()
+            output = x.last_hidden_state.mean()
 
         return output
 

@@ -39,7 +39,6 @@ vision_models = dict(
     dinov2=Dinov2ModelBase,
     evaclip=EvaCLIPModelBase,
     siglip=SiglipModelBase,
-    intern_vit=InternVisonModelBase,
     pixtral=PixtralVisionModelBase,
     qwen2_vision=Qwen2VisionTransformerBase,
     vit=ViTModelBase,

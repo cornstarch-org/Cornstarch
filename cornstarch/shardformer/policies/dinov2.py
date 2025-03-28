@@ -81,16 +81,10 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
             Dinov2Embeddings,
             Dinov2Layer,
             Dinov2Model,
-            Dinov2SdpaSelfAttention,
             Dinov2SelfAttention,
         )
 
         config: Dinov2Config = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": Dinov2SelfAttention,
-            "sdpa": Dinov2SdpaSelfAttention,
-        }
-
         policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
@@ -119,7 +113,7 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         )
         attention_attribute_replacement["is_causal"] = False
 
-        attn_policy = ModulePolicyDescription(
+        policy[Dinov2SelfAttention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
                 "forward": functools.partial(
@@ -128,12 +122,9 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                 )
             },
         )
-        for attn_impl in ATTN_IMPLEMENTATION.values():
-            policy[attn_impl] = attn_policy
 
         if self.shard_config.enable_tensor_parallelism:
             policy[Dinov2Embeddings] = ModulePolicyDescription(
-                attribute_replacement={},
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="dropout",
@@ -157,16 +148,8 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                         target_module=Linear1D_Col,
                     ),
                     SubModuleReplacementDescription(
-                        suffix="attention.attention.dropout",
-                        target_module=DropoutForParallelInput,
-                    ),
-                    SubModuleReplacementDescription(
                         suffix="attention.output.dense",
                         target_module=Linear1D_Row,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="attention.output.dropout",
-                        target_module=DropoutForReplicatedInput,
                     ),
                     SubModuleReplacementDescription(
                         suffix=(

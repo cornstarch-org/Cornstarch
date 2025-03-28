@@ -7,6 +7,8 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
 from transformers.models.pixtral.modeling_pixtral import PixtralVisionModel
 
+from cornstarch.shardformer.layers.operation import gather_forward_split_backward
+
 from ..utils import ModelClassBase
 
 
@@ -40,7 +42,16 @@ class PixtralVisionModelBase(ModelClassBase):
     def loss_fn(
         self, x: BaseModelOutput, sp_group: dist.ProcessGroup = None
     ) -> torch.Tensor:
-        return x.last_hidden_state.mean()
+        sp_size = dist.get_world_size(sp_group)
+        if sp_group is not None and sp_size > 1:
+            gathered_states = gather_forward_split_backward(
+                x.last_hidden_state, dim=1, process_group=sp_group, grad_scale=sp_size
+            )
+            output = gathered_states.mean()
+        else:
+            output = x.last_hidden_state.mean()
+
+        return output
 
     # PixtralVisionModel does not support FlashAttention.
     # Use eager implementation instead.

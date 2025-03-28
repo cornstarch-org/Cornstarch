@@ -1,13 +1,9 @@
 import functools
-import math
 from typing import Callable, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
-from colossalai.shardformer.layer import ColoAttention
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import (
     BackboneOutput,
     BaseModelOutput,
@@ -19,9 +15,9 @@ from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2Encoder,
     Dinov2Model,
     Dinov2SelfAttention,
+    eager_attention_forward,
     logger,
 )
-from transformers.processing_utils import Unpack
 
 from cornstarch.shardformer.layers.context_parallel_attention import (
     context_parallel_flash_attention,
@@ -343,7 +339,17 @@ class Dinov2SelfAttentionForwards:
                 context_parallel_flash_attention, sp_group=sp_group
             )
         else:
-            attention_interface: Callable = ALL_ATTENTION_FUNCTIONS["sdpa"]
+            attention_interface: Callable = eager_attention_forward
+            if self.config._attn_implementation != "eager":
+                if self.config._attn_implementation == "sdpa" and output_attentions:
+                    logger.warning_once(
+                        "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                        'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                    )
+                else:
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[
+                        self.config._attn_implementation
+                    ]
 
         context_layer, _ = attention_interface(
             self,
@@ -351,8 +357,8 @@ class Dinov2SelfAttentionForwards:
             key_layer,
             value_layer,
             attention_mask=head_mask,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            scaling=None,
+            scaling=self.scaling,
+            dropout_p=0.0 if not self.training else self.dropout_prob,
             **kwargs,
         )
 

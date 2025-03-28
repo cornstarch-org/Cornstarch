@@ -1,8 +1,9 @@
 import torch
 import torch.distributed as dist
-from colossalai.shardformer.layer._operation import reduce_forward
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.siglip import SiglipVisionConfig, SiglipVisionModel
+
+from cornstarch.shardformer.layers.operation import gather_forward_split_backward
 
 from ..utils import ModelClassBase
 
@@ -39,11 +40,12 @@ class SiglipModelBase(ModelClassBase):
     ) -> torch.Tensor:
         sp_size = dist.get_world_size(sp_group)
         if sp_group is not None and sp_size > 1:
-            output = (
-                reduce_forward(x.pooler_output, sp_group, grad_scale=sp_size) / sp_size
-            ).mean()
+            gathered_states = gather_forward_split_backward(
+                x.last_hidden_state, dim=1, process_group=sp_group, grad_scale=sp_size
+            )
+            output = gathered_states.mean()
         else:
-            output = x.pooler_output.mean()
+            output = x.last_hidden_state.mean()
 
         return output
 

@@ -3,7 +3,6 @@ from typing import Any, Dict, cast
 
 import torch.distributed as dist
 from colossalai.shardformer.layer import Linear1D_Col, Linear1D_Row
-from colossalai.shardformer.layer._operation import gather_forward_split_backward
 from colossalai.shardformer.policies.auto_policy import _fullname
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -23,6 +22,7 @@ from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
+from cornstarch.shardformer.layers.operation import gather_forward_split_backward
 from cornstarch.shardformer.modeling.multimodal import ModalModulePipelineForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
