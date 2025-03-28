@@ -109,7 +109,6 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
         )
 
         config: CLIPVisionConfig = self.model.config
-
         policy: dict[str | nn.Module, ModulePolicyDescription] = {}
 
         tp_size = self.shard_config.tensor_parallel_size
@@ -150,32 +149,39 @@ class EvaCLIPVisionPolicy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
         if self.shard_config.enable_tensor_parallelism:
             policy[EvaCLIPEncoderLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.k_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.v_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.out_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.fc1",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.fc2",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                 ],
             )

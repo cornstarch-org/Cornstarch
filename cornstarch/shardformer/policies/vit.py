@@ -119,32 +119,39 @@ class ViTModelPolicy(PipelineTemplatePolicyBase, Policy):
                 },
             )
 
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
         if self.shard_config.enable_tensor_parallelism:
             policy[ViTLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="attention.attention.query",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.key",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.value",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.output.dense",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="intermediate.dense",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="output.dense",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                 ]
             )

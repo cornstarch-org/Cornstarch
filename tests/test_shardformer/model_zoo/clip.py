@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+from colossalai.shardformer.layer._operation import reduce_forward
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.clip import CLIPVisionConfig, CLIPVisionModel
 
@@ -37,7 +38,15 @@ class CLIPModelBase(ModelClassBase):
     def loss_fn(
         self, x: BaseModelOutputWithPooling, sp_group: dist.ProcessGroup = None
     ) -> torch.Tensor:
-        return x.pooler_output.mean()
+        sp_size = dist.get_world_size(sp_group)
+        if sp_group is not None and sp_size > 1:
+            output = (
+                reduce_forward(x.pooler_output, sp_group, grad_scale=sp_size) / sp_size
+            ).mean()
+        else:
+            output = x.pooler_output.mean()
+
+        return output
 
     def data_gen_fn(self, num_batch: int) -> dict:
         image_size = self.config.image_size
