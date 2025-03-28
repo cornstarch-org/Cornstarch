@@ -19,10 +19,16 @@ from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or
 from transformers.models.qwen2_audio.configuration_qwen2_audio import (
     Qwen2AudioEncoderConfig,
 )
-from transformers.models.qwen2_audio.modeling_qwen2_audio import Qwen2AudioEncoder
+from transformers.models.qwen2_audio.modeling_qwen2_audio import (
+    Qwen2AudioEncoder,
+    QWEN2AUDIO_ATTENTION_CLASSES,
+)
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.qwen2_audio import Qwen2AudioModelForwards
+from cornstarch.shardformer.modeling.qwen2_audio import (
+    Qwen2AudioModelForwards,
+    Qwen2AudioAttentionForwards,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -97,27 +103,11 @@ class Qwen2AudioEncoderPolicy(PipelineTemplatePolicyBase, Policy):
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from transformers.models.qwen2_audio.modeling_qwen2_audio import (
-            Qwen2AudioAttention,
             Qwen2AudioEncoderLayer,
-            Qwen2AudioFlashAttention2,
-            Qwen2AudioSdpaAttention,
         )
 
         config: Qwen2AudioEncoderConfig = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": Qwen2AudioAttention,
-            "sdpa": Qwen2AudioSdpaAttention,
-            "flash_attention_2": Qwen2AudioFlashAttention2,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
-
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "Qwen2Audio doesn't support sequence parallelism, will ignore the sequence parallelism flag."
-            )
 
         tp_size = self.shard_config.tensor_parallel_size
         num_heads = config.encoder_attention_heads
@@ -134,19 +124,29 @@ class Qwen2AudioEncoderPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement = {}
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
+        attention_attribute_replacement["is_causal"] = False
 
-        policy[attn_cls] = ModulePolicyDescription(
+        attn_policy = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    Qwen2AudioAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
         )
+        for attn_cls in QWEN2AUDIO_ATTENTION_CLASSES.values():
+            policy[attn_cls] = attn_policy
 
         if self.shard_config.enable_flash_attention:
             attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
                 not is_flash_attn_greater_or_equal("2.1.0")
             )
 
-            policy[attn_cls] = ModulePolicyDescription(
-                attribute_replacement=attention_attribute_replacement,
-                method_replacement={"forward": Qwen2AudioFlashAttention2.forward},
+            policy[Qwen2AudioEncoder] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2"
+                }
             )
 
         if self.shard_config.enable_tensor_parallelism:
