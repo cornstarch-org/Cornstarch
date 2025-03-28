@@ -1,5 +1,5 @@
+import functools
 import itertools
-import warnings
 from functools import partial
 from typing import Dict, List, cast
 
@@ -20,7 +20,10 @@ from transformers.models.siglip.configuration_siglip import SiglipVisionConfig
 from transformers.models.siglip.modeling_siglip import SiglipVisionTransformer
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.siglip import SiglipVisionModelForwards
+from cornstarch.shardformer.modeling.siglip import (
+    SiglipVisionAttentionForwards,
+    SiglipVisionModelForwards,
+)
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -94,15 +97,8 @@ class SiglipVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
             "sdpa": SiglipSdpaAttention,
             "flash_attention_2": SiglipFlashAttention2,
         }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
-
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "CLIP doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
-            )
 
         tp_size = self.shard_config.tensor_parallel_size
         num_heads = config.num_attention_heads
@@ -119,20 +115,23 @@ class SiglipVisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement = {}
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
+        attention_attribute_replacement["is_causal"] = False
 
-        policy[attn_cls] = ModulePolicyDescription(
+        attn_policy = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    SiglipVisionAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                ),
+            },
         )
+        for attn_cls in ATTN_IMPLEMENTATION.values():
+            policy[attn_cls] = attn_policy
 
         if self.shard_config.enable_flash_attention:
             attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
                 not is_flash_attn_greater_or_equal("2.1.0")
-            )
-            attention_attribute_replacement["is_causal"] = False
-
-            policy[attn_cls] = ModulePolicyDescription(
-                attribute_replacement=attention_attribute_replacement,
-                method_replacement={"forward": (SiglipFlashAttention2.forward)},
             )
 
             policy[SiglipVisionTransformer] = ModulePolicyDescription(

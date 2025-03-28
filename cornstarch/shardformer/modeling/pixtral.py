@@ -3,7 +3,6 @@ from typing import Callable, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
