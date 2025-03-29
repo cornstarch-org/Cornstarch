@@ -1,4 +1,5 @@
 import copy
+import functools
 import re
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -74,7 +75,9 @@ class ModelClassBase(ABC):
         self.config = config
 
     @abstractmethod
-    def loss_fn(self, x: ModelOutput) -> torch.Tensor: ...
+    def loss_fn(
+        self, x: ModelOutput, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor: ...
 
     @abstractmethod
     def data_gen_fn(self, num_batch: int) -> dict: ...
@@ -368,24 +371,20 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         org_model: nn.Module,
         sharded_model: nn.Module,
         sharded_optimizer: Optimizer,
-        criterion: Callable[[torch.Tensor], torch.Tensor],
+        criterion: Callable[[torch.Tensor, dist.ProcessGroup], torch.Tensor],
         output_transform_fn: Callable,
         booster: Booster,
         precision: torch.dtype,
     ):
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
-            loss = criterion(outputs)
+            loss = criterion(outputs, sharded_model.sp_group)
             return loss
 
         data = self.model.data_gen_fn(self.microbatch_size * self.num_microbatches)
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
-        if sharded_model.unwrap().config._attn_implementation == "bitfield_attention":
-            shard_test_data["attention_mask"] = create_bitfield_attention_mask(
-                shard_test_data["input_ids"]
-            )
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()
@@ -416,14 +415,14 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 sharded_output = sharded_model(*shard_test_data)
             else:
                 sharded_output = sharded_model(**shard_test_data)
-            sharded_loss = criterion(sharded_output)
+            sharded_loss = _criterion(sharded_output, shard_test_data)
             sharded_optimizer.backward(sharded_loss)
 
         return org_loss, org_output, sharded_loss, sharded_output
 
 
 class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
-    num_microbatches: int = 4
+    num_microbatches: int = 6
     microbatch_size: int = 2
     token_ids: dict[str, int]
 
@@ -596,7 +595,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         self,
         tp_size: int,
         modal_pp_size: dict[str, int],
-        llm_sp_mode: str | None,
+        modal_sp_size: dict[str, int] = {},
         run_original_model: bool = True,
         run_sharded_model: bool = True,
     ) -> tuple[nn.Module, ModelWrapper, Optimizer, OptimizerWrapper, Booster]:
@@ -618,7 +617,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         ) = self.build_model_from_multimodal_plugin(
             tp_size=tp_size,
             module_pp_size=modal_pp_size,
-            llm_sp_mode=llm_sp_mode,
+            module_sp_size=modal_sp_size,
             test_config=test_config,
             precision=precision,
         )
@@ -654,9 +653,11 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         return org_model, sharded_model, org_optimizer, sharded_optimizer, booster
 
     @staticmethod
-    def postprocess_callback(inputs: dict, output: BaseModelOutput) -> BaseModelOutput:
+    def postprocess_projector_callback(
+        inputs: dict, output: ModelOutput
+    ) -> ModelOutput:
         # Cut number of tokens to make merging outputs easier
-        output.last_hidden_state = output.last_hidden_state[:, :32, :]
+        output.hidden_states = output.hidden_states[:, :32]
         return output
 
     def build_model_from_pretrained(
@@ -711,7 +712,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             encoder = model_base.model_fn()
             encoders[modal_key] = ModalEncoderModule(
                 encoder,
-                postprocess_module_callback=self.postprocess_callback,
+                postprocess_projector_callback=self.postprocess_projector_callback,
             )
 
         llm = self.llm.model_fn()
@@ -736,7 +737,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         model: MultimodalModel,
         tp_size: int,
         module_pp_size: dict[str, int],
-        llm_sp_mode: str | None,
+        module_sp_size: dict[str, int],
         test_config: dict[str, Any],
         precision: torch.dtype,
     ) -> tuple[
@@ -748,17 +749,23 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         plugins: dict[str, ModalParallelPlugin] = {}
         for modal_name, pp_size in module_pp_size.items():
             if modal_name == "llm":
+                llm_sp_size = module_sp_size.get("llm", 1)
                 llm_plugin = ModalParallelPlugin(
                     tp_size=tp_size,
-                    sp_size=2 if llm_sp_mode is not None else 1,
-                    sequence_parallelism_mode=llm_sp_mode,
+                    sp_size=llm_sp_size,
+                    sequence_parallelism_mode="ring_attn" if llm_sp_size > 1 else None,
                     pipeline_template=self.get_pipeline_template(
                         model.language_model, pp_size
                     ),
                 )
             else:
+                modal_sp_size = module_sp_size.get(modal_name, 1)
                 plugins[modal_name] = ModalParallelPlugin(
                     tp_size=tp_size,
+                    sp_size=modal_sp_size,
+                    sequence_parallelism_mode=(
+                        "ring_attn" if modal_sp_size > 1 else None
+                    ),
                     pipeline_template=self.get_pipeline_template(
                         model.get_submodule(f"{modal_name}_encoder"), pp_size
                     ),
@@ -789,7 +796,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         self,
         tp_size: int,
         module_pp_size: dict[str, int],
-        llm_sp_mode: str | None,
+        module_sp_size: dict[str, int],
         test_config: dict[str, Any],
         precision: torch.dtype,
     ) -> tuple[
@@ -813,8 +820,16 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         org_optimizer = Adam(org_model.parameters(), lr=1e-3)
 
         sharded_model, sharded_optimizer, criterion, booster = self.parallelize_model(
-            sharded_model, tp_size, module_pp_size, llm_sp_mode, test_config, precision
+            sharded_model,
+            tp_size,
+            module_pp_size,
+            module_sp_size,
+            test_config,
+            precision,
         )
+
+        org_model.update_language_model_to_use_bitfield_attention_mask()
+        sharded_model.unwrap().update_language_model_to_use_bitfield_attention_mask()
 
         return (
             org_model,
@@ -958,10 +973,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 loss = criterion(output) / self.num_microbatches
                 loss.backward()
                 org_loss.add_(loss.data)
-
-            # org_output = org_model(**unshard_test_data)
-            # org_loss = criterion(org_output)
-            # org_loss.backward()
 
         sharded_loss, sharded_output = None, None
         if run_sharded_model:

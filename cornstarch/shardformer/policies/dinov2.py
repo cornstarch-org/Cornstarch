@@ -81,17 +81,10 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
             Dinov2Embeddings,
             Dinov2Layer,
             Dinov2Model,
-            Dinov2SdpaSelfAttention,
             Dinov2SelfAttention,
         )
 
         config: Dinov2Config = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": Dinov2SelfAttention,
-            "sdpa": Dinov2SdpaSelfAttention,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
 
         if self.shard_config.enable_sequence_parallelism:
@@ -118,21 +111,20 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement["attention_probs_dropout_prob"] = (
             config.attention_probs_dropout_prob
         )
+        attention_attribute_replacement["is_causal"] = False
 
-        policy[attn_cls] = ModulePolicyDescription(
+        policy[Dinov2SelfAttention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
-                "forward": (
-                    Dinov2SelfAttentionForwards.flash_attention_forward
-                    if self.shard_config.enable_flash_attention
-                    else Dinov2SelfAttentionForwards.sdpa_forward
-                ),
+                "forward": functools.partial(
+                    Dinov2SelfAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
             },
         )
 
         if self.shard_config.enable_tensor_parallelism:
             policy[Dinov2Embeddings] = ModulePolicyDescription(
-                attribute_replacement={},
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="dropout",
@@ -156,16 +148,8 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                         target_module=Linear1D_Col,
                     ),
                     SubModuleReplacementDescription(
-                        suffix="attention.attention.dropout",
-                        target_module=DropoutForParallelInput,
-                    ),
-                    SubModuleReplacementDescription(
                         suffix="attention.output.dense",
                         target_module=Linear1D_Row,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="attention.output.dropout",
-                        target_module=DropoutForReplicatedInput,
                     ),
                     SubModuleReplacementDescription(
                         suffix=(

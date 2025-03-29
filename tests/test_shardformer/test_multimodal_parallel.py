@@ -71,7 +71,6 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         self.run_multimodal_parallel(
             tp_size,
             {"vision": vision_pp_size, "llm": language_pp_size},
-            None,
         )
 
 
@@ -79,18 +78,24 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
 class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 6
+        return 8
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize(
-        "tp_size, vision_pp_size, language_pp_size",
+        "tp_size, vision_pp_size, vision_sp_size, language_pp_size, language_sp_size",
         [
-            (1, 1, 1),
-            (2, 1, 1),
-            (1, 2, 2),
+            (1, 1, 1, 1, 1),
+            (1, 1, 2, 1, 2),
+            (1, 2, 1, 2, 1),
+            (1, 2, 2, 2, 2),
+            (1, 2, 1, 1, 2),
+            (2, 1, 1, 1, 1),
+            (2, 1, 2, 1, 2),
+            (2, 2, 1, 2, 1),
+            (2, 2, 1, 1, 2),
         ],
-        name_fn=lambda tp, vpp, lpp: f"tp={tp}, pp={vpp},{lpp}",
+        name_fn=lambda tp, vpp, vsp, lpp, lsp: f"tp={tp}, pp=({vpp},{lpp}), sp=({vsp},{lsp})",
     )
     def test(
         self,
@@ -99,6 +104,8 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
         tp_size: int,
         vision_pp_size: int,
         language_pp_size: int,
+        vision_sp_size: int,
+        language_sp_size: int,
     ):
         self.set_model(
             encoders={"vision": vision_models[vision_model_name]()},
@@ -107,7 +114,7 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
         self.run_multimodal_parallel(
             tp_size,
             {"vision": vision_pp_size, "llm": language_pp_size},
-            llm_sp_mode="ring_attn",
+            {"vision": vision_sp_size, "llm": language_sp_size},
         )
 
 
@@ -115,18 +122,25 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
 class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 6
+        return 12
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize("audio_model_name", audio_models.keys(), lambda x: f"{x}")
     @parametrize(
-        "tp_size, vision_pp_size, audio_pp_size, language_pp_size",
+        "tp_size, vision_pp_size, vision_sp_size, audio_pp_size, audio_sp_size, language_pp_size, language_sp_size",
         [
-            (2, 1, 1, 1),
-            (1, 1, 1, 1),
+            (1, 1, 1, 1, 1, 1, 1),
+            (1, 1, 2, 1, 2, 1, 2),
+            (1, 2, 1, 2, 1, 2, 1),
+            (1, 2, 2, 2, 2, 2, 2),
+            (1, 2, 1, 2, 1, 1, 2),
+            (2, 1, 1, 1, 1, 1, 1),
+            (2, 1, 2, 1, 2, 1, 2),
+            (2, 2, 1, 2, 1, 2, 1),
+            (2, 2, 1, 2, 1, 1, 2),
         ],
-        name_fn=lambda tp, vpp, app, lpp: f"tp={tp}, pp={vpp},{app},{lpp}",
+        name_fn=lambda tp, vpp, vsp, app, asp, lpp, lsp: f"tp={tp}, pp=({vpp},{app},{lpp}), sp=({vsp},{asp},{lsp})",
     )
     def test(
         self,
@@ -137,6 +151,9 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         vision_pp_size: int,
         audio_pp_size: int,
         language_pp_size: int,
+        vision_sp_size: int,
+        audio_sp_size: int,
+        language_sp_size: int,
     ):
         self.set_model(
             encoders={
@@ -148,5 +165,5 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         self.run_multimodal_parallel(
             tp_size,
             {"vision": vision_pp_size, "audio": audio_pp_size, "llm": language_pp_size},
-            None,
+            {"vision": vision_sp_size, "audio": audio_sp_size, "llm": language_sp_size},
         )

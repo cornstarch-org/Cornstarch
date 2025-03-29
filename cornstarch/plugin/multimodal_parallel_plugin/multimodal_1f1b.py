@@ -511,9 +511,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             "decoders in the model."
         )
 
-        self.comm: MultimodalPipelineP2PCommunication = (
-            MultimodalPipelineP2PCommunication(stage_manager)
-        )
+        self.comm = MultimodalPipelineP2PCommunication(stage_manager)
 
         self.num_microbatches = num_microbatches
         self.microbatch_size = microbatch_size
@@ -731,8 +729,9 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             tensors_to_backward = []
             grads_to_backward = []
             for k in keys:
-                tensors_to_backward.append(output_obj[k])
-                grads_to_backward.append(output_obj_grad[k])
+                if isinstance(output_obj[k], torch.Tensor):
+                    tensors_to_backward.append(output_obj[k])
+                    grads_to_backward.append(output_obj_grad[k])
             if len(tensors_to_backward) == 1:
                 optimizer.backward_by_grad(tensors_to_backward[0], grads_to_backward[0])
             else:

@@ -38,24 +38,25 @@ from .utils import (
 )
 
 
-@instantiate_parametrized_tests
-class EncodersColocatedMultimodalParallel(CornstarchMultimodalParallelBase):
-    @property
-    def world_size(self) -> int:
-        return 6
-
+class EncodersColocatedMultimodalParallelBase(CornstarchMultimodalParallelBase):
     def parallelize_model(
         self,
         model: MultimodalModel,
         tp_size: int,
         encoder_pp_size: int,
         language_pp_size: int,
+        encoder_sp_size: int,
+        language_sp_size: int,
         test_config: dict[str, Any],
         precision: torch.dtype,
     ):
         encoder_plugins: dict[str, ModalParallelPlugin] = {
             encoder_name: ModalParallelPlugin(
                 tp_size=tp_size,
+                sp_size=encoder_sp_size,
+                sequence_parallelism_mode=(
+                    "ring_attn" if encoder_sp_size > 1 else None
+                ),
                 pipeline_template=self.get_pipeline_template(
                     model.get_submodule(f"{encoder_name}_encoder"), encoder_pp_size
                 ),
@@ -65,6 +66,8 @@ class EncodersColocatedMultimodalParallel(CornstarchMultimodalParallelBase):
 
         llm_plugin = ModalParallelPlugin(
             tp_size=tp_size,
+            sp_size=language_sp_size,
+            sequence_parallelism_mode="ring_attn" if language_sp_size > 1 else None,
             pipeline_template=self.get_pipeline_template(
                 model.language_model, language_pp_size
             ),
@@ -246,6 +249,125 @@ class EncodersColocatedMultimodalParallel(CornstarchMultimodalParallelBase):
 
         check_all_grad_tensors(grads_to_check)
 
+    def build_colocated_model_from_multimodal_plugin(
+        self,
+        tp_size: int,
+        encoder_pp_size: int,
+        language_pp_size: int,
+        encoder_sp_size: int,
+        language_sp_size: int,
+        test_config: dict[str, Any],
+        precision: torch.dtype,
+    ) -> tuple[
+        MultimodalModel,
+        Optimizer,
+        EncodersColocatedMultimodalParallelModule,
+        OptimizerWrapper,
+        Callable,
+        Booster,
+    ]:
+        use_lazy_init: bool = test_config.pop("use_lazy_init", False)
+
+        ctx = LazyInitContext() if use_lazy_init else nullcontext()
+        with ctx:
+            org_model = self.build_model_from_config()
+            sharded_model = copy.deepcopy(org_model)
+
+        if use_lazy_init:
+            ctx.materialize(org_model)
+
+        org_optimizer = Adam(org_model.parameters(), lr=1e-3)
+
+        sharded_model, sharded_optimizer, criterion, booster = self.parallelize_model(
+            sharded_model,
+            tp_size,
+            encoder_pp_size,
+            language_pp_size,
+            encoder_sp_size,
+            language_sp_size,
+            test_config,
+            precision,
+        )
+
+        org_model.update_language_model_to_use_bitfield_attention_mask()
+        sharded_model.unwrap().update_language_model_to_use_bitfield_attention_mask()
+
+        return (
+            org_model,
+            org_optimizer,
+            sharded_model,
+            sharded_optimizer,
+            criterion,
+            booster,
+        )
+
+    def run_colocated_multimodal_parallel(
+        self,
+        tp_size: int,
+        encoder_pp_size: int,
+        language_pp_size: int,
+        encoder_sp_size: int = 1,
+        language_sp_size: int = 1,
+    ):
+        precision = torch.bfloat16
+
+        test_config = dict(
+            num_microbatches=self.num_microbatches,
+            microbatch_size=self.microbatch_size,
+            initial_scale=1,
+        )
+
+        (
+            org_model,
+            org_optimizer,
+            sharded_model,
+            sharded_optimizer,
+            criterion,
+            booster,
+        ) = self.build_colocated_model_from_multimodal_plugin(
+            tp_size=tp_size,
+            encoder_pp_size=encoder_pp_size,
+            language_pp_size=language_pp_size,
+            encoder_sp_size=encoder_sp_size,
+            language_sp_size=language_sp_size,
+            test_config=test_config,
+            precision=precision,
+        )
+
+        org_model.gradient_checkpointing_enable()
+        sharded_model.unwrap().gradient_checkpointing_enable()
+
+        org_loss, org_output, sharded_loss, sharded_output = (
+            self.run_forward_backward_with_multimodal_plugin(
+                org_model=org_model,
+                sharded_model=sharded_model,
+                sharded_optimizer=sharded_optimizer,
+                criterion=criterion,
+                output_transform_fn=lambda x: x,
+                booster=booster,
+                precision=precision,
+            )
+        )
+
+        self.check_fn(
+            booster=booster,
+            org_model=org_model,
+            sharded_model=sharded_model,
+            org_optim=org_optimizer,
+            sharded_optim=sharded_optimizer,
+            org_output=org_output,
+            sharded_output=sharded_output,
+            org_loss=org_loss,
+            sharded_loss=sharded_loss,
+        )
+
+
+@instantiate_parametrized_tests
+class EncodersColocatedMultimodalParallel(EncodersColocatedMultimodalParallelBase):
+    @property
+    def world_size(self) -> int:
+        return 6
+
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize("audio_model_name", audio_models.keys(), lambda x: f"{x}")
@@ -283,103 +405,56 @@ class EncodersColocatedMultimodalParallel(CornstarchMultimodalParallelBase):
             language_pp_size,
         )
 
-    def build_colocated_model_from_multimodal_plugin(
+
+@instantiate_parametrized_tests
+class EncodersColocatedMultimodalContextParallel(
+    EncodersColocatedMultimodalParallelBase
+):
+    @property
+    def world_size(self) -> int:
+        return 8
+
+    @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
+    @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
+    @parametrize("audio_model_name", audio_models.keys(), lambda x: f"{x}")
+    @parametrize(
+        "tp_size, encoder_pp_size, encoder_sp_size, language_pp_size, language_sp_size",
+        [
+            (1, 1, 2, 1, 2),
+            (1, 2, 1, 2, 1),
+            (1, 2, 2, 2, 2),
+            (1, 1, 2, 2, 1),
+            (1, 2, 1, 1, 2),
+            (2, 1, 2, 1, 2),
+            (2, 2, 1, 2, 1),
+            (2, 2, 1, 1, 2),
+            (2, 1, 2, 2, 1),
+        ],
+        name_fn=lambda tp, epp, esp, lpp, lsp: f"tp={tp}, pp=({epp},{lpp}), sp=({esp},{lsp})",
+    )
+    def test(
         self,
+        vision_model_name: str,
+        language_model_name: str,
+        audio_model_name: str,
         tp_size: int,
         encoder_pp_size: int,
+        encoder_sp_size: int,
         language_pp_size: int,
-        test_config: dict[str, Any],
-        precision: torch.dtype,
-    ) -> tuple[
-        MultimodalModel,
-        Optimizer,
-        EncodersColocatedMultimodalParallelModule,
-        OptimizerWrapper,
-        Callable,
-        Booster,
-    ]:
-        use_lazy_init: bool = test_config.pop("use_lazy_init", False)
+        language_sp_size: int,
+    ):
+        self.set_model(
+            encoders={
+                "vision": vision_models[vision_model_name](),
+                "audio": audio_models[audio_model_name](),
+            },
+            llm=causal_lms[language_model_name](),
+        )
 
-        ctx = LazyInitContext() if use_lazy_init else nullcontext()
-        with ctx:
-            org_model = self.build_model_from_config()
-            sharded_model = copy.deepcopy(org_model)
-
-        if use_lazy_init:
-            ctx.materialize(org_model)
-
-        org_optimizer = Adam(org_model.parameters(), lr=1e-3)
-
-        sharded_model, sharded_optimizer, criterion, booster = self.parallelize_model(
-            sharded_model,
+        self.run_colocated_multimodal_parallel(
             tp_size,
             encoder_pp_size,
             language_pp_size,
-            test_config,
-            precision,
-        )
-
-        return (
-            org_model,
-            org_optimizer,
-            sharded_model,
-            sharded_optimizer,
-            criterion,
-            booster,
-        )
-
-    def run_colocated_multimodal_parallel(
-        self,
-        tp_size: int,
-        encoder_pp_size: int,
-        language_pp_size: int,
-    ):
-        precision = torch.bfloat16
-
-        test_config = dict(
-            num_microbatches=self.num_microbatches,
-            microbatch_size=self.microbatch_size,
-            initial_scale=1,
-        )
-
-        (
-            org_model,
-            org_optimizer,
-            sharded_model,
-            sharded_optimizer,
-            criterion,
-            booster,
-        ) = self.build_colocated_model_from_multimodal_plugin(
-            tp_size=tp_size,
-            encoder_pp_size=encoder_pp_size,
-            language_pp_size=language_pp_size,
-            test_config=test_config,
-            precision=precision,
-        )
-
-        org_model.gradient_checkpointing_enable()
-        sharded_model.unwrap().gradient_checkpointing_enable()
-
-        org_loss, org_output, sharded_loss, sharded_output = (
-            self.run_forward_backward_with_multimodal_plugin(
-                org_model=org_model,
-                sharded_model=sharded_model,
-                sharded_optimizer=sharded_optimizer,
-                criterion=criterion,
-                output_transform_fn=lambda x: x,
-                booster=booster,
-                precision=precision,
-            )
-        )
-
-        self.check_fn(
-            booster=booster,
-            org_model=org_model,
-            sharded_model=sharded_model,
-            org_optim=org_optimizer,
-            sharded_optim=sharded_optimizer,
-            org_output=org_output,
-            sharded_output=sharded_output,
-            org_loss=org_loss,
-            sharded_loss=sharded_loss,
+            encoder_sp_size,
+            language_sp_size,
         )

@@ -36,18 +36,22 @@ class EncodersColocatedProcessGroupMesh(MultiModalProcessGroupMesh):
 
     def __init__(
         self,
-        encoder_templates: dict[PipelineTemplate, int],
+        encoder_templates: dict[PipelineTemplate, int | tuple[int, int]],
         llm_template: tuple[PipelineTemplate, int, int],
     ) -> None:
         assert dist.is_initialized(), "Please initialize torch.distributed first."
         assert isinstance(encoder_templates, dict), "encoder_templates must be a dict."
-        assert llm_template is not None, "llm_template must be provided."
+        assert len(encoder_templates) > 0, "encoder_templates must not be empty."
+
+        for encoder_template, parallel_sizes in encoder_templates.items():
+            if isinstance(parallel_sizes, int):
+                encoder_templates[encoder_template] = (parallel_sizes, 1)
 
         first_encoder_template = next(iter(encoder_templates.keys()))
-        for template, tp_size in encoder_templates.items():
+        for template, parallel_size in encoder_templates.items():
             assert (
-                tp_size == encoder_templates[first_encoder_template]
-            ), "All encoder templates must have the same tensor parallel degree."
+                parallel_size == encoder_templates[first_encoder_template]
+            ), "All encoder templates must have the same tensor/context parallel degree."
             assert (
                 template.num_stages == first_encoder_template.num_stages
             ), "All encoder templates must have the same number of stages."
@@ -56,7 +60,7 @@ class EncodersColocatedProcessGroupMesh(MultiModalProcessGroupMesh):
         self.llm_template = llm_template
 
         # Context parallelism for encoders is not supported. SP for encoders == 1.
-        encoder_pp_size, encoder_tp_size = (
+        encoder_pp_size, (encoder_tp_size, encoder_sp_size) = (
             first_encoder_template.num_stages,
             encoder_templates[first_encoder_template],
         )
@@ -67,58 +71,64 @@ class EncodersColocatedProcessGroupMesh(MultiModalProcessGroupMesh):
         )
 
         num_ranks_in_model = (
-            encoder_pp_size * encoder_tp_size + llm_pp_size * llm_tp_size * llm_sp_size
+            encoder_pp_size * encoder_tp_size * encoder_sp_size
+            + llm_pp_size * llm_tp_size * llm_sp_size
         )
         assert (
             dist.get_world_size() % num_ranks_in_model == 0
-        ), f"World size {dist.get_world_size()} is not divisible by num_ranks per replica {num_ranks_in_model}."
+        ), f"The world size {dist.get_world_size()} must be divisible by num_ranks per replica {num_ranks_in_model}."
         dp_size = dist.get_world_size() // num_ranks_in_model
 
         max_tp_size = max(encoder_tp_size, llm_tp_size)
-
-        assert (
-            max_tp_size % encoder_tp_size == 0
-        ), "TP size must be divisible by encoder TP size."
-        assert (
-            max_tp_size % llm_tp_size == 0
-        ), "TP size must be divisible by LLM TP size."
+        max_sp_size = max(encoder_sp_size, llm_sp_size)
+        assert all(max_tp_size % tp == 0 for tp in [encoder_tp_size, llm_tp_size]), (
+            f"TP size {max_tp_size} must be divisible by encoder TP size {encoder_tp_size} "
+            f"and LLM TP size {llm_tp_size}."
+        )
+        assert all(max_sp_size % sp == 0 for sp in [encoder_sp_size, llm_sp_size]), (
+            f"SP size {max_sp_size} must be divisible by encoder SP size {encoder_sp_size} "
+            f"and LLM SP size {llm_sp_size}."
+        )
 
         meshes: list[list[list[int]]] = []
         rank_index = 0
         modal_to_ranks: dict[PipelineTemplate, list[int]] = defaultdict(list)
 
-        # Encoder ranks
-        for _ in range(encoder_pp_size):
-            stage_mesh = []
-            for _ in range(dp_size):
-                ranks = [
-                    i
-                    for i in range(rank_index, rank_index + encoder_tp_size)
-                    for _ in range(max_tp_size // encoder_tp_size)
-                ]
-                rank_index += encoder_tp_size
-                tp_mesh = [ranks for _ in range(llm_sp_size)]
-                stage_mesh.append(tp_mesh)
-                for modal in encoder_templates.keys():
-                    modal_to_ranks[modal].extend(list(itertools.chain(*tp_mesh)))
-            meshes.append(stage_mesh)
+        iterables: list[tuple[PipelineTemplate, int, int]] = [
+            (first_encoder_template, encoder_tp_size, encoder_sp_size),
+            llm_template,
+        ]
 
-        # LLM ranks
-        for _ in range(llm_pp_size):
-            stage_mesh = []
-            for _ in range(dp_size):
-                tp_mesh = []
-                for _ in range(llm_sp_size):
-                    ranks = [
-                        i
-                        for i in range(rank_index, rank_index + llm_tp_size)
-                        for _ in range(max_tp_size // llm_tp_size)
-                    ]
-                    rank_index += llm_tp_size
-                    tp_mesh.append(ranks)
-                stage_mesh.append(tp_mesh)
-                modal_to_ranks[llm_template[0]].extend(list(itertools.chain(*tp_mesh)))
-            meshes.append(stage_mesh)
+        for modal, tp_size, sp_size in iterables:
+            for _ in range(modal.num_stages):
+                stage_mesh = []
+                for _ in range(dp_size):
+                    tp_mesh = []
+                    copy_per_same_ranks = max_sp_size // sp_size
+
+                    for _ in range(sp_size):
+                        ranks = list(
+                            itertools.chain.from_iterable(
+                                [
+                                    [i] * (max_tp_size // tp_size)
+                                    for i in range(rank_index, rank_index + tp_size)
+                                ]
+                            )
+                        )
+                        rank_index += tp_size
+                        tp_mesh.extend([ranks for _ in range(copy_per_same_ranks)])
+
+                    stage_mesh.append(tp_mesh)
+
+                    if modal == first_encoder_template:
+                        for encoder in encoder_templates.keys():
+                            modal_to_ranks[encoder].extend(
+                                list(itertools.chain(*tp_mesh))
+                            )
+                    else:
+                        assert modal == llm_template[0]
+                        modal_to_ranks[modal].extend(list(itertools.chain(*tp_mesh)))
+                meshes.append(stage_mesh)
 
         self._rank = dist.get_rank()
         self._mesh = np.array(meshes)

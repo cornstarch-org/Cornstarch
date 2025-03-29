@@ -1,15 +1,30 @@
-from typing import Optional, Tuple, Union
+import functools
+from typing import Callable, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPooling,
 )
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.vit.modeling_vit import (
     ViTModel,
+    ViTSelfAttention,
+    eager_attention_forward,
     logger,
 )
+
+from cornstarch.shardformer.layers.context_parallel_attention import (
+    context_parallel_flash_attention,
+)
+from cornstarch.shardformer.layers.utils import (
+    ContextParallelBatchSplitUtils,
+    ContextParallelDistributionMode,
+)
+
+_SUPPORTED_CP_MODE = ["ring_attn"]
 
 
 class ViTModelForwards:
@@ -80,6 +95,26 @@ class ViTModelForwards:
 
             hidden_states = embedding_output
 
+        sp_mode = shard_config.sequence_parallelism_mode
+        sp_group = shard_config.sequence_parallel_process_group
+        sp_size = shard_config.sequence_parallel_size
+
+        # Support SP + PP. Later stages have already received the split input.
+        if sp_mode == "ring_attn":
+            split_input = stage_manager is None or stage_manager.is_first_stage()
+            if split_input:
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    # fake attention mask
+                    torch.empty(hidden_states.shape[:2], device="meta"),
+                    sp_group,
+                    dist_mode=ContextParallelDistributionMode.UNIFORM,
+                )
+
+                hidden_states = ContextParallelBatchSplitUtils.split_batch(
+                    hidden_states,
+                    sp_group,
+                )
+
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.encoder.layer))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
@@ -114,6 +149,8 @@ class ViTModelForwards:
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
+
+        ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
             outputs = {"hidden_states": hidden_states}
@@ -151,31 +188,69 @@ class ViTModelForwards:
         )
 
 
-# class ViTAttentionForwards:
-#     @staticmethod
-#     def sdpa_forward(
-#         self: ViTSdpaSelfAttention,
-#         hidden_states: torch.FloatTensor,
-#         head_mask: Optional[torch.Tensor] = None,
-#         output_attentions: bool = False,
-#     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-#         if output_attentions or head_mask is not None:
-#             logger.warning_once(
-#                 "`ViTSdpaAttention` is used but `torch.nn.functional.scaled_dot_product_attention` does not support "
-#                 "`output_attentions=True` or `head_mask`. Falling back to the manual attention implementation, but "
-#                 "specifying the manual implementation will be required from Transformers version v5.0.0 onwards. "
-#                 'This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-#             )
-#             return ViTAttentionForwards.forward(
-#                 self, hidden_states, head_mask, output_attentions
-#             )
+class ViTAttentionForwards:
+    @staticmethod
+    def forward(
+        self: ViTSelfAttention,
+        hidden_states,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+        shard_config: Optional[ShardConfig] = None,
+        **kwargs,
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        if shard_config is not None and shard_config.enable_sequence_parallelism:
+            sp_mode: str = shard_config.sequence_parallelism_mode
+            sp_size: int = shard_config.sequence_parallel_size
+            sp_group: dist.ProcessGroup = shard_config.sequence_parallel_process_group
 
+            assert (
+                sp_mode in _SUPPORTED_CP_MODE
+            ), f"SP mode {sp_mode} is not supported by {type(self)} yet"
+            assert (
+                sp_size > 1 and sp_group is not None
+            ), "Must specify sp_size and sp_group for sequence parallel"
+        else:
+            sp_mode = None
+            sp_size = None
+            sp_group = None
 
-#     @staticmethod
-#     def forward(
-#         self: ViTSelfAttention,
-#         hidden_states: torch.Tensor,
-#         head_mask: Optional[torch.Tensor] = None,
-#         output_attentions: bool = False,
-#     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-#         pass
+        key_layer = self.transpose_for_scores(self.key(hidden_states))
+        value_layer = self.transpose_for_scores(self.value(hidden_states))
+        query_layer = self.transpose_for_scores(self.query(hidden_states))
+
+        if sp_mode == "ring_attn":
+            attention_interface: Callable = functools.partial(
+                context_parallel_flash_attention, sp_group=sp_group
+            )
+        else:
+            attention_interface: Callable = eager_attention_forward
+            if self.config._attn_implementation != "eager":
+                if self.config._attn_implementation == "sdpa" and output_attentions:
+                    logger.warning_once(
+                        "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                        'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                    )
+                else:
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[
+                        self.config._attn_implementation
+                    ]
+
+        context_layer, attention_probs = attention_interface(
+            self,
+            query_layer,
+            key_layer,
+            value_layer,
+            attention_mask=head_mask,
+            is_causal=self.is_causal,
+            scaling=self.scaling,
+            dropout=0.0 if not self.training else self.dropout_prob,
+        )
+
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.reshape(new_context_layer_shape)
+
+        outputs = (
+            (context_layer, attention_probs) if output_attentions else (context_layer,)
+        )
+
+        return outputs

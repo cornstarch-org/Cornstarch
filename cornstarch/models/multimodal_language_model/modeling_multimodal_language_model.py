@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+from collections import OrderedDict
 from types import MethodType
 from typing import Any, Callable, Optional, Union
 
@@ -33,10 +34,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 )
 from transformers.utils import logging
 
-from cornstarch.kernel.interface import (
-    bitfield_attention_forward,
-    create_bitfield_attention_mask,
-)
+from cornstarch.kernel.interface import bitfield_attention_forward
 from cornstarch.models.multimodal_language_model import MultimodalProjectorConfig
 
 logger = logging.get_logger(__name__)
@@ -337,7 +335,7 @@ class MultimodalProjector(PreTrainedModel):
 
     config_class = MultimodalProjectorConfig
     base_model_prefix = ""
-    main_input_name = "inputs_embeds"
+    main_input_name = "hidden_states"
     supports_gradient_checkpointing = True
 
     config: MultimodalProjectorConfig
@@ -354,27 +352,49 @@ class MultimodalProjector(PreTrainedModel):
             self.projection = projection
         else:
             if config.projection_type == "linear":
-                self.projection = nn.Linear(
-                    in_features=config.in_features,
-                    out_features=config.out_features,
+                self.projection = nn.Sequential(
+                    OrderedDict(
+                        [
+                            (
+                                "linear",
+                                nn.Linear(
+                                    in_features=config.in_features,
+                                    out_features=config.out_features,
+                                ),
+                            )
+                        ]
+                    )
                 )
             elif config.projection_type == "mlp":
                 self.projection = nn.Sequential(
-                    nn.Linear(
-                        in_features=config.in_features,
-                        out_features=config.out_features,
-                    ),
-                    get_activation(config.activation),
-                    nn.Linear(
-                        in_features=config.out_features,
-                        out_features=config.out_features,
-                    ),
+                    OrderedDict(
+                        [
+                            (
+                                "in_proj",
+                                nn.Linear(
+                                    in_features=config.in_features,
+                                    out_features=config.out_features,
+                                ),
+                            ),
+                            ("activation", get_activation(config.activation)),
+                            (
+                                "out_proj",
+                                nn.Linear(
+                                    in_features=config.out_features,
+                                    out_features=config.out_features,
+                                ),
+                            ),
+                        ]
+                    )
                 )
             elif config.projection_type == "qformer":
                 raise NotImplementedError
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def post_projection(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states
 
     def forward(
         self, hidden_states: torch.Tensor, return_dict: bool = True
@@ -383,6 +403,8 @@ class MultimodalProjector(PreTrainedModel):
             outputs = self._gradient_checkpointing_func(self.projection, hidden_states)
         else:
             outputs = self.projection(hidden_states)
+
+        outputs = self.post_projection(outputs)
 
         if not return_dict:
             return tuple(outputs)
@@ -694,9 +716,8 @@ class MultimodalModel(nn.Module):
         self.token_ids: dict[str, int] = None
         self.preprocess_llm_callback = preprocess_llm_callback
 
-    def update_language_model_to_use_bitfield_attention_mask(
-        self, language_model: PreTrainedModel
-    ):
+    def update_language_model_to_use_bitfield_attention_mask(self):
+        language_model = self.language_model
         if isinstance(language_model, PeftModel):
             language_model = language_model.get_base_model()
 
@@ -717,11 +738,11 @@ class MultimodalModel(nn.Module):
             "Please check if the language model is from HuggingFace Transformers."
         )
 
-        language_model.config._attn_implementation = "bitfield_attention"
         language_model._update_causal_mask = MethodType(
             MultimodalModel.check_bitfield_attention_mask,
             language_model,
         )
+        language_model.config._attn_implementation = "bitfield_attention"
 
     @classmethod
     def from_pretrained_multimodal_model(
@@ -744,23 +765,6 @@ class MultimodalModel(nn.Module):
             return Qwen2VLModel(config).from_pretrained(*args, **kwargs)
         else:
             raise NotImplementedError
-
-    @staticmethod
-    def check_bitfield_attention_mask(
-        self, attention_mask: torch.Tensor, *args, **kwargs
-    ):
-        """
-        A replacement function for Model._update_causal_mask() to avoid updating the attention mask.
-        Plus, it checks if the attention mask is a bitfield attention mask.
-        """
-        if self.training:
-            assert (
-                attention_mask is not None
-                and attention_mask.dtype == torch.int64
-                and (attention_mask > 1).any()
-            ), "The attention mask should be a bitfield attention mask."
-
-        return attention_mask
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         if gradient_checkpointing_kwargs is None:
@@ -833,6 +837,23 @@ class MultimodalModel(nn.Module):
         Do not call manually.
         """
         self.token_ids = token_ids
+
+    @staticmethod
+    def check_bitfield_attention_mask(
+        self, attention_mask: torch.Tensor, *args, **kwargs
+    ):
+        """
+        A replacement function for Model._update_causal_mask() to avoid updating the attention mask.
+        Plus, it checks if the attention mask is a bitfield attention mask.
+        """
+        if self.training:
+            assert (
+                attention_mask is not None
+                and attention_mask.dtype == torch.int64
+                and (attention_mask > 1).any()
+            ), "The attention mask should be a bitfield attention mask."
+
+        return attention_mask
 
     def merge_encoder_outputs(
         self,
@@ -913,15 +934,25 @@ class MultimodalModel(nn.Module):
                 dim=1
             )
 
-        attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
+        if self.language_model.config._attn_implementation == "bitfield_attention":
+            attention_mask = self.create_bitfield_attention_mask(input_ids)
+        else:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
+
         for i, sequence_length in enumerate(sequence_lengths.tolist()):
             attention_mask[i, sequence_length:] = 0
 
-        # attention_mask = create_bitfield_attention_mask(input_ids, self.token_ids)
-        # for i, sequence_length in enumerate(sequence_lengths.tolist()):
-        #     attention_mask[i, sequence_length:] = 0
-
         return inputs_embeds, attention_mask
+
+    def create_bitfield_attention_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Create a bitfield attention mask for the input_ids.
+        """
+        attention_mask = torch.full_like(input_ids, (1 << 62) | 1, dtype=torch.int64)
+        for index, token_id in enumerate(self.token_ids.values()):
+            attention_mask[input_ids == token_id] = 1 << (index + 1)
+
+        return attention_mask
 
     def forward(
         self,

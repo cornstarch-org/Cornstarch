@@ -33,7 +33,6 @@ from cornstarch.models.multimodal_language_model import (
     ModalEncoderModule,
     MultimodalModel,
 )
-from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.modal_parallel_plugin import (
     ModalParallelPlugin,
 )
@@ -237,7 +236,6 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
-
                 language_model_inputs.update(kwargs)
 
                 if module.preprocess_llm_callback is not None:
@@ -273,11 +271,13 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
+                language_model_inputs.update(kwargs)
 
             # remove inputs that the language model doesn't accept
             language_model_arguments = list(
                 inspect.signature(module.language_model.forward).parameters.keys()
             )
+
             for key in list(language_model_inputs.keys()):
                 if key not in language_model_arguments:
                     language_model_inputs.pop(key)
@@ -509,25 +509,9 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         if self.distributed_initialized:
             return
 
-        modal_templates: dict[PipelineTemplate, int] = {}
-        execution_order: list[tuple[PipelineTemplate, PipelineTemplate]] = []
-        for plugin in self.encoder_plugins.values():
-            modal_templates[plugin.pipeline_template] = plugin.tp_size
-            execution_order.append(
-                (plugin.pipeline_template, self.language_model_plugin.pipeline_template)
-            )
-        modal_templates[self.language_model_plugin.pipeline_template] = (
-            self.language_model_plugin.tp_size
-        )
-
-        # TODO: add decoders when we support multimodal generation
-        # Note that current schedule is encoder-llm only.
-        # Decoder-llm needs another schedule, and encoder-decoder cannot be trained together.
-        # TODO: implement interleaved parallelism to train encoder and decoder at the same time.
-
         self.pg_mesh = MultiModalProcessGroupMesh(
             encoder_templates={
-                plugin.pipeline_template: plugin.tp_size
+                plugin.pipeline_template: (plugin.tp_size, plugin.sp_size)
                 for plugin in self.encoder_plugins.values()
             },
             llm_template=(
@@ -557,15 +541,24 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.shard_config.enable_tensor_parallelism = (
             dist.get_world_size(self.tp_group) > 1
         )
+
+        target_plugin: ModalParallelPlugin
+        my_modal_template = self.stage_manager.stage_index_to_modal[
+            self.stage_manager.pg_mesh.coords[0][self.stage_manager.pipeline_axis]
+        ]
+        if my_modal_template == self.stage_manager.pg_mesh.llm_template[0]:
+            target_plugin = self.language_model_plugin
+        else:
+            target_plugin = list(self.encoder_plugins.values())[0]
+
         self.shard_config.sequence_parallel_process_group = self.sp_group
         self.shard_config.enable_sequence_parallelism = (
             dist.get_world_size(self.sp_group) > 1
         )
         self.shard_config.sequence_parallelism_mode = (
-            self.language_model_plugin.sequence_parallelism_mode
-            if self.shard_config.enable_sequence_parallelism
-            else None
+            target_plugin.sequence_parallelism_mode
         )
+
         self.shard_config.__post_init__()
 
         # sync gradients across DP * SP ranks
@@ -612,6 +605,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             module = self.language_model_plugin.configure(
                 module, llm_shard_config, self.stage_manager
             )
+            module.config._attn_implementation = "bitfield_attention"
             model.add_module("language_model", module)
 
             model = MultimodalParallelModule(

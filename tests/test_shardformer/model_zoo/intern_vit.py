@@ -1,6 +1,7 @@
 import copy
 
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 from cornstarch.models.intern_vit import InternVisionConfig, InternVisionModel
@@ -34,7 +35,9 @@ class InternVisonModelBase(ModelClassBase):
             "encoder.layers[0].norm2",
         ]
 
-    def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:
+    def loss_fn(
+        self, x: BaseModelOutputWithPooling, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
         return x.pooler_output.mean()
 
     # InternVision FlashAttention does not support torch.autocast AMP.

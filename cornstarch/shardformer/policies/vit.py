@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import functools
 import itertools
-import warnings
 from typing import Dict, List, cast
 
 from colossalai.shardformer.layer import (
@@ -17,10 +16,11 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.vit.modeling_vit import ViTConfig, ViTModel
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.vit import ViTModelForwards
+from cornstarch.shardformer.modeling.vit import ViTAttentionForwards, ViTModelForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
@@ -74,24 +74,11 @@ class ViTModelPolicy(PipelineTemplatePolicyBase, Policy):
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         from transformers.models.vit.modeling_vit import (
             ViTLayer,
-            ViTSdpaSelfAttention,
             ViTSelfAttention,
         )
 
         config: ViTConfig = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": ViTSelfAttention,
-            "sdpa": ViTSdpaSelfAttention,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
-
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "ViT doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
-            )
 
         tp_size = self.shard_config.tensor_parallel_size
         num_heads = config.num_attention_heads
@@ -111,51 +98,60 @@ class ViTModelPolicy(PipelineTemplatePolicyBase, Policy):
             "attention_probs_dropout_prob": config.attention_probs_dropout_prob,
         }
 
-        policy[attn_cls] = ModulePolicyDescription(
+        policy[ViTSelfAttention] = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
-                "forward": ViTSdpaSelfAttention.forward,
+                "forward": functools.partial(
+                    ViTAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
             },
         )
 
-        policy[ViTModel] = ModulePolicyDescription(
-            attribute_replacement={
-                "config._attn_implementation": "sdpa",
-            }
-        )
-
         if self.shard_config.enable_flash_attention:
-            warnings.warn(
-                "ViT doesn't support FlashAttention now, will ignore the FlashAttention flag."
+            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
+                not is_flash_attn_greater_or_equal("2.1.0")
             )
-            self.shard_config.enable_flash_attention = False
 
+            policy[ViTModel] = ModulePolicyDescription(
+                attribute_replacement={
+                    "config._attn_implementation": "flash_attention_2"
+                },
+            )
+
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
         if self.shard_config.enable_tensor_parallelism:
             policy[ViTLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="attention.attention.query",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.key",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.value",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.output.dense",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="intermediate.dense",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="output.dense",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                 ]
             )

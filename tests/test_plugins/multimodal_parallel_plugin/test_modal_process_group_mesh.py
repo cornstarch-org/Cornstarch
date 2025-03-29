@@ -56,6 +56,21 @@ def destroy_process_group():
             },
         ),
         (
+            16,
+            {encoder1_template: (2, 2)},
+            (llm_template_2stages, 2, 2),
+            [
+                [[[0, 1], [2, 3]]],
+                [[[4, 5], [6, 7]]],
+                [[[8, 9], [10, 11]]],
+                [[[12, 13], [14, 15]]],
+            ],
+            {
+                encoder1_template: list(range(0, 8)),
+                llm_template_2stages: list(range(8, 16)),
+            },
+        ),
+        (
             18,
             {encoder1_template: 2, encoder2_template: 2},
             (llm_template_2stages, 4, 1),
@@ -769,6 +784,11 @@ def test_get_group_along_axis(
         (
             24,
             {encoder1_template: 2},
+            (llm_template_2stages, 4, 1),
+        ),
+        (
+            16,
+            {encoder1_template: (2, 2)},
             (llm_template_2stages, 4, 1),
         ),
         (

@@ -101,6 +101,7 @@ def reduce_scatter_gloo(
     Returns:
         dist.Work or None: If async_op is True, returns a Work object. Otherwise, returns None.
     """
+    assert isinstance(input_list, list)
     assert op in [
         dist.ReduceOp.SUM,
         dist.ReduceOp.AVG,
@@ -125,14 +126,17 @@ def all_gather_gloo(
     group: Optional[dist.ProcessGroup] = None,
     async_op: bool = False,
 ):
-    world_size = dist.get_world_size(group)
-    rank = dist.get_rank(group)
+    assert isinstance(tensor_list, list)
 
-    for group_rank in range(world_size):
-        if rank == group_rank:
-            tensor_list[group_rank].copy_(tensor)
-        global_src = dist.get_global_rank(group, group_rank)
-        dist.broadcast(tensor_list[group_rank], src=global_src, group=group)
+    cpu_tensor_list = [torch.empty_like(t, device="cpu") for t in tensor_list]
+    for rank in range(dist.get_world_size(group)):
+        if rank == dist.get_rank(group):
+            cpu_tensor_list[rank].copy_(tensor)
+
+        dist.broadcast(cpu_tensor_list[rank], group=group, group_src=rank)
+
+    for t, ct in zip(tensor_list, cpu_tensor_list):
+        t.copy_(ct)
 
     if async_op:
         global_src = dist.get_global_rank(group, group_rank=0)

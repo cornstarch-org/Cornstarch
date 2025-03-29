@@ -1,9 +1,9 @@
-import copy
-
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.modeling_utils import PreTrainedModel
 from transformers.models.dinov2 import Dinov2Config, Dinov2Model
+
+from cornstarch.shardformer.layers.operation import gather_forward_split_backward
 
 from ..utils import ModelClassBase
 
@@ -23,16 +23,19 @@ class Dinov2ModelBase(ModelClassBase):
         self.col_layers_to_check = ["encoder.layer[0].attention.output.dense"]
         self.row_layers_to_check = ["encoder.layer[0].attention.attention.query"]
 
-    def loss_fn(self, x: BaseModelOutputWithPooling) -> torch.Tensor:
-        return x.pooler_output.mean()
+    def loss_fn(
+        self, x: BaseModelOutputWithPooling, sp_group: dist.ProcessGroup = None
+    ) -> torch.Tensor:
+        sp_size = dist.get_world_size(sp_group)
+        if sp_group is not None and sp_size > 1:
+            gathered_states = gather_forward_split_backward(
+                x.last_hidden_state, dim=1, process_group=sp_group, grad_scale=sp_size
+            )
+            output = gathered_states.mean()
+        else:
+            output = x.last_hidden_state.mean()
 
-    # HF does not provide Dinov2 flash attention yet.
-    # Use SDPA implementation and compare against ColoAttention.
-    def model_fn(self) -> PreTrainedModel:
-        config = copy.deepcopy(self.config)
-        config.pad_token_id = config.eos_token_id
-        config._attn_implementation = "sdpa"
-        return self.model_class(config)
+        return output
 
     def data_gen_fn(self, num_batch: int) -> dict:
         image_size = self.config.image_size

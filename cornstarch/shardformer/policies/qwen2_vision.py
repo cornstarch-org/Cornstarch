@@ -23,6 +23,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.qwen2_vision import (
+    Qwen2VisionAttentionForwards,
     Qwen2VisionModelForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
@@ -96,15 +97,8 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
             "sdpa": VisionSdpaAttention,
             "flash_attention_2": VisionFlashAttention2,
         }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
 
         policy = {}
-
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "Qwen2Vision doesn't support sequence parallelism now, will ignore the sequence parallelism flag."
-            )
 
         tp_size = self.shard_config.tensor_parallel_size
         num_heads = config.num_heads
@@ -121,17 +115,21 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement = {}
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
+        attention_attribute_replacement["is_causal"] = False
 
-        policy[attn_cls] = ModulePolicyDescription(
+        attn_policy = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
+            method_replacement={
+                "forward": functools.partial(
+                    Qwen2VisionAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            },
         )
+        for attn_cls in ATTN_IMPLEMENTATION.values():
+            policy[attn_cls] = attn_policy
 
         if self.shard_config.enable_flash_attention:
-            policy[attn_cls] = ModulePolicyDescription(
-                attribute_replacement=attention_attribute_replacement,
-                method_replacement={"forward": VisionFlashAttention2.forward},
-            )
-
             policy[Qwen2VisionTransformerPretrainedModel] = ModulePolicyDescription(
                 attribute_replacement={
                     "config._attn_implementation": "flash_attention_2"

@@ -1,19 +1,33 @@
-from typing import Optional, Tuple, Union
+import functools
+from typing import Callable, Optional, Tuple, Union
 
 import torch
-from colossalai.shardformer.layer import ColoAttention
+import torch.distributed as dist
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from transformers.modeling_outputs import (
     BackboneOutput,
     BaseModelOutput,
     BaseModelOutputWithPooling,
 )
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.dinov2.modeling_dinov2 import (
     Dinov2Backbone,
     Dinov2Encoder,
     Dinov2Model,
     Dinov2SelfAttention,
+    eager_attention_forward,
+    logger,
 )
+
+from cornstarch.shardformer.layers.context_parallel_attention import (
+    context_parallel_flash_attention,
+)
+from cornstarch.shardformer.layers.utils import (
+    ContextParallelBatchSplitUtils,
+    ContextParallelDistributionMode,
+)
+
+_SUPPORTED_CP_MODE = ["ring_attn"]
 
 
 class Dinov2ModelForwards:
@@ -131,6 +145,25 @@ class Dinov2ModelForwards:
             )
             hidden_states = embedding_output
 
+        sp_mode = shard_config.sequence_parallelism_mode
+        sp_group = shard_config.sequence_parallel_process_group
+        sp_size = shard_config.sequence_parallel_size
+
+        # Support SP + PP. Later stages have already received the split input.
+        split_input = stage_manager is None or stage_manager.is_first_stage()
+        if split_input and sp_mode == "ring_attn":
+            ContextParallelBatchSplitUtils.create_context_parallel_split(
+                # fake attention mask
+                torch.empty(hidden_states.shape[:2], device="meta"),
+                sp_group,
+                dist_mode=ContextParallelDistributionMode.UNIFORM,
+            )
+
+            hidden_states = ContextParallelBatchSplitUtils.split_batch(
+                hidden_states,
+                sp_group,
+            )
+
         encoder_outputs = Dinov2ModelForwards.dinov2_encoder_forward(
             self.encoder,
             hidden_states=hidden_states,
@@ -142,6 +175,8 @@ class Dinov2ModelForwards:
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
         )
+
+        ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
             return encoder_outputs
@@ -196,6 +231,25 @@ class Dinov2ModelForwards:
             embedding_output = self.embeddings(pixel_values)
             hidden_states = embedding_output
 
+        sp_mode = shard_config.sequence_parallelism_mode
+        sp_group = shard_config.sequence_parallel_process_group
+        sp_size = shard_config.sequence_parallel_size
+
+        # Support SP + PP. Later stages have already received the split input.
+        split_input = stage_manager is None or stage_manager.is_first_stage()
+        if split_input and sp_mode == "ring_attn":
+            ContextParallelBatchSplitUtils.create_context_parallel_split(
+                # fake attention mask
+                torch.empty(hidden_states.shape[:2], device="meta"),
+                sp_group,
+                dist_mode=ContextParallelDistributionMode.UNIFORM,
+            )
+
+            hidden_states = ContextParallelBatchSplitUtils.split_batch(
+                hidden_states,
+                sp_group,
+            )
+
         outputs = Dinov2ModelForwards.dinov2_encoder_forward(
             self.encoder,
             hidden_states=hidden_states,
@@ -206,6 +260,8 @@ class Dinov2ModelForwards:
             all_self_attentions=all_self_attentions,
             shard_config=shard_config,
         )
+
+        ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
             return outputs
@@ -245,59 +301,68 @@ class Dinov2ModelForwards:
 
 class Dinov2SelfAttentionForwards:
     @staticmethod
-    def sdpa_forward(
+    def forward(
         self: Dinov2SelfAttention,
         hidden_states: torch.Tensor,
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
         shard_config: Optional[ShardConfig] = None,
+        **kwargs,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         mixed_query_layer = self.query(hidden_states)
+
+        if shard_config is not None and shard_config.enable_sequence_parallelism:
+            sp_mode: str = shard_config.sequence_parallelism_mode
+            sp_size: int = shard_config.sequence_parallel_size
+            sp_group: dist.ProcessGroup = shard_config.sequence_parallel_process_group
+
+            assert (
+                sp_mode in _SUPPORTED_CP_MODE
+            ), f"SP mode {sp_mode} is not supported by {type(self)} yet"
+            assert (
+                sp_size > 1 and sp_group is not None
+            ), "Must specify sp_size and sp_group for sequence parallel"
+        else:
+            sp_mode = None
+            sp_size = None
+            sp_group = None
 
         key_layer = self.transpose_for_scores(self.key(hidden_states))
         value_layer = self.transpose_for_scores(self.value(hidden_states))
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
-        context_layer = torch.nn.functional.scaled_dot_product_attention(
+        if sp_mode == "ring_attn":
+            assert (
+                head_mask is None
+            ), "head_mask is not supported in context parallelism"
+            attention_interface: Callable = functools.partial(
+                context_parallel_flash_attention, sp_group=sp_group
+            )
+        else:
+            attention_interface: Callable = eager_attention_forward
+            if self.config._attn_implementation != "eager":
+                if self.config._attn_implementation == "sdpa" and output_attentions:
+                    logger.warning_once(
+                        "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                        'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                    )
+                else:
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[
+                        self.config._attn_implementation
+                    ]
+
+        context_layer, _ = attention_interface(
+            self,
             query_layer,
             key_layer,
             value_layer,
-            head_mask,
-            self.attention_probs_dropout_prob if self.training else 0.0,
-            is_causal=False,
-            scale=None,
+            attention_mask=head_mask,
+            scaling=self.scaling,
+            dropout_p=0.0 if not self.training else self.dropout_prob,
+            **kwargs,
         )
 
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(new_context_layer_shape)
-
-        return context_layer, None
-
-    @staticmethod
-    def flash_attention_forward(
-        self: Dinov2SelfAttention,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        shard_config: Optional[ShardConfig] = None,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        assert head_mask is None, "head_mask is not supported for FlashAttention"
-
-        mixed_query_layer = self.query(hidden_states)
-
-        key_layer = self.transpose_for_scores(self.key(hidden_states))
-        value_layer = self.transpose_for_scores(self.value(hidden_states))
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-
-        context_layer = ColoAttention.attention(
-            query_layer,
-            key_layer,
-            value_layer,
-            dropout_p=self.dropout.p if self.training else 0.0,
-        )
-
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        # context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
 

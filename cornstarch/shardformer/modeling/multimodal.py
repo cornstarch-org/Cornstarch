@@ -2,15 +2,18 @@ import inspect
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 from transformers.modeling_outputs import BaseModelOutput, ModelOutput
 
 from cornstarch.models.multimodal_language_model.modeling_multimodal_language_model import (
     ModalDecoderModule,
     ModalEncoderModule,
+    MultimodalProjector,
 )
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
+from cornstarch.shardformer.layers.operation import gather_forward_split_backward
 
 
 class ModalModulePipelineForwards:
@@ -92,3 +95,18 @@ class ModalModulePipelineForwards:
             return self.module(self.projector(*args, **kwargs))[0]
         else:
             return self.module(*args, **kwargs)
+
+    @staticmethod
+    def multimodal_projector_post_projection(
+        self: MultimodalProjector,
+        hidden_states: torch.Tensor,
+        process_group: dist.ProcessGroup,
+        dim: int = 1,
+        grad_scale: float = 1.0,
+    ) -> torch.Tensor:
+        return gather_forward_split_backward(
+            hidden_states,
+            dim=dim,
+            process_group=process_group,
+            grad_scale=grad_scale,
+        )

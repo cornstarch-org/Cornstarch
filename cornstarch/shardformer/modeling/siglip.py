@@ -1,12 +1,27 @@
-from typing import Optional, Tuple, Union
+import functools
+from typing import Callable, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.siglip.modeling_siglip import (
+    SiglipAttention,
     SiglipVisionModel,
     SiglipVisionTransformer,
+    logger,
 )
+
+from cornstarch.shardformer.layers.context_parallel_attention import (
+    context_parallel_flash_attention,
+)
+from cornstarch.shardformer.layers.utils import (
+    ContextParallelBatchSplitUtils,
+    ContextParallelDistributionMode,
+)
+
+_SUPPORTED_CP_MODE = ["ring_attn"]
 
 
 class SiglipVisionModelForwards:
@@ -39,6 +54,18 @@ class SiglipVisionModelForwards:
 
         stage_manager = shard_config.pipeline_stage_manager
 
+        if stage_manager is not None:
+            if output_attentions:
+                logger.warning_once(
+                    "output_attentions=True is not supported for pipeline models at the moment."
+                )
+                output_attentions = False
+            if output_hidden_states:
+                logger.warning_once(
+                    "output_hidden_states=True is not supported for pipeline models at the moment."
+                )
+                output_hidden_states = False
+
         if stage_manager is None or stage_manager.is_first_stage():
             hidden_states = self.embeddings(
                 pixel_values, interpolate_pos_encoding=interpolate_pos_encoding
@@ -49,6 +76,26 @@ class SiglipVisionModelForwards:
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         else:
             start_idx, end_idx = (0, len(self.encoder.layers))
+
+        sp_mode = shard_config.sequence_parallelism_mode
+        sp_group = shard_config.sequence_parallel_process_group
+        sp_size = shard_config.sequence_parallel_size
+
+        # Support SP + PP. Later stages have already received the split input.
+        if sp_mode == "ring_attn":
+            split_input = stage_manager is None or stage_manager.is_first_stage()
+            if split_input:
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    # fake attention mask
+                    torch.empty(hidden_states.shape[:2], device="meta"),
+                    sp_group,
+                    dist_mode=ContextParallelDistributionMode.UNIFORM,
+                )
+
+                hidden_states = ContextParallelBatchSplitUtils.split_batch(
+                    hidden_states,
+                    sp_group,
+                )
 
         for encoder_layer in self.encoder.layers[start_idx:end_idx]:
             if output_hidden_states:
@@ -75,6 +122,8 @@ class SiglipVisionModelForwards:
 
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
+
+        ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
             outputs = {"hidden_states": hidden_states}
@@ -133,3 +182,64 @@ class SiglipVisionModelForwards:
             all_attentions,
             shard_config,
         )
+
+
+class SiglipVisionAttentionForwards:
+    @staticmethod
+    def forward(
+        self: SiglipAttention,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = False,
+        shard_config: Optional[ShardConfig] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Input shape: Batch x Time x Channel"""
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        if shard_config is not None and shard_config.enable_sequence_parallelism:
+            sp_mode: str = shard_config.sequence_parallelism_mode
+            sp_size: int = shard_config.sequence_parallel_size
+            sp_group: dist.ProcessGroup = shard_config.sequence_parallel_process_group
+
+            assert (
+                sp_mode in _SUPPORTED_CP_MODE
+            ), f"SP mode {sp_mode} is not supported by {type(self)} yet"
+            assert (
+                sp_size > 1 and sp_group is not None
+            ), "Must specify sp_size and sp_group for sequence parallel"
+        else:
+            sp_mode = None
+            sp_size = None
+            sp_group = None
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(hidden_shape).transpose(1, 2)
+        key_states = key_states.view(hidden_shape).transpose(1, 2)
+        value_states = value_states.view(hidden_shape).transpose(1, 2)
+
+        if sp_mode == "ring_attn":
+            attention_interface: Callable = functools.partial(
+                context_parallel_flash_attention, sp_group=sp_group
+            )
+        else:
+            attention_interface: Callable = ALL_ATTENTION_FUNCTIONS["flash_attention_2"]
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask=attention_mask,
+            dropout_p=0.0 if not self.training else self.dropout,
+        )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+
+        attn_output = self.out_proj(attn_output)
+        return attn_output, attn_weights

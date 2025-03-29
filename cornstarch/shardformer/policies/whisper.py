@@ -1,6 +1,5 @@
 import functools
 import itertools
-import warnings
 from typing import cast
 
 from colossalai.shardformer.layer import (
@@ -17,11 +16,15 @@ from torch.nn.modules import Module
 from transformers import PretrainedConfig
 from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
 from transformers.models.whisper import WhisperConfig
-from transformers.models.whisper.modeling_whisper import WhisperEncoder
+from transformers.models.whisper.modeling_whisper import (
+    WhisperEncoder,
+    WHISPER_ATTENTION_CLASSES,
+)
 
 from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.whisper import (
     WhisperModelForwards,
+    WhisperAttentionForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -97,28 +100,10 @@ class WhisperEncoderPolicy(PipelineTemplatePolicyBase, Policy):
         return held_layers
 
     def module_policy(self) -> dict[str | Module, ModulePolicyDescription]:
-        from transformers.models.whisper.modeling_whisper import (
-            WhisperAttention,
-            WhisperEncoderLayer,
-            WhisperFlashAttention2,
-            WhisperSdpaAttention,
-        )
+        from transformers.models.whisper.modeling_whisper import WhisperEncoderLayer
 
         config: WhisperConfig = self.model.config
-        ATTN_IMPLEMENTATION = {
-            "eager": WhisperAttention,
-            "sdpa": WhisperSdpaAttention,
-            "flash_attention_2": WhisperFlashAttention2,
-        }
-        attn_cls = ATTN_IMPLEMENTATION[config._attn_implementation]
-
         policy = {}
-
-        if self.shard_config.enable_sequence_parallelism:
-            self.shard_config.enable_sequence_parallelism = False
-            warnings.warn(
-                "Whisper doesn't support sequence parallelism, will ignore the sequence parallelism flag."
-            )
 
         tp_size = self.shard_config.tensor_parallel_size
         num_heads = config.num_attention_heads
@@ -135,28 +120,23 @@ class WhisperEncoderPolicy(PipelineTemplatePolicyBase, Policy):
         attention_attribute_replacement = {}
         attention_attribute_replacement["embed_dim"] = hidden_size
         attention_attribute_replacement["num_heads"] = num_heads
+        attention_attribute_replacement["is_causal"] = False
 
-        policy[attn_cls] = ModulePolicyDescription(
+        attn_policy = ModulePolicyDescription(
             attribute_replacement=attention_attribute_replacement,
             method_replacement={
-                "forward": (
-                    WhisperFlashAttention2.forward
-                    if config._attn_implementation == "flash_attention_2"
-                    else WhisperSdpaAttention.forward
-                )
+                "forward": functools.partial(
+                    WhisperAttentionForwards.forward,
+                    shard_config=self.shard_config,
+                ),
             },
         )
+        for attn_cls in WHISPER_ATTENTION_CLASSES.values():
+            policy[attn_cls] = attn_policy
 
         if self.shard_config.enable_flash_attention:
             attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
                 not is_flash_attn_greater_or_equal("2.1.0")
-            )
-
-            policy[attn_cls] = ModulePolicyDescription(
-                attribute_replacement=attention_attribute_replacement,
-                method_replacement={
-                    "forward": WhisperFlashAttention2.forward,
-                },
             )
 
             policy[WhisperEncoder] = ModulePolicyDescription(

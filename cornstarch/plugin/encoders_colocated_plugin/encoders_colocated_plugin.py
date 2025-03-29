@@ -29,8 +29,9 @@ from cornstarch.models.multimodal_language_model import (
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
     EncodersColocatedPipelineStageManager,
 )
+
 from cornstarch.plugin.encoders_colocated_plugin.one_f_one_b import (
-    OneForwardOneBackwardSchedule,
+    MultimodalColocatedOneForwardOneBackwardSchedule,
 )
 from cornstarch.plugin.encoders_colocated_plugin.process_group_mesh import (
     EncodersColocatedProcessGroupMesh,
@@ -40,9 +41,6 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultimodalParallelModule,
 )
 
-# from cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b import (
-#     MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
-# )
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
@@ -182,7 +180,7 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                         continue
                     # make a tuple so that in merge_encoder_outputs the actual values are taken
                     encoders_outputs[modal_key] = (
-                        kwargs[f"encoder_outputs_{modal_key}"],
+                        kwargs.pop(f"encoder_outputs_{modal_key}"),
                     )
 
                 # step 2. merge encoded multimodal features into text embeddings
@@ -217,7 +215,6 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
-
                 language_model_inputs.update(kwargs)
 
                 if module.preprocess_llm_callback is not None:
@@ -253,6 +250,7 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
+                language_model_inputs.update(kwargs)
 
             # remove inputs that the language model doesn't accept
             language_model_arguments = list(
@@ -334,7 +332,7 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
         self,
         encoder_plugins: dict[str, ModalParallelPlugin] = None,
         language_model_plugin: ModalParallelPlugin | None = None,
-        precision: str = "fp16",
+        precision: str = None,
         enable_fused_normalization: bool = False,
         enable_flash_attention: bool = False,
         enable_jit_fused: bool = False,
@@ -420,7 +418,7 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
 
         self.pg_mesh = EncodersColocatedProcessGroupMesh(
             encoder_templates={
-                plugin.pipeline_template: plugin.tp_size
+                plugin.pipeline_template: (plugin.tp_size, plugin.sp_size)
                 for plugin in self.encoder_plugins.values()
             },
             llm_template=(
@@ -441,11 +439,8 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
-        self.schedule = OneForwardOneBackwardSchedule(
-            self.stage_manager,
-            self.num_microbatches,
-            self.microbatch_size,
-            enable_metadata_cache=False,
+        self.schedule = MultimodalColocatedOneForwardOneBackwardSchedule(
+            self.stage_manager, self.num_microbatches, self.microbatch_size
         )
 
         self.shard_config.tensor_parallel_process_group = self.tp_group
@@ -453,16 +448,31 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
         self.shard_config.enable_tensor_parallelism = (
             dist.get_world_size(self.tp_group) > 1
         )
+
+        target_plugin: ModalParallelPlugin
+        my_modal_template = self.stage_manager.stage_index_to_modal[
+            self.stage_manager.pg_mesh.coords[0][self.stage_manager.pipeline_axis]
+        ]
+        if my_modal_template == self.stage_manager.pg_mesh.llm_template[0]:
+            target_plugin = self.language_model_plugin
+        else:
+            target_plugin = list(self.encoder_plugins.values())[0]
+
         self.shard_config.sequence_parallel_process_group = self.sp_group
         self.shard_config.enable_sequence_parallelism = (
             dist.get_world_size(self.sp_group) > 1
         )
         self.shard_config.sequence_parallelism_mode = (
-            self.language_model_plugin.sequence_parallelism_mode
-            if self.shard_config.enable_sequence_parallelism
-            else None
+            target_plugin.sequence_parallelism_mode
         )
         self.shard_config.__post_init__()
+
+        # sync gradients across DP * SP ranks
+        if self.shard_config.enable_sequence_parallelism:
+            self.dp_group = self.pg_mesh.get_group_along_axis(
+                [self.pg_mesh.dp_axis, self.pg_mesh.sp_axis]
+            )
+
         self.distributed_initialized = True
 
     def configure(
@@ -504,11 +514,13 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
             llm_shard_config = replace(
                 self.shard_config,
                 pipeline_template=self.language_model_plugin.pipeline_template,
+                enable_flash_attention=False,
             )
             module = model.get_submodule("language_model")
             module = self.language_model_plugin.configure(
                 module, llm_shard_config, self.stage_manager
             )
+            module.config._attn_implementation = "bitfield_attention"
             model.add_module("language_model", module)
 
             model = EncodersColocatedMultimodalParallelModule(
