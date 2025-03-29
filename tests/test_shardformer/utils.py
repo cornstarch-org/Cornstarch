@@ -422,7 +422,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
 
 class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
-    num_microbatches: int = 4
+    num_microbatches: int = 6
     microbatch_size: int = 2
     token_ids: dict[str, int]
 
