@@ -530,7 +530,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
 
         self.pg_mesh = MultiModalProcessGroupMesh(
             encoder_templates={
-                plugin.pipeline_template: plugin.tp_size
+                plugin.pipeline_template: (plugin.tp_size, plugin.sp_size)
                 for plugin in self.encoder_plugins.values()
             },
             llm_template=(

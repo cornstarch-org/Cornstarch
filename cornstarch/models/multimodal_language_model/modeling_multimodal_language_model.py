@@ -390,12 +390,11 @@ class MultimodalProjector(PreTrainedModel):
             elif config.projection_type == "qformer":
                 raise NotImplementedError
 
-        # shardformer creates a module and assigns it to self.post_projection
-        # if context parallelism is enabled
-        self.post_projection: nn.Module = None
-
         # Initialize weights and apply final processing
         self.post_init()
+
+    def post_projection(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states
 
     def forward(
         self, hidden_states: torch.Tensor, return_dict: bool = True
@@ -405,8 +404,7 @@ class MultimodalProjector(PreTrainedModel):
         else:
             outputs = self.projection(hidden_states)
 
-        if self.post_projection is not None:
-            outputs = self.post_projection(outputs)
+        outputs = self.post_projection(outputs)
 
         if not return_dict:
             return tuple(outputs)

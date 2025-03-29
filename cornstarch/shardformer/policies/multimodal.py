@@ -22,7 +22,6 @@ from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
-from cornstarch.shardformer.layers.operation import gather_forward_split_backward
 from cornstarch.shardformer.modeling.multimodal import ModalModulePipelineForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -65,9 +64,9 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
         if self.shard_config.enable_sequence_parallelism and sp_mode == "ring_attn":
             # Gather forward result by replacing projector.post_projection
             policy[MultimodalProjector] = ModulePolicyDescription(
-                attribute_replacement={
+                method_replacement={
                     "post_projection": functools.partial(
-                        gather_forward_split_backward,
+                        ModalModulePipelineForwards.multimodal_projector_post_projection,
                         dim=1,
                         process_group=sp_group,
                         grad_scale=sp_size,

@@ -595,7 +595,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         self,
         tp_size: int,
         modal_pp_size: dict[str, int],
-        llm_sp_mode: str | None,
+        modal_sp_size: dict[str, int] = {},
         run_original_model: bool = True,
         run_sharded_model: bool = True,
     ) -> tuple[nn.Module, ModelWrapper, Optimizer, OptimizerWrapper, Booster]:
@@ -617,7 +617,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         ) = self.build_model_from_multimodal_plugin(
             tp_size=tp_size,
             module_pp_size=modal_pp_size,
-            llm_sp_mode=llm_sp_mode,
+            module_sp_size=modal_sp_size,
             test_config=test_config,
             precision=precision,
         )
@@ -653,9 +653,11 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         return org_model, sharded_model, org_optimizer, sharded_optimizer, booster
 
     @staticmethod
-    def postprocess_callback(inputs: dict, output: BaseModelOutput) -> BaseModelOutput:
+    def postprocess_projector_callback(
+        inputs: dict, output: ModelOutput
+    ) -> ModelOutput:
         # Cut number of tokens to make merging outputs easier
-        output.last_hidden_state = output.last_hidden_state[:, :32, :]
+        output.hidden_states = output.hidden_states[:, :32]
         return output
 
     def build_model_from_pretrained(
@@ -710,7 +712,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             encoder = model_base.model_fn()
             encoders[modal_key] = ModalEncoderModule(
                 encoder,
-                postprocess_module_callback=self.postprocess_callback,
+                postprocess_projector_callback=self.postprocess_projector_callback,
             )
 
         llm = self.llm.model_fn()
@@ -735,7 +737,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         model: MultimodalModel,
         tp_size: int,
         module_pp_size: dict[str, int],
-        llm_sp_mode: str | None,
+        module_sp_size: dict[str, int],
         test_config: dict[str, Any],
         precision: torch.dtype,
     ) -> tuple[
@@ -747,17 +749,23 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         plugins: dict[str, ModalParallelPlugin] = {}
         for modal_name, pp_size in module_pp_size.items():
             if modal_name == "llm":
+                llm_sp_size = module_sp_size.get("llm", 1)
                 llm_plugin = ModalParallelPlugin(
                     tp_size=tp_size,
-                    sp_size=2 if llm_sp_mode is not None else 1,
-                    sequence_parallelism_mode=llm_sp_mode,
+                    sp_size=llm_sp_size,
+                    sequence_parallelism_mode="ring_attn" if llm_sp_size > 1 else None,
                     pipeline_template=self.get_pipeline_template(
                         model.language_model, pp_size
                     ),
                 )
             else:
+                modal_sp_size = module_sp_size.get(modal_name, 1)
                 plugins[modal_name] = ModalParallelPlugin(
                     tp_size=tp_size,
+                    sp_size=modal_sp_size,
+                    sequence_parallelism_mode=(
+                        "ring_attn" if modal_sp_size > 1 else None
+                    ),
                     pipeline_template=self.get_pipeline_template(
                         model.get_submodule(f"{modal_name}_encoder"), pp_size
                     ),
@@ -788,7 +796,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         self,
         tp_size: int,
         module_pp_size: dict[str, int],
-        llm_sp_mode: str | None,
+        module_sp_size: dict[str, int],
         test_config: dict[str, Any],
         precision: torch.dtype,
     ) -> tuple[
@@ -812,7 +820,12 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         org_optimizer = Adam(org_model.parameters(), lr=1e-3)
 
         sharded_model, sharded_optimizer, criterion, booster = self.parallelize_model(
-            sharded_model, tp_size, module_pp_size, llm_sp_mode, test_config, precision
+            sharded_model,
+            tp_size,
+            module_pp_size,
+            module_sp_size,
+            test_config,
+            precision,
         )
 
         org_model.update_language_model_to_use_bitfield_attention_mask()
