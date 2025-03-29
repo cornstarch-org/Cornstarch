@@ -124,6 +124,28 @@ def destroy_process_group():
                 [[[16, 17], [18, 19]], [[20, 21], [22, 23]]],
             ],
         ),
+        (
+            16,
+            {encoder1_template: (2, 2)},
+            (llm_template_2stages, 2, 2),
+            [
+                [[[0, 1], [2, 3]]],
+                [[[4, 5], [6, 7]]],
+                [[[8, 9], [10, 11]]],
+                [[[12, 13], [14, 15]]],
+            ],
+        ),
+        (
+            16,
+            {encoder1_template: (1, 2)},
+            (llm_template_2stages, 2, 1),
+            [
+                [[[0, 0], [1, 1]], [[2, 2], [3, 3]]],
+                [[[4, 4], [5, 5]], [[6, 6], [7, 7]]],
+                [[[8, 9], [8, 9]], [[10, 11], [10, 11]]],
+                [[[12, 13], [12, 13]], [[14, 15], [14, 15]]],
+            ],
+        ),
     ],
 )
 def test_init_process_group_mesh_single_encoder(
@@ -156,6 +178,7 @@ def test_init_process_group_mesh_single_encoder(
         (19, {encoder2_template: 1}, (llm_template_4stages, 2, 2)),
         (22, {encoder2_template: 2}, (llm_template_4stages, 2, 2)),
         (24, {encoder1_template: 2}, (llm_template_2stages, 2, 2)),
+        (16, {encoder1_template: (2, 2)}, (llm_template_2stages, 2, 2)),
     ],
 )
 def test_create_group_along_axis_order(
@@ -497,7 +520,7 @@ def test_get_group_along_axis(
             5,
             {encoder1_template: 1},
             AssertionError,
-            "World size 5 is not divisible by num_ranks per replica 4.",
+            "The world size 5 must be divisible by num_ranks per replica 4.",
         ),
         (
             7,
@@ -509,7 +532,7 @@ def test_get_group_along_axis(
             8,
             {encoder1_template: 1, encoder3_template: 2},
             AssertionError,
-            "All encoder templates must have the same tensor parallel degree.",
+            "All encoder templates must have the same tensor/context parallel degree.",
         ),
     ],
 )

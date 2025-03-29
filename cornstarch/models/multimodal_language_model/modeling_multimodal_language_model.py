@@ -945,7 +945,7 @@ class MultimodalModel(nn.Module):
         """
         Create a bitfield attention mask for the input_ids.
         """
-        attention_mask = torch.full_like(input_ids, 1, dtype=torch.int64)
+        attention_mask = torch.full_like(input_ids, (1 << 62) | 1, dtype=torch.int64)
         for index, token_id in enumerate(self.token_ids.values()):
             attention_mask[input_ids == token_id] = 1 << (index + 1)
 

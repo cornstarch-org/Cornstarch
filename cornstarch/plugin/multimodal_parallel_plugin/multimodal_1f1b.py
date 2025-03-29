@@ -511,9 +511,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             "decoders in the model."
         )
 
-        self.comm: MultimodalPipelineP2PCommunication = (
-            MultimodalPipelineP2PCommunication(stage_manager)
-        )
+        self.comm = MultimodalPipelineP2PCommunication(stage_manager)
 
         self.num_microbatches = num_microbatches
         self.microbatch_size = microbatch_size

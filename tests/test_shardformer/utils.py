@@ -974,10 +974,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 loss.backward()
                 org_loss.add_(loss.data)
 
-            # org_output = org_model(**unshard_test_data)
-            # org_loss = criterion(org_output)
-            # org_loss.backward()
-
         sharded_loss, sharded_output = None, None
         if run_sharded_model:
             sharded_model.train()

@@ -40,10 +40,24 @@ class ShardConfig(ColossalShardConfig):
     make_vocab_size_divisible_by: int = 64
 
     def __post_init__(self):
-        super().__post_init__()
-
-        if self.sequence_parallelism_mode is not None:
+        if self.enable_sequence_parallelism:
             assert self.sequence_parallelism_mode in [
                 "ring_attn",
                 "all_to_all",
             ], f"Invalid sequence parallelism mode {self.sequence_parallelism_mode}"
+
+        # get the tensor parallel size
+        if not self.enable_tensor_parallelism:
+            self._tensor_parallel_size = 1
+        else:
+            self._tensor_parallel_size = dist.get_world_size(
+                self.tensor_parallel_process_group
+            )
+
+        # get the sequence parallel size
+        if not self.enable_sequence_parallelism:
+            self._sequence_parallel_size = 1
+        else:
+            self._sequence_parallel_size = dist.get_world_size(
+                self.sequence_parallel_process_group
+            )
