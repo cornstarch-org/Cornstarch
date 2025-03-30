@@ -17,7 +17,7 @@ Cornstarch provides
 
 ## Install and Run
 
-Please refer to [our document](https://cornstarch-org.github.io/getting_started)!
+Please refer to [our document](https://cornstarch-org.github.io/getting_started/installation/)!
 
 ## Research
 
