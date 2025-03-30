@@ -31,9 +31,71 @@ def collate_fn(batches: list[dict], processor: MultimodalProcessor):
     return inputs
 
 
+def collate_fn_scienceqa_pretrain(
+    batches: list[dict], processor: MultimodalProcessor, dataset_dir: Path
+):
+    # NOTE: This collate function is fitted for ScienceQA dataset
+    images = []
+    texts = []
+
+    for batch in batches:
+        assert set(["image", "id", "conversations"]) == set(batch.keys())
+        assert isinstance(batch["conversations"], list) and len(batch["conversations"])
+        for conversation in batch["conversations"]:
+            assert ["from", "value"] == list(conversation.keys())
+
+        if "<image>" in batch["conversations"][0]["value"]:
+            # if file ({dataset_dir}/train/{batch['image']}) exist, open it, else open file ({dataset_dir}/val/{batch['image']})
+            try:
+                image = Image.open(f"{dataset_dir}/train/{batch['image']}")
+            except FileNotFoundError:
+                image = Image.open(f"{dataset_dir}/val/{batch['image']}")
+
+            if image.mode != "RGB":
+                image = image.convert(mode="RGB")
+            images.append(image)
+
+        texts.append(
+            batch["conversations"][0]["value"]
+            + "\n"
+            + batch["conversations"][1]["value"]
+        )
+
+    inputs = processor(
+        encoder_inputs={"vision": {"images": images}} if images else None,
+        llm_inputs={"text": texts, "padding": True},
+        return_tensors="pt",
+    ).to(dtype=torch.bfloat16)
+
+    for k, v in inputs.items():
+        if isinstance(v, torch.Tensor):
+            inputs[k] = v.to("cuda").requires_grad_(v.is_floating_point())
+
+    inputs["labels"] = inputs["input_ids"].clone()
+    return inputs
+
+
 def collate_fn_llava_pretrain(
     batches: list[dict], processor: MultimodalProcessor, dataset_dir: Path
 ):
+    """
+    Example of pretrain data sample (LCS 558K)
+    {
+    "id": "004539375",
+    "image": "00453/004539375.jpg",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Render a clear and concise summary of the photo.\n<image>"
+      },
+      {
+        "from": "gpt",
+        "value": "select luxury furniture 3 - inch gel memory foam mattress topper"
+      }
+    ]
+    },
+
+    """
     images = []
     texts = []
 

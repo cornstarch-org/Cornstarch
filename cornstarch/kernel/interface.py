@@ -60,19 +60,19 @@ def bitfield_attention_forward(
     # This is to detect if the model is in generation phase during inference.
     # There is no need of using bitfield attention in generation phase,
     # thus use flash attention
-    if not module.training and query.shape[2] == 1:
-        return flash_attention_forward(
-            module,
-            query,
-            key,
-            value,
-            attention_mask=None,
-            dropout=dropout,
-            scaling=scaling,
-            sliding_window=sliding_window,
-            softcap=softcap,
-            **kwargs,
-        )
+    # if not module.training and query.shape[2] == 1:
+    return flash_attention_forward(
+        module,
+        query,
+        key,
+        value,
+        attention_mask=None,
+        dropout=dropout,
+        scaling=scaling,
+        sliding_window=sliding_window,
+        softcap=softcap,
+        **kwargs,
+    )
 
     assert (
         attention_mask is not None and attention_mask.dtype == torch.int64
