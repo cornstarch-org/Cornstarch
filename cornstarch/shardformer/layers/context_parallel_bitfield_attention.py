@@ -239,16 +239,25 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 softmax_scale=softmax_scales[head_index // heads_stride],
             )
 
-            dist.reduce_scatter(
-                dkv[0], list(dgkv[0].split(seqlen_per_rank, dim=1)), group=sp_group
-            )
-            dist.reduce_scatter(
-                dkv[1], list(dgkv[1].split(seqlen_per_rank, dim=1)), group=sp_group
-            )
+            with torch.cuda.stream(stream):
+                dist.reduce_scatter(
+                    dkv[0],
+                    list(dgkv[0].split(seqlen_per_rank, dim=1)),
+                    group=sp_group,
+                    async_op=True,
+                )
+                dist.reduce_scatter(
+                    dkv[1],
+                    list(dgkv[1].split(seqlen_per_rank, dim=1)),
+                    group=sp_group,
+                    async_op=True,
+                )
 
             dqs.append(dq.clone())
             dks.append(dkv[0].clone())
             dvs.append(dkv[1].clone())
+
+        torch.cuda.current_stream().wait_stream(stream)
 
         return (
             torch.cat(dqs, dim=2),
