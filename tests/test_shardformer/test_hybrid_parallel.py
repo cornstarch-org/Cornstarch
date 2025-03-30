@@ -23,6 +23,7 @@ from .model_zoo import (
     MixtralModelBase,
     Phi3ForCausalLMBase,
     Phi3ModelBase,
+    Phi4MultimodalAudioModelBase,
     PixtralVisionModelBase,
     Qwen2AudioEncoderBase,
     Qwen2ForCausalLMBase,
@@ -67,6 +68,7 @@ causal_lms = dict(
 audio_models = dict(
     qwen2_audio=Qwen2AudioEncoderBase,
     whisper=WhisperEncoderBase,
+    phi4audio=Phi4MultimodalAudioModelBase,
 )
 
 
