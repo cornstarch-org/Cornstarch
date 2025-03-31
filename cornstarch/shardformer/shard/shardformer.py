@@ -1,5 +1,6 @@
 from typing import Iterator, List, Optional, Set
 
+import torch
 from colossalai.accelerator import get_accelerator
 from colossalai.shardformer._utils import getattr_, setattr_
 from colossalai.shardformer.policies.base_policy import (
@@ -37,10 +38,11 @@ class ModelSharder(ColossalModelSharder):
         return shared_params
 
     def _materialize(self) -> None:
-        for p in self.model.parameters():
-            if p.device.type == "meta":
-                p.to_empty(device=get_accelerator().get_current_device())
-        super()._materialize()
+        device = get_accelerator().get_current_device()
+        self.model._apply(
+            lambda t: torch.empty_like(t, device=device) if t.is_meta else t,
+            recurse=True,
+        )
 
     @classmethod
     def set_tensors_to_placeholder(
