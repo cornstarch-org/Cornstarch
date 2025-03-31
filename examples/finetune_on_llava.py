@@ -99,14 +99,9 @@ def calculate_dataset_perplexity(model, dataloader_val, device: str = "cuda"):
     Returns:
         float: Dataset-level perplexity.
     """
-    total_nll = 0.0
-    total_valid_tokens = 0
-
-    ignore_index = -100
     total_step = len(dataloader_val)
     print(f"total_step: {total_step}")
     dataload_iter = iter(dataloader_val)
-    iteration = 0
 
     total_loss = 0
 
@@ -120,39 +115,6 @@ def calculate_dataset_perplexity(model, dataloader_val, device: str = "cuda"):
                 inputs = next(dataload_iter)
                 outputs = model(**inputs)
                 total_loss += outputs.loss
-
-                # logits = outputs.logits
-                # labels = inputs["labels"]
-                # vocab_size = outputs.vocab_size
-
-                # # Compute sum of NLL for this batch
-                # logits = logits.float()
-                # labels = labels.to(logits.device)
-                # # Shift so that tokens < n predict n
-                # labels = torch.nn.functional.pad(labels, (0, 1), value=ignore_index)
-                # shift_labels = labels[..., 1:].contiguous()
-
-                # # Flatten the tokens
-                # logits = logits.view(-1, vocab_size)
-                # shift_labels = shift_labels.view(-1)
-                # # Enable model parallelism
-                # shift_labels = shift_labels.to(logits.device)
-                # batch_nll = torch.nn.functional.cross_entropy(
-                #     logits, shift_labels, ignore_index=ignore_index, reduction="sum"
-                # )
-
-                # batch_nll_mean = torch.nn.functional.cross_entropy(
-                #     logits, shift_labels, ignore_index=ignore_index, reduction="mean"
-                # )
-
-                # # Count valid tokens (non-ignored)
-                # valid_tokens = (shift_labels != ignore_index).sum().item()
-
-                # total_nll += batch_nll.item()
-                # total_valid_tokens += valid_tokens
-
-    # avg_nll = total_nll / total_valid_tokens
-    # perplexity = torch.exp(torch.tensor(avg_nll)).item()
 
     avg_nll = total_loss / total_step
     perplexity = torch.exp(torch.tensor(avg_nll)).item()
