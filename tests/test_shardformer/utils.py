@@ -122,6 +122,12 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
     def postprocess_data_for_sharded_model(
         self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
     ) -> dict:
+        if self.model.model_class.__name__ == "Phi4MultimodalAudioModel":
+            data = {
+                "input_features": data["hidden_states"],
+                "mask": data["mask"],
+            }
+
         return self.postprocess_data_for_original_model(data, precision)
 
     def check_fn(

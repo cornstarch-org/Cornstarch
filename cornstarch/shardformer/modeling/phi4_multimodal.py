@@ -29,8 +29,10 @@ class Phi4MultimodalForwards:
     @staticmethod
     def phi4_multimodal_audio_model_forward(
         self: Phi4MultimodalAudioModel,
-        hidden_states: Optional[torch.FloatTensor] = None,
+        input_features: torch.FloatTensor,
         mask: Optional[torch.Tensor] = None,
+        hidden_states: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         return_dict: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -65,6 +67,10 @@ class Phi4MultimodalForwards:
                 )
                 output_hidden_states = False
 
+        if stage_manager is None or stage_manager.is_first_stage():
+            hidden_states = self.encoder_embedding(input_features)
+            hidden_states, hs_mask, mask = self.forward_embeddings(hidden_states, mask)
+
         unfolded = False
         bs, seq_len, _ = hidden_states.shape
         max_seq_len = 500  # maxium position for absolute positional encoding
@@ -78,9 +84,6 @@ class Phi4MultimodalForwards:
                 chunk_pad_size = 0
 
         if stage_manager is None or stage_manager.is_first_stage():
-            hidden_states = self.encoder_embedding(hidden_states)
-            hidden_states, hs_mask, mask = self.forward_embeddings(hidden_states, mask)
-
             if seq_len > max_seq_len:
                 if chunk_pad_size > 0:
                     hidden_states_pad = F.pad(
@@ -119,8 +122,8 @@ class Phi4MultimodalForwards:
         sp_size = shard_config.sequence_parallel_size
 
         # Support SP + PP. Later stages have already received the split input.
+        split_input = stage_manager is None or stage_manager.is_first_stage()
         if sp_mode == "ring_attn":
-            split_input = stage_manager is None or stage_manager.is_first_stage()
             if split_input:
                 # FIXME: Qwen2Vision does not have a batched input,
                 # but they are concatenated. Current implementation
@@ -140,11 +143,22 @@ class Phi4MultimodalForwards:
 
                 # Recompute attention mask
 
+        if (
+            split_input
+            and shard_config.enable_tensor_parallelism
+            and attention_mask is not None
+        ):
+            # Recompute attention mask
+            assert attention_mask.ndim == 4
+            tp_size = shard_config.tensor_parallel_size
+            tp_rank = dist.get_rank(shard_config.tensor_parallel_process_group)
+            attention_mask = torch.chunk(attention_mask, tp_size, dim=1)[tp_rank]
+
         if stage_manager is not None:
-            layers_per_stage = stage_manager.distribute_layers(len(self.blocks))
+            layers_per_stage = stage_manager.distribute_layers(len(self.encoders))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         else:
-            start_idx, end_idx = (0, len(self.blocks))
+            start_idx, end_idx = (0, len(self.encoders))
 
         for layer in self.encoders[start_idx:end_idx]:
             if self.gradient_checkpointing and self.training:

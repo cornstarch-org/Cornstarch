@@ -142,7 +142,7 @@ class Phi4MultimodalAudioModelPolicy(PipelineTemplatePolicyBase, Policy):
                         kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
-                        suffix="self_attn.out_proj",
+                        suffix="self_attn.o_proj",
                         target_module=Linear1D_Row,
                         kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
@@ -199,7 +199,10 @@ class Phi4MultimodalAudioModelPolicy(PipelineTemplatePolicyBase, Policy):
 
         self.append_or_create_method_replacement(
             description={
-                "forward": Phi4MultimodalForwards.phi4_multimodal_audio_model_forward,
+                "forward": functools.partial(
+                    Phi4MultimodalForwards.phi4_multimodal_audio_model_forward,
+                    shard_config=self.shard_config,
+                ),
             },
             policy=policy,
             target_key=Phi4MultimodalAudioModel,
@@ -228,6 +231,6 @@ class Phi4MultimodalAudioModelPolicy(PipelineTemplatePolicyBase, Policy):
                 ]
             )
         start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
-        held_layers.extend(module.encoder.layers[start_idx:end_idx])
+        held_layers.extend(module.encoders[start_idx:end_idx])
 
         return held_layers
