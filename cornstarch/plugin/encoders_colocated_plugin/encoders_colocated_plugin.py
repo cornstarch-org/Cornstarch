@@ -29,7 +29,6 @@ from cornstarch.models.multimodal_language_model import (
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
     EncodersColocatedPipelineStageManager,
 )
-
 from cornstarch.plugin.encoders_colocated_plugin.one_f_one_b import (
     MultimodalColocatedOneForwardOneBackwardSchedule,
 )
@@ -40,7 +39,6 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
     MultimodalParallelModule,
 )
-
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
@@ -330,7 +328,7 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
 
     def __init__(
         self,
-        encoder_plugins: dict[str, ModalParallelPlugin] = None,
+        encoders_plugins: dict[str, ModalParallelPlugin] = None,
         language_model_plugin: ModalParallelPlugin | None = None,
         precision: str = None,
         enable_fused_normalization: bool = False,
@@ -351,8 +349,8 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
     ):
         PipelinePluginBase.__init__(self)
 
-        first_plugin = next(iter(encoder_plugins.values()))
-        for plugin in encoder_plugins.values():
+        first_plugin = next(iter(encoders_plugins.values()))
+        for plugin in encoders_plugins.values():
             assert (
                 first_plugin.tp_size == plugin.tp_size
             ), "All encoder plugins must have the same number of tensor parallel degree."
@@ -368,7 +366,7 @@ class EncodersColocatedMultimodalParallelPlugin(HybridParallelPlugin):
                 == plugin.pipeline_template.num_stages
             ), "All encoder plugins must have the same number of stages."
 
-        self.encoder_plugins = encoder_plugins
+        self.encoder_plugins = encoders_plugins
         self.language_model_plugin = language_model_plugin
 
         self.precision = precision
