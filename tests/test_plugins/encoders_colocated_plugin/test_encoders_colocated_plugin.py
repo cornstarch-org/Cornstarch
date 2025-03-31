@@ -95,7 +95,7 @@ class TestMultiEncoderColocatedModelInitializationClass(
         )
 
         return EncodersColocatedMultimodalParallelPlugin(
-            encoders_plugins=encoder_plugins,
+            encoder_plugins=encoder_plugins,
             language_model_plugin=language_plugin,
             num_microbatches=12,
             microbatch_size=1,

@@ -74,7 +74,7 @@ class EncodersColocatedMultimodalParallelBase(CornstarchMultimodalParallelBase):
         )
 
         plugin = EncodersColocatedMultimodalParallelPlugin(
-            encoders_plugins=encoder_plugins,
+            encoder_plugins=encoder_plugins,
             language_model_plugin=llm_plugin,
             **test_config,
         )
