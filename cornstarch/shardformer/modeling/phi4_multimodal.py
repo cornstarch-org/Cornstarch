@@ -67,8 +67,36 @@ class Phi4MultimodalForwards:
                 )
                 output_hidden_states = False
 
+        sp_mode = shard_config.sequence_parallelism_mode
+        sp_group = shard_config.sequence_parallel_process_group
+        sp_size = shard_config.sequence_parallel_size
+
         if stage_manager is None or stage_manager.is_first_stage():
             hidden_states = self.encoder_embedding(input_features)
+
+            if sp_mode == "ring_attn":
+                # FIXME: Qwen2Vision does not have a batched input,
+                # but they are concatenated. Current implementation
+                # does not work even though somehow it passes the tests.
+                # Need to support varlen input.
+                ContextParallelBatchSplitUtils.create_context_parallel_split(
+                    # fake attention mask
+                    torch.empty(hidden_states.shape[:2], device="meta"),
+                    sp_group,
+                    dist_mode=ContextParallelDistributionMode.UNIFORM,
+                )
+
+                hidden_states = ContextParallelBatchSplitUtils.split_batch(
+                    hidden_states,
+                    sp_group,
+                )
+
+                # Recompute attention mask
+                mask = ContextParallelBatchSplitUtils.split_batch(
+                    mask,
+                    sp_group,
+                )
+
             hidden_states, hs_mask, mask = self.forward_embeddings(hidden_states, mask)
 
         unfolded = False
@@ -117,32 +145,8 @@ class Phi4MultimodalForwards:
             relative_attention_bias = self.relative_attention_bias_layer(hidden_states)
             attention_mask = hs_mask.unsqueeze(1) + relative_attention_bias
 
-        sp_mode = shard_config.sequence_parallelism_mode
-        sp_group = shard_config.sequence_parallel_process_group
-        sp_size = shard_config.sequence_parallel_size
-
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
-        if sp_mode == "ring_attn":
-            if split_input:
-                # FIXME: Qwen2Vision does not have a batched input,
-                # but they are concatenated. Current implementation
-                # does not work even though somehow it passes the tests.
-                # Need to support varlen input.
-                ContextParallelBatchSplitUtils.create_context_parallel_split(
-                    # fake attention mask
-                    torch.empty(hidden_states.shape[:2], device="meta"),
-                    sp_group,
-                    dist_mode=ContextParallelDistributionMode.UNIFORM,
-                )
-
-                hidden_states = ContextParallelBatchSplitUtils.split_batch(
-                    hidden_states,
-                    sp_group,
-                )
-
-                # Recompute attention mask
-
         if (
             split_input
             and shard_config.enable_tensor_parallelism
