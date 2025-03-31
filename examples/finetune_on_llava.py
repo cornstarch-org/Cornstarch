@@ -137,7 +137,7 @@ def finetune(
     rank_llm = "f" if rank_llm == -1 else rank_llm
     data_amount = 2 ** (data_scale) if data_scale >= 0 else "full"
 
-    ckpt_save_dir = f"/workspace/Cornstarch/examples/LLaVA-OV-{model_size}-rVE{rank_ve}_rLLM{rank_llm}_{data_amount}_samelr"
+    ckpt_save_dir = f"/workspace/Cornstarch/examples/LLaVA-OV-{model_size}-rVE{rank_ve}_rLLM{rank_llm}_{data_amount}_samelr"  # put your save_dir path here
 
     Path(ckpt_save_dir).mkdir(parents=True, exist_ok=True)
     log_file = f"{ckpt_save_dir}/log.log"
@@ -173,7 +173,7 @@ def finetune(
 
     # Load pretrained projector
     ckpt = torch.load(
-        f"/workspace/mllm/ckpt/LLaVA-OV-{model_size}-Align-Instruct/aligned.pt",
+        f"/workspace/mllm/ckpt/LLaVA-OV-{model_size}-Align-Instruct/aligned.pt",  # put your checkpoint path here
         map_location="cuda",
     )
     model.load_state_dict(ckpt["model_state_dict"])
@@ -243,7 +243,7 @@ def finetune(
         dataset_dir = "/workspace/mllm/dataset/LCS/liuhaotian___llava-pretrain"
         dataset_file_name = "blip_laion_cc_sbu_558k.json"
     """
-    dataset_dir = "/workspace/mllm/dataset/LLaVA-mixture/coco/train2017"
+    dataset_dir = "/workspace/mllm/dataset/LLaVA-mixture/coco/train2017"  # put your dataset path here
     traindata_file_name = (
         f"llava_instruct_smalltrain_{data_amount}.json"
         if data_scale >= 0
