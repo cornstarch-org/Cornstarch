@@ -159,6 +159,10 @@ _POLICY_LIST = {
     "transformers.models.phi3.modeling_phi3.Phi3ForCausalLM": PolicyLocation(
         file_name="phi3", class_name="Phi3ForCausalLMPolicy"
     ),
+    # Phi4
+    "transformers.models.phi4_multimodal.modeling_phi4_multimodal.Phi4MultimodalAudioModel": PolicyLocation(
+        file_name="phi4_multimodal", class_name="Phi4MultimodalAudioModelPolicy"
+    ),
     # Qwen2
     "transformers.models.qwen2.modeling_qwen2.Qwen2Model": PolicyLocation(
         file_name="qwen2", class_name="Qwen2ModelPolicy"

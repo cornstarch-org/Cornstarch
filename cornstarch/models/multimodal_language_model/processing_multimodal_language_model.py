@@ -82,6 +82,12 @@ def default_num_feature_calculation_func_qwen2vl(
     return num_image_tokens
 
 
+def default_num_feature_calculation_func_phi4audio(
+    inputs: dict, outputs: dict, config: PretrainedConfig
+) -> list[int]:
+    return outputs["audio_input_features"].shape[:2]
+
+
 processor_type_to_num_feature_calculation_func = {
     "ViTImageProcessor": default_num_feature_calculation_func_vision_static,
     "CLIPImageProcessor": default_num_feature_calculation_func_vision_clip,
@@ -90,6 +96,7 @@ processor_type_to_num_feature_calculation_func = {
     "PixtralImageProcessor": default_num_feature_calculation_func_pixtral,
     "Qwen2VLImageProcessor": default_num_feature_calculation_func_qwen2vl,
     "WhisperFeatureExtractor": default_num_feature_calculation_func_audio_static,
+    "Phi4MultimodalFeatureExtractor": default_num_feature_calculation_func_phi4audio,
 }
 
 
@@ -143,6 +150,9 @@ class MultimodalProcessor:
         """
         # Set the default num_feature_calculation_funcs
         for modal_key, processor in encoder_processors.items():
+            if modal_key in num_feature_calculation_funcs:
+                continue
+
             processor_type = type(processor).__name__
             if processor_type in processor_type_to_num_feature_calculation_func:
                 encoder = model.encoders[modal_key]

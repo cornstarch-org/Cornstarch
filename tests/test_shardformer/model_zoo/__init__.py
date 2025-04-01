@@ -15,3 +15,4 @@ from .qwen2_vision import Qwen2VisionTransformerBase
 from .siglip import SiglipModelBase
 from .vit import ViTModelBase
 from .whisper import WhisperEncoderBase
+from .phi4_multimodal import Phi4MultimodalAudioModelBase
