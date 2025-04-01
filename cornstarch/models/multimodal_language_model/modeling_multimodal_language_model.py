@@ -547,6 +547,11 @@ class ModalEncoderModule(ModalModuleBase):
 
         # Filter out arguments
         module_params = list(inspect.signature(self.module.forward).parameters.keys())
+
+        # Skip execution if inputs do not exist
+        if module_params[0] not in kwargs:
+            return None
+
         module_params = {k: v for k, v in kwargs.items() if k in module_params}
 
         outputs: BaseModelOutput | tuple | torch.Tensor = self.module(**module_params)
@@ -1047,11 +1052,6 @@ class MultimodalModel(nn.Module):
                 if additional_arg in kwargs:
                     args[additional_arg] = kwargs[additional_arg]
 
-            if hasattr(encoder_module.module, "main_input_name"):
-                # if the main input is not in args, this encoder should not be executed
-                if encoder_module.module.main_input_name not in args:
-                    continue
-
             if "output_attentions" in self.encoders_args[modal_key]:
                 args["output_attentions"] = output_attentions
             if "output_hidden_states" in self.encoders_args[modal_key]:
@@ -1059,7 +1059,9 @@ class MultimodalModel(nn.Module):
             if "return_dict" in self.encoders_args[modal_key]:
                 args["return_dict"] = return_dict
 
-            encoders_outputs[modal_key] = encoder_module(**args)
+            encoder_output = encoder_module(**args)
+            if encoder_output is not None:
+                encoders_outputs[modal_key] = encoder_output
 
         # step 2. merge encoded multimodal features into text embeddings
         # mask out special tokens from input_ids to avoid out of index error
