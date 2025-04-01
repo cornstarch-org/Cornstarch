@@ -1,6 +1,7 @@
 import copy
 import functools
 import inspect
+import math
 from typing import Callable, Union
 
 import numpy as np
@@ -85,7 +86,9 @@ def default_num_feature_calculation_func_qwen2vl(
 def default_num_feature_calculation_func_phi4audio(
     inputs: dict, outputs: dict, config: PretrainedConfig
 ) -> list[int]:
-    return outputs["audio_input_features"].shape[:2]
+    return [
+        math.ceil(outputs["audio_input_features"].shape[1] / config.time_reduction)
+    ] * outputs["audio_input_features"].shape[0]
 
 
 processor_type_to_num_feature_calculation_func = {
