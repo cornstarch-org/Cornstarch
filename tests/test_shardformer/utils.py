@@ -1,5 +1,4 @@
 import copy
-import functools
 import re
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -30,7 +29,6 @@ from torch import Tensor, nn
 from torch.optim import Adam, Optimizer
 from torch.testing import assert_close
 from transformers.modeling_outputs import (
-    BaseModelOutput,
     BaseModelOutputWithPast,
     ModelOutput,
 )
@@ -659,10 +657,31 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         return org_model, sharded_model, org_optimizer, sharded_optimizer, booster
 
     @staticmethod
+    def qwen2_vision_preprocess_callback(inputs: dict) -> dict:
+        for key, value in inputs.items():
+            inputs[key] = value.view(-1, value.shape[-1])
+
+        return inputs
+
+    @staticmethod
+    def qwen2_vision_postprocess_projector_callback(
+        inputs: dict, output: ModelOutput
+    ) -> ModelOutput:
+        # Qwen2Vision specific
+        batch_size = inputs[
+            "image_grid_thw" if "image_grid_thw" in inputs else "grid_thw"
+        ].shape[0]
+        output.hidden_states = output.hidden_states.view(
+            batch_size, -1, output.hidden_states.shape[-1]
+        )
+
+        output.hidden_states = output.hidden_states[:, :32]
+        return output
+
+    @staticmethod
     def postprocess_projector_callback(
         inputs: dict, output: ModelOutput
     ) -> ModelOutput:
-        # Cut number of tokens to make merging outputs easier
         output.hidden_states = output.hidden_states[:, :32]
         return output
 
@@ -716,10 +735,19 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         encoders: dict[str, ModalEncoderModule] = {}
         for modal_key, model_base in self.encoders.items():
             encoder = model_base.model_fn()
-            encoders[modal_key] = ModalEncoderModule(
-                encoder,
-                postprocess_projector_callback=self.postprocess_projector_callback,
-            )
+
+            if model_base.__class__.__name__ == "Qwen2VisionTransformerBase":
+                encoders[modal_key] = ModalEncoderModule(
+                    encoder,
+                    preprocess_callback=self.qwen2_vision_preprocess_callback,
+                    postprocess_projector_callback=self.qwen2_vision_postprocess_projector_callback,
+                    additional_args=["hidden_states", "grid_thw"],
+                )
+            else:
+                encoders[modal_key] = ModalEncoderModule(
+                    encoder,
+                    postprocess_projector_callback=self.postprocess_projector_callback,
+                )
 
         llm = self.llm.model_fn()
 

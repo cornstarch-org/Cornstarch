@@ -8,8 +8,10 @@ from .model_zoo import (
     LlamaForCausalLMBase,
     MistralForCausalLMBase,
     Phi3ForCausalLMBase,
+    Phi4MultimodalAudioModelBase,
     Qwen2AudioEncoderBase,
     Qwen2ForCausalLMBase,
+    Qwen2VisionTransformerBase,
     SiglipModelBase,
     WhisperEncoderBase,
 )
@@ -18,6 +20,7 @@ from .utils import CornstarchMultimodalParallelBase
 vision_models = dict(
     clip=CLIPModelBase,
     siglip=SiglipModelBase,
+    qwen2_vision=Qwen2VisionTransformerBase,
     # evaclip=EvaCLIPModelBase,
     # intern_vit=InternVisonModelBase,
 )
@@ -25,6 +28,7 @@ vision_models = dict(
 audio_models = dict(
     qwen2_audio=Qwen2AudioEncoderBase,
     whisper=WhisperEncoderBase,
+    phi4_audio=Phi4MultimodalAudioModelBase,
 )
 
 causal_lms = dict(

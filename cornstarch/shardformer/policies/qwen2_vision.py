@@ -221,7 +221,8 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
         held_layers = []
         layers_per_stage = stage_manager.distribute_layers(len(module.blocks))
         if stage_manager.is_first_stage():
-            held_layers.extend([module.patch_embed, module.rotary_pos_emb])
+            held_layers.append(module.patch_embed)
+        held_layers.append(module.rotary_pos_emb)
         start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.blocks[start_idx:end_idx])
         if stage_manager.is_last_stage():

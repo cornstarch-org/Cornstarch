@@ -30,17 +30,11 @@ class Qwen2VisionModelForwards:
     @staticmethod
     def qwen2_vision_transformer_forward(
         self: Qwen2VisionTransformerPretrainedModel,
-        pixel_values: Optional[torch.FloatTensor] = None,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        pixel_values_videos: Optional[torch.FloatTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
+        hidden_states: Optional[torch.FloatTensor] = None,
+        grid_thw: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        hidden_states: Optional[torch.FloatTensor] = None,
-        grid_thw: Optional[torch.LongTensor] = None,
-        rotary_pos_emb: Optional[torch.FloatTensor] = None,
-        cu_seqlens: Optional[torch.LongTensor] = None,
         shard_config: ShardConfig = None,
     ) -> torch.Tensor:
         output_attentions = (
@@ -57,6 +51,13 @@ class Qwen2VisionModelForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
+        if hidden_states.ndim == 3:
+            # Slice-based microbatching leaves one more dimension
+            hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+
+        if grid_thw.ndim == 3:
+            grid_thw = grid_thw.view(-1, grid_thw.size(-1))
+
         stage_manager = shard_config.pipeline_stage_manager
 
         if stage_manager is not None:
@@ -72,32 +73,23 @@ class Qwen2VisionModelForwards:
                 output_hidden_states = False
 
         if stage_manager is None or stage_manager.is_first_stage():
-            if pixel_values is not None:
-                hidden_states = pixel_values
-                grid_thw = image_grid_thw
-            elif pixel_values_videos is not None:
-                hidden_states = pixel_values_videos
-                grid_thw = video_grid_thw
-
-            if hidden_states.ndim == 3:
-                # Slice-based microbatching leaves one more dimension
-                hidden_states = hidden_states.view(-1, hidden_states.size(-1))
-                grid_thw = grid_thw.view(-1, grid_thw.size(-1))
-
             hidden_states = self.patch_embed(hidden_states)
-            rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-            cu_seqlens = torch.repeat_interleave(
-                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-            ).cumsum(
-                dim=0,
-                # Select dtype based on the following factors:
-                #  - FA2 requires that cu_seqlens_q must have dtype int32
-                #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
-                # See https://github.com/huggingface/transformers/pull/34852 for more information
-                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-            )
-            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        position_embeddings = (emb.cos(), emb.sin())
+
+        cu_seqlens = torch.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+        ).cumsum(
+            dim=0,
+            # Select dtype based on the following factors:
+            #  - FA2 requires that cu_seqlens_q must have dtype int32
+            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
+            # See https://github.com/huggingface/transformers/pull/34852 for more information
+            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
@@ -124,10 +116,15 @@ class Qwen2VisionModelForwards:
                     sp_group,
                 )
 
-                # TODO: recompute cu_seqlens and rotary_pos_emb here
-                cu_seqlens = cu_seqlens.chunk(sp_size, dim=0)[0]
-                grid_thw = grid_thw.chunk(sp_size, dim=0)[sp_rank]
-                rotary_pos_emb = self.rot_pos_emb(grid_thw)
+            # Recompute cu_seqlens and rotary_pos_emb here
+            # FIXME: this doesn't work for arbitrary length
+            cu_seqlens_chunks = cu_seqlens.chunk(sp_size, dim=0)
+            cu_seqlens = cu_seqlens_chunks[sp_rank]
+            if sp_rank > 1:
+                cu_seqlens -= cu_seqlens_chunks[sp_rank - 1][-1]
+            grid_thw = grid_thw.chunk(sp_size, dim=0)[sp_rank]
+            rotary_pos_emb = self.rot_pos_emb(grid_thw)
+            position_embeddings = (emb.cos(), emb.sin())
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.blocks))
@@ -138,21 +135,19 @@ class Qwen2VisionModelForwards:
         for blk in self.blocks[start_idx:end_idx]:
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
-                    blk.__call__, hidden_states, cu_seqlens, rotary_pos_emb
+                    blk.__call__, hidden_states, cu_seqlens, None, position_embeddings
                 )
             else:
                 hidden_states = blk(
-                    hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb
+                    hidden_states,
+                    cu_seqlens=cu_seqlens,
+                    position_embeddings=position_embeddings,
                 )
 
         ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
-            return {
-                "hidden_states": hidden_states,
-                "rotary_pos_emb": rotary_pos_emb,
-                "cu_seqlens": cu_seqlens,
-            }
+            return {"hidden_states": hidden_states}
 
         return self.merger(hidden_states)
 
