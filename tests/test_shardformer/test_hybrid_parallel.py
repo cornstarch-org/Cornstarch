@@ -100,21 +100,25 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
         self.set_model(vision_models[model_name]())
         self.run_hybrid_parallel(tp_size, pp_size, attention, precision)
 
-    def postprocess_data_for_sharded_model(self, data, precision):
-        if not isinstance(self.model, Qwen2VisionTransformerBase):
-            return super().postprocess_data_for_original_model(data, precision)
+    def postprocess_data_for_original_model(self, data, precision):
+        data = super().postprocess_data_for_original_model(data, precision)
+        if isinstance(self.model, Qwen2VisionTransformerBase):
+            for key, value in data.items():
+                data[key] = value.view(-1, value.shape[-1])
 
-        # Special data handling for Qwen2Vision
-        num_batch = self.num_microbatches * self.microbatch_size
-        new_data = {
-            "pixel_values": torch.stack(
-                data["hidden_states"].chunk(num_batch, dim=0), dim=0
-            ),
-            "image_grid_thw": torch.stack(
-                data["grid_thw"].chunk(num_batch, dim=0), dim=0
-            ),
-        }
-        return super().postprocess_data_for_original_model(new_data, precision)
+        return data
+
+    def postprocess_data_for_sharded_model(self, data, precision):
+        data = super().postprocess_data_for_original_model(data, precision)
+
+        if isinstance(self.model, Qwen2VisionTransformerBase):
+            # Special data handling for Qwen2Vision
+            num_batch = self.num_microbatches * self.microbatch_size
+
+            for key, value in data.items():
+                data[key] = value.view(num_batch, -1, value.shape[-1])
+
+        return data
 
     @parametrize("model_name", vision_models.keys(), name_fn=lambda m: m)
     @parametrize(

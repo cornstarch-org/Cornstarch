@@ -100,26 +100,20 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         self.model = model
 
     def postprocess_data_for_original_model(
-        self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
+        self, data: dict[str, torch.Tensor], precision: torch.dtype
     ) -> dict:
-        assert isinstance(data, list) or isinstance(data, dict)
-        if isinstance(data, list):
-            new_data = []
-            for d in data:
-                if isinstance(d, torch.Tensor) and d.is_floating_point():
-                    d = d.to(dtype=precision)
-                new_data.append(d.clone().to("cuda"))
-        elif isinstance(data, dict):
-            new_data = {}
-            for k, v in data.items():
-                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                    v = v.to(dtype=precision)
-                new_data[k] = v.clone().to("cuda")
+        assert isinstance(data, dict)
+
+        new_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            new_data[k] = v.clone().to("cuda")
 
         return new_data
 
     def postprocess_data_for_sharded_model(
-        self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
+        self, data: dict[str, torch.Tensor], precision: torch.dtype
     ) -> dict:
         if self.model.model_class.__name__ == "Phi4MultimodalAudioModel":
             data = {
