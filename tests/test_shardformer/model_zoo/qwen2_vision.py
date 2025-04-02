@@ -64,6 +64,6 @@ class Qwen2VisionTransformerBase(ModelClassBase):
         # Stacking is required to run models with get_micro_batch()
         # as Qwen2VisionImageProcessor flattens all images.
         return {
-            "hidden_states": torch.stack([pixel_values] * num_batch, dim=0),
-            "grid_thw": torch.stack([image_grid_thw] * num_batch, dim=0),
+            "pixel_values": torch.stack([pixel_values] * num_batch, dim=0),
+            "image_grid_thw": torch.stack([image_grid_thw] * num_batch, dim=0),
         }

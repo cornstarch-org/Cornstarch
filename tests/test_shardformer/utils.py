@@ -663,7 +663,9 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         inputs: dict, output: ModelOutput, language_hidden_size: int
     ) -> ModelOutput:
         # Qwen2Vision specific
-        batch_size = inputs["grid_thw"].shape[0]
+        batch_size = inputs[
+            "image_grid_thw" if "image_grid_thw" in inputs else "grid_thw"
+        ].shape[0]
         output.hidden_states = output.hidden_states.view(
             batch_size, -1, language_hidden_size
         )
@@ -737,7 +739,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                         self.qwen2_vision_postprocess_projector_callback,
                         language_hidden_size=self.llm.config.hidden_size,
                     ),
-                    additional_args=["hidden_states", "grid_thw"],
+                    additional_args=["pixel_values", "image_grid_thw"],
                 )
             else:
                 encoders[modal_key] = ModalEncoderModule(
@@ -913,19 +915,13 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
     def postprocess_data_for_original_model(
         self, data: dict[str, torch.Tensor], precision: torch.dtype
     ) -> dict:
-        assert isinstance(data, list) or isinstance(data, dict)
-        if isinstance(data, list):
-            new_data = []
-            for d in data:
-                if isinstance(d, torch.Tensor) and d.is_floating_point():
-                    d = d.to(dtype=precision)
-                new_data.append(d.clone().to("cuda"))
-        elif isinstance(data, dict):
-            new_data = {}
-            for k, v in data.items():
-                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                    v = v.to(dtype=precision)
-                new_data[k] = v.clone().to("cuda")
+        assert isinstance(data, dict)
+
+        new_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            new_data[k] = v.clone().to("cuda")
 
         """
         Inject encoder tokens to the input_ids for the multimodal model.

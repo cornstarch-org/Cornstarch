@@ -103,20 +103,36 @@ class VisionHybridParallel(ColossalaiHybridParallelBase):
     def postprocess_data_for_original_model(self, data, precision):
         data = super().postprocess_data_for_original_model(data, precision)
         if isinstance(self.model, Qwen2VisionTransformerBase):
-            for key, value in data.items():
-                data[key] = value.view(-1, value.shape[-1])
+            data = {
+                "hidden_states": data["pixel_values"].view(
+                    -1, data["pixel_values"].shape[-1]
+                ),
+                "grid_thw": data["image_grid_thw"].view(
+                    -1, data["image_grid_thw"].shape[-1]
+                ),
+            }
 
         return data
 
     def postprocess_data_for_sharded_model(self, data, precision):
-        data = super().postprocess_data_for_original_model(data, precision)
+        data = self.postprocess_data_for_original_model(data, precision)
 
         if isinstance(self.model, Qwen2VisionTransformerBase):
             # Special data handling for Qwen2Vision
             num_batch = self.num_microbatches * self.microbatch_size
 
-            for key, value in data.items():
-                data[key] = value.view(num_batch, -1, value.shape[-1])
+            data = {
+                "pixel_values": data["hidden_states"].view(
+                    num_batch,
+                    -1,
+                    data["hidden_states"].shape[-1],
+                ),
+                "image_grid_thw": data["grid_thw"].view(
+                    num_batch,
+                    -1,
+                    data["grid_thw"].shape[-1],
+                ),
+            }
 
         return data
 

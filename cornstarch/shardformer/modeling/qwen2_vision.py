@@ -5,14 +5,12 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
     VisionAttention,
     apply_rotary_pos_emb_vision,
     logger,
-    repeat_kv,
 )
 
 from cornstarch.shardformer.layers.context_parallel_attention import (
@@ -30,6 +28,10 @@ class Qwen2VisionModelForwards:
     @staticmethod
     def qwen2_vision_transformer_forward(
         self: Qwen2VisionTransformerPretrainedModel,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         grid_thw: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
@@ -51,15 +53,7 @@ class Qwen2VisionModelForwards:
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        if hidden_states.ndim == 3:
-            # Slice-based microbatching leaves one more dimension
-            hidden_states = hidden_states.view(-1, hidden_states.size(-1))
-
-        if grid_thw.ndim == 3:
-            grid_thw = grid_thw.view(-1, grid_thw.size(-1))
-
         stage_manager = shard_config.pipeline_stage_manager
-
         if stage_manager is not None:
             if output_attentions:
                 logger.warning_once(
@@ -71,6 +65,26 @@ class Qwen2VisionModelForwards:
                     "output_hidden_states=True is not supported for pipeline models at the moment."
                 )
                 output_hidden_states = False
+
+        if stage_manager is None or stage_manager.is_first_stage():
+            if pixel_values is not None:
+                hidden_states = pixel_values
+            elif pixel_values_videos is not None:
+                hidden_states = pixel_values_videos
+
+        if image_grid_thw is not None:
+            grid_thw = image_grid_thw
+        elif video_grid_thw is not None:
+            grid_thw = video_grid_thw
+
+        assert hidden_states is not None and grid_thw is not None
+
+        if hidden_states.ndim == 3:
+            # Slice-based microbatching leaves one more dimension
+            hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+
+        if grid_thw.ndim == 3:
+            grid_thw = grid_thw.view(-1, grid_thw.size(-1))
 
         if stage_manager is None or stage_manager.is_first_stage():
             hidden_states = self.patch_embed(hidden_states)
