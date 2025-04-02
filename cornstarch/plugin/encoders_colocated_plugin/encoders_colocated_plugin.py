@@ -29,7 +29,6 @@ from cornstarch.models.multimodal_language_model import (
 from cornstarch.plugin.encoders_colocated_plugin.encoders_colocated_stage_manager import (
     EncodersColocatedPipelineStageManager,
 )
-
 from cornstarch.plugin.encoders_colocated_plugin.one_f_one_b import (
     MultimodalColocatedOneForwardOneBackwardSchedule,
 )
@@ -40,7 +39,6 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     ModalParallelPlugin,
     MultimodalParallelModule,
 )
-
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
@@ -284,15 +282,13 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                         if additional_arg in kwargs:
                             encoder_inputs[additional_arg] = kwargs[additional_arg]
 
-                    if encoder_module.module.main_input_name not in encoder_inputs:
-                        continue
-
-                    encoders_outputs[modal_key] = encoder_module(
+                    encoder_output = encoder_module(
                         **encoder_inputs,
                         output_attentions=output_attentions,
                         output_hidden_states=output_hidden_states,
                         return_dict=return_dict,
                     )
+                    encoders_outputs[modal_key] = encoder_output
             else:
                 for modal_key, encoder_module in module.encoders.items():
                     if f"encoder_outputs_{modal_key}" not in kwargs:
