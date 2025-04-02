@@ -297,7 +297,10 @@ class MultimodalProcessor:
 
         result.update(text_inputs)
 
-        return BatchFeature(data={**result})
+        # Put input_ids into the first position
+        # so that colossalai can properly check the batch size
+        input_ids = result.pop("input_ids")
+        return BatchFeature(data={"input_ids": input_ids, **result})
 
     def batch_decode(self, *args, **kwargs):
         return self.llm_tokenizer.batch_decode(*args, **kwargs)
