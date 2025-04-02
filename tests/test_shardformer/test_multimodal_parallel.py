@@ -50,30 +50,10 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         return 8
 
     def postprocess_data_for_original_model(self, data, precision):
-        data = super().postprocess_data_for_original_model(data, precision)
-        if isinstance(self.encoders["vision"], Qwen2VisionTransformerBase):
-            data.update(
-                {
-                    "hidden_states": data.pop("pixel_values"),
-                    "grid_thw": data.pop("image_grid_thw"),
-                }
-            )
-
-        return data
+        return super().postprocess_data_for_original_model(data, precision)
 
     def postprocess_data_for_sharded_model(self, data, precision):
-        data = self.postprocess_data_for_original_model(data, precision)
-
-        if isinstance(self.encoders["vision"], Qwen2VisionTransformerBase):
-            # Special data handling for Qwen2Vision
-            data.update(
-                {
-                    "pixel_values": data.pop("hidden_states"),
-                    "image_grid_thw": data.pop("grid_thw"),
-                }
-            )
-
-        return data
+        return self.postprocess_data_for_original_model(data, precision)
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
@@ -111,30 +91,10 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
         return 8
 
     def postprocess_data_for_original_model(self, data, precision):
-        data = super().postprocess_data_for_original_model(data, precision)
-        if isinstance(self.encoders["vision"], Qwen2VisionTransformerBase):
-            data.update(
-                {
-                    "hidden_states": data.pop("pixel_values"),
-                    "grid_thw": data.pop("image_grid_thw"),
-                }
-            )
-
-        return data
+        return super().postprocess_data_for_original_model(data, precision)
 
     def postprocess_data_for_sharded_model(self, data, precision):
-        data = self.postprocess_data_for_original_model(data, precision)
-
-        if isinstance(self.encoders["vision"], Qwen2VisionTransformerBase):
-            # Special data handling for Qwen2Vision
-            data.update(
-                {
-                    "pixel_values": data.pop("hidden_states"),
-                    "image_grid_thw": data.pop("grid_thw"),
-                }
-            )
-
-        return data
+        return self.postprocess_data_for_original_model(data, precision)
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
@@ -177,30 +137,10 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         return 12
 
     def postprocess_data_for_original_model(self, data, precision):
-        data = super().postprocess_data_for_original_model(data, precision)
-        if isinstance(self.encoders["vision"], Qwen2VisionTransformerBase):
-            data.update(
-                {
-                    "hidden_states": data.pop("pixel_values"),
-                    "grid_thw": data.pop("image_grid_thw"),
-                }
-            )
-
-        return data
+        return super().postprocess_data_for_original_model(data, precision)
 
     def postprocess_data_for_sharded_model(self, data, precision):
-        data = self.postprocess_data_for_original_model(data, precision)
-
-        if isinstance(self.encoders["vision"], Qwen2VisionTransformerBase):
-            # Special data handling for Qwen2Vision
-            data.update(
-                {
-                    "pixel_values": data.pop("hidden_states"),
-                    "image_grid_thw": data.pop("grid_thw"),
-                }
-            )
-
-        return data
+        return self.postprocess_data_for_original_model(data, precision)
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")

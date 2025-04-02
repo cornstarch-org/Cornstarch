@@ -645,8 +645,14 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
     @staticmethod
     def qwen2_vision_preprocess_callback(inputs: dict) -> dict:
-        for key, value in inputs.items():
-            inputs[key] = value.view(-1, value.shape[-1])
+        inputs = {
+            "hidden_states": inputs["pixel_values"].view(
+                -1, inputs["pixel_values"].shape[-1]
+            ),
+            "grid_thw": inputs["image_grid_thw"].view(
+                -1, inputs["image_grid_thw"].shape[-1]
+            ),
+        }
 
         return inputs
 
