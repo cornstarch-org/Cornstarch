@@ -70,6 +70,7 @@ class Phi4MultimodalForwards:
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
+        sp_rank = dist.get_rank(sp_group)
 
         if stage_manager is None or stage_manager.is_first_stage():
             hidden_states = self.encoder_embedding(input_features)
@@ -92,10 +93,7 @@ class Phi4MultimodalForwards:
                 )
 
                 # Recompute attention mask
-                mask = ContextParallelBatchSplitUtils.split_batch(
-                    mask,
-                    sp_group,
-                )
+                mask = torch.chunk(mask, sp_size, dim=1)[sp_rank]
 
             hidden_states, hs_mask, mask = self.forward_embeddings(hidden_states, mask)
 
