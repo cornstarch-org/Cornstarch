@@ -102,6 +102,7 @@ class Qwen2VisionModelForwards:
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
+        sp_rank = dist.get_rank(sp_group)
 
         # Support SP + PP. Later stages have already received the split input.
         if sp_mode == "ring_attn":
@@ -113,7 +114,7 @@ class Qwen2VisionModelForwards:
                 # Need to support varlen input.
                 ContextParallelBatchSplitUtils.create_context_parallel_split(
                     # fake attention mask
-                    torch.empty(hidden_states.shape[:2], device="meta"),
+                    torch.empty((1, hidden_states.shape[0]), device="meta"),
                     sp_group,
                     dist_mode=ContextParallelDistributionMode.UNIFORM,
                 )
@@ -124,6 +125,9 @@ class Qwen2VisionModelForwards:
                 )
 
                 # TODO: recompute cu_seqlens and rotary_pos_emb here
+                cu_seqlens = cu_seqlens.chunk(sp_size, dim=0)[0]
+                grid_thw = grid_thw.chunk(sp_size, dim=0)[sp_rank]
+                rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.blocks))
