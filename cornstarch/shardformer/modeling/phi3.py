@@ -340,7 +340,9 @@ class Phi3ModelForwards:
                     offsets_per_rank
                 )
 
-            labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)
+            labels = ContextParallelBatchSplitUtils.split_batch(
+                labels, sp_group, is_label=True
+            )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = Phi3ModelForwards.phi3_model_forward(

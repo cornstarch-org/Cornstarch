@@ -118,12 +118,15 @@ class Qwen2VisionModelForwards:
 
             # Recompute cu_seqlens and rotary_pos_emb here
             # FIXME: this doesn't work for arbitrary length
-            cu_seqlens_chunks = cu_seqlens.chunk(sp_size, dim=0)
+            # split should be done in image-wise
+            cu_seqlens_chunks = cu_seqlens[1:].chunk(sp_size, dim=0)
             cu_seqlens = cu_seqlens_chunks[sp_rank]
-            if sp_rank > 1:
+            if sp_rank > 0:
                 cu_seqlens -= cu_seqlens_chunks[sp_rank - 1][-1]
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
             grid_thw = grid_thw.chunk(sp_size, dim=0)[sp_rank]
             rotary_pos_emb = self.rot_pos_emb(grid_thw)
+            emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
             position_embeddings = (emb.cos(), emb.sin())
 
         if stage_manager is not None:
@@ -207,16 +210,25 @@ class Qwen2VisionAttentionForwards:
         # which context parallelism doesn't support,
         # Cornstarch forces to use the same length for all sequences
         # in the same batch.
-        lengths = torch.diff(cu_seqlens).tolist()
-        assert all(
-            l == lengths[0] for l in lengths
-        ), "All sequences in the same batch must have the same length."
+        if len(cu_seqlens) == 1:
+            # shape: (batch, seq_len, num_heads, head_dim)
+            q, k, v = (
+                t.view(1, cu_seqlens.item(), self.num_heads, -1).transpose(1, 2)
+                for t in [q, k, v]
+            )
+        elif len(cu_seqlens) > 1:
+            lengths = torch.diff(cu_seqlens).tolist()
+            assert all(
+                l == lengths[0] for l in lengths
+            ), "All sequences in the same batch must have the same length."
 
-        # shape: (batch, seq_len, num_heads, head_dim)
-        q, k, v = (
-            t.view(len(lengths), lengths[0], self.num_heads, -1).transpose(1, 2)
-            for t in [q, k, v]
-        )
+            # shape: (batch, seq_len, num_heads, head_dim)
+            q, k, v = (
+                t.view(len(lengths), lengths[0], self.num_heads, -1).transpose(1, 2)
+                for t in [q, k, v]
+            )
+        else:
+            raise ValueError("cu_seqlens must have at least one element")
 
         if sp_mode == "ring_attn":
             attention_interface: Callable = functools.partial(

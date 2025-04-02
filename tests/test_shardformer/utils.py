@@ -1,4 +1,5 @@
 import copy
+import functools
 import re
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -665,14 +666,12 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
     @staticmethod
     def qwen2_vision_postprocess_projector_callback(
-        inputs: dict, output: ModelOutput
+        inputs: dict, output: ModelOutput, language_hidden_size: int
     ) -> ModelOutput:
         # Qwen2Vision specific
-        batch_size = inputs[
-            "image_grid_thw" if "image_grid_thw" in inputs else "grid_thw"
-        ].shape[0]
+        batch_size = inputs["grid_thw"].shape[0]
         output.hidden_states = output.hidden_states.view(
-            batch_size, -1, output.hidden_states.shape[-1]
+            batch_size, -1, language_hidden_size
         )
 
         output.hidden_states = output.hidden_states[:, :32]
@@ -740,7 +739,10 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 encoders[modal_key] = ModalEncoderModule(
                     encoder,
                     preprocess_callback=self.qwen2_vision_preprocess_callback,
-                    postprocess_projector_callback=self.qwen2_vision_postprocess_projector_callback,
+                    postprocess_projector_callback=functools.partial(
+                        self.qwen2_vision_postprocess_projector_callback,
+                        language_hidden_size=self.llm.config.hidden_size,
+                    ),
                     additional_args=["hidden_states", "grid_thw"],
                 )
             else:
