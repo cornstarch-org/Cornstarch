@@ -363,11 +363,19 @@ class ContextParallelBatchSplitUtils:
     ) -> torch.Tensor:
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
-        batch_size, seq_len = batch.shape[:2]
 
-        # if context length is too small
-        if cls.context_parallel_offsets_cache is None:
-            assert sp_size == 1 or seq_len < 128 * sp_size
-            return batch
+        if batch.ndim == 3:
+            batch_size, seq_len = batch.shape[:2]
 
-        return batch[:, cls.context_parallel_offsets_cache[sp_rank]]
+            # if context length is too small
+            if cls.context_parallel_offsets_cache is None:
+                assert sp_size == 1 or seq_len < 128 * sp_size
+                return batch
+
+            return batch[:, cls.context_parallel_offsets_cache[sp_rank]]
+        elif batch.ndim == 2:
+            seq_len = batch.shape[0]
+            if cls.context_parallel_offsets_cache is None:
+                assert sp_size == 1 or seq_len < 128 * sp_size
+                return batch
+            return batch[cls.context_parallel_offsets_cache[sp_rank]]
