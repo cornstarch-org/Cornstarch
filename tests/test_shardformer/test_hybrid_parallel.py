@@ -306,7 +306,7 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
         if isinstance(self.model, Phi4MultimodalAudioModelBase):
             data = {
                 "hidden_states": data["audio_input_features"],
-                "mask": data["mask"],
+                "mask": data["audio_attention_mask"],
             }
 
         return data

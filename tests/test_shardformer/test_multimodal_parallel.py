@@ -148,9 +148,11 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @parametrize(
         "tp_size, vision_pp_size, vision_sp_size, audio_pp_size, audio_sp_size, language_pp_size, language_sp_size",
         [
+            (1, 1, 1, 1, 1, 1, 1),
             (1, 1, 2, 1, 2, 1, 2),
             (1, 2, 2, 2, 2, 2, 2),
             (1, 2, 1, 2, 1, 1, 2),
+            (2, 1, 1, 1, 1, 1, 1),
             (2, 1, 2, 1, 2, 1, 2),
             (2, 2, 1, 2, 1, 1, 2),
         ],

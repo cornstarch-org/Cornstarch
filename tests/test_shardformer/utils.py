@@ -643,6 +643,22 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
         return org_model, sharded_model, org_optimizer, sharded_optimizer, booster
 
+    """
+    AS multiple encoders may use `hidden_states`,
+    we cannot put `hidden_states` in the input.
+    Instead, we change input name to `hidden_states` in preprocess callback,
+    which only includes encoder-specific inputs and no possibility of duplicates.
+    """
+
+    @staticmethod
+    def phi4_audio_preprocess_callback(inputs: dict) -> dict:
+        inputs = {
+            "hidden_states": inputs["audio_input_features"],
+            "mask": inputs["audio_attention_mask"],
+        }
+
+        return inputs
+
     @staticmethod
     def qwen2_vision_preprocess_callback(inputs: dict) -> dict:
         inputs = {
@@ -738,6 +754,13 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                         language_hidden_size=self.llm.config.hidden_size,
                     ),
                     additional_args=["pixel_values", "image_grid_thw"],
+                )
+            elif model_base.__class__.__name__ == "Phi4MultimodalAudioModelBase":
+                encoders[modal_key] = ModalEncoderModule(
+                    encoder,
+                    preprocess_callback=self.phi4_audio_preprocess_callback,
+                    postprocess_projector_callback=self.postprocess_projector_callback,
+                    additional_args=["audio_input_features", "audio_attention_mask"],
                 )
             else:
                 encoders[modal_key] = ModalEncoderModule(
