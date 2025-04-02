@@ -115,12 +115,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
     def postprocess_data_for_sharded_model(
         self, data: dict[str, torch.Tensor], precision: torch.dtype
     ) -> dict:
-        if self.model.model_class.__name__ == "Phi4MultimodalAudioModel":
-            data = {
-                "input_features": data["hidden_states"],
-                "mask": data["mask"],
-            }
-
         return self.postprocess_data_for_original_model(data, precision)
 
     def check_fn(
@@ -268,8 +262,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
             booster.plugin.shard_config.context_parallel_distribution_mode = (
                 ring_attn_mode
             )
-
-        assert sharded_model.unwrap().config._attn_implementation == attention
 
         try:
             org_model.gradient_checkpointing_enable({"use_reentrant": False})

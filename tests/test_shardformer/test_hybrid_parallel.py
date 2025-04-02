@@ -299,3 +299,25 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
             "bf16",
             "ring_attn",
         )
+
+    def postprocess_data_for_original_model(self, data, precision):
+        data = super().postprocess_data_for_original_model(data, precision)
+
+        if isinstance(self.model, Phi4MultimodalAudioModelBase):
+            data = {
+                "hidden_states": data["audio_input_features"],
+                "mask": data["mask"],
+            }
+
+        return data
+
+    def postprocess_data_for_sharded_model(self, data, precision):
+        data = self.postprocess_data_for_original_model(data, precision)
+
+        if isinstance(self.model, Phi4MultimodalAudioModelBase):
+            data = {
+                "audio_input_features": data["hidden_states"],
+                "mask": data["mask"],
+            }
+
+        return data

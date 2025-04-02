@@ -29,7 +29,7 @@ class Phi4MultimodalForwards:
     @staticmethod
     def phi4_multimodal_audio_model_forward(
         self: Phi4MultimodalAudioModel,
-        input_features: torch.FloatTensor,
+        audio_input_features: torch.FloatTensor,
         mask: Optional[torch.Tensor] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -73,7 +73,7 @@ class Phi4MultimodalForwards:
         sp_rank = dist.get_rank(sp_group)
 
         if stage_manager is None or stage_manager.is_first_stage():
-            hidden_states = self.encoder_embedding(input_features)
+            hidden_states = self.encoder_embedding(audio_input_features)
 
             if sp_mode == "ring_attn":
                 # FIXME: Qwen2Vision does not have a batched input,
@@ -238,6 +238,7 @@ class Phi4MultimodalAudioAttentionForwards:
             query_states,
             key_states,
             value_states,
+            attention_mask=attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
             **kwargs,
