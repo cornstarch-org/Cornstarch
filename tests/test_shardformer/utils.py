@@ -760,7 +760,11 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                     encoder,
                     preprocess_callback=self.phi4_audio_preprocess_callback,
                     postprocess_projector_callback=self.postprocess_projector_callback,
-                    additional_args=["audio_input_features", "audio_attention_mask"],
+                    additional_args=[
+                        "audio_input_features",
+                        "audio_attention_mask",
+                        "chunk_pad_size",
+                    ],
                 )
             else:
                 encoders[modal_key] = ModalEncoderModule(
