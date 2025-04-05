@@ -30,20 +30,6 @@ def create_bitfield_attention_mask(
     return attention_mask
 
 
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, slen, head_dim
-    )
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
 def cornstarch_attention_forward(
     module: nn.Module,
     query: torch.Tensor,
@@ -99,9 +85,6 @@ def bitfield_attention_forward(
     assert (
         attention_mask is not None and attention_mask.dtype == torch.int64
     ), "Bitfield attention requires an attention mask of type torch.int64."
-
-    key = repeat_kv(key, module.num_key_value_groups)
-    value = repeat_kv(value, module.num_key_value_groups)
 
     # BAM follows FA2 that uses non-transposed inputs
     query = query.transpose(1, 2)
