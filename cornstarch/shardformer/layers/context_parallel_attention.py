@@ -3,8 +3,6 @@ import torch.distributed as dist
 import torch.nn as nn
 from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 
-from cornstarch.kernel.interface import repeat_kv
-
 
 class ContextParallelFlashAttention(torch.autograd.Function):
 
@@ -273,10 +271,6 @@ def context_parallel_flash_attention(
     heads_stride: int = 1,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
-    if query.shape[1] > key.shape[1]:
-        key = repeat_kv(key, module.num_key_value_groups)
-        value = repeat_kv(value, module.num_key_value_groups)
-
     # FA1 uses non-transposed inputs
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
