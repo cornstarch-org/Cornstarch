@@ -214,7 +214,7 @@ def test_bitfield_attention_gqa(
     head_dim: int, seqlen: int, batch_size: int, num_kv_heads: int
 ):
     device = torch.device("cuda")
-    dtype = torch.float16
+    dtype = torch.bfloat16
     num_attention_heads = 6
     assert num_attention_heads % num_kv_heads == 0
     assert num_attention_heads >= num_kv_heads
