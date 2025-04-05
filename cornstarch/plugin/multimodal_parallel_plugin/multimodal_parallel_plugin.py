@@ -295,20 +295,26 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             modal_key = self.my_modal_name.replace("_encoder", "")
             encoder_module = getattr(module, self.my_modal_name)
 
+            encoder_inputs = {}
             if stage_manager.is_first_stage(check_only_in_modal=True):
-                assert hidden_states is None
-                encoder_inputs = {
-                    arg: kwargs[arg]
-                    for arg in module.encoders_args[modal_key]
-                    if arg in kwargs
-                }
+                if hidden_states is not None:
+                    encoder_inputs["hidden_states"] = hidden_states
 
-                for additional_arg in encoder_module.additional_args:
-                    if additional_arg in kwargs:
-                        encoder_inputs[additional_arg] = kwargs[additional_arg]
+                encoder_inputs.update(
+                    {
+                        arg: kwargs[arg]
+                        for arg in module.encoders_args[modal_key]
+                        if arg in kwargs
+                    }
+                )
+
             else:
                 assert hidden_states is not None
-                encoder_inputs = dict(hidden_states=hidden_states)
+                encoder_inputs["hidden_states"] = hidden_states
+
+            for additional_arg in encoder_module.additional_args:
+                if additional_arg in kwargs:
+                    encoder_inputs[additional_arg] = kwargs[additional_arg]
 
             outputs = encoder_module(
                 **encoder_inputs,

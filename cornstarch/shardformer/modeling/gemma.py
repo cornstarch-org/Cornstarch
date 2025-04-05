@@ -359,7 +359,9 @@ class GemmaModelForwards:
                     offsets_per_rank
                 )
 
-            labels = ContextParallelBatchSplitUtils.split_batch(labels, sp_group)
+            labels = ContextParallelBatchSplitUtils.split_batch(
+                labels, sp_group, is_label=True
+            )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = GemmaModelForwards.gemma_model_forward(

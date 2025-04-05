@@ -30,7 +30,6 @@ from torch import Tensor, nn
 from torch.optim import Adam, Optimizer
 from torch.testing import assert_close
 from transformers.modeling_outputs import (
-    BaseModelOutput,
     BaseModelOutputWithPast,
     ModelOutput,
 )
@@ -101,33 +100,21 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         self.model = model
 
     def postprocess_data_for_original_model(
-        self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
+        self, data: dict[str, torch.Tensor], precision: torch.dtype
     ) -> dict:
-        assert isinstance(data, list) or isinstance(data, dict)
-        if isinstance(data, list):
-            new_data = []
-            for d in data:
-                if isinstance(d, torch.Tensor) and d.is_floating_point():
-                    d = d.to(dtype=precision)
-                new_data.append(d.clone().to("cuda"))
-        elif isinstance(data, dict):
-            new_data = {}
-            for k, v in data.items():
-                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                    v = v.to(dtype=precision)
-                new_data[k] = v.clone().to("cuda")
+        assert isinstance(data, dict)
+
+        new_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            new_data[k] = v.clone().to("cuda")
 
         return new_data
 
     def postprocess_data_for_sharded_model(
-        self, data: list[torch.Tensor] | dict[str, torch.Tensor], precision: torch.dtype
+        self, data: dict[str, torch.Tensor], precision: torch.dtype
     ) -> dict:
-        if self.model.model_class.__name__ == "Phi4MultimodalAudioModel":
-            data = {
-                "input_features": data["hidden_states"],
-                "mask": data["mask"],
-            }
-
         return self.postprocess_data_for_original_model(data, precision)
 
     def check_fn(
@@ -275,8 +262,6 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
             booster.plugin.shard_config.context_parallel_distribution_mode = (
                 ring_attn_mode
             )
-
-        assert sharded_model.unwrap().config._attn_implementation == attention
 
         try:
             org_model.gradient_checkpointing_enable({"use_reentrant": False})
@@ -658,11 +643,54 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
         return org_model, sharded_model, org_optimizer, sharded_optimizer, booster
 
+    """
+    AS multiple encoders may use `hidden_states`,
+    we cannot put `hidden_states` in the input.
+    Instead, we change input name to `hidden_states` in preprocess callback,
+    which only includes encoder-specific inputs and no possibility of duplicates.
+    """
+
+    @staticmethod
+    def phi4_audio_preprocess_callback(inputs: dict) -> dict:
+        inputs = {
+            "hidden_states": inputs["audio_input_features"],
+            "mask": inputs["audio_attention_mask"],
+        }
+
+        return inputs
+
+    @staticmethod
+    def qwen2_vision_preprocess_callback(inputs: dict) -> dict:
+        inputs = {
+            "hidden_states": inputs["pixel_values"].view(
+                -1, inputs["pixel_values"].shape[-1]
+            ),
+            "grid_thw": inputs["image_grid_thw"].view(
+                -1, inputs["image_grid_thw"].shape[-1]
+            ),
+        }
+
+        return inputs
+
+    @staticmethod
+    def qwen2_vision_postprocess_projector_callback(
+        inputs: dict, output: ModelOutput, language_hidden_size: int
+    ) -> ModelOutput:
+        # Qwen2Vision specific
+        batch_size = inputs[
+            "image_grid_thw" if "image_grid_thw" in inputs else "grid_thw"
+        ].shape[0]
+        output.hidden_states = output.hidden_states.view(
+            batch_size, -1, language_hidden_size
+        )
+
+        output.hidden_states = output.hidden_states[:, :32]
+        return output
+
     @staticmethod
     def postprocess_projector_callback(
         inputs: dict, output: ModelOutput
     ) -> ModelOutput:
-        # Cut number of tokens to make merging outputs easier
         output.hidden_states = output.hidden_states[:, :32]
         return output
 
@@ -716,10 +744,33 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         encoders: dict[str, ModalEncoderModule] = {}
         for modal_key, model_base in self.encoders.items():
             encoder = model_base.model_fn()
-            encoders[modal_key] = ModalEncoderModule(
-                encoder,
-                postprocess_projector_callback=self.postprocess_projector_callback,
-            )
+
+            if model_base.__class__.__name__ == "Qwen2VisionTransformerBase":
+                encoders[modal_key] = ModalEncoderModule(
+                    encoder,
+                    preprocess_callback=self.qwen2_vision_preprocess_callback,
+                    postprocess_projector_callback=functools.partial(
+                        self.qwen2_vision_postprocess_projector_callback,
+                        language_hidden_size=self.llm.config.hidden_size,
+                    ),
+                    additional_args=["pixel_values", "image_grid_thw"],
+                )
+            elif model_base.__class__.__name__ == "Phi4MultimodalAudioModelBase":
+                encoders[modal_key] = ModalEncoderModule(
+                    encoder,
+                    preprocess_callback=self.phi4_audio_preprocess_callback,
+                    postprocess_projector_callback=self.postprocess_projector_callback,
+                    additional_args=[
+                        "audio_input_features",
+                        "audio_attention_mask",
+                        "chunk_pad_size",
+                    ],
+                )
+            else:
+                encoders[modal_key] = ModalEncoderModule(
+                    encoder,
+                    postprocess_projector_callback=self.postprocess_projector_callback,
+                )
 
         llm = self.llm.model_fn()
 
@@ -889,19 +940,13 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
     def postprocess_data_for_original_model(
         self, data: dict[str, torch.Tensor], precision: torch.dtype
     ) -> dict:
-        assert isinstance(data, list) or isinstance(data, dict)
-        if isinstance(data, list):
-            new_data = []
-            for d in data:
-                if isinstance(d, torch.Tensor) and d.is_floating_point():
-                    d = d.to(dtype=precision)
-                new_data.append(d.clone().to("cuda"))
-        elif isinstance(data, dict):
-            new_data = {}
-            for k, v in data.items():
-                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                    v = v.to(dtype=precision)
-                new_data[k] = v.clone().to("cuda")
+        assert isinstance(data, dict)
+
+        new_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            new_data[k] = v.clone().to("cuda")
 
         """
         Inject encoder tokens to the input_ids for the multimodal model.

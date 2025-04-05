@@ -29,13 +29,14 @@ class Phi4MultimodalForwards:
     @staticmethod
     def phi4_multimodal_audio_model_forward(
         self: Phi4MultimodalAudioModel,
-        input_features: torch.FloatTensor,
+        audio_input_features: Optional[torch.FloatTensor] = None,
         mask: Optional[torch.Tensor] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         return_dict: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        chunk_pad_size: Optional[torch.Tensor] = None,
         shard_config: ShardConfig = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -70,9 +71,14 @@ class Phi4MultimodalForwards:
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
+        sp_rank = dist.get_rank(sp_group)
 
         if stage_manager is None or stage_manager.is_first_stage():
-            hidden_states = self.encoder_embedding(input_features)
+            if audio_input_features is not None:
+                hidden_states = audio_input_features
+
+            hidden_states = self.encoder_embedding(hidden_states)
+            hidden_states, hs_mask, mask = self.forward_embeddings(hidden_states, mask)
 
             if sp_mode == "ring_attn":
                 # FIXME: Qwen2Vision does not have a batched input,
@@ -92,27 +98,24 @@ class Phi4MultimodalForwards:
                 )
 
                 # Recompute attention mask
-                mask = ContextParallelBatchSplitUtils.split_batch(
-                    mask,
-                    sp_group,
-                )
+                mask = torch.chunk(mask, sp_size, dim=2)[sp_rank]
 
-            hidden_states, hs_mask, mask = self.forward_embeddings(hidden_states, mask)
-
-        unfolded = False
-        bs, seq_len, _ = hidden_states.shape
-        max_seq_len = 500  # maxium position for absolute positional encoding
-        if seq_len > max_seq_len:
-            # audio sequence is longer than max_seq_len, unfold it into chunks of max_seq_len
-            unfolded = True
-            # the unfold op will drop residual frames, pad it to the multiple of max_seq_len
-            if seq_len % max_seq_len > 0:
-                chunk_pad_size = max_seq_len - (seq_len % max_seq_len)
-            else:
-                chunk_pad_size = 0
+        assert hidden_states is not None
 
         if stage_manager is None or stage_manager.is_first_stage():
+            chunk_pad_size = 0
+            unfolded = False
+            bs, seq_len, _ = hidden_states.shape
+            max_seq_len = 500  # maxium position for absolute positional encoding
             if seq_len > max_seq_len:
+                # audio sequence is longer than max_seq_len, unfold it into chunks of max_seq_len
+                unfolded = True
+                # the unfold op will drop residual frames, pad it to the multiple of max_seq_len
+                if seq_len % max_seq_len > 0:
+                    chunk_pad_size = max_seq_len - (seq_len % max_seq_len)
+                else:
+                    chunk_pad_size = 0
+
                 if chunk_pad_size > 0:
                     hidden_states_pad = F.pad(
                         hidden_states, (0, 0, 0, chunk_pad_size), "constant", 0
@@ -144,6 +147,10 @@ class Phi4MultimodalForwards:
 
             relative_attention_bias = self.relative_attention_bias_layer(hidden_states)
             attention_mask = hs_mask.unsqueeze(1) + relative_attention_bias
+
+            chunk_pad_size = torch.tensor(
+                [1 if unfolded else 0, bs, chunk_pad_size], device=hidden_states.device
+            )
 
         # Support SP + PP. Later stages have already received the split input.
         split_input = stage_manager is None or stage_manager.is_first_stage()
@@ -180,12 +187,18 @@ class Phi4MultimodalForwards:
             return {
                 "hidden_states": hidden_states,
                 "attention_mask": attention_mask,
+                "chunk_pad_size": chunk_pad_size,
             }
+
+        unfolded, bs, chunk_pad_size = chunk_pad_size.tolist()
+        unfolded = bool(unfolded)
 
         if unfolded is True:
             embed_dim = hidden_states.shape[-1]
             hidden_states = hidden_states.reshape(bs, -1, embed_dim)
+
             # if we ever padded before unfolding, we need to remove the padding
+            # removing the padding only happens at the last stage
             if chunk_pad_size > 0:
                 hidden_states = hidden_states[:, :-chunk_pad_size, :]
 
@@ -240,6 +253,7 @@ class Phi4MultimodalAudioAttentionForwards:
             query_states,
             key_states,
             value_states,
+            attention_mask=attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
             **kwargs,

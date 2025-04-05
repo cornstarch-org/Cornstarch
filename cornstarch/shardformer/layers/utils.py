@@ -360,14 +360,23 @@ class ContextParallelBatchSplitUtils:
         cls: ContextParallelBatchSplitUtils,
         batch: torch.Tensor,
         sp_group: dist.ProcessGroup,
+        is_label: bool = False,
     ) -> torch.Tensor:
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
-        batch_size, seq_len = batch.shape[:2]
+
+        if batch.ndim == 3 or (batch.ndim == 2 and is_label):
+            seq_len = batch.shape[1]
+        else:
+            assert batch.ndim == 2
+            seq_len = batch.shape[0]
 
         # if context length is too small
         if cls.context_parallel_offsets_cache is None:
             assert sp_size == 1 or seq_len < 128 * sp_size
             return batch
 
-        return batch[:, cls.context_parallel_offsets_cache[sp_rank]]
+        if batch.ndim == 3 or (batch.ndim == 2 and is_label):
+            return batch[:, cls.context_parallel_offsets_cache[sp_rank]]
+        else:
+            return batch[cls.context_parallel_offsets_cache[sp_rank]]

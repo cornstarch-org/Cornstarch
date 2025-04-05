@@ -1,6 +1,5 @@
 import torch
 import torch.distributed as dist
-from colossalai.shardformer.layer._operation import reduce_forward
 from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
     Qwen2VLVisionConfig,
@@ -62,7 +61,9 @@ class Qwen2VisionTransformerBase(ModelClassBase):
         )
         image_grid_thw = torch.tensor([[1, num_grid, num_grid]])
 
+        # Stacking is required to run models with get_micro_batch()
+        # as Qwen2VisionImageProcessor flattens all images.
         return {
-            "hidden_states": torch.cat([pixel_values] * num_batch, dim=0),
-            "grid_thw": torch.cat([image_grid_thw] * num_batch, dim=0),
+            "pixel_values": torch.stack([pixel_values] * num_batch, dim=0),
+            "image_grid_thw": torch.stack([image_grid_thw] * num_batch, dim=0),
         }

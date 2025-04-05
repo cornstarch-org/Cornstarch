@@ -25,6 +25,7 @@ from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.shardformer.modeling.phi4_multimodal import (
     Phi4MultimodalAudioAttentionForwards,
     Phi4MultimodalForwards,
+    logger,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -116,9 +117,12 @@ class Phi4MultimodalAudioModelPolicy(PipelineTemplatePolicyBase, Policy):
         )
 
         if self.shard_config.enable_flash_attention:
+            logger.warning(
+                "Phi4MultimodalAudioModal currently is broken with flash attention. Use SDPA instead."
+            )
             policy[Phi4MultimodalAudioModel] = ModulePolicyDescription(
                 attribute_replacement={
-                    "config._attn_implementation": "flash_attention_2",
+                    "config._attn_implementation": "sdpa",
                 }
             )
 

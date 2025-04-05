@@ -5,14 +5,12 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
     VisionAttention,
     apply_rotary_pos_emb_vision,
     logger,
-    repeat_kv,
 )
 
 from cornstarch.shardformer.layers.context_parallel_attention import (
@@ -30,17 +28,15 @@ class Qwen2VisionModelForwards:
     @staticmethod
     def qwen2_vision_transformer_forward(
         self: Qwen2VisionTransformerPretrainedModel,
-        pixel_values: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         pixel_values_videos: Optional[torch.FloatTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
+        hidden_states: Optional[torch.FloatTensor] = None,
+        grid_thw: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        hidden_states: Optional[torch.FloatTensor] = None,
-        grid_thw: Optional[torch.LongTensor] = None,
-        rotary_pos_emb: Optional[torch.FloatTensor] = None,
-        cu_seqlens: Optional[torch.LongTensor] = None,
         shard_config: ShardConfig = None,
     ) -> torch.Tensor:
         output_attentions = (
@@ -58,7 +54,6 @@ class Qwen2VisionModelForwards:
         )
 
         stage_manager = shard_config.pipeline_stage_manager
-
         if stage_manager is not None:
             if output_attentions:
                 logger.warning_once(
@@ -74,34 +69,46 @@ class Qwen2VisionModelForwards:
         if stage_manager is None or stage_manager.is_first_stage():
             if pixel_values is not None:
                 hidden_states = pixel_values
-                grid_thw = image_grid_thw
             elif pixel_values_videos is not None:
                 hidden_states = pixel_values_videos
-                grid_thw = video_grid_thw
 
-            if hidden_states.ndim == 3:
-                # Slice-based microbatching leaves one more dimension
-                hidden_states = hidden_states.view(-1, hidden_states.size(-1))
-                grid_thw = grid_thw.view(-1, grid_thw.size(-1))
+        if image_grid_thw is not None:
+            grid_thw = image_grid_thw
+        elif video_grid_thw is not None:
+            grid_thw = video_grid_thw
 
+        assert hidden_states is not None and grid_thw is not None
+
+        if hidden_states.ndim == 3:
+            # Slice-based microbatching leaves one more dimension
+            hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+
+        if grid_thw.ndim == 3:
+            grid_thw = grid_thw.view(-1, grid_thw.size(-1))
+
+        if stage_manager is None or stage_manager.is_first_stage():
             hidden_states = self.patch_embed(hidden_states)
-            rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-            cu_seqlens = torch.repeat_interleave(
-                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-            ).cumsum(
-                dim=0,
-                # Select dtype based on the following factors:
-                #  - FA2 requires that cu_seqlens_q must have dtype int32
-                #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
-                # See https://github.com/huggingface/transformers/pull/34852 for more information
-                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-            )
-            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        position_embeddings = (emb.cos(), emb.sin())
+
+        cu_seqlens = torch.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+        ).cumsum(
+            dim=0,
+            # Select dtype based on the following factors:
+            #  - FA2 requires that cu_seqlens_q must have dtype int32
+            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
+            # See https://github.com/huggingface/transformers/pull/34852 for more information
+            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
+        sp_rank = dist.get_rank(sp_group)
 
         # Support SP + PP. Later stages have already received the split input.
         if sp_mode == "ring_attn":
@@ -113,7 +120,7 @@ class Qwen2VisionModelForwards:
                 # Need to support varlen input.
                 ContextParallelBatchSplitUtils.create_context_parallel_split(
                     # fake attention mask
-                    torch.empty(hidden_states.shape[:2], device="meta"),
+                    torch.empty((1, hidden_states.shape[0]), device="meta"),
                     sp_group,
                     dist_mode=ContextParallelDistributionMode.UNIFORM,
                 )
@@ -123,7 +130,18 @@ class Qwen2VisionModelForwards:
                     sp_group,
                 )
 
-                # TODO: recompute cu_seqlens and rotary_pos_emb here
+            # Recompute cu_seqlens and rotary_pos_emb here
+            # FIXME: this doesn't work for arbitrary length
+            # split should be done in image-wise
+            cu_seqlens_chunks = cu_seqlens[1:].chunk(sp_size, dim=0)
+            cu_seqlens = cu_seqlens_chunks[sp_rank]
+            if sp_rank > 0:
+                cu_seqlens -= cu_seqlens_chunks[sp_rank - 1][-1]
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+            grid_thw = grid_thw.chunk(sp_size, dim=0)[sp_rank]
+            rotary_pos_emb = self.rot_pos_emb(grid_thw)
+            emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+            position_embeddings = (emb.cos(), emb.sin())
 
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.blocks))
@@ -134,21 +152,19 @@ class Qwen2VisionModelForwards:
         for blk in self.blocks[start_idx:end_idx]:
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
-                    blk.__call__, hidden_states, cu_seqlens, rotary_pos_emb
+                    blk.__call__, hidden_states, cu_seqlens, None, position_embeddings
                 )
             else:
                 hidden_states = blk(
-                    hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb
+                    hidden_states,
+                    cu_seqlens=cu_seqlens,
+                    position_embeddings=position_embeddings,
                 )
 
         ContextParallelBatchSplitUtils.clear_cache()
 
         if not (stage_manager is None or stage_manager.is_last_stage()):
-            return {
-                "hidden_states": hidden_states,
-                "rotary_pos_emb": rotary_pos_emb,
-                "cu_seqlens": cu_seqlens,
-            }
+            return {"hidden_states": hidden_states}
 
         return self.merger(hidden_states)
 
@@ -208,16 +224,25 @@ class Qwen2VisionAttentionForwards:
         # which context parallelism doesn't support,
         # Cornstarch forces to use the same length for all sequences
         # in the same batch.
-        lengths = torch.diff(cu_seqlens).tolist()
-        assert all(
-            l == lengths[0] for l in lengths
-        ), "All sequences in the same batch must have the same length."
+        if len(cu_seqlens) == 1:
+            # shape: (batch, seq_len, num_heads, head_dim)
+            q, k, v = (
+                t.view(1, cu_seqlens.item(), self.num_heads, -1).transpose(1, 2)
+                for t in [q, k, v]
+            )
+        elif len(cu_seqlens) > 1:
+            lengths = torch.diff(cu_seqlens).tolist()
+            assert all(
+                l == lengths[0] for l in lengths
+            ), "All sequences in the same batch must have the same length."
 
-        # shape: (batch, seq_len, num_heads, head_dim)
-        q, k, v = (
-            t.view(len(lengths), lengths[0], self.num_heads, -1).transpose(1, 2)
-            for t in [q, k, v]
-        )
+            # shape: (batch, seq_len, num_heads, head_dim)
+            q, k, v = (
+                t.view(len(lengths), lengths[0], self.num_heads, -1).transpose(1, 2)
+                for t in [q, k, v]
+            )
+        else:
+            raise ValueError("cu_seqlens must have at least one element")
 
         if sp_mode == "ring_attn":
             attention_interface: Callable = functools.partial(

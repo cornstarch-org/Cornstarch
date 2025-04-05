@@ -52,7 +52,7 @@ class Phi4MultimodalAudioModelBase(ModelClassBase):
         return self.model_class(config)
 
     def data_gen_fn(self, num_batch: int) -> dict:
-        return dict(
-            hidden_states=torch.rand(num_batch, 498, self.config.input_size),
-            mask=torch.ones(num_batch, 498, dtype=torch.bool),
-        )
+        return {
+            "audio_input_features": torch.rand(num_batch, 9598, self.config.input_size),
+            "audio_attention_mask": torch.ones(num_batch, 9598, dtype=torch.bool),
+        }

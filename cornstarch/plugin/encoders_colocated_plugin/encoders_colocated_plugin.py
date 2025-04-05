@@ -294,9 +294,17 @@ class EncodersColocatedMultimodalParallelModule(MultimodalParallelModule):
                     if f"encoder_outputs_{modal_key}" not in kwargs:
                         continue
 
-                    encoder_inputs = kwargs[f"encoder_outputs_{modal_key}"]
+                    encoder_inputs = {}
+                    encoder_inputs["hidden_states"] = kwargs[
+                        f"encoder_outputs_{modal_key}"
+                    ]
+
+                    for additional_arg in encoder_module.additional_args:
+                        if additional_arg in kwargs:
+                            encoder_inputs[additional_arg] = kwargs[additional_arg]
+
                     encoders_outputs[modal_key] = encoder_module(
-                        hidden_states=encoder_inputs,
+                        **encoder_inputs,
                         output_attentions=output_attentions,
                         output_hidden_states=output_hidden_states,
                         return_dict=return_dict,

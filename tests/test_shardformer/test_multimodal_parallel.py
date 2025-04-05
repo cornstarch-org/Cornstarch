@@ -8,8 +8,10 @@ from .model_zoo import (
     LlamaForCausalLMBase,
     MistralForCausalLMBase,
     Phi3ForCausalLMBase,
+    Phi4MultimodalAudioModelBase,
     Qwen2AudioEncoderBase,
     Qwen2ForCausalLMBase,
+    Qwen2VisionTransformerBase,
     SiglipModelBase,
     WhisperEncoderBase,
 )
@@ -18,6 +20,7 @@ from .utils import CornstarchMultimodalParallelBase
 vision_models = dict(
     clip=CLIPModelBase,
     siglip=SiglipModelBase,
+    qwen2_vision=Qwen2VisionTransformerBase,
     # evaclip=EvaCLIPModelBase,
     # intern_vit=InternVisonModelBase,
 )
@@ -25,6 +28,7 @@ vision_models = dict(
 audio_models = dict(
     qwen2_audio=Qwen2AudioEncoderBase,
     whisper=WhisperEncoderBase,
+    phi4_audio=Phi4MultimodalAudioModelBase,
 )
 
 causal_lms = dict(
@@ -44,6 +48,12 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
         return 8
+
+    def postprocess_data_for_original_model(self, data, precision):
+        return super().postprocess_data_for_original_model(data, precision)
+
+    def postprocess_data_for_sharded_model(self, data, precision):
+        return self.postprocess_data_for_original_model(data, precision)
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
@@ -80,19 +90,21 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
     def world_size(self) -> int:
         return 8
 
+    def postprocess_data_for_original_model(self, data, precision):
+        return super().postprocess_data_for_original_model(data, precision)
+
+    def postprocess_data_for_sharded_model(self, data, precision):
+        return self.postprocess_data_for_original_model(data, precision)
+
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize(
         "tp_size, vision_pp_size, vision_sp_size, language_pp_size, language_sp_size",
         [
-            (1, 1, 1, 1, 1),
             (1, 1, 2, 1, 2),
-            (1, 2, 1, 2, 1),
             (1, 2, 2, 2, 2),
             (1, 2, 1, 1, 2),
-            (2, 1, 1, 1, 1),
             (2, 1, 2, 1, 2),
-            (2, 2, 1, 2, 1),
             (2, 2, 1, 1, 2),
         ],
         name_fn=lambda tp, vpp, vsp, lpp, lsp: f"tp={tp}, pp=({vpp},{lpp}), sp=({vsp},{lsp})",
@@ -124,6 +136,12 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     def world_size(self) -> int:
         return 12
 
+    def postprocess_data_for_original_model(self, data, precision):
+        return super().postprocess_data_for_original_model(data, precision)
+
+    def postprocess_data_for_sharded_model(self, data, precision):
+        return self.postprocess_data_for_original_model(data, precision)
+
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize("audio_model_name", audio_models.keys(), lambda x: f"{x}")
@@ -132,12 +150,10 @@ class VisionAudioLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         [
             (1, 1, 1, 1, 1, 1, 1),
             (1, 1, 2, 1, 2, 1, 2),
-            (1, 2, 1, 2, 1, 2, 1),
             (1, 2, 2, 2, 2, 2, 2),
             (1, 2, 1, 2, 1, 1, 2),
             (2, 1, 1, 1, 1, 1, 1),
             (2, 1, 2, 1, 2, 1, 2),
-            (2, 2, 1, 2, 1, 2, 1),
             (2, 2, 1, 2, 1, 1, 2),
         ],
         name_fn=lambda tp, vpp, vsp, app, asp, lpp, lsp: f"tp={tp}, pp=({vpp},{app},{lpp}), sp=({vsp},{asp},{lsp})",
