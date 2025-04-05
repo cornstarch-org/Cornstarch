@@ -1290,8 +1290,8 @@ class BitfieldAttentionFunction(torch.autograd.Function):
         # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
         with torch.inference_mode():
             dq = torch.empty_like(q)
-            dk = torch.zeros_like(k)
-            dv = torch.zeros_like(v)
+            dk = torch.zeros_like(k, dtype=torch.float32)
+            dv = torch.zeros_like(v, dtype=torch.float32)
             _bitfield_attn_backward(
                 do,
                 q,
@@ -1307,7 +1307,7 @@ class BitfieldAttentionFunction(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=ctx.softmax_scale,
             )
-        return dq, dk, dv, None, None, None
+        return dq, dk.to(dtype=k.dtype), dv.to(dtype=v.dtype), None, None, None
 
 
 def bitfield_attn_func(
