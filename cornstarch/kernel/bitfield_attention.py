@@ -261,6 +261,7 @@ def _fwd_kernel(
     stride_cmb,
     stride_cmm,
     nheads,
+    nheads_k,
     seqlen_q,
     seqlen_k,
     seqlen_q_rounded,
@@ -281,6 +282,10 @@ def _fwd_kernel(
     off_hb = tl.program_id(1)
     off_b = off_hb // nheads
     off_h = off_hb % nheads
+
+    group_size = nheads // nheads_k
+    off_hk = off_h // group_size if group_size > 1 else off_h
+
     # initialize offsets
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
@@ -298,13 +303,13 @@ def _fwd_kernel(
     k_ptrs = (
         K
         + off_b * stride_kb
-        + off_h * stride_kh
+        + off_hk * stride_kh
         + (offs_n[:, None] * stride_kn + offs_d[None, :])
     )
     v_ptrs = (
         V
         + off_b * stride_vb
-        + off_h * stride_vh
+        + off_hk * stride_vh
         + (offs_n[:, None] * stride_vn + offs_d[None, :])
     )
     if BIAS_TYPE == "vector":
@@ -580,22 +585,22 @@ def _bwd_store_dk_dv(
     # if we just call tl.store(dv_ptrs), there's a race condition
     if EVEN_N & EVEN_M:
         if EVEN_HEADDIM:
-            tl.store(dv_ptrs, dv)
-            tl.store(dk_ptrs, dk)
+            tl.atomic_add(dv_ptrs, dv)
+            tl.atomic_add(dk_ptrs, dk)
         else:
-            tl.store(dv_ptrs, dv, mask=offs_d[None, :] < headdim)
-            tl.store(dk_ptrs, dk, mask=offs_d[None, :] < headdim)
+            tl.atomic_add(dv_ptrs, dv, mask=offs_d[None, :] < headdim)
+            tl.atomic_add(dk_ptrs, dk, mask=offs_d[None, :] < headdim)
     else:
         if EVEN_HEADDIM:
-            tl.store(dv_ptrs, dv, mask=offs_n[:, None] < seqlen_k)
-            tl.store(dk_ptrs, dk, mask=offs_n[:, None] < seqlen_k)
+            tl.atomic_add(dv_ptrs, dv, mask=offs_n[:, None] < seqlen_k)
+            tl.atomic_add(dk_ptrs, dk, mask=offs_n[:, None] < seqlen_k)
         else:
-            tl.store(
+            tl.atomic_add(
                 dv_ptrs,
                 dv,
                 mask=(offs_n[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
             )
-            tl.store(
+            tl.atomic_add(
                 dk_ptrs,
                 dk,
                 mask=(offs_n[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
@@ -932,6 +937,7 @@ def _bwd_kernel(
     stride_cmb,
     stride_cmm,
     nheads,
+    nheads_k,
     seqlen_q,
     seqlen_k,
     seqlen_q_rounded,
@@ -951,14 +957,18 @@ def _bwd_kernel(
     off_hb = tl.program_id(1)
     off_b = off_hb // nheads
     off_h = off_hb % nheads
+
+    group_size = nheads // nheads_k
+    off_hk = off_h // group_size if group_size > 1 else off_h
+
     # offset pointers for batch/head
     Q += off_b * stride_qb + off_h * stride_qh
-    K += off_b * stride_kb + off_h * stride_kh
-    V += off_b * stride_vb + off_h * stride_vh
+    K += off_b * stride_kb + off_hk * stride_kh
+    V += off_b * stride_vb + off_hk * stride_vh
     DO += off_b * stride_dob + off_h * stride_doh
     DQ += off_b * stride_dqb + off_h * stride_dqh
-    DK += off_b * stride_dkb + off_h * stride_dkh
-    DV += off_b * stride_dvb + off_h * stride_dvh
+    DK += off_b * stride_dkb + off_hk * stride_dkh
+    DV += off_b * stride_dvb + off_hk * stride_dvh
     if BIAS_TYPE != "none":
         Bias += off_b * stride_bb + off_h * stride_bh
     # pointer to row-wise quantities in value-like data
@@ -1021,9 +1031,7 @@ def _bitfield_attn_forward(
 ):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
-    _, seqlen_k, _, _ = k.shape
-    assert k.shape == (batch, seqlen_k, nheads, d)
-    assert v.shape == (batch, seqlen_k, nheads, d)
+    _, seqlen_k, nheads_k, _ = k.shape
     assert d <= 128, "FlashAttention only support head dimensions up to 128"
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
@@ -1091,6 +1099,7 @@ def _bitfield_attn_forward(
         compressed_mask.stride(0),
         compressed_mask.stride(1),
         nheads,
+        nheads_k,
         seqlen_q,
         seqlen_k,
         seqlen_q_rounded,
@@ -1126,7 +1135,7 @@ def _bitfield_attn_backward(
     if do.stride(-1) != 1:
         do = do.contiguous()
     batch, seqlen_q, nheads, d = q.shape
-    _, seqlen_k, _, _ = k.shape
+    _, seqlen_k, nheads_k, _ = k.shape
     # assert d in {16, 32, 64, 128}
     assert d <= 128
     seqlen_q_rounded = math.ceil(seqlen_q / BLOCK_M) * BLOCK_M
@@ -1219,6 +1228,7 @@ def _bitfield_attn_backward(
         compressed_mask.stride(0),
         compressed_mask.stride(1),
         nheads,
+        nheads_k,
         seqlen_q,
         seqlen_k,
         seqlen_q_rounded,
@@ -1280,8 +1290,8 @@ class BitfieldAttentionFunction(torch.autograd.Function):
         # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
         with torch.inference_mode():
             dq = torch.empty_like(q)
-            dk = torch.empty_like(k)
-            dv = torch.empty_like(v)
+            dk = torch.zeros_like(k)
+            dv = torch.zeros_like(v)
             _bitfield_attn_backward(
                 do,
                 q,

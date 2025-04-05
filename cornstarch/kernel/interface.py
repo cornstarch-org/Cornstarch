@@ -52,9 +52,6 @@ def cornstarch_attention_forward(
     attention_mask: torch.Tensor,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
-    key = repeat_kv(key, module.num_key_value_groups)
-    value = repeat_kv(value, module.num_key_value_groups)
-
     # FA2 uses non-transposed inputs
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
