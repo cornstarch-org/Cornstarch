@@ -217,7 +217,6 @@ class LlamaModelForwards:
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
-                    **flash_attn_kwargs,
                     **kwargs,
                 )
 

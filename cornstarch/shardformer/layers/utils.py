@@ -362,6 +362,9 @@ class ContextParallelBatchSplitUtils:
         sp_group: dist.ProcessGroup,
         is_label: bool = False,
     ) -> torch.Tensor:
+        if batch is None:
+            return None
+
         sp_size = dist.get_world_size(sp_group)
         sp_rank = dist.get_rank(sp_group)
 
