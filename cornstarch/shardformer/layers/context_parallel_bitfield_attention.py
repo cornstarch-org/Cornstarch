@@ -103,13 +103,15 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
         assert len(per_head_events) == nheads_kv // heads_stride
         group_size = nheads // nheads_kv
-        for head_index in range(0, nheads, heads_stride):
-            event = per_head_events[head_index // heads_stride // group_size]
+        for head_index in range(0, nheads_kv, heads_stride):
+            event = per_head_events[head_index // heads_stride]
             torch.cuda.current_stream().wait_event(event)
 
-            current_q = q[:, :, head_index : head_index + heads_stride, :].contiguous()
-            current_k = gathered_kv[head_index // heads_stride // group_size][0]
-            current_v = gathered_kv[head_index // heads_stride // group_size][1]
+            current_q = q[
+                :, :, head_index * group_size : (head_index + heads_stride) * group_size
+            ].contiguous()
+            current_k = gathered_kv[head_index // heads_stride][0]
+            current_v = gathered_kv[head_index // heads_stride][1]
 
             o, lse, softmax_scale_out = _bitfield_attn_forward(
                 current_q,
@@ -204,13 +206,13 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             dtype=k.dtype,
             device=k.device,
         )
-        for head_index in range(0, nheads, heads_stride):
-            kv_head_index = head_index // heads_stride // group_size
+        for head_index in range(0, nheads_kv, heads_stride):
+            kv_head_index = head_index // heads_stride
             event = per_head_events[kv_head_index]
             torch.cuda.current_stream().wait_event(event)
 
             dq = torch.empty(
-                (batch, seqlen_q, heads_stride, d),
+                (batch, seqlen_q, heads_stride * group_size, d),
                 dtype=q.dtype,
                 device=q.device,
             )
@@ -227,8 +229,16 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             )
 
             _bitfield_attn_backward(
-                do=do[:, :, head_index : head_index + heads_stride, :],
-                q=q[:, :, head_index : head_index + heads_stride, :],
+                do=do[
+                    :,
+                    :,
+                    head_index * group_size : (head_index + heads_stride) * group_size,
+                ],
+                q=q[
+                    :,
+                    :,
+                    head_index * group_size : (head_index + heads_stride) * group_size,
+                ],
                 k=gathered_kv[kv_head_index][0],
                 v=gathered_kv[kv_head_index][1],
                 o=os[head_index // heads_stride],
