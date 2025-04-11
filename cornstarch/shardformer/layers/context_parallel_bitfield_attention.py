@@ -8,7 +8,6 @@ from cornstarch.kernel.bitfield_attention import (
     _bitfield_attn_backward,
     _bitfield_attn_forward,
 )
-from cornstarch.kernel.interface import repeat_kv
 
 
 class ContextParallelBitfieldAttention(torch.autograd.Function):
@@ -42,7 +41,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         stream = ContextParallelBitfieldAttention.stream
 
         batch, seqlen_q, nheads, d = q.shape
-        _, seqlen_kv, _, _ = k.shape
+        _, seqlen_kv, nheads_kv, _ = k.shape
 
         seqlen_per_rank = [len(offsets) for offsets in offsets_per_rank]
         total_seqlen = sum(seqlen_per_rank)
@@ -50,10 +49,10 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         offsets_kv = torch.cat(offsets_per_rank, dim=0)
 
         assert bitfield_mask.shape == (batch, total_seqlen)
-        assert k.shape == (batch, seqlen_kv, nheads, d)
-        assert v.shape == (batch, seqlen_kv, nheads, d)
+        # assert k.shape == (batch, seqlen_kv, nheads, d)
+        # assert v.shape == (batch, seqlen_kv, nheads, d)
         assert (
-            nheads % heads_stride == 0
+            nheads_kv % heads_stride == 0
         ), "number of heads must be divisible by heads_stride"
         assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
         assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
@@ -68,12 +67,12 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 dtype=k.dtype,
                 device=k.device,
             )
-            for _ in range(nheads // heads_stride)
+            for _ in range(nheads_kv // heads_stride)
         ]
 
         # Initialize allgather works asynchronously
         with torch.cuda.stream(stream):
-            for head_index in range(0, nheads, heads_stride):
+            for head_index in range(0, nheads_kv, heads_stride):
                 dist.all_gather(
                     list(
                         gathered_kv[head_index // heads_stride][0].split(
@@ -102,12 +101,15 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         lses: list[torch.Tensor] = []
         softmax_scales: list[torch.Tensor] = []
 
-        assert len(per_head_events) == nheads // heads_stride
-        for head_index in range(0, nheads, heads_stride):
+        assert len(per_head_events) == nheads_kv // heads_stride
+        group_size = nheads // nheads_kv
+        for head_index in range(0, nheads_kv, heads_stride):
             event = per_head_events[head_index // heads_stride]
             torch.cuda.current_stream().wait_event(event)
 
-            current_q = q[:, :, head_index : head_index + heads_stride, :].contiguous()
+            current_q = q[
+                :, :, head_index * group_size : (head_index + heads_stride) * group_size
+            ].contiguous()
             current_k = gathered_kv[head_index // heads_stride][0]
             current_v = gathered_kv[head_index // heads_stride][1]
 
@@ -149,7 +151,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         sp_group: dist.ProcessGroup = ctx.sp_group
 
         batch, seqlen_q, nheads, d = q.shape
-        _, seqlen_kv, _, _ = k.shape
+        _, seqlen_kv, nheads_kv, _ = k.shape
 
         seqlen_per_rank = [len(offsets) for offsets in offsets_per_rank]
         total_seqlen = sum(seqlen_per_rank)
@@ -165,12 +167,12 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 dtype=k.dtype,
                 device=k.device,
             )
-            for _ in range(nheads // heads_stride)
+            for _ in range(nheads_kv // heads_stride)
         ]
 
         # Initialize allgather works asynchronously
         with torch.cuda.stream(stream):
-            for head_index in range(0, nheads, heads_stride):
+            for head_index in range(0, nheads_kv, heads_stride):
                 dist.all_gather(
                     list(
                         gathered_kv[head_index // heads_stride][0].split(
@@ -196,16 +198,21 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 per_head_events.append(event)
 
         dqs: list[torch.Tensor] = []
-        dks: list[torch.Tensor] = []
-        dvs: list[torch.Tensor] = []
 
-        assert len(per_head_events) == nheads // heads_stride
-        for head_index in range(0, nheads, heads_stride):
-            event = per_head_events[head_index // heads_stride]
+        assert len(per_head_events) == nheads_kv // heads_stride
+        group_size = nheads // nheads_kv
+        scattered_dkv = torch.zeros(
+            (2, batch, seqlen_kv, nheads_kv, d),
+            dtype=k.dtype,
+            device=k.device,
+        )
+        for head_index in range(0, nheads_kv, heads_stride):
+            kv_head_index = head_index // heads_stride
+            event = per_head_events[kv_head_index]
             torch.cuda.current_stream().wait_event(event)
 
             dq = torch.empty(
-                (batch, seqlen_q, heads_stride, d),
+                (batch, seqlen_q, heads_stride * group_size, d),
                 dtype=q.dtype,
                 device=q.device,
             )
@@ -217,15 +224,23 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
             dgkv = torch.zeros(
                 (2, batch, total_seqlen, heads_stride, d),
-                dtype=k.dtype,
+                dtype=torch.float32,
                 device=k.device,
             )
 
             _bitfield_attn_backward(
-                do=do[:, :, head_index : head_index + heads_stride, :],
-                q=q[:, :, head_index : head_index + heads_stride, :],
-                k=gathered_kv[head_index // heads_stride][0],
-                v=gathered_kv[head_index // heads_stride][1],
+                do=do[
+                    :,
+                    :,
+                    head_index * group_size : (head_index + heads_stride) * group_size,
+                ],
+                q=q[
+                    :,
+                    :,
+                    head_index * group_size : (head_index + heads_stride) * group_size,
+                ],
+                k=gathered_kv[kv_head_index][0],
+                v=gathered_kv[kv_head_index][1],
                 o=os[head_index // heads_stride],
                 bitfield_mask=bitfield_mask,
                 compressed_mask=compressed_mask,
@@ -242,27 +257,31 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             with torch.cuda.stream(stream):
                 dist.reduce_scatter(
                     dkv[0],
-                    list(dgkv[0].split(seqlen_per_rank, dim=1)),
+                    list(dgkv[0].to(dtype=dkv.dtype).split(seqlen_per_rank, dim=1)),
                     group=sp_group,
                     async_op=True,
                 )
                 dist.reduce_scatter(
                     dkv[1],
-                    list(dgkv[1].split(seqlen_per_rank, dim=1)),
+                    list(dgkv[1].to(dtype=dkv.dtype).split(seqlen_per_rank, dim=1)),
                     group=sp_group,
                     async_op=True,
                 )
 
-            dqs.append(dq.clone())
-            dks.append(dkv[0].clone())
-            dvs.append(dkv[1].clone())
+            dqs.append(dq)
+            scattered_dkv[0][:, :, kv_head_index : kv_head_index + heads_stride] += dkv[
+                0
+            ]
+            scattered_dkv[1][:, :, kv_head_index : kv_head_index + heads_stride] += dkv[
+                1
+            ]
 
         torch.cuda.current_stream().wait_stream(stream)
 
         return (
             torch.cat(dqs, dim=2),
-            torch.cat(dks, dim=2),
-            torch.cat(dvs, dim=2),
+            scattered_dkv[0],
+            scattered_dkv[1],
             None,
             None,
             None,
@@ -292,9 +311,6 @@ def context_parallel_bitfield_attention_forward(
     assert (
         bitfield_mask is not None and bitfield_mask.dtype == torch.int64
     ), "Bitfield attention requires an attention mask of type torch.int64."
-
-    key = repeat_kv(key, module.num_key_value_groups)
-    value = repeat_kv(value, module.num_key_value_groups)
 
     # BAM follows FA2 that uses non-transposed inputs
     query = query.transpose(1, 2)

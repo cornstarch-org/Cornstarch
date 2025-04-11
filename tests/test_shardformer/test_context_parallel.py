@@ -289,6 +289,8 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
                 (3, batch_size, seq_len, 8, 64), device="cuda", dtype=torch.bfloat16
             ).normal_(mean=0, std=0.5),
         )
+        key = key[:, :, :4]
+        value = value[:, :, :4]
 
         for t in [query, key, value]:
             t.requires_grad_()
@@ -334,7 +336,7 @@ class TestBitfieldContextParallelismClass(GlooDistributedTestBase):
         assert (
             local_key.shape
             == local_value.shape
-            == (batch_size, chunk_sizes[self.rank], 8, 64)
+            == (batch_size, chunk_sizes[self.rank], 4, 64)
         )
 
         offsets_per_rank = torch.split(
