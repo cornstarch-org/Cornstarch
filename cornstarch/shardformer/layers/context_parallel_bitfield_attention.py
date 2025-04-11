@@ -63,59 +63,77 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
         assert q.is_cuda and k.is_cuda and v.is_cuda
 
-        per_head_events: list[torch.cuda.Event] = []
-
         # pre-allocate memory for k and v gathering for all ranks
-        gathered_kv = [
+        kv_buffers = [
             torch.empty(
-                (2, batch, total_seqlen, heads_stride, d),
+                (2, batch, seqlen_per_rank[rank], heads_stride, d),
                 dtype=k.dtype,
                 device=k.device,
             )
-            for _ in range(nheads_kv // heads_stride)
+            for rank in range(dist.get_world_size(sp_group))
         ]
 
-        # Initialize allgather works asynchronously
+        # Gather first head stride
         with torch.cuda.stream(stream):
-            for head_index in range(0, nheads_kv, heads_stride):
-                with torch.cuda.nvtx.range(f"all_gather_{head_index}"):
-                    work = dist.all_gather(
-                        list(
-                            gathered_kv[head_index // heads_stride].split(
-                                seqlen_per_rank, dim=2
-                            )
-                        ),
-                        torch.stack(
-                            [
-                                k[:, :, head_index : head_index + heads_stride, :],
-                                v[:, :, head_index : head_index + heads_stride, :],
-                            ],
-                            dim=0,
-                        ).contiguous(),
-                        group=sp_group,
-                        async_op=True,
-                    )
-                    work.wait()
-
-                    event = torch.cuda.Event()
-                    event.record()
-                    per_head_events.append(event)
+            work = dist.all_gather(
+                kv_buffers,
+                torch.stack(
+                    [
+                        k[:, :, :heads_stride, :],
+                        v[:, :, :heads_stride, :],
+                    ],
+                    dim=0,
+                ).contiguous(),
+                group=sp_group,
+                async_op=True,
+            )
 
         os: list[torch.Tensor] = []
         lses: list[torch.Tensor] = []
         softmax_scales: list[torch.Tensor] = []
 
-        assert len(per_head_events) == nheads_kv // heads_stride
+        # assert len(per_head_events) == nheads_kv // heads_stride
         group_size = nheads // nheads_kv
         for head_index in range(0, nheads_kv, heads_stride):
-            event = per_head_events[head_index // heads_stride]
-            torch.cuda.current_stream().wait_event(event)
+            work.wait()
+            torch.cuda.current_stream().wait_stream(stream)
 
             current_q = q[
                 :, :, head_index * group_size : (head_index + heads_stride) * group_size
             ].contiguous()
-            current_k = gathered_kv[head_index // heads_stride][0]
-            current_v = gathered_kv[head_index // heads_stride][1]
+            current_k = torch.cat([t[0] for t in kv_buffers], dim=1).contiguous()
+            current_v = torch.cat([t[1] for t in kv_buffers], dim=1).contiguous()
+
+            if head_index < nheads_kv - heads_stride:
+                local_kv = torch.stack(
+                    [
+                        k[
+                            :,
+                            :,
+                            head_index + heads_stride : head_index + 2 * heads_stride,
+                            :,
+                        ],
+                        v[
+                            :,
+                            :,
+                            head_index + heads_stride : head_index + 2 * heads_stride,
+                            :,
+                        ],
+                    ],
+                    dim=0,
+                ).contiguous()
+
+                with (
+                    torch.cuda.stream(stream),
+                    torch.cuda.nvtx.range(f"all_gather{head_index}"),
+                ):
+                    # prefetch the next head stride
+                    work = dist.all_gather(
+                        kv_buffers,
+                        local_kv,
+                        group=sp_group,
+                        async_op=True,
+                    )
 
             o, lse, softmax_scale_out = call_bitfield_attention_forward(
                 current_q,
