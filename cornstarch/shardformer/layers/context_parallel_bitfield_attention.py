@@ -96,7 +96,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         group_size = nheads // nheads_kv
         for head_index in range(0, nheads_kv, heads_stride):
             work.wait()
-            torch.cuda.current_stream().wait_stream(stream)
+            torch.cuda.current_stream().wait_event(work)
 
             current_q = q[
                 :, :, head_index * group_size : (head_index + heads_stride) * group_size
