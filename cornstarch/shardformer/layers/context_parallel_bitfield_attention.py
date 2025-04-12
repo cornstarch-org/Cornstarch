@@ -18,7 +18,6 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
 
     stream: torch.cuda.Stream = None
 
-    @torch.cuda.nvtx.range("ContextParallelBitfieldAttention.forward")
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
@@ -96,7 +95,6 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         group_size = nheads // nheads_kv
         for head_index in range(0, nheads_kv, heads_stride):
             work.wait()
-            torch.cuda.current_stream().wait_event(work)
 
             current_q = q[
                 :, :, head_index * group_size : (head_index + heads_stride) * group_size
@@ -105,28 +103,29 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
             current_v = torch.cat([t[1] for t in kv_buffers], dim=1).contiguous()
 
             if head_index < nheads_kv - heads_stride:
-                local_kv = torch.stack(
-                    [
-                        k[
-                            :,
-                            :,
-                            head_index + heads_stride : head_index + 2 * heads_stride,
-                            :,
+                with torch.cuda.stream(stream):
+                    local_kv = torch.stack(
+                        [
+                            k[
+                                :,
+                                :,
+                                head_index
+                                + heads_stride : head_index
+                                + 2 * heads_stride,
+                                :,
+                            ],
+                            v[
+                                :,
+                                :,
+                                head_index
+                                + heads_stride : head_index
+                                + 2 * heads_stride,
+                                :,
+                            ],
                         ],
-                        v[
-                            :,
-                            :,
-                            head_index + heads_stride : head_index + 2 * heads_stride,
-                            :,
-                        ],
-                    ],
-                    dim=0,
-                ).contiguous()
+                        dim=0,
+                    ).contiguous()
 
-                with (
-                    torch.cuda.stream(stream),
-                    torch.cuda.nvtx.range(f"all_gather{head_index}"),
-                ):
                     # prefetch the next head stride
                     work = dist.all_gather(
                         kv_buffers,
@@ -180,48 +179,33 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         offsets_q = offsets_per_rank[dist.get_rank(sp_group)]
         offsets_kv = torch.cat(offsets_per_rank, dim=0)
 
-        per_head_events: list[torch.cuda.Event] = []
-
         # pre-allocate memory for k and v gathering for all heads
-        gathered_kv = [
+        kv_buffers = [
             torch.empty(
-                (2, batch, total_seqlen, heads_stride, d),
+                (2, batch, seqlen_per_rank[rank], heads_stride, d),
                 dtype=k.dtype,
                 device=k.device,
             )
-            for _ in range(nheads_kv // heads_stride)
+            for rank in range(dist.get_world_size(sp_group))
         ]
 
-        # Initialize allgather works asynchronously
+        # Gather first head stride
         with torch.cuda.stream(stream):
-            for head_index in range(0, nheads_kv, heads_stride):
-                dist.all_gather(
-                    list(
-                        gathered_kv[head_index // heads_stride][0].split(
-                            seqlen_per_rank, dim=1
-                        )
-                    ),
-                    k[:, :, head_index : head_index + heads_stride, :].contiguous(),
-                    group=sp_group,
-                    async_op=True,
-                )
-                dist.all_gather(
-                    list(
-                        gathered_kv[head_index // heads_stride][1].split(
-                            seqlen_per_rank, dim=1
-                        )
-                    ),
-                    v[:, :, head_index : head_index + heads_stride, :].contiguous(),
-                    group=sp_group,
-                    async_op=True,
-                )
-                event = torch.cuda.Event()
-                event.record(stream)
-                per_head_events.append(event)
+            work = dist.all_gather(
+                kv_buffers,
+                torch.stack(
+                    [
+                        k[:, :, :heads_stride, :],
+                        v[:, :, :heads_stride, :],
+                    ],
+                    dim=0,
+                ).contiguous(),
+                group=sp_group,
+                async_op=True,
+            )
 
         dqs: list[torch.Tensor] = []
 
-        assert len(per_head_events) == nheads_kv // heads_stride
         group_size = nheads // nheads_kv
         scattered_dkv = torch.zeros(
             (2, batch, seqlen_kv, nheads_kv, d),
@@ -230,8 +214,39 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
         )
         for head_index in range(0, nheads_kv, heads_stride):
             kv_head_index = head_index // heads_stride
-            event = per_head_events[kv_head_index]
-            torch.cuda.current_stream().wait_event(event)
+            work.wait()
+
+            if head_index < nheads_kv - heads_stride:
+                with torch.cuda.stream(stream):
+                    local_kv = torch.stack(
+                        [
+                            k[
+                                :,
+                                :,
+                                head_index
+                                + heads_stride : head_index
+                                + 2 * heads_stride,
+                                :,
+                            ],
+                            v[
+                                :,
+                                :,
+                                head_index
+                                + heads_stride : head_index
+                                + 2 * heads_stride,
+                                :,
+                            ],
+                        ],
+                        dim=0,
+                    ).contiguous()
+
+                # prefetch the next head stride
+                work = dist.all_gather(
+                    kv_buffers,
+                    local_kv,
+                    group=sp_group,
+                    async_op=True,
+                )
 
             dq = torch.empty(
                 (batch, seqlen_q, heads_stride * group_size, d),
@@ -250,6 +265,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                 device=k.device,
             )
 
+            current_k = torch.cat([t[0] for t in kv_buffers], dim=1).contiguous()
+            current_v = torch.cat([t[1] for t in kv_buffers], dim=1).contiguous()
             _bitfield_attn_backward(
                 do=do[
                     :,
@@ -261,8 +278,8 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                     :,
                     head_index * group_size : (head_index + heads_stride) * group_size,
                 ],
-                k=gathered_kv[kv_head_index][0],
-                v=gathered_kv[kv_head_index][1],
+                k=current_k,
+                v=current_v,
                 o=os[head_index // heads_stride],
                 bitfield_mask=bitfield_mask,
                 compressed_mask=compressed_mask,
