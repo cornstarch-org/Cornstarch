@@ -52,7 +52,9 @@ import triton.language as tl
 
 BLOCK_M = 128
 BLOCK_N = 32
-NUM_TILES_TO_COMPUTE_PER_BLOCK = 4
+NUM_TOKENS_TO_COMPUTE_PER_BLOCK = 4096
+NUM_Q_BLOCKERS_PER_BLOCK = NUM_TOKENS_TO_COMPUTE_PER_BLOCK // BLOCK_M
+NUM_KV_BLOCKS_PER_BLOCK = NUM_TOKENS_TO_COMPUTE_PER_BLOCK // BLOCK_N
 
 
 @triton.jit
@@ -487,6 +489,10 @@ def _fwd_kernel(
             l_i_new = tl.exp(lse_i - m_ij) + l_ij
             lse_i = m_ij + tl.log(l_i_new)
 
+    # FIXME: Now computing lse_i and acc_o is parallelized,
+    # this cannot generate the correct output.
+    # Store local output separately and implement an additional
+    # kernel that aggregates them.
     o_scale = tl.exp(m_i - lse_i)
     acc_o = acc_o * o_scale[:, None]
     # rematerialize offsets to save registers
@@ -645,9 +651,10 @@ def _bwd_kernel_one_col_block(
     EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    NUM_TILES_TO_COMPUTE_PER_BLOCK: tl.constexpr,
 ):
     # We need to make sure begin_m is a multiple of BLOCK_M (not BLOCK_N)
-    begin_m = 0
+    begin_m = tl.program_id(2) * BLOCK_M
     # initialize row/col offsets
     offs_qm = begin_m + tl.arange(0, BLOCK_M)
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -716,8 +723,8 @@ def _bwd_kernel_one_col_block(
     cm_base_ptr = Compressed_mask + start_n
 
     # loop over rows
-    num_block_m = tl.cdiv(seqlen_q, BLOCK_M)
-    for start_m in range(begin_m, num_block_m * BLOCK_M, BLOCK_M):
+    end_n = tl.minimum(begin_m + BLOCK_M * NUM_TILES_TO_COMPUTE_PER_BLOCK, seqlen_q)
+    for start_m in range(begin_m, end_n, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         offs_m_curr = start_m + offs_m
 
@@ -851,6 +858,10 @@ def _bwd_kernel_one_col_block(
             b_ptrs += BLOCK_M * stride_bm
 
     # write-back
+    # FIXME: Now computing gradients is parallelized,
+    # this cannot generate the correct output.
+    # Store local output separately and implement an additional
+    # kernel that aggregates them.
     dv_ptrs = DV + (offs_n[:, None] * stride_dvn + offs_d[None, :])
     dk_ptrs = DK + (offs_n[:, None] * stride_dkn + offs_d[None, :])
     _bwd_store_dk_dv(
@@ -954,6 +965,7 @@ def _bwd_kernel(
     EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    NUM_TILES_TO_COMPUTE_PER_BLOCK: tl.constexpr,
 ):
     off_hb = tl.program_id(1)
     off_b = off_hb // nheads
@@ -1016,6 +1028,7 @@ def _bwd_kernel(
         EVEN_HEADDIM=EVEN_HEADDIM,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_TILES_TO_COMPUTE_PER_BLOCK,
     )
 
 
@@ -1074,7 +1087,7 @@ def _bitfield_attn_forward(
     grid = (
         triton.cdiv(seqlen_q, BLOCK_M),
         batch * nheads,
-        triton.cdiv(seqlen_k, BLOCK_N * NUM_TILES_TO_COMPUTE_PER_BLOCK),
+        triton.cdiv(seqlen_k, NUM_TOKENS_TO_COMPUTE_PER_BLOCK),
     )
     _fwd_kernel[grid](
         q,
@@ -1115,7 +1128,7 @@ def _bitfield_attn_forward(
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
         bias_type,
         BLOCK_HEADDIM,
-        NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_TILES_TO_COMPUTE_PER_BLOCK,
+        NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_KV_BLOCKS_PER_BLOCK,
     )
     return o, lse, softmax_scale  # softmax_scale could have been updated
 
@@ -1193,7 +1206,11 @@ def _bitfield_attn_backward(
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    grid = (triton.cdiv(seqlen_k, BLOCK_N), batch * nheads)
+    grid = (
+        triton.cdiv(seqlen_k, BLOCK_N),
+        batch * nheads,
+        triton.cdiv(seqlen_q, NUM_TOKENS_TO_COMPUTE_PER_BLOCK),
+    )
     _bwd_kernel[grid](
         q,
         k,
@@ -1245,6 +1262,7 @@ def _bitfield_attn_backward(
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
         bias_type,
         BLOCK_HEADDIM,
+        NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_Q_BLOCKERS_PER_BLOCK,
     )
     dq.copy_(dq_accum)
 
