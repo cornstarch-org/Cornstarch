@@ -52,6 +52,7 @@ import triton.language as tl
 
 BLOCK_M = 128
 BLOCK_N = 32
+NUM_TILES_TO_COMPUTE_PER_BLOCK = 4
 
 
 @triton.jit
@@ -277,9 +278,11 @@ def _fwd_kernel(
     EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    NUM_TILES_TO_COMPUTE_PER_BLOCK: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     off_hb = tl.program_id(1)
+    off_n = tl.program_id(2) * BLOCK_N * NUM_TILES_TO_COMPUTE_PER_BLOCK
     off_b = off_hb // nheads
     off_h = off_hb % nheads
 
@@ -347,8 +350,9 @@ def _fwd_kernel(
     cm_base_ptr = Compressed_mask + off_b * stride_cmb + start_m * stride_cmm
 
     # loop over k, v and update accumulator
-    end_n = seqlen_k
-    for start_n in range(0, end_n, BLOCK_N):
+    off_n = tl.multiple_of(off_n, BLOCK_N)
+    end_n = tl.minimum(off_n + BLOCK_N * NUM_TILES_TO_COMPUTE_PER_BLOCK, seqlen_k)
+    for start_n in range(off_n, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
         compressed_mask = tl.load(cm_base_ptr + start_n // BLOCK_N)
@@ -484,9 +488,6 @@ def _fwd_kernel(
             lse_i = m_ij + tl.log(l_i_new)
 
     o_scale = tl.exp(m_i - lse_i)
-    # BUG: have to store and immediately load
-    tl.store(t_ptrs, o_scale)
-    o_scale = tl.load(t_ptrs)
     acc_o = acc_o * o_scale[:, None]
     # rematerialize offsets to save registers
     start_m = tl.program_id(0)
@@ -1070,7 +1071,11 @@ def _bitfield_attn_forward(
     o = torch.empty_like(q)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
-    grid = (triton.cdiv(seqlen_q, BLOCK_M), batch * nheads)
+    grid = (
+        triton.cdiv(seqlen_q, BLOCK_M),
+        batch * nheads,
+        triton.cdiv(seqlen_k, BLOCK_N * NUM_TILES_TO_COMPUTE_PER_BLOCK),
+    )
     _fwd_kernel[grid](
         q,
         k,
@@ -1110,6 +1115,7 @@ def _bitfield_attn_forward(
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
         bias_type,
         BLOCK_HEADDIM,
+        NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_TILES_TO_COMPUTE_PER_BLOCK,
     )
     return o, lse, softmax_scale  # softmax_scale could have been updated
 
