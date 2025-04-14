@@ -160,15 +160,12 @@ class ContextParallelBatchSplitUtils:
         batch_size, seqlen = bitfield_mask.shape
         compressed_mask = BitfieldUtils.materialize_compressed_mask_from_bitfield_mask(
             bitfield_mask
-        )
+        ).to("cpu")
 
         # 1D tensor of shape (ceil(seqlen_q, BLOCK_N))
         num_blocks_to_compute_in_attention = torch.sum(compressed_mask > 0, dim=(0, 2))
 
-        workloads_per_block = (
-            num_blocks_to_compute_in_attention * attention_block_exec_time
-            + linear_block_exec_time
-        )
+        workloads_per_block = num_blocks_to_compute_in_attention
         workloads_per_block, indices = torch.sort(
             workloads_per_block, stable=True, descending=True
         )
@@ -353,7 +350,7 @@ class ContextParallelBatchSplitUtils:
         # Shuffle columns with offsets_kv_per_rank
         local_compressed_mask = local_compressed_mask[:, :, offsets_kv_per_rank]
 
-        return local_compressed_mask
+        return local_compressed_mask.contiguous()
 
     @classmethod
     def split_batch(
@@ -380,6 +377,6 @@ class ContextParallelBatchSplitUtils:
             return batch
 
         if batch.ndim == 3 or (batch.ndim == 2 and is_label):
-            return batch[:, cls.context_parallel_offsets_cache[sp_rank]]
+            return batch[:, cls.context_parallel_offsets_cache[sp_rank]].contiguous()
         else:
-            return batch[cls.context_parallel_offsets_cache[sp_rank]]
+            return batch[cls.context_parallel_offsets_cache[sp_rank]].contiguous()
