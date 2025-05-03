@@ -117,21 +117,6 @@ def calculate_dataset_perplexity_trainset(model, dataloader_val, device: str = "
                 outputs = model(**inputs)
                 total_loss += outputs.loss
 
-        # print(
-        #     f"[before] GPU mem allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB"
-        # )
-        # print(
-        #     f"[before] GPU mem reserved : {torch.cuda.memory_reserved() / 1024**2:.2f} MB"
-        # )
-        # torch.cuda.empty_cache()
-        # torch.cuda.ipc_collect()
-        # print(
-        #     f"[after] GPU mem allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB"
-        # )
-        # print(
-        #     f"[after] GPU mem reserved : {torch.cuda.memory_reserved() / 1024**2:.2f} MB"
-        # )
-
     avg_nll = total_loss / total_step
     perplexity = torch.exp(torch.tensor(avg_nll)).item()
 
@@ -168,22 +153,6 @@ def calculate_dataset_perplexity_testset(model, dataloader_val, device: str = "c
                 outputs = model(**inputs)
                 total_loss += outputs.loss
 
-        # print(
-        #     f"[before] GPU mem allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB"
-        # )
-        # print(
-        #     f"[before] GPU mem reserved : {torch.cuda.memory_reserved() / 1024**2:.2f} MB"
-        # )
-
-        # torch.cuda.empty_cache()
-        # torch.cuda.ipc_collect()
-        # print(
-        #     f"[after] GPU mem allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB"
-        # )
-        # print(
-        #     f"[after] GPU mem reserved : {torch.cuda.memory_reserved() / 1024**2:.2f} MB"
-        # )
-
     avg_nll = total_loss / total_step
     perplexity = torch.exp(torch.tensor(avg_nll)).item()
 
@@ -191,7 +160,7 @@ def calculate_dataset_perplexity_testset(model, dataloader_val, device: str = "c
 
 
 def finetune(
-    num_epoch: Optional[int] = 1000,
+    num_epoch: Optional[int] = 100,
     lr_ve: Optional[float] = 1e-5,  # 2e-6,
     lr_llm: Optional[float] = 1e-5,  # 1e-5,
     rank_ve: Optional[int] = 4,
@@ -404,6 +373,7 @@ def finetune(
     # print(f"[info] starting checkpoint saved at {checkpoint_path}")
 
     iteration = 0
+    curr_ppl = 0
     for epoch in range(num_epoch):
         # if epoch >= 1:
         #     break
@@ -411,6 +381,9 @@ def finetune(
         if epoch >= 50:
             break
         if iteration >= 10000:
+            break
+
+        if epoch > 10 and curr_ppl > 15.0:  # early stop
             break
 
         model.train()
@@ -457,9 +430,6 @@ def finetune(
                     }
                 )
 
-                # print(model)
-
-                # print (iteration)
                 if iteration % 5 == 0:
                     avg_nll_train, perplexity_train = (
                         calculate_dataset_perplexity_trainset(
@@ -474,6 +444,7 @@ def finetune(
                         dataloader_val,
                         device="cuda",
                     )
+                    curr_ppl = perplexity_val
 
                     f_trainlog.write(
                         f"[result] Epoch {epoch} Iteration {iteration} loss: {loss2}\n"
@@ -487,20 +458,6 @@ def finetune(
                     f_vallog.write(
                         f"[result] Epoch {epoch} Iteration {iteration} perplexity: {perplexity_val}\n"
                     )
-                    # print(f"[result] Epoch {epoch} Iteration {iteration} loss: {loss2}\n")
-                    # print(
-                    #     f"[result] Epoch {epoch} Iteration {iteration} nll: {avg_nll_train}\n"
-                    # )
-                    # print(
-                    #     f"[result] Epoch {epoch} Iteration {iteration} perplexity: {perplexity_train}\n"
-                    # )
-                    # print(f"[result] Epoch {epoch} Iteration {iteration} loss: {loss2}\n")
-                    # print(
-                    #     f"[result] Epoch {epoch} Iteration {iteration} nll: {avg_nll_val}\n"
-                    # )
-                    # print(
-                    #     f"[result] Epoch {epoch} Iteration {iteration} perplexity: {perplexity_val}\n"
-                    # )
 
                 iteration += 1
 
