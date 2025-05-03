@@ -175,7 +175,7 @@ def finetune(
     rank_llm = "f" if rank_llm == -1 else rank_llm
     data_amount = 2 ** (data_scale) if data_scale >= 0 else "full"
 
-    ckpt_save_dir = f"/workspace/Cornstarch/examples/SC2-{model_size}-rVE{rank_ve}_rLLM{rank_llm}_{data_amount}_samelr_1e5_coslr"  # put your save_dir path here
+    ckpt_save_dir = f"/workspace/Cornstarch/examples/SC2-{model_size}-rVE{rank_ve}_rLLM{rank_llm}_{data_amount}_samelr_1e5"  # put your save_dir path here
 
     Path(ckpt_save_dir).mkdir(parents=True, exist_ok=True)
     trainlog_file = f"{ckpt_save_dir}/trainlog.log"
@@ -383,7 +383,7 @@ def finetune(
         if iteration >= 10000:
             break
 
-        if epoch > 10 and curr_ppl > 15.0:  # early stop
+        if epoch > 10 and curr_ppl > 12.0:  # early stop
             break
 
         model.train()
