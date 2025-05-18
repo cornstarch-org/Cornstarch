@@ -18,7 +18,7 @@ class DcgmContextManager:
         or manually spawn a process with:
         $ nv-hostengine
         """
-        gpu_id = int(os.environ["LOCAL_RANK"])
+        gpu_id = int(os.environ.get("LOCAL_RANK", 0))
         reader = DcgmReader(
             fieldIds=[
                 dcgm_fields.DCGM_FI_PROF_SM_OCCUPANCY,
