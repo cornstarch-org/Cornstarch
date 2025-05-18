@@ -241,7 +241,6 @@ def _fwd_kernel(
     Bitfield_mask,  # (batch_size, seqlen)
     Compressed_mask,  # (batch_size, seqlen // BLOCK_M, seqlen // BLOCK_N)
     Lse,
-    TMP,  # NOTE: TMP is a scratchpad buffer to workaround a compiler bug
     softmax_scale,
     stride_qb,
     stride_qh,
@@ -325,7 +324,6 @@ def _fwd_kernel(
             + (offs_m[:, None] * stride_bm + offs_n[None, :])
         )
     # initialize pointer to m and l
-    t_ptrs = TMP + off_hb * seqlen_q_rounded + offs_m
     lse_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     acc_o = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=tl.float32)
@@ -449,9 +447,6 @@ def _fwd_kernel(
             acc_o_scale = tl.exp(m_i - m_ij)
 
             # # -- update output accumulator --
-            # BUG: have to store and immediately load
-            tl.store(t_ptrs, acc_o_scale)
-            acc_o_scale = tl.load(t_ptrs)
             acc_o = acc_o * acc_o_scale[:, None]
             # update acc_o
             if (
@@ -1065,9 +1060,6 @@ def _bitfield_attn_forward(
     lse = torch.empty(
         (batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32
     )
-    tmp = torch.empty(
-        (batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32
-    )
     o = torch.empty_like(q)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
@@ -1085,7 +1077,6 @@ def _bitfield_attn_forward(
         bitfield_mask,
         compressed_mask,
         lse,
-        tmp,
         softmax_scale,
         q.stride(0),
         q.stride(2),
