@@ -52,7 +52,8 @@ import triton.language as tl
 
 BLOCK_M = 128
 BLOCK_N = 32
-NUM_TILES_TO_COMPUTE_PER_BLOCK = 4
+NUM_TOKENS_TO_COMPUTE_PER_BLOCK = 256
+NUM_KV_BLOCKS_PER_BLOCK = NUM_TOKENS_TO_COMPUTE_PER_BLOCK // BLOCK_N
 
 
 @triton.jit
@@ -237,10 +238,10 @@ def _fwd_kernel(
     K,
     V,
     Bias,
-    Out,
     Bitfield_mask,  # (batch_size, seqlen)
     Compressed_mask,  # (batch_size, seqlen // BLOCK_M, seqlen // BLOCK_N)
-    Lse,
+    Partial_out, # (num_kv_blocks, batch, seqlen_q, nheads, d)
+    Partial_lse, # (num_kv_blocks, batch, nheads, seqlen_q_rounded)
     softmax_scale,
     stride_qb,
     stride_qh,
@@ -254,12 +255,14 @@ def _fwd_kernel(
     stride_bb,
     stride_bh,
     stride_bm,
-    stride_ob,
-    stride_oh,
-    stride_om,
     stride_bmb,
     stride_cmb,
     stride_cmm,
+    stride_pok,
+    stride_pob,
+    stride_poh,
+    stride_pom,
+    stride_plsek,
     nheads,
     nheads_k,
     seqlen_q,
@@ -272,16 +275,17 @@ def _fwd_kernel(
     CACHE_KEY_SEQLEN_K,
     BIAS_TYPE: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
+    NUM_TILES_TO_COMPUTE_PER_BLOCK: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
     EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    NUM_TILES_TO_COMPUTE_PER_BLOCK: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     off_hb = tl.program_id(1)
-    off_n = tl.program_id(2) * BLOCK_N * NUM_TILES_TO_COMPUTE_PER_BLOCK
+    kv_block_idx = tl.program_id(2)
+    off_n = kv_block_idx * BLOCK_N * NUM_TILES_TO_COMPUTE_PER_BLOCK
     off_b = off_hb // nheads
     off_h = off_hb % nheads
 
@@ -484,20 +488,20 @@ def _fwd_kernel(
 
     o_scale = tl.exp(m_i - lse_i)
     acc_o = acc_o * o_scale[:, None]
-    # rematerialize offsets to save registers
-    start_m = tl.program_id(0)
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    # write back l and m
-    lse_ptrs = Lse + off_hb * seqlen_q_rounded + offs_m
+
+    # write back partial lse
+    lse_ptrs = Partial_lse + kv_block_idx * stride_plsek + off_hb * seqlen_q_rounded + offs_m
     tl.store(lse_ptrs, lse_i)
     # initialize pointers to output
     offs_d = tl.arange(0, BLOCK_HEADDIM)
     out_ptrs = (
-        Out
-        + off_b * stride_ob
-        + off_h * stride_oh
-        + (offs_m[:, None] * stride_om + offs_d[None, :])
+        Partial_out
+        + kv_block_idx * stride_pok
+        + off_b * stride_pob
+        + off_h * stride_poh
+        + (offs_m[:, None] * stride_pom + offs_d[None, :])
     )
+
     if EVEN_M:
         if EVEN_HEADDIM:
             tl.store(out_ptrs, acc_o)
@@ -1057,26 +1061,39 @@ def _bitfield_attn_forward(
     )
 
     seqlen_q_rounded = math.ceil(seqlen_q / BLOCK_M) * BLOCK_M
-    lse = torch.empty(
+    num_kv_blocks = triton.cdiv(seqlen_k, NUM_TOKENS_TO_COMPUTE_PER_BLOCK)
+    
+    partial_lse = torch.empty(
+        (num_kv_blocks, batch, nheads, seqlen_q_rounded),
+        device=q.device,
+        dtype=torch.float32,
+    )
+    partial_out = torch.empty(
+        (num_kv_blocks, batch, seqlen_q, nheads, d),
+        device=q.device,
+        dtype=torch.float32,
+    )
+
+    final_lse = torch.empty(
         (batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32
     )
-    o = torch.empty_like(q)
+    final_out = torch.empty_like(q)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     grid = (
         triton.cdiv(seqlen_q, BLOCK_M),
         batch * nheads,
-        triton.cdiv(seqlen_k, BLOCK_N * NUM_TILES_TO_COMPUTE_PER_BLOCK),
+        num_kv_blocks,
     )
     _fwd_kernel[grid](
         q,
         k,
         v,
         bias,
-        o,
         bitfield_mask,
         compressed_mask,
-        lse,
+        partial_out,
+        partial_lse,
         softmax_scale,
         q.stride(0),
         q.stride(2),
@@ -1088,12 +1105,14 @@ def _bitfield_attn_forward(
         v.stride(2),
         v.stride(1),
         *bias_strides,
-        o.stride(0),
-        o.stride(2),
-        o.stride(1),
         bitfield_mask.stride(0),
         compressed_mask.stride(0),
         compressed_mask.stride(1),
+        partial_out.stride(0),
+        partial_out.stride(1),
+        partial_out.stride(3),
+        partial_out.stride(2),
+        partial_lse.stride(0),
         nheads,
         nheads_k,
         seqlen_q,
@@ -1106,9 +1125,16 @@ def _bitfield_attn_forward(
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
         bias_type,
         BLOCK_HEADDIM,
-        NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_TILES_TO_COMPUTE_PER_BLOCK,
+        NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_KV_BLOCKS_PER_BLOCK
     )
-    return o, lse, softmax_scale  # softmax_scale could have been updated
+
+    assert num_kv_blocks == 1
+    final_out.copy_(partial_out[0])
+    final_lse.copy_(partial_lse[0])
+
+    # softmax_scale could have been updated
+    return final_out, final_lse, softmax_scale  
+
 
 
 def _bitfield_attn_backward(
