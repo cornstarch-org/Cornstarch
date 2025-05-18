@@ -486,8 +486,15 @@ def _fwd_kernel(
             l_i_new = tl.exp(lse_i - m_ij) + l_ij
             lse_i = m_ij + tl.log(l_i_new)
 
-    o_scale = tl.exp(m_i - lse_i)
-    acc_o = acc_o * o_scale[:, None]
+    # Scale acc_o to get the final output for this partial block.
+    # acc_o is currently (sum_j exp(S_j - m_i) V_j).
+    # We want (sum_j exp(S_j - lse_i) V_j) = acc_o * exp(m_i - lse_i).
+    # If lse_i is -inf (all probabilities in block are 0), sum_exp_block_norm_by_m_i will be 0.
+    # In this case, safe_o_scale becomes 0, and acc_o (which should be 0 if p was all 0s) remains 0.
+    # This prevents NaN if m_i and lse_i are both -inf, where exp(m_i - lse_i) would be NaN.
+    sum_exp_block_norm_by_m_i = tl.exp(lse_i - m_i)
+    safe_o_scale = tl.where(sum_exp_block_norm_by_m_i > 0.0, tl.exp(m_i - lse_i), 0.0)
+    acc_o = acc_o * safe_o_scale[:, None]
 
     # write back partial lse
     lse_ptrs = Partial_lse + kv_block_idx * stride_plsek + off_hb * seqlen_q_rounded + offs_m
@@ -1128,9 +1135,31 @@ def _bitfield_attn_forward(
         NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_KV_BLOCKS_PER_BLOCK
     )
 
-    assert num_kv_blocks == 1
-    final_out.copy_(partial_out[0])
-    final_lse.copy_(partial_lse[0])
+    grid_aggregate = (triton.cdiv(seqlen_q, BLOCK_M), batch * nheads)
+    _aggregate_partial_outputs[grid_aggregate](
+        partial_out,
+        partial_lse,
+        final_out,
+        final_lse,
+        partial_out.stride(0),  # kv_blocks stride (first dimension)
+        partial_out.stride(1),  # batch stride
+        partial_out.stride(3),  # head stride
+        partial_out.stride(2),  # sequence stride
+        partial_lse.stride(0),  # kv_blocks stride (first dimension)
+        partial_lse.stride(1),  # batch stride
+        partial_lse.stride(2),  # head stride
+        final_out.stride(0),
+        final_out.stride(2),
+        final_out.stride(1),
+        final_lse.stride(0),
+        final_lse.stride(1),
+        num_kv_blocks,
+        seqlen_q,
+        seqlen_q_rounded,
+        d,
+        nheads,
+        BLOCK_HEADDIM=BLOCK_HEADDIM,
+    )
 
     # softmax_scale could have been updated
     return final_out, final_lse, softmax_scale  
@@ -1342,3 +1371,162 @@ def bitfield_attn_func(
     softmax_scale: Optional[float] = None,
 ) -> torch.Tensor:
     return BitfieldAttentionFunction.apply(q, k, v, bitfield_mask, bias, softmax_scale)
+
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_M': BLOCK_M}, num_warps=4, num_stages=1),
+    ],
+    key=['seqlen_q', 'num_kv_blocks'],
+)
+@triton.heuristics(
+    {
+        'EVEN_M': lambda args: args['seqlen_q'] % args['BLOCK_M'] == 0,
+        'EVEN_HEADDIM': lambda args: args['headdim'] == args['BLOCK_HEADDIM'],
+    }
+)
+@triton.jit
+def _aggregate_partial_outputs(
+    Partial_out,
+    Partial_lse,
+    Final_out,
+    Final_lse,
+    stride_pok,  # kv_blocks stride (first dimension)
+    stride_pob,  # batch stride
+    stride_poh,  # head stride
+    stride_pom,  # sequence stride
+    stride_plsek,  # kv_blocks stride (first dimension)
+    stride_plseb,  # batch stride
+    stride_plseh,  # head stride
+    stride_fob,
+    stride_foh,
+    stride_fom,
+    stride_flseb,
+    stride_flseh,
+    num_kv_blocks,
+    seqlen_q,
+    seqlen_q_rounded,
+    headdim,
+    nheads,
+    EVEN_M: tl.constexpr,
+    EVEN_HEADDIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_HEADDIM: tl.constexpr,
+):
+    start_m = tl.program_id(0)
+    off_hb = tl.program_id(1)
+    off_b = off_hb // nheads
+    off_h = off_hb % nheads
+    
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_HEADDIM)
+    
+    # Initialize final output accumulator
+    acc_final = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=tl.float32)
+    lse_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float('inf')
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float('inf')
+    
+    # Single pass: use online softmax to accumulate outputs
+    for kv_block in range(num_kv_blocks):
+        out_ptr = (
+            Partial_out
+            + kv_block * stride_pok
+            + off_b * stride_pob
+            + off_h * stride_poh
+            + (offs_m[:, None] * stride_pom + offs_d[None, :])
+        )
+        lse_ptr = (
+            Partial_lse
+            + kv_block * stride_plsek
+            + off_hb * seqlen_q_rounded
+            + offs_m
+        )
+        
+        if EVEN_M:
+            if EVEN_HEADDIM:
+                partial_o = tl.load(out_ptr)
+            else:
+                partial_o = tl.load(out_ptr, mask=offs_d[None, :] < headdim, other=0.0)
+        else:
+            if EVEN_HEADDIM:
+                partial_o = tl.load(out_ptr, mask=offs_m[:, None] < seqlen_q, other=0.0)
+            else:
+                partial_o = tl.load(
+                    out_ptr,
+                    mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
+                    other=0.0,
+                )
+        
+        partial_lse_val = tl.load(lse_ptr)
+        
+        # Online softmax update
+        # m_ij_orig is the true new maximum: max(running_max, current_block_lse)
+        m_ij_orig = tl.maximum(m_i, partial_lse_val)
+
+        # Stabilize m_ij for use in tl.exp to prevent exp(-inf - (-inf)) = nan.
+        # If m_ij_orig is -inf, it means all LSEs encountered so far (m_i and partial_lse_val) were -inf.
+        # By setting m_ij_stable to 0.0 if m_ij_orig is -inf, we ensure:
+        #   - exp(any_lse - m_ij_stable) becomes exp(-inf - 0.0) = 0 if any_lse was -inf.
+        #   - This correctly reflects zero probability contributions.
+        m_ij_stable = tl.where(m_ij_orig == float("-inf"), 0.0, m_ij_orig)
+
+        # Scale previous accumulator: acc_old * exp(m_old - m_new_stable)
+        acc_final_scale = tl.exp(m_i - m_ij_stable)
+        acc_final = acc_final * acc_final_scale[:, None]
+        
+        # Add current block's contribution: partial_o_k * exp(L_k - m_new_stable)
+        # partial_o is already (sum_j exp(S_kj - L_k)V_j).
+        # If Partial_out was correctly set to 0 for fully masked blocks by _fwd_kernel,
+        # and L_k is -inf, then exp_val = exp(-inf - m_ij_stable).
+        # If m_ij_stable is 0 (from -inf), exp_val = 0. Then 0 * 0 = 0.
+        # If m_ij_stable is > -inf, exp_val is still valid.
+        exp_val = tl.exp(partial_lse_val - m_ij_stable)
+        acc_final += partial_o * exp_val[:, None]
+        
+        # Update statistics
+        # lse_new = m_new_orig + log( exp(lse_old - m_new_stable) + exp(L_k - m_new_stable) )
+        l_i_new_term_prev = tl.exp(lse_i - m_ij_stable) # If lse_i=-inf, m_ij_stable=0 -> 0
+        l_i_new = l_i_new_term_prev + exp_val # This is sum of (stabilized) exp terms
+        
+        lse_i = m_ij_orig + tl.log(l_i_new) # Use m_ij_orig for the LSE definition. If l_i_new is 0, lse_i becomes -inf.
+        m_i = m_ij_orig # Update running max with the true maximum for the next iteration
+    
+    # Rescale final output, avoid division by zero
+    # lse_i = m_i + log(sum_k exp(L_k - m_i))
+    # sum_exp_normalized effectively is sum_k exp(L_k - m_i)
+    sum_exp_normalized = tl.exp(lse_i - m_i)
+    
+    # If sum_exp_normalized is 0, lse_i is -inf. m_i - lse_i can be nan or inf.
+    # Scale should be 0 if sum_exp_normalized is 0 to make acc_final 0.
+    safe_scale = tl.where(sum_exp_normalized > 0.0, tl.exp(m_i - lse_i), 0.0)
+    acc_final = acc_final * safe_scale[:, None]
+    
+    # Write back final output
+    final_ptr = (
+        Final_out
+        + off_b * stride_fob
+        + off_h * stride_foh
+        + offs_m[:, None] * stride_fom
+        + offs_d[None, :]
+    )
+    if EVEN_M:
+        if EVEN_HEADDIM:
+            tl.store(final_ptr, acc_final)
+        else:
+            tl.store(final_ptr, acc_final, mask=offs_d[None, :] < headdim)
+    else:
+        if EVEN_HEADDIM:
+            tl.store(final_ptr, acc_final, mask=offs_m[:, None] < seqlen_q)
+        else:
+            tl.store(
+                final_ptr,
+                acc_final,
+                mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
+            )
+    
+    # Write back final lse
+    final_lse_ptr = (
+        Final_lse
+        + off_hb * seqlen_q_rounded
+        + offs_m
+    )
+    tl.store(final_lse_ptr, lse_i)
