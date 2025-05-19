@@ -571,9 +571,6 @@ def _bwd_preprocess_do_o_dot(
     # write-back
     tl.store(Delta + off_hb * seqlen_q_rounded + offs_m, delta)
 
-def init_to_zero(name):
-    return lambda nargs: nargs[name].zero_()
-
 
 @triton.autotune(
     configs=[
@@ -581,7 +578,6 @@ def init_to_zero(name):
             {"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N},
             num_warps=4,
             num_stages=1,
-            pre_hook=init_to_zero("DQ"),
         ),
     ],
     key=[
@@ -652,6 +648,7 @@ def _bwd_kernel(
     CACHE_KEY_SEQLEN_K,
     BIAS_TYPE: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
+    NUM_TILES_TO_COMPUTE_PER_BLOCK: tl.constexpr,
     EVEN_M: tl.constexpr,
     EVEN_N: tl.constexpr,
     EVEN_HEADDIM: tl.constexpr,
@@ -660,6 +657,7 @@ def _bwd_kernel(
 ):
     start_n = tl.program_id(0)
     off_hb = tl.program_id(1)
+    q_block_idx = tl.program_id(2)
     off_b = off_hb // nheads
     off_h = off_hb % nheads
 
@@ -668,7 +666,7 @@ def _bwd_kernel(
 
     # initialize offsets
     # We need to make sure begin_m is a multiple of BLOCK_M (not BLOCK_N)
-    begin_m = 0
+    begin_m = q_block_idx * BLOCK_M * NUM_TILES_TO_COMPUTE_PER_BLOCK
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, BLOCK_HEADDIM)
@@ -676,6 +674,7 @@ def _bwd_kernel(
     # Initialize pointers to Q, K, V
     q_ptrs = (
         Q
+        + q_block_idx * BLOCK_M * NUM_TILES_TO_COMPUTE_PER_BLOCK * stride_qm
         + off_b * stride_qb
         + off_h * stride_qh
         + (offs_m[:, None] * stride_qm + offs_d[None, :])
@@ -694,12 +693,14 @@ def _bwd_kernel(
     )
     do_ptrs = (
         DO
+        + q_block_idx * BLOCK_M * NUM_TILES_TO_COMPUTE_PER_BLOCK * stride_dom
         + off_b * stride_dob
         + off_h * stride_doh
         + (offs_m[:, None] * stride_dom + offs_d[None, :])
     )
     dq_ptrs = (
         DQ
+        + q_block_idx * BLOCK_M * NUM_TILES_TO_COMPUTE_PER_BLOCK * stride_dqm
         + off_b * stride_dqb
         + off_h * stride_dqh
         + (offs_m[:, None] * stride_dqm + offs_d[None, :])
@@ -721,6 +722,7 @@ def _bwd_kernel(
     elif BIAS_TYPE == "matrix":
         b_ptrs = (
             Bias
+            + q_block_idx * BLOCK_M * NUM_TILES_TO_COMPUTE_PER_BLOCK * stride_bm
             + off_b * stride_bb
             + off_h * stride_bh
             + (offs_m[:, None] * stride_bm + offs_n[None, :])
@@ -765,7 +767,10 @@ def _bwd_kernel(
     cm_base_ptr = Compression_mask + start_n
 
     # loop over rows
-    end_m = tl.cdiv(seqlen_q, BLOCK_M) * BLOCK_M
+    end_m = tl.minimum(
+        begin_m + BLOCK_M * NUM_TILES_TO_COMPUTE_PER_BLOCK,
+        tl.cdiv(seqlen_q, BLOCK_M) * BLOCK_M
+    )
     for start_m in range(begin_m, end_m, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         offs_m_curr = start_m + offs_m
@@ -902,22 +907,22 @@ def _bwd_kernel(
     # write-back
     if EVEN_N & EVEN_M:
         if EVEN_HEADDIM:
-            tl.store(dv_ptrs, dv)
-            tl.store(dk_ptrs, dk)
+            tl.atomic_add(dv_ptrs, dv)
+            tl.atomic_add(dk_ptrs, dk)
         else:
-            tl.store(dv_ptrs, dv, mask=offs_d[None, :] < headdim)
-            tl.store(dk_ptrs, dk, mask=offs_d[None, :] < headdim)
+            tl.atomic_add(dv_ptrs, dv, mask=offs_d[None, :] < headdim)
+            tl.atomic_add(dk_ptrs, dk, mask=offs_d[None, :] < headdim)
     else:
         if EVEN_HEADDIM:
-            tl.store(dv_ptrs, dv, mask=offs_n[:, None] < seqlen_k)
-            tl.store(dk_ptrs, dk, mask=offs_n[:, None] < seqlen_k)
+            tl.atomic_add(dv_ptrs, dv, mask=offs_n[:, None] < seqlen_k)
+            tl.atomic_add(dk_ptrs, dk, mask=offs_n[:, None] < seqlen_k)
         else:
-            tl.store(
+            tl.atomic_add(
                 dv_ptrs,
                 dv,
                 mask=(offs_n[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
             )
-            tl.store(
+            tl.atomic_add(
                 dk_ptrs,
                 dk,
                 mask=(offs_n[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
@@ -1094,7 +1099,6 @@ def _bitfield_attn_backward(
     assert q.stride(-1) == k.stride(-1) == v.stride(-1) == o.stride(-1) == 1
     assert dq.stride(-1) == dk.stride(-1) == dv.stride(-1) == 1
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
-    dq_accum = torch.empty_like(q, dtype=torch.float32)
     delta = torch.empty_like(lse)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
@@ -1138,7 +1142,8 @@ def _bitfield_attn_backward(
         (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
     )
 
-    grid = (triton.cdiv(seqlen_k, BLOCK_N), batch * nheads)
+    num_q_blocks = triton.cdiv(seqlen_q, NUM_TOKENS_TO_COMPUTE_PER_BLOCK)
+    grid = (triton.cdiv(seqlen_k, BLOCK_N), batch * nheads, num_q_blocks)
     _bwd_kernel[grid](
         q,
         k,
@@ -1147,7 +1152,7 @@ def _bitfield_attn_backward(
         bitfield_mask,
         compressed_mask,
         do,
-        dq_accum,
+        dq,
         dk,
         dv,
         lse,
@@ -1166,9 +1171,9 @@ def _bitfield_attn_backward(
         do.stride(0),
         do.stride(2),
         do.stride(1),
-        dq_accum.stride(0),
-        dq_accum.stride(2),
-        dq_accum.stride(1),
+        dq.stride(0),
+        dq.stride(2),
+        dq.stride(1),
         dk.stride(0),
         dk.stride(2),
         dk.stride(1),
@@ -1190,8 +1195,8 @@ def _bitfield_attn_backward(
         seqlen_k // 32,  # key for triton cache (limit number of compilations)
         bias_type,
         BLOCK_HEADDIM,
+        NUM_TILES_TO_COMPUTE_PER_BLOCK=NUM_KV_BLOCKS_PER_BLOCK
     )
-    dq.copy_(dq_accum)
 
 
 class BitfieldAttentionFunction(torch.autograd.Function):
@@ -1240,7 +1245,7 @@ class BitfieldAttentionFunction(torch.autograd.Function):
         # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
         # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
         with torch.inference_mode():
-            dq = torch.empty_like(q)
+            dq = torch.zeros_like(q, dtype=torch.float32)
             dk = torch.zeros_like(k, dtype=torch.float32)
             dv = torch.zeros_like(v, dtype=torch.float32)
             _bitfield_attn_backward(
@@ -1258,7 +1263,7 @@ class BitfieldAttentionFunction(torch.autograd.Function):
                 bias=bias,
                 softmax_scale=ctx.softmax_scale,
             )
-        return dq, dk.to(dtype=k.dtype), dv.to(dtype=v.dtype), None, None, None
+        return dq.to(dtype=q.dtype), dk.to(dtype=k.dtype), dv.to(dtype=v.dtype), None, None, None
 
 
 def bitfield_attn_func(
