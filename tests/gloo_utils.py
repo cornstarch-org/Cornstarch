@@ -1,7 +1,11 @@
+import inspect
 from typing import Optional
 
 import torch
 import torch.distributed as dist
+
+signature = inspect.signature(dist.broadcast).parameters
+is_group_src_present = "group_src" in signature
 
 
 def batch_isend_irecv_gloo(p2p_op_list: list[dist.P2POp]) -> list[dist.Work]:
@@ -133,7 +137,11 @@ def all_gather_gloo(
         if rank == dist.get_rank(group):
             cpu_tensor_list[rank].copy_(tensor)
 
-        dist.broadcast(cpu_tensor_list[rank], group=group, group_src=rank)
+        if is_group_src_present:
+            dist.broadcast(cpu_tensor_list[rank], group=group, group_src=rank)
+        else:
+            src = dist.get_global_rank(group, rank)
+            dist.broadcast(cpu_tensor_list[rank], group=group, src=src)
 
     for t, ct in zip(tensor_list, cpu_tensor_list):
         t.copy_(ct)
