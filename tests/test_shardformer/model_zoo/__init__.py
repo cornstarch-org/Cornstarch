@@ -5,6 +5,7 @@ from .gemma import GemmaForCausalLMBase, GemmaModelBase
 from .gemma2 import Gemma2ForCausalLMBase, Gemma2ModelBase
 from .intern_vit import InternVisonModelBase
 from .llama import LlamaForCausalLMBase, LlamaModelBase
+from .llama4 import Llama4ForCausalLMBase, Llama4ModelBase
 from .mistral import MistralForCausalLMBase, MistralModelBase
 from .mixtral import MixtralForCausalLMBase, MixtralModelBase
 from .phi3 import Phi3ForCausalLMBase, Phi3ModelBase

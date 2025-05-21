@@ -281,6 +281,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 output_transform_fn=lambda x: x,
                 booster=booster,
                 precision=precision,
+                attention=attention,
             )
         )
 
@@ -316,6 +317,12 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
             org_model = self.model.model_fn().to(device="cuda")
+
+            for param in org_model.parameters():
+                if not param.isnan().any():
+                    continue
+                param.data = torch.randn_like(param.data)
+
             sharded_model = copy.deepcopy(org_model)
             sharded_model.config._attn_implementation = attention
         if use_lazy_init:
@@ -366,6 +373,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         output_transform_fn: Callable,
         booster: Booster,
         precision: torch.dtype,
+        attention: str,
     ):
         def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
             outputs = output_transform_fn(outputs)
@@ -376,6 +384,11 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
 
         unshard_test_data = self.postprocess_data_for_original_model(data, precision)
         shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
+
+        if attention == "bitfield_attention":
+            shard_test_data["attention_mask"] = torch.full_like(
+                shard_test_data["attention_mask"], (1 << 62) | 1, dtype=torch.int64
+            )
 
         # use torch.autocast AMP for fp16 training test cases
         org_model.train()

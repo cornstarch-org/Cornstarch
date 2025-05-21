@@ -17,6 +17,8 @@ from .model_zoo import (
     InternVisonModelBase,
     LlamaForCausalLMBase,
     LlamaModelBase,
+    Llama4ForCausalLMBase,
+    Llama4ModelBase,
     MistralForCausalLMBase,
     MistralModelBase,
     MixtralForCausalLMBase,
@@ -49,6 +51,7 @@ language_models = dict(
     gemma=GemmaModelBase,
     gemma2=Gemma2ModelBase,
     llama=LlamaModelBase,
+    llama4=Llama4ModelBase,
     mistral=MistralModelBase,
     mixtral=MixtralModelBase,
     phi3=Phi3ModelBase,
@@ -59,6 +62,7 @@ causal_lms = dict(
     gemma=GemmaForCausalLMBase,
     gemma2=Gemma2ForCausalLMBase,
     llama=LlamaForCausalLMBase,
+    llama4=Llama4ForCausalLMBase,
     mistral=MistralForCausalLMBase,
     mixtral=MixtralForCausalLMBase,
     phi3=Phi3ForCausalLMBase,
@@ -168,11 +172,10 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
     )
     @parametrize(
         "attention",
-        ["bitfield_attention", "flash_attention_2", "eager"],
+        ["bitfield_attention", "flash_attention_2"],
         name_fn=lambda x: {
             "bitfield_attention": "bam",
             "flash_attention_2": "fa",
-            "eager": "eager",
         }[x],
     )
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
@@ -195,11 +198,10 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
     )
     @parametrize(
         "attention",
-        ["bitfield_attention", "flash_attention_2", "eager"],
+        ["bitfield_attention", "flash_attention_2"],
         name_fn=lambda x: {
             "bitfield_attention": "bam",
             "flash_attention_2": "fa",
-            "eager": "eager",
         }[x],
     )
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)

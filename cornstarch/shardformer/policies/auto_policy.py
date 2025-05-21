@@ -58,6 +58,13 @@ _POLICY_LIST = {
     "transformers.models.llama.modeling_llama.LlamaForSequenceClassification": PolicyLocation(
         file_name="llama", class_name="LlamaForSequenceClassificationPolicy"
     ),
+    # LLaMA4
+    "transformers.models.llama4.modeling_llama4.Llama4TextModel": PolicyLocation(
+        file_name="llama4", class_name="Llama4TextModelPolicy"
+    ),
+    "transformers.models.llama4.modeling_llama4.Llama4ForCausalLM": PolicyLocation(
+        file_name="llama4", class_name="Llama4ForCausalLMPolicy"
+    ),
     # GPT2
     "transformers.models.gpt2.modeling_gpt2.GPT2Model": PolicyLocation(
         file_name="gpt2", class_name="GPT2ModelPolicy"
