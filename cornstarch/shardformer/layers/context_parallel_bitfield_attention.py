@@ -248,9 +248,9 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                     async_op=True,
                 )
 
-            dq = torch.empty(
+            dq = torch.zeros(
                 (batch, seqlen_q, heads_stride * group_size, d),
-                dtype=q.dtype,
+                dtype=torch.float32,
                 device=q.device,
             )
             dkv = torch.empty(
@@ -307,7 +307,7 @@ class ContextParallelBitfieldAttention(torch.autograd.Function):
                     async_op=True,
                 )
 
-            dqs.append(dq)
+            dqs.append(dq.to(dtype=q.dtype))
             scattered_dkv[0][:, :, kv_head_index : kv_head_index + heads_stride] += dkv[
                 0
             ]
