@@ -169,17 +169,17 @@ def test_bitfield_attention(head_dim: int, seqlen: int, batch_size: int):
             dtype=torch.int64,
             device=device,
         )
-        # attention_mask[:, 12:24] = 1 << 1
-        # attention_mask[:, 36:56] = 1 << 2
+        attention_mask[:, 12:24] = 1 << 1
+        attention_mask[:, 36:56] = 1 << 2
 
         full_mask = torch.tril(
             torch.ones((batch_size, seqlen, seqlen), dtype=torch.bool, device=device),
             diagonal=0,
         )
-        # full_mask[:, 12:24, :] = False
-        # full_mask[:, 12:24, 12:24] = True
-        # full_mask[:, 36:56, :] = False
-        # full_mask[:, 36:56, 36:56] = True
+        full_mask[:, 12:24, :] = False
+        full_mask[:, 12:24, 12:24] = True
+        full_mask[:, 36:56, :] = False
+        full_mask[:, 36:56, 36:56] = True
 
         return attention_mask, full_mask
 
