@@ -162,11 +162,12 @@ class Llama4ModelForwards:
                     hidden_states,
                     sp_group,
                 )
-                position_ids = (
+                cache_position = (
                     ContextParallelBatchSplitUtils.get_context_parallel_offsets_cache(
                         dist.get_rank(sp_group)
-                    ).unsqueeze(0)
+                    )
                 )
+                position_ids = cache_position.unsqueeze(0)
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
