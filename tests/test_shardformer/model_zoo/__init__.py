@@ -11,6 +11,7 @@ from .mixtral import MixtralForCausalLMBase, MixtralModelBase
 from .phi3 import Phi3ForCausalLMBase, Phi3ModelBase
 from .pixtral import PixtralVisionModelBase
 from .qwen2 import Qwen2ForCausalLMBase, Qwen2ModelBase
+from .qwen3 import Qwen3ForCausalLMBase, Qwen3ModelBase
 from .qwen2_audio import Qwen2AudioEncoderBase
 from .qwen2_vision import Qwen2VisionTransformerBase
 from .siglip import SiglipModelBase

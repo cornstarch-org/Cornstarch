@@ -188,6 +188,13 @@ _POLICY_LIST = {
     "transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration": PolicyLocation(
         file_name="qwen2", class_name="Qwen2ForCausalLMPolicy"
     ),
+    # Qwen3
+    "transformers.models.qwen3.modeling_qwen3.Qwen3Model": PolicyLocation(
+        file_name="qwen3", class_name="Qwen3ModelPolicy"
+    ),
+    "transformers.models.qwen3.modeling_qwen3.Qwen3ForCausalLM": PolicyLocation(
+        file_name="qwen3", class_name="Qwen3ForCausalLMPolicy"
+    ),
     # Whisper
     "transformers.models.whisper.modeling_whisper.WhisperEncoder": PolicyLocation(
         file_name="whisper", class_name="WhisperEncoderPolicy"
