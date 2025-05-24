@@ -43,7 +43,6 @@ class Qwen3Policy(PipelineTemplatePolicyBase, Policy):
         modules.extend(["embed_tokens", "rotary_emb"])
         modules.extend([f"layers.{i}" for i in range(config.num_hidden_layers)])
         modules.append("norm")
-        modules.append("lm_head")
 
         return modules
 
@@ -81,7 +80,7 @@ class Qwen3Policy(PipelineTemplatePolicyBase, Policy):
         held_layers = []
         layers_per_stage = stage_manager.distribute_layers(len(module.layers))
         if stage_manager.is_first_stage():
-            held_layers.extend([module.embed_tokens, module.rotary_emb])
+            held_layers.append(module.embed_tokens)
         start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.layers[start_idx:end_idx])
         if stage_manager.is_last_stage():
