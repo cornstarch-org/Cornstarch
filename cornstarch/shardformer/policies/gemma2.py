@@ -221,7 +221,7 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
                     ),
                 ],
                 policy=policy,
-                target=Gemma2DecoderLayer,
+                target_key=Gemma2DecoderLayer,
             )
 
         embedding_cls = None

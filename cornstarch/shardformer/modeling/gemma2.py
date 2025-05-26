@@ -532,18 +532,10 @@ class Gemma2AttentionForwards:
             )
         else:
             attention_interface: Callable = eager_attention_forward
-            if self.config._attn_implementation != "eager":
-                if self.config._attn_implementation == "sdpa" and kwargs.get(
-                    "output_attentions", False
-                ):
-                    logger.warning_once(
-                        "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-                        'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-                    )
-                else:
-                    attention_interface = ALL_ATTENTION_FUNCTIONS[
-                        self.config._attn_implementation
-                    ]
+        if self.config._attn_implementation != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[
+                self.config._attn_implementation
+            ]
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -553,6 +545,8 @@ class Gemma2AttentionForwards:
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
+            sliding_window=self.sliding_window,
+            softcap=self.attn_logit_softcapping,
             **kwargs,
         )
 
