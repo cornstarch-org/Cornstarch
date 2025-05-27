@@ -159,6 +159,13 @@ _POLICY_LIST = {
     "transformers.models.gemma2.modeling_gemma2.Gemma2ForCausalLM": PolicyLocation(
         file_name="gemma2", class_name="Gemma2ForCausalLMPolicy"
     ),
+    # Gemma3
+    "transformers.models.gemma3.modeling_gemma3.Gemma3TextModel": PolicyLocation(
+        file_name="gemma3", class_name="Gemma3TextModelPolicy"
+    ),
+    "transformers.models.gemma3.modeling_gemma3.Gemma3ForCausalLM": PolicyLocation(
+        file_name="gemma3", class_name="Gemma3ForCausalLMPolicy"
+    ),
     # Phi3
     "transformers.models.phi3.modeling_phi3.Phi3Model": PolicyLocation(
         file_name="phi3", class_name="Phi3ModelPolicy"

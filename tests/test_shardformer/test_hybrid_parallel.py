@@ -10,6 +10,8 @@ from .model_zoo import (
     CLIPModelBase,
     Dinov2ModelBase,
     EvaCLIPModelBase,
+    Gemma3ForCausalLMBase,
+    Gemma3ModelBase,
     Gemma2ForCausalLMBase,
     Gemma2ModelBase,
     GemmaForCausalLMBase,
@@ -54,6 +56,7 @@ vision_models = dict(
 language_models = dict(
     gemma=GemmaModelBase,
     gemma2=Gemma2ModelBase,
+    gemma3=Gemma3ModelBase,
     llama=LlamaModelBase,
     llama4=Llama4ModelBase,
     mistral=MistralModelBase,
@@ -67,6 +70,7 @@ language_models = dict(
 causal_lms = dict(
     gemma=GemmaForCausalLMBase,
     gemma2=Gemma2ForCausalLMBase,
+    gemma3=Gemma3ForCausalLMBase,
     llama=LlamaForCausalLMBase,
     llama4=Llama4ForCausalLMBase,
     mistral=MistralForCausalLMBase,

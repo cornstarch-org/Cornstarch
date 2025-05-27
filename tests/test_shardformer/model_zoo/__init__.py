@@ -3,6 +3,7 @@ from .dinov2 import Dinov2ModelBase
 from .evaclip import EvaCLIPModelBase
 from .gemma import GemmaForCausalLMBase, GemmaModelBase
 from .gemma2 import Gemma2ForCausalLMBase, Gemma2ModelBase
+from .gemma3 import Gemma3ForCausalLMBase, Gemma3ModelBase
 from .intern_vit import InternVisonModelBase
 from .llama import LlamaForCausalLMBase, LlamaModelBase
 from .llama4 import Llama4ForCausalLMBase, Llama4ModelBase
