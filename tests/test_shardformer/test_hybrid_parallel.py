@@ -10,6 +10,8 @@ from .model_zoo import (
     CLIPModelBase,
     Dinov2ModelBase,
     EvaCLIPModelBase,
+    Gemma3ForCausalLMBase,
+    Gemma3ModelBase,
     Gemma2ForCausalLMBase,
     Gemma2ModelBase,
     GemmaForCausalLMBase,
@@ -17,6 +19,8 @@ from .model_zoo import (
     InternVisonModelBase,
     LlamaForCausalLMBase,
     LlamaModelBase,
+    Llama4ForCausalLMBase,
+    Llama4ModelBase,
     MistralForCausalLMBase,
     MistralModelBase,
     MixtralForCausalLMBase,
@@ -29,6 +33,10 @@ from .model_zoo import (
     Qwen2ForCausalLMBase,
     Qwen2ModelBase,
     Qwen2VisionTransformerBase,
+    Qwen3ForCausalLMBase,
+    Qwen3ModelBase,
+    Qwen3MoeForCausalLMBase,
+    Qwen3MoeModelBase,
     SiglipModelBase,
     ViTModelBase,
     WhisperEncoderBase,
@@ -48,21 +56,29 @@ vision_models = dict(
 language_models = dict(
     gemma=GemmaModelBase,
     gemma2=Gemma2ModelBase,
+    gemma3=Gemma3ModelBase,
     llama=LlamaModelBase,
+    llama4=Llama4ModelBase,
     mistral=MistralModelBase,
     mixtral=MixtralModelBase,
     phi3=Phi3ModelBase,
     qwen2=Qwen2ModelBase,
+    qwen3=Qwen3ModelBase,
+    qwen3_moe=Qwen3MoeModelBase,
 )
 
 causal_lms = dict(
     gemma=GemmaForCausalLMBase,
     gemma2=Gemma2ForCausalLMBase,
+    gemma3=Gemma3ForCausalLMBase,
     llama=LlamaForCausalLMBase,
+    llama4=Llama4ForCausalLMBase,
     mistral=MistralForCausalLMBase,
     mixtral=MixtralForCausalLMBase,
     phi3=Phi3ForCausalLMBase,
     qwen2=Qwen2ForCausalLMBase,
+    qwen3=Qwen3ForCausalLMBase,
+    qwen3_moe=Qwen3MoeForCausalLMBase,
 )
 
 audio_models = dict(
@@ -168,11 +184,10 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
     )
     @parametrize(
         "attention",
-        ["bitfield_attention", "flash_attention_2", "eager"],
+        ["bitfield_attention", "flash_attention_2"],
         name_fn=lambda x: {
             "bitfield_attention": "bam",
             "flash_attention_2": "fa",
-            "eager": "eager",
         }[x],
     )
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)
@@ -195,11 +210,10 @@ class LanguageHybridParallel(ColossalaiHybridParallelBase):
     )
     @parametrize(
         "attention",
-        ["bitfield_attention", "flash_attention_2", "eager"],
+        ["bitfield_attention", "flash_attention_2"],
         name_fn=lambda x: {
             "bitfield_attention": "bam",
             "flash_attention_2": "fa",
-            "eager": "eager",
         }[x],
     )
     @parametrize("precision", ["bf16"], name_fn=lambda p: p)

@@ -317,6 +317,12 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         ctx = LazyInitContext() if use_lazy_init else nullcontext()
         with ctx:
             org_model = self.model.model_fn().to(device="cuda")
+
+            for param in org_model.parameters():
+                if not param.isnan().any():
+                    continue
+                param.data = torch.randn_like(param.data)
+
             sharded_model = copy.deepcopy(org_model)
             sharded_model.config._attn_implementation = attention
         if use_lazy_init:

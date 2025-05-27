@@ -58,6 +58,13 @@ _POLICY_LIST = {
     "transformers.models.llama.modeling_llama.LlamaForSequenceClassification": PolicyLocation(
         file_name="llama", class_name="LlamaForSequenceClassificationPolicy"
     ),
+    # LLaMA4
+    "transformers.models.llama4.modeling_llama4.Llama4TextModel": PolicyLocation(
+        file_name="llama4", class_name="Llama4TextModelPolicy"
+    ),
+    "transformers.models.llama4.modeling_llama4.Llama4ForCausalLM": PolicyLocation(
+        file_name="llama4", class_name="Llama4ForCausalLMPolicy"
+    ),
     # GPT2
     "transformers.models.gpt2.modeling_gpt2.GPT2Model": PolicyLocation(
         file_name="gpt2", class_name="GPT2ModelPolicy"
@@ -152,6 +159,13 @@ _POLICY_LIST = {
     "transformers.models.gemma2.modeling_gemma2.Gemma2ForCausalLM": PolicyLocation(
         file_name="gemma2", class_name="Gemma2ForCausalLMPolicy"
     ),
+    # Gemma3
+    "transformers.models.gemma3.modeling_gemma3.Gemma3TextModel": PolicyLocation(
+        file_name="gemma3", class_name="Gemma3TextModelPolicy"
+    ),
+    "transformers.models.gemma3.modeling_gemma3.Gemma3ForCausalLM": PolicyLocation(
+        file_name="gemma3", class_name="Gemma3ForCausalLMPolicy"
+    ),
     # Phi3
     "transformers.models.phi3.modeling_phi3.Phi3Model": PolicyLocation(
         file_name="phi3", class_name="Phi3ModelPolicy"
@@ -180,6 +194,20 @@ _POLICY_LIST = {
     ),
     "transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration": PolicyLocation(
         file_name="qwen2", class_name="Qwen2ForCausalLMPolicy"
+    ),
+    # Qwen3
+    "transformers.models.qwen3.modeling_qwen3.Qwen3Model": PolicyLocation(
+        file_name="qwen3", class_name="Qwen3ModelPolicy"
+    ),
+    "transformers.models.qwen3.modeling_qwen3.Qwen3ForCausalLM": PolicyLocation(
+        file_name="qwen3", class_name="Qwen3ForCausalLMPolicy"
+    ),
+    # Qwen3Moe
+    "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeModel": PolicyLocation(
+        file_name="qwen3_moe", class_name="Qwen3MoeModelPolicy"
+    ),
+    "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeForCausalLM": PolicyLocation(
+        file_name="qwen3_moe", class_name="Qwen3MoeForCausalLMPolicy"
     ),
     # Whisper
     "transformers.models.whisper.modeling_whisper.WhisperEncoder": PolicyLocation(

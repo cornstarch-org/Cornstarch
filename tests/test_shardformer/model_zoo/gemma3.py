@@ -4,11 +4,16 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM, Gemma2Model
+from transformers.models.gemma3 import (
+    Gemma3TextConfig,
+    Gemma3ForCausalLM,
+    Gemma3TextModel,
+)
 
 from ..utils import ModelClassBase
 
-gemma2_config = Gemma2Config(
+gemma3_config = Gemma3TextConfig(
+    vocab_size=5120,
     hidden_size=256,
     intermediate_size=64,
     num_attention_heads=8,
@@ -26,9 +31,9 @@ gemma2_config = Gemma2Config(
 )
 
 
-class Gemma2ModelBase(ModelClassBase):
+class Gemma3ModelBase(ModelClassBase):
     def __init__(self):
-        super().__init__(Gemma2Model, gemma2_config)
+        super().__init__(Gemma3TextModel, gemma3_config)
         self.col_layers_to_check = ["layers[0].self_attn.o_proj"]
         self.row_layers_to_check = ["layers[0].self_attn.q_proj", "embed_tokens"]
 
@@ -48,9 +53,9 @@ class Gemma2ModelBase(ModelClassBase):
         return input
 
 
-class Gemma2ForCausalLMBase(ModelClassBase):
+class Gemma3ForCausalLMBase(ModelClassBase):
     def __init__(self):
-        super().__init__(Gemma2ForCausalLM, gemma2_config)
+        super().__init__(Gemma3ForCausalLM, gemma3_config)
         self.col_layers_to_check = ["model.layers[0].self_attn.o_proj"]
         self.row_layers_to_check = [
             "model.layers[0].self_attn.q_proj",

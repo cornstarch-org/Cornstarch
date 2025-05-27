@@ -1,5 +1,5 @@
 import functools
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -10,7 +10,7 @@ from colossalai.shardformer.layer._operation import (
     split_forward_gather_backward,
 )
 from colossalai.shardformer.shard.shard_config import ShardConfig
-from transformers.cache_utils import Cache, HybridCache
+from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import (
     FlashAttentionKwargs,
 )
@@ -19,10 +19,11 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.gemma2.modeling_gemma2 import (
-    Gemma2Attention,
-    Gemma2ForCausalLM,
-    Gemma2Model,
+from transformers.models.qwen3.modeling_qwen3 import (
+    KwargsForCausalLM,
+    Qwen3Attention,
+    Qwen3ForCausalLM,
+    Qwen3Model,
     apply_rotary_pos_emb,
     eager_attention_forward,
     logger,
@@ -41,30 +42,28 @@ from cornstarch.shardformer.layers.utils import (
 _SUPPORTED_CP_MODE = ["all_to_all", "ring_attn"]
 
 
-class Gemma2ModelForwards:
+class Qwen3ModelForwards:
     @staticmethod
-    def gemma2_model_forward(
-        self: Gemma2Model,
-        input_ids: torch.LongTensor = None,
+    def qwen3_model_forward(
+        self: Qwen3Model,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[HybridCache] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        last_cache_position: Optional[int] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
-        all_self_attentions: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
-        force_sp_gather: bool = True,  # Set to false only when computing cross
+        force_sp_gather: bool = True,  # Set to false only when computing cross entropy
         offsets_per_rank: Optional[list[torch.Tensor]] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+    ) -> BaseModelOutputWithPast:
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -76,29 +75,18 @@ class Gemma2ModelForwards:
             else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        if self.gradient_checkpointing and self.training and use_cache:
+        if use_cache and self.gradient_checkpointing and self.training:
             logger.warning_once(
                 "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
             )
             use_cache = False
 
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
         stage_manager = shard_config.pipeline_stage_manager
-
-        if stage_manager is not None:
-            if use_cache:
-                logger.warning_once(
-                    "use_cache=True is not supported for pipeline models at the moment."
-                )
-                use_cache = False
 
         if stage_manager is None or stage_manager.is_first_stage():
             if (input_ids is None) ^ (inputs_embeds is not None):
                 raise ValueError(
-                    "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
+                    "You must specify exactly one of input_ids or inputs_embeds"
                 )
 
             if inputs_embeds is None:
@@ -106,22 +94,13 @@ class Gemma2ModelForwards:
 
             hidden_states = inputs_embeds
 
-            # normalized
-            # Gemma2 downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5
-            # See https://github.com/huggingface/transformers/pull/29402
-            normalizer = torch.tensor(
-                self.config.hidden_size**0.5, dtype=hidden_states.dtype
+        if not isinstance(past_key_values, (type(None), Cache)):
+            raise ValueError(
+                "The `past_key_values` should be either a `Cache` object or `None`."
             )
-            hidden_states = hidden_states * normalizer
 
-        if use_cache and past_key_values is None and not self.training:
-            batch_size, seq_len, _ = hidden_states.shape
-            past_key_values = HybridCache(
-                self.config,
-                max_batch_size=batch_size,
-                max_cache_len=seq_len,
-                dtype=inputs_embeds.dtype,
-            )
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
 
         if cache_position is None:
             past_seen_tokens = (
@@ -129,8 +108,8 @@ class Gemma2ModelForwards:
             )
             cache_position = torch.arange(
                 past_seen_tokens,
-                past_seen_tokens + hidden_states.shape[1],
-                device=hidden_states.device,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
             )
 
         if position_ids is None:
@@ -139,19 +118,6 @@ class Gemma2ModelForwards:
         if position_embeddings is None:
             # create position embeddings to be shared across the decoder layers
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        # This is needed to correctly slice the mask without data-dependent slicing later on if using dynamo tracing
-        # (retrieving the same value from `cache_position` later on would crash dynamo)
-        if last_cache_position is None:
-            last_cache_position = 0
-            if attention_mask is not None:
-                # In case a 4d mask is passed directly without using `generate`, we have to rely on cache_position
-                # It will break dynamo tracing but there are no way around it (and it should never happen in practice)
-                last_cache_position = (
-                    attention_mask.shape[-1]
-                    if attention_mask.dim() == 2
-                    else cache_position[-1].item()
-                )
 
         sp_mode = shard_config.sequence_parallelism_mode
         sp_group = shard_config.sequence_parallel_process_group
@@ -163,10 +129,9 @@ class Gemma2ModelForwards:
         )
 
         if self.config._attn_implementation == "bitfield_attention":
-            attn_mask = attention_mask
+            causal_mask = attention_mask
         else:
-            # causal mask
-            attn_mask = self._update_causal_mask(
+            causal_mask = self._update_causal_mask(
                 attention_mask,
                 hidden_states,
                 cache_position,
@@ -222,42 +187,43 @@ class Gemma2ModelForwards:
             kwargs.update(
                 {
                     "compressed_mask": ContextParallelBatchSplitUtils.get_local_compressed_mask(
-                        attn_mask, sp_group
+                        causal_mask, sp_group
                     ),
                     "offsets_per_rank": offsets_per_rank,
                 }
             )
 
         # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
+                    functools.partial(decoder_layer.__call__, **flash_attn_kwargs),
                     hidden_states,
-                    position_embeddings,
-                    attn_mask,
+                    causal_mask,
                     position_ids,
                     past_key_values,
                     output_attentions,
                     use_cache,
                     cache_position,
-                    last_cache_position,
+                    position_embeddings,
                     **kwargs,
                 )
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    position_embeddings=position_embeddings,
-                    attention_mask=attn_mask,
+                    attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    last_cache_position=last_cache_position,
+                    position_embeddings=position_embeddings,
                     **flash_attn_kwargs,
                     **kwargs,
                 )
@@ -289,39 +255,39 @@ class Gemma2ModelForwards:
         ):
             hidden_states = gather_sp_output(hidden_states, shard_config)
 
+        # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        output = BaseModelOutputWithPast(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
+            past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
         )
-        return output if return_dict else output.to_tuple()
 
-    def gemma2_for_causal_lm_forward(
-        self: Gemma2ForCausalLM,
-        input_ids: torch.LongTensor = None,
+    @staticmethod
+    def qwen3_for_causal_lm_forward(
+        self: Qwen3ForCausalLM,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[HybridCache] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         hidden_states: Optional[torch.FloatTensor] = None,
         all_hidden_states: Optional[Tuple[torch.FloatTensor]] = (),
-        all_self_attentions: Optional[Tuple[torch.FloatTensor]] = (),
+        all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         offsets_per_rank: Optional[list[torch.Tensor]] = None,
-        **kwargs,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        **kwargs: Unpack[KwargsForCausalLM],
+    ) -> CausalLMOutputWithPast:
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -331,9 +297,6 @@ class Gemma2ModelForwards:
             output_hidden_states
             if output_hidden_states is not None
             else self.config.output_hidden_states
-        )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
         )
 
         stage_manager = shard_config.pipeline_stage_manager
@@ -382,8 +345,7 @@ class Gemma2ModelForwards:
                 labels, sp_group, is_label=True
             )
 
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = Gemma2ModelForwards.gemma2_model_forward(
+        outputs = Qwen3ModelForwards.qwen3_model_forward(
             self.model,
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -393,7 +355,6 @@ class Gemma2ModelForwards:
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
             hidden_states=hidden_states,
@@ -405,14 +366,11 @@ class Gemma2ModelForwards:
             **kwargs,
         )
 
-        BitfieldUtils.clear_cache()
-        ContextParallelBatchSplitUtils.clear_cache()
-
-        stage_manager = shard_config.pipeline_stage_manager
         if not (stage_manager is None or stage_manager.is_last_stage()):
             return outputs
 
-        hidden_states = outputs[0]
+        hidden_states = outputs.last_hidden_state
+
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = (
             slice(-logits_to_keep, None)
@@ -434,10 +392,6 @@ class Gemma2ModelForwards:
                 self.model.dtype,
             )
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
@@ -447,10 +401,10 @@ class Gemma2ModelForwards:
         )
 
 
-class Gemma2AttentionForwards:
+class Qwen3AttentionForwards:
     @staticmethod
     def forward(
-        self: Gemma2Attention,
+        self: Qwen3Attention,
         hidden_states: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
@@ -500,26 +454,10 @@ class Gemma2AttentionForwards:
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {
-                "sin": sin,
-                "cos": cos,
-                "cache_position": cache_position,
-                "sliding_window": self.sliding_window,
-            }
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
-
-            # Here we need to slice as we use a static cache by default, but FA2 does not support it
-            if (
-                attention_mask is not None
-                and self.config._attn_implementation == "flash_attention_2"
-            ):
-                seq_len = attention_mask.shape[-1]
-                key_states, value_states = (
-                    key_states[:, :, :seq_len, :],
-                    value_states[:, :, :seq_len, :],
-                )
 
         if sp_mode == "ring_attn":
             assert self.config._attn_implementation == "bitfield_attention", (
@@ -532,10 +470,18 @@ class Gemma2AttentionForwards:
             )
         else:
             attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[
-                self.config._attn_implementation
-            ]
+            if self.config._attn_implementation != "eager":
+                if self.config._attn_implementation == "sdpa" and kwargs.get(
+                    "output_attentions", False
+                ):
+                    logger.warning_once(
+                        "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                        'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                    )
+                else:
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[
+                        self.config._attn_implementation
+                    ]
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -545,8 +491,7 @@ class Gemma2AttentionForwards:
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
-            sliding_window=self.sliding_window,
-            softcap=self.attn_logit_softcapping,
+            sliding_window=self.sliding_window,  # diff with Llama
             **kwargs,
         )
 

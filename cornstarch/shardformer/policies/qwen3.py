@@ -16,29 +16,28 @@ from colossalai.shardformer.policies.base_policy import (
     Policy,
     SubModuleReplacementDescription,
 )
-from torch import Tensor, nn
-from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_flash_attention_utils import is_flash_attn_greater_or_equal
-from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
-from transformers.models.gemma2.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Model
+from torch import nn
+from transformers import PretrainedConfig
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
+from transformers.models.qwen3.modeling_qwen3 import Qwen3Model
 
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.shardformer.modeling.gemma2 import (
-    Gemma2AttentionForwards,
-    Gemma2ModelForwards,
+from cornstarch.shardformer.modeling.qwen3 import (
+    Qwen3AttentionForwards,
+    Qwen3ModelForwards,
 )
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
 
 
-class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
+class Qwen3Policy(PipelineTemplatePolicyBase, Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> List[str]:
         assert isinstance(
-            config, Gemma2Config
-        ), f"config must be of type Gemma2Config, but got {type(config)}"
-        config: Gemma2Config = cast(Gemma2Config, config)
+            config, Qwen3Config
+        ), "config must be an instance of Qwen3Config"
+        config: Qwen3Config = cast(Qwen3Config, config)
 
         modules = []
         modules.extend(["embed_tokens", "rotary_emb"])
@@ -49,41 +48,30 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
         assert (
-            "trasnformers.models.gemma2.modeling_gemma2" in template.model_name
-        ), "The pipeline template is not for Gemma2 model"
+            "transformers.models.qwen3.modeling_qwen3" in template.model_name
+        ), "The pipeline template is not for Qwen3 model."
 
-        prefix = "" if self.model.__class__.__name__ == "Gemma2Model" else "model."
+        prefix = "" if self.model.__class__.__name__ == "Qwen3Model" else "model."
 
         assert hasattr(self.model, "config"), "model must have a config attribute"
         modules = self.get_all_modules(self.model.config)
         modules_in_template = list(itertools.chain(*template.modules_per_stage))
         if modules != modules_in_template:
             raise ValueError(
-                f"modules in the template do not match the modules in the model. "
-                f"Expected: {modules}, Got: {modules_in_template}"
+                "Modules in the pipeline template do not match the modules in the model."
             )
 
-        if f"{prefix}embed_tokens" not in modules_in_template[0]:
-            raise ValueError("embed_tokens must be in the first stage.")
+        if not all(module in modules_in_template[0] for module in modules):
+            raise ValueError("The pipeline template is not for Qwen3 model.")
 
         if f"{prefix}norm" not in modules_in_template[-1]:
             raise ValueError("norm must be in the last stage.")
 
-    def config_sanity_check(self):
-        pass
-
-    def preprocess(self) -> nn.Module:
-        self.tie_weight = self.tie_weight_check()
-        return self.model
-
-    def postprocess(self) -> nn.Module:
-        return self.model
-
     def get_held_layers(self) -> List[nn.Module]:
         assert self.pipeline_stage_manager is not None
 
-        module: Gemma2Model
-        if self.model.__class__.__name__ == "Gemma2Model":
+        module: Qwen3Model
+        if self.model.__class__.__name__ == "Qwen3Model":
             module = self.model
         else:
             module = self.model.model
@@ -92,25 +80,26 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
         held_layers = []
         layers_per_stage = stage_manager.distribute_layers(len(module.layers))
         if stage_manager.is_first_stage():
-            held_layers.extend([module.embed_tokens, module.rotary_emb])
+            held_layers.append(module.embed_tokens)
         start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
         held_layers.extend(module.layers[start_idx:end_idx])
         if stage_manager.is_last_stage():
             held_layers.append(module.norm)
+        held_layers.append(module.rotary_emb)
         return held_layers
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
-        from transformers.models.gemma2.modeling_gemma2 import (
-            Gemma2Attention,
-            Gemma2DecoderLayer,
-            Gemma2RMSNorm,
+        from transformers.models.qwen3.modeling_qwen3 import (
+            Qwen3Attention,
+            Qwen3RMSNorm,
+            Qwen3DecoderLayer,
         )
 
-        config: Gemma2Config = self.model.config
+        config: Qwen3Config = self.model.config
         policy = {}
 
         # This is to avoid refererence to its weight which has been replaced by a placeholder
-        policy[Gemma2RMSNorm] = ModulePolicyDescription(
+        policy[Qwen3RMSNorm] = ModulePolicyDescription(
             method_replacement={
                 "extra_repr": lambda self: f"eps={self.variance_epsilon}"
             }
@@ -123,15 +112,11 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
                 "Ring attention is only meant for causal language modeling."
             )
 
-        tp_size = self.shard_config.tensor_parallel_size
         num_q_heads = config.num_attention_heads
         num_kv_heads = getattr(config, "num_key_value_heads", None)
-        hidden_size = config.hidden_size
 
         if sp_mode == "all_to_all":
             # Ulysses all-to-all context parallelism needs to partition number of heads
-            hidden_size //= sp_size
-
             assert (
                 num_q_heads % sp_size == 0
             ), "The number of attention heads must be divisible by the sequence parallel size."
@@ -143,85 +128,61 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
                 ), "The number of key_value heads must be divisible by the sequence parallel size."
                 num_kv_heads //= sp_size
 
-        if self.shard_config.enable_tensor_parallelism:
-            hidden_size //= tp_size
-
-            assert (
-                num_q_heads % tp_size == 0
-            ), "The number of attention heads must be divisible by the tensor parallel size."
-            num_q_heads //= tp_size
-
-            if num_kv_heads:
-                assert (
-                    num_kv_heads % tp_size == 0
-                ), "The number of key_value heads must be divisible by the tensor parallel size."
-                num_kv_heads //= tp_size
-
-        attention_attribute_replacement = {}
-        attention_attribute_replacement["hidden_size"] = hidden_size
-        attention_attribute_replacement["num_heads"] = num_q_heads
-        if num_kv_heads:
-            attention_attribute_replacement["num_key_value_heads"] = num_kv_heads
+        policy[Qwen3Attention] = ModulePolicyDescription(
+            method_replacement={
+                "forward": functools.partial(
+                    Qwen3AttentionForwards.forward,
+                    shard_config=self.shard_config,
+                )
+            }
+        )
 
         if self.shard_config.enable_flash_attention:
-            attention_attribute_replacement["_flash_attn_uses_top_left_mask"] = (
-                not is_flash_attn_greater_or_equal("2.1.0")
-            )
-
-            policy[Gemma2Model] = ModulePolicyDescription(
+            policy[Qwen3Model] = ModulePolicyDescription(
                 attribute_replacement={
                     "config._attn_implementation": "flash_attention_2"
                 }
             )
 
-        policy[Gemma2Attention] = ModulePolicyDescription(
-            attribute_replacement=attention_attribute_replacement,
-            method_replacement={
-                "forward": functools.partial(
-                    Gemma2AttentionForwards.forward,
-                    shard_config=self.shard_config,
-                )
-            },
-        )
-
-        policy[Gemma2DecoderLayer] = ModulePolicyDescription(
-            attribute_replacement={"is_sliding": False}
-        )
-
         if self.shard_config.enable_tensor_parallelism:
-            self.append_or_create_submodule_replacement(
-                [
+            policy[Qwen3DecoderLayer] = ModulePolicyDescription(
+                sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.k_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.v_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.o_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.gate_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.up_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.down_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
-                ],
-                policy=policy,
-                target_key=Gemma2DecoderLayer,
+                ]
             )
 
         embedding_cls = None
@@ -240,9 +201,10 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
                     },
                 ),
                 policy=policy,
-                target_key=Gemma2Model,
+                target_key=Qwen3Model,
             )
 
+        # optimization configuration
         if self.shard_config.enable_fused_normalization:
             self.append_or_create_submodule_replacement(
                 description=[
@@ -254,39 +216,40 @@ class Gemma2Policy(PipelineTemplatePolicyBase, Policy):
                         suffix="post_attention_layernorm",
                         target_module=FusedRMSNorm,
                     ),
-                    SubModuleReplacementDescription(
-                        suffix="pre_feedforward_layernorm",
-                        target_module=FusedRMSNorm,
-                    ),
-                    SubModuleReplacementDescription(
-                        suffix="post_feedforward_layernorm",
-                        target_module=FusedRMSNorm,
-                    ),
                 ],
                 policy=policy,
-                target_key=Gemma2DecoderLayer,
+                target_key=Qwen3DecoderLayer,
             )
+
             self.append_or_create_submodule_replacement(
-                description=[
-                    SubModuleReplacementDescription(
-                        suffix="norm",
-                        target_module=FusedRMSNorm,
-                    )
-                ],
+                description=SubModuleReplacementDescription(
+                    suffix="norm",
+                    target_module=FusedRMSNorm,
+                ),
                 policy=policy,
-                target_key=Gemma2Model,
+                target_key=Qwen3Model,
             )
 
         return policy
 
+    def preprocess(self) -> nn.Module:
+        self.tie_weight = self.tie_weight_check()
+        return self.model
 
-class Gemma2ModelPolicy(Gemma2Policy):
+    def postprocess(self) -> nn.Module:
+        return self.model
+
+    def config_sanity_check(self):
+        pass
+
+
+class Qwen3ModelPolicy(Qwen3Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> List[str]:
-        return Gemma2Policy.get_all_modules(config)
+        return Qwen3Policy.get_all_modules(config)
 
     def pipeline_template_sanity_check(self, template: PipelineTemplate):
-        super().pipeline_template_sanity_check(template)
+        super().pipeline_template_sanity_check(self, template)
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
         policy = super().module_policy()
@@ -294,12 +257,12 @@ class Gemma2ModelPolicy(Gemma2Policy):
         self.append_or_create_method_replacement(
             description={
                 "forward": functools.partial(
-                    Gemma2ModelForwards.gemma2_model_forward,
+                    Qwen3ModelForwards.qwen3_model_forward,
                     shard_config=self.shard_config,
-                )
+                ),
             },
             policy=policy,
-            target_key=Gemma2Model,
+            target_key=Qwen3Model,
         )
 
         return policy
@@ -308,10 +271,10 @@ class Gemma2ModelPolicy(Gemma2Policy):
         return super().get_held_layers()
 
 
-class Gemma2ForCausalLMPolicy(Gemma2Policy):
+class Qwen3ForCausalLMPolicy(Qwen3Policy):
     @staticmethod
     def get_all_modules(config: PretrainedConfig) -> List[str]:
-        modules = [f"model.{module}" for module in Gemma2Policy.get_all_modules(config)]
+        modules = [f"model.{module}" for module in Qwen3Policy.get_all_modules(config)]
         modules.append("lm_head")
         return modules
 
@@ -321,10 +284,13 @@ class Gemma2ForCausalLMPolicy(Gemma2Policy):
             raise ValueError("lm_head must be in the last stage.")
 
     def module_policy(self) -> Dict[str | nn.Module, ModulePolicyDescription]:
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+
         self.is_causal = True
         policy = super().module_policy()
 
         if self.shard_config.enable_tensor_parallelism:
+            # add a new item for causal lm
             target_module = VocabParallelLMHead1D
             kwargs = {
                 "gather_output": not self.shard_config.parallel_output,
@@ -343,18 +309,18 @@ class Gemma2ForCausalLMPolicy(Gemma2Policy):
                 kwargs=kwargs,
             ),
             policy=policy,
-            target_key=Gemma2ForCausalLM,
+            target_key=Qwen3ForCausalLM,
         )
 
         self.append_or_create_method_replacement(
             description={
                 "forward": functools.partial(
-                    Gemma2ModelForwards.gemma2_for_causal_lm_forward,
+                    Qwen3ModelForwards.qwen3_for_causal_lm_forward,
                     shard_config=self.shard_config,
                 )
             },
             policy=policy,
-            target_key=Gemma2ForCausalLM,
+            target_key=Qwen3ForCausalLM,
         )
 
         return policy
@@ -362,21 +328,6 @@ class Gemma2ForCausalLMPolicy(Gemma2Policy):
     def get_held_layers(self) -> List[nn.Module]:
         stage_manager = self.pipeline_stage_manager
         held_layers = super().get_held_layers()
-        if stage_manager.is_last_stage():
+        if stage_manager.is_last_stage(ignore_chunk=True):
             held_layers.append(self.model.lm_head)
         return held_layers
-
-    def get_shared_params(self) -> List[Dict[int, Tensor]]:
-        gemma_model = self.model.model
-        if self.pipeline_stage_manager and self.pipeline_stage_manager.num_stages > 1:
-            if id(gemma_model.embed_tokens.weight) == id(self.model.lm_head.weight):
-                # tie weights
-                return [
-                    {
-                        0: gemma_model.embed_tokens.weight,
-                        self.pipeline_stage_manager.num_stages
-                        - 1: self.model.lm_head.weight,
-                    }
-                ]
-
-        return []

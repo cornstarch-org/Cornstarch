@@ -4,33 +4,26 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM, Gemma2Model
+from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM, Qwen3Model
 
 from ..utils import ModelClassBase
 
-gemma2_config = Gemma2Config(
+qwen3_config = Qwen3Config(
     hidden_size=256,
     intermediate_size=64,
     num_attention_heads=8,
     num_key_value_heads=4,
     num_hidden_layers=4,
-    # TODO: all pretrained Gemma model uses head_dim=256, which is not supported
-    # by bitfield attention mask (Triton FlashAttention base).
-    head_dim=64,
     use_cache=False,
-    # TODO: Gemma uses tie_word_embeddings True, in which case the tests fail.
-    # Implement automatic gradient synchronization between tied weights.
-    # Existing explicit synchronization is not enough as there are encoders
-    # that need to have gradients propagated "after" the weights are synchronized.
-    tie_word_embeddings=False,
 )
 
 
-class Gemma2ModelBase(ModelClassBase):
+class Qwen3ModelBase(ModelClassBase):
     def __init__(self):
-        super().__init__(Gemma2Model, gemma2_config)
+        super().__init__(Qwen3Model, qwen3_config)
+        # embed_tokens have different dimension, so skip checking embed_tokens here
+        self.row_layers_to_check = ["layers[0].self_attn.q_proj"]
         self.col_layers_to_check = ["layers[0].self_attn.o_proj"]
-        self.row_layers_to_check = ["layers[0].self_attn.q_proj", "embed_tokens"]
 
     def loss_fn(
         self, x: BaseModelOutputWithPast, sp_group: dist.ProcessGroup = None
@@ -48,14 +41,12 @@ class Gemma2ModelBase(ModelClassBase):
         return input
 
 
-class Gemma2ForCausalLMBase(ModelClassBase):
+class Qwen3ForCausalLMBase(ModelClassBase):
     def __init__(self):
-        super().__init__(Gemma2ForCausalLM, gemma2_config)
+        super().__init__(Qwen3ForCausalLM, qwen3_config)
+        # embed_tokens have different dimension, so skip checking embed_tokens here
+        self.row_layers_to_check = ["model.layers[0].self_attn.q_proj"]
         self.col_layers_to_check = ["model.layers[0].self_attn.o_proj"]
-        self.row_layers_to_check = [
-            "model.layers[0].self_attn.q_proj",
-            "model.embed_tokens",
-        ]
 
     def loss_fn(
         self, x: CausalLMOutputWithPast, sp_group: dist.ProcessGroup = None
