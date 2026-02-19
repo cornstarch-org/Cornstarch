@@ -16,7 +16,6 @@ from .model_zoo import (
     Gemma2ModelBase,
     GemmaForCausalLMBase,
     GemmaModelBase,
-    InternVisonModelBase,
     LlamaForCausalLMBase,
     LlamaModelBase,
     Llama4ForCausalLMBase,

@@ -12,13 +12,10 @@ from transformers.models.siglip import SiglipVisionConfig
 from transformers.models.whisper import WhisperConfig
 
 from cornstarch.models.evaclip import EvaCLIPVisionConfig
-from cornstarch.models.intern_vit import InternVisionConfig
-from cornstarch.models.internlm2 import InternLM2Config
 
 llama_config = LlamaConfig()
 gemma_config = GemmaConfig()
 gemma2_config = Gemma2Config()
-internlm2_config = InternLM2Config()
 mistral_config = MistralConfig()
 mixtral_config = MixtralConfig()
 phi3_config = Phi3Config()
@@ -32,7 +29,6 @@ for language_config in [
     mixtral_config,
     phi3_config,
     qwen2_config,
-    internlm2_config,
 ]:
     language_config.hidden_size = 256
     language_config.intermediate_size = 256
@@ -50,7 +46,6 @@ for language_config in [
 # GQA adjustment. Models not in this list use MHA.
 for language_config in [
     gemma2_config,
-    internlm2_config,
     mistral_config,
     mixtral_config,
     qwen2_config,
@@ -67,14 +62,12 @@ clip_config = CLIPVisionConfig()
 siglip_config = SiglipVisionConfig()
 dinov2_config = Dinov2Config()
 evaclip_config = EvaCLIPVisionConfig()
-internvit_config = InternVisionConfig()
 
 for vision_config in [
     clip_config,
     siglip_config,
     dinov2_config,
     evaclip_config,
-    internvit_config,
 ]:
     vision_config.hidden_size = 256
     vision_config.intermediate_size = 256

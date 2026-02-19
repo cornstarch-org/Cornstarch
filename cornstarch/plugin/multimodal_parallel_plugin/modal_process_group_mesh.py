@@ -230,18 +230,29 @@ class MultiModalProcessGroupMesh:
     # ------------------------------------------------------------------
 
     def get_border_next_ranks(self, rank: int) -> list[int]:
-        """Return ranks in the next modal that ``rank`` should send to."""
+        """Return ranks in the next modal that ``rank`` should send to at a pipeline border.
+
+        Encoder last-stage ranks return the LLM first-stage ranks they should send to.
+        LLM last-stage ranks return an empty list (no downstream modal).
+        """
+        result: list[int] = []
         for fmap in self.forward_border_map.values():
             if rank in fmap:
-                return fmap[rank]
-        return []
+                result.extend(fmap[rank])
+        return sorted(result)
 
     def get_border_prev_ranks(self, rank: int) -> list[int]:
-        """Return ranks in the previous modal that send to ``rank``."""
+        """Return ranks in the previous modal(s) that send to ``rank``.
+
+        Accumulates across all backward border maps so that, for example, a LLM
+        first-stage rank correctly returns last-stage ranks from *every* encoder
+        when there are multiple encoders.
+        """
+        result: list[int] = []
         for bmap in self.backward_border_map.values():
             if rank in bmap:
-                return bmap[rank]
-        return []
+                result.extend(bmap[rank])
+        return sorted(result)
 
     # ------------------------------------------------------------------
     # Process group creation

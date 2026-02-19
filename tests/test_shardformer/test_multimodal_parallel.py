@@ -22,7 +22,6 @@ vision_models = dict(
     siglip=SiglipModelBase,
     qwen2_vision=Qwen2VisionTransformerBase,
     # evaclip=EvaCLIPModelBase,
-    # intern_vit=InternVisonModelBase,
 )
 
 audio_models = dict(

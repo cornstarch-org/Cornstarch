@@ -36,10 +36,10 @@ def destroy_process_group():
             {encoder1_template: 2},
             (llm_template_2stages, 4, 1),
             [
-                {"prev": [16, 17], "next": [4]},
-                {"prev": [18, 19], "next": [5]},
-                {"prev": [20, 21], "next": [6]},
-                {"prev": [22, 23], "next": [7]},
+                {"prev": [], "next": [4]},
+                {"prev": [], "next": [5]},
+                {"prev": [], "next": [6]},
+                {"prev": [], "next": [7]},
                 {"prev": [0], "next": [8, 9]},  # rank = 4
                 {"prev": [1], "next": [10, 11]},
                 {"prev": [2], "next": [12, 13]},
@@ -52,14 +52,14 @@ def destroy_process_group():
                 {"prev": [6], "next": [21]},
                 {"prev": [7], "next": [22]},
                 {"prev": [7], "next": [23]},
-                {"prev": [8], "next": [0]},  # rank = 16
-                {"prev": [9], "next": [0]},
-                {"prev": [10], "next": [1]},
-                {"prev": [11], "next": [1]},
-                {"prev": [12], "next": [2]},  # rank = 20
-                {"prev": [13], "next": [2]},
-                {"prev": [14], "next": [3]},
-                {"prev": [15], "next": [3]},
+                {"prev": [8], "next": []},  # rank = 16
+                {"prev": [9], "next": []},
+                {"prev": [10], "next": []},
+                {"prev": [11], "next": []},
+                {"prev": [12], "next": []},  # rank = 20
+                {"prev": [13], "next": []},
+                {"prev": [14], "next": []},
+                {"prev": [15], "next": []},
             ],
         ),
         (
@@ -67,74 +67,51 @@ def destroy_process_group():
             {encoder1_template: 2, encoder2_template: 2},
             (llm_template_2stages, 4, 1),
             [
-                {"prev": [14, 15], "next": [2]},  # rank = 0. encoder1
-                {"prev": [16, 17], "next": [3]},
-                {"prev": [0], "next": [10, 11]},  # rank = 2. connected to llm
+                {"prev": [], "next": [2]},  # rank = 0. encoder1 stage 0
+                {"prev": [], "next": [3]},
+                {"prev": [0], "next": [10, 11]},  # rank = 2. encoder1 stage 1 → llm
                 {"prev": [1], "next": [12, 13]},
-                {"prev": [14, 15], "next": [6]},  # rank = 4. encoder2
-                {"prev": [16, 17], "next": [7]},
+                {"prev": [], "next": [6]},  # rank = 4. encoder2 stage 0
+                {"prev": [], "next": [7]},
                 {"prev": [4], "next": [8]},
                 {"prev": [5], "next": [9]},
-                {"prev": [6], "next": [10, 11]},  # rank = 8. connected to llm
+                {"prev": [6], "next": [10, 11]},  # rank = 8. encoder2 last → llm
                 {"prev": [7], "next": [12, 13]},
                 {"prev": [2, 8], "next": [14]},
                 {"prev": [2, 8], "next": [15]},
                 {"prev": [3, 9], "next": [16]},  # rank = 12
                 {"prev": [3, 9], "next": [17]},
-                {"prev": [10], "next": [0, 4]},
-                {"prev": [11], "next": [0, 4]},
-                {"prev": [12], "next": [1, 5]},  # rank = 16
-                {"prev": [13], "next": [1, 5]},
+                {"prev": [10], "next": []},  # rank = 14. LLM last stage
+                {"prev": [11], "next": []},
+                {"prev": [12], "next": []},  # rank = 16
+                {"prev": [13], "next": []},
             ],
         ),
         (
             84,
             {encoder2_template: 4},
             (llm_template_4stages, 4, 1),
-            [
-                {"prev": [72], "next": [12]},
-                {"prev": [73], "next": [13]},
-                {"prev": [74], "next": [14]},
-                {"prev": [75], "next": [15]},
-                {"prev": [76], "next": [16]},
-                {"prev": [77], "next": [17]},
-                {"prev": [78], "next": [18]},
-                {"prev": [79], "next": [19]},
-                {"prev": [80], "next": [20]},
-                {"prev": [81], "next": [21]},
-                {"prev": [82], "next": [22]},
-                {"prev": [83], "next": [23]},
-            ]
+            # encoder2 stage 0: ranks 0-11, no prev modal
+            [{"prev": [], "next": [i + 12]} for i in range(0, 12)]
+            # encoder2 stages 1-2 and LLM stages 0-2: intra-modal PP
             + [{"prev": [i - 12], "next": [i + 12]} for i in range(12, 72)]
-            + [
-                {"prev": [60], "next": [0]},
-                {"prev": [61], "next": [1]},
-                {"prev": [62], "next": [2]},
-                {"prev": [63], "next": [3]},
-                {"prev": [64], "next": [4]},
-                {"prev": [65], "next": [5]},
-                {"prev": [66], "next": [6]},
-                {"prev": [67], "next": [7]},
-                {"prev": [68], "next": [8]},
-                {"prev": [69], "next": [9]},
-                {"prev": [70], "next": [10]},
-                {"prev": [71], "next": [11]},
-            ],
+            # LLM stage 3 (last): ranks 72-83, no next modal
+            + [{"prev": [i - 12], "next": []} for i in range(72, 84)],
         ),
         (
             40,  # 20 ranks * 2 dp
             {encoder1_template: 2},
             (llm_template_2stages, 4, 2),
             [
-                {"prev": [24, 25, 28, 29], "next": [4]},
-                {"prev": [26, 27, 30, 31], "next": [5]},
-                {"prev": [32, 33, 36, 37], "next": [6]},
-                {"prev": [34, 35, 38, 39], "next": [7]},
-                {"prev": [0], "next": [8, 9, 12, 13]},  # rank = 4
+                {"prev": [], "next": [4]},  # rank = 0. encoder stage 0
+                {"prev": [], "next": [5]},
+                {"prev": [], "next": [6]},
+                {"prev": [], "next": [7]},
+                {"prev": [0], "next": [8, 9, 12, 13]},  # rank = 4. encoder stage 1 → llm
                 {"prev": [1], "next": [10, 11, 14, 15]},
                 {"prev": [2], "next": [16, 17, 20, 21]},
                 {"prev": [3], "next": [18, 19, 22, 23]},
-                {"prev": [4], "next": [24]},  # rank = 8
+                {"prev": [4], "next": [24]},  # rank = 8. LLM stage 0
                 {"prev": [4], "next": [25]},
                 {"prev": [5], "next": [26]},
                 {"prev": [5], "next": [27]},
@@ -150,22 +127,22 @@ def destroy_process_group():
                 {"prev": [6], "next": [37]},
                 {"prev": [7], "next": [38]},
                 {"prev": [7], "next": [39]},
-                {"prev": [8], "next": [0]},  # rank = 24
-                {"prev": [9], "next": [0]},
-                {"prev": [10], "next": [1]},
-                {"prev": [11], "next": [1]},
-                {"prev": [12], "next": [0]},  # rank = 28
-                {"prev": [13], "next": [0]},
-                {"prev": [14], "next": [1]},
-                {"prev": [15], "next": [1]},
-                {"prev": [16], "next": [2]},  # rank = 32
-                {"prev": [17], "next": [2]},
-                {"prev": [18], "next": [3]},
-                {"prev": [19], "next": [3]},
-                {"prev": [20], "next": [2]},  # rank = 36
-                {"prev": [21], "next": [2]},
-                {"prev": [22], "next": [3]},
-                {"prev": [23], "next": [3]},
+                {"prev": [8], "next": []},  # rank = 24. LLM last stage
+                {"prev": [9], "next": []},
+                {"prev": [10], "next": []},
+                {"prev": [11], "next": []},
+                {"prev": [12], "next": []},  # rank = 28
+                {"prev": [13], "next": []},
+                {"prev": [14], "next": []},
+                {"prev": [15], "next": []},
+                {"prev": [16], "next": []},  # rank = 32
+                {"prev": [17], "next": []},
+                {"prev": [18], "next": []},
+                {"prev": [19], "next": []},
+                {"prev": [20], "next": []},  # rank = 36
+                {"prev": [21], "next": []},
+                {"prev": [22], "next": []},
+                {"prev": [23], "next": []},
             ],
         ),
         (
@@ -173,17 +150,17 @@ def destroy_process_group():
             {encoder1_template: 2, encoder2_template: 2},
             (llm_template_2stages, 4, 4),
             [
-                {"prev": [26, 27, 30, 31, 34, 35, 38, 39], "next": [2]},
-                {"prev": [28, 29, 32, 33, 36, 37, 40, 41], "next": [3]},
+                {"prev": [], "next": [2]},  # rank = 0. encoder1 stage 0
+                {"prev": [], "next": [3]},
                 {"prev": [0], "next": [10, 11, 14, 15, 18, 19, 22, 23]},
                 {"prev": [1], "next": [12, 13, 16, 17, 20, 21, 24, 25]},
-                {"prev": [26, 27, 30, 31, 34, 35, 38, 39], "next": [6]},  # rank = 4
-                {"prev": [28, 29, 32, 33, 36, 37, 40, 41], "next": [7]},
+                {"prev": [], "next": [6]},  # rank = 4. encoder2 stage 0
+                {"prev": [], "next": [7]},
                 {"prev": [4], "next": [8]},
                 {"prev": [5], "next": [9]},
                 {"prev": [6], "next": [10, 11, 14, 15, 18, 19, 22, 23]},
                 {"prev": [7], "next": [12, 13, 16, 17, 20, 21, 24, 25]},
-                {"prev": [2, 8], "next": [26]},  # rank = 10, LLM
+                {"prev": [2, 8], "next": [26]},  # rank = 10, LLM stage 0
                 {"prev": [2, 8], "next": [27]},
                 {"prev": [3, 9], "next": [28]},
                 {"prev": [3, 9], "next": [29]},
@@ -199,22 +176,22 @@ def destroy_process_group():
                 {"prev": [2, 8], "next": [39]},
                 {"prev": [3, 9], "next": [40]},
                 {"prev": [3, 9], "next": [41]},
-                {"prev": [10], "next": [0, 4]},  # rank = 26
-                {"prev": [11], "next": [0, 4]},
-                {"prev": [12], "next": [1, 5]},
-                {"prev": [13], "next": [1, 5]},
-                {"prev": [14], "next": [0, 4]},  # rank = 30
-                {"prev": [15], "next": [0, 4]},
-                {"prev": [16], "next": [1, 5]},
-                {"prev": [17], "next": [1, 5]},
-                {"prev": [18], "next": [0, 4]},  # rank = 34
-                {"prev": [19], "next": [0, 4]},
-                {"prev": [20], "next": [1, 5]},
-                {"prev": [21], "next": [1, 5]},
-                {"prev": [22], "next": [0, 4]},  # rank = 38
-                {"prev": [23], "next": [0, 4]},
-                {"prev": [24], "next": [1, 5]},
-                {"prev": [25], "next": [1, 5]},
+                {"prev": [10], "next": []},  # rank = 26. LLM last stage
+                {"prev": [11], "next": []},
+                {"prev": [12], "next": []},
+                {"prev": [13], "next": []},
+                {"prev": [14], "next": []},  # rank = 30
+                {"prev": [15], "next": []},
+                {"prev": [16], "next": []},
+                {"prev": [17], "next": []},
+                {"prev": [18], "next": []},  # rank = 34
+                {"prev": [19], "next": []},
+                {"prev": [20], "next": []},
+                {"prev": [21], "next": []},
+                {"prev": [22], "next": []},  # rank = 38
+                {"prev": [23], "next": []},
+                {"prev": [24], "next": []},
+                {"prev": [25], "next": []},
             ],
         ),
         (
@@ -222,19 +199,19 @@ def destroy_process_group():
             {encoder2_template: 4},
             (llm_template_4stages, 2, 4),
             [
-                {"prev": [36, 38, 40, 42], "next": [4]},
-                {"prev": [36, 38, 40, 42], "next": [5]},
-                {"prev": [37, 39, 41, 43], "next": [6]},
-                {"prev": [37, 39, 41, 43], "next": [7]},
-                {"prev": [0], "next": [8]},  # rank = 4
+                {"prev": [], "next": [4]},  # rank = 0. encoder2 stage 0
+                {"prev": [], "next": [5]},
+                {"prev": [], "next": [6]},
+                {"prev": [], "next": [7]},
+                {"prev": [0], "next": [8]},  # rank = 4. encoder2 stage 1
                 {"prev": [1], "next": [9]},
                 {"prev": [2], "next": [10]},
                 {"prev": [3], "next": [11]},
-                {"prev": [4], "next": [12, 14, 16, 18]},  # rank = 8
+                {"prev": [4], "next": [12, 14, 16, 18]},  # rank = 8. encoder2 last → llm
                 {"prev": [5], "next": [12, 14, 16, 18]},
                 {"prev": [6], "next": [13, 15, 17, 19]},
                 {"prev": [7], "next": [13, 15, 17, 19]},
-                {"prev": [8, 9], "next": [20]},  # rank = 12, LLM
+                {"prev": [8, 9], "next": [20]},  # rank = 12, LLM stage 0
                 {"prev": [10, 11], "next": [21]},
                 {"prev": [8, 9], "next": [22]},
                 {"prev": [10, 11], "next": [23]},
@@ -258,14 +235,130 @@ def destroy_process_group():
                 {"prev": [25], "next": [41]},
                 {"prev": [26], "next": [42]},
                 {"prev": [27], "next": [43]},
-                {"prev": [28], "next": [0, 1]},  # rank = 36
-                {"prev": [29], "next": [2, 3]},
-                {"prev": [30], "next": [0, 1]},
-                {"prev": [31], "next": [2, 3]},
-                {"prev": [32], "next": [0, 1]},  # rank = 40
-                {"prev": [33], "next": [2, 3]},
-                {"prev": [34], "next": [0, 1]},
-                {"prev": [35], "next": [2, 3]},
+                {"prev": [28], "next": []},  # rank = 36. LLM last stage
+                {"prev": [29], "next": []},
+                {"prev": [30], "next": []},
+                {"prev": [31], "next": []},
+                {"prev": [32], "next": []},  # rank = 40
+                {"prev": [33], "next": []},
+                {"prev": [34], "next": []},
+                {"prev": [35], "next": []},
+            ],
+        ),
+        # ------------------------------------------------------------------
+        # Case A: encoder TP=4 SP=1, LLM TP=2 SP=1 (only TP different,
+        #          encoder TP > LLM TP), DP=1, world_size=12
+        # encoder mesh [2,1,1,4]: stage0=[0,1,2,3], stage1=[4,5,6,7]
+        # LLM    mesh [2,1,1,2]: stage0=[8,9],      stage1=[10,11]
+        # Border: encoder→LLM fan-in 2:1 on TP
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 4},
+            (llm_template_2stages, 2, 1),
+            [
+                {"prev": [], "next": [4]},   # rank 0. encoder stage 0
+                {"prev": [], "next": [5]},
+                {"prev": [], "next": [6]},
+                {"prev": [], "next": [7]},
+                {"prev": [0], "next": [8]},  # rank 4. encoder stage 1
+                {"prev": [1], "next": [8]},
+                {"prev": [2], "next": [9]},
+                {"prev": [3], "next": [9]},
+                {"prev": [4, 5], "next": [10]},  # rank 8. LLM stage 0
+                {"prev": [6, 7], "next": [11]},
+                {"prev": [8], "next": []},       # rank 10. LLM last stage
+                {"prev": [9], "next": []},
+            ],
+        ),
+        # ------------------------------------------------------------------
+        # Case B: encoder TP=2 SP=1, LLM TP=2 SP=2 (only SP different,
+        #          encoder SP < LLM SP), DP=1, world_size=12
+        # encoder mesh [2,1,1,2]: stage0=[0,1], stage1=[2,3]
+        # LLM    mesh [2,1,2,2]: stage0 SP0=[4,5] SP1=[6,7];
+        #                        stage1 SP0=[8,9] SP1=[10,11]
+        # Border: encoder last → LLM first fan-out 1:2 on SP
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 2},
+            (llm_template_2stages, 2, 2),
+            [
+                {"prev": [], "next": [2]},         # rank 0. encoder stage 0
+                {"prev": [], "next": [3]},
+                {"prev": [0], "next": [4, 6]},     # rank 2. encoder last → llm
+                {"prev": [1], "next": [5, 7]},
+                {"prev": [2], "next": [8]},         # rank 4. LLM stage 0 SP=0
+                {"prev": [3], "next": [9]},
+                {"prev": [2], "next": [10]},        # rank 6. LLM stage 0 SP=1
+                {"prev": [3], "next": [11]},
+                {"prev": [4], "next": []},           # rank 8. LLM last stage
+                {"prev": [5], "next": []},
+                {"prev": [6], "next": []},
+                {"prev": [7], "next": []},
+            ],
+        ),
+        # ------------------------------------------------------------------
+        # Case C: encoder TP=2 SP=2, LLM TP=2 SP=1 (only SP different,
+        #          encoder SP > LLM SP), DP=1, world_size=12
+        # encoder mesh [2,1,2,2]: stage0 SP0=[0,1] SP1=[2,3];
+        #                         stage1 SP0=[4,5] SP1=[6,7]
+        # LLM    mesh [2,1,1,2]: stage0=[8,9], stage1=[10,11]
+        # Border: encoder last → LLM first fan-in 2:1 on SP
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: (2, 2)},
+            (llm_template_2stages, 2, 1),
+            [
+                {"prev": [], "next": [4]},   # rank 0. encoder stage 0 SP=0 TP=0
+                {"prev": [], "next": [5]},
+                {"prev": [], "next": [6]},   # rank 2. encoder stage 0 SP=1 TP=0
+                {"prev": [], "next": [7]},
+                {"prev": [0], "next": [8]},  # rank 4. encoder stage 1 SP=0 TP=0
+                {"prev": [1], "next": [9]},
+                {"prev": [2], "next": [8]},  # rank 6. encoder stage 1 SP=1 TP=0
+                {"prev": [3], "next": [9]},
+                {"prev": [4, 6], "next": [10]},  # rank 8. LLM stage 0
+                {"prev": [5, 7], "next": [11]},
+                {"prev": [8], "next": []},       # rank 10. LLM last stage
+                {"prev": [9], "next": []},
+            ],
+        ),
+        # ------------------------------------------------------------------
+        # Case D: encoder TP=4 SP=2, LLM TP=2 SP=1 (both different,
+        #          encoder TP > LLM TP AND encoder SP > LLM SP), DP=1,
+        #          world_size=20
+        # encoder mesh [2,1,2,4]:
+        #   stage0 SP0=[0..3] SP1=[4..7]; stage1 SP0=[8..11] SP1=[12..15]
+        # LLM    mesh [2,1,1,2]: stage0=[16,17], stage1=[18,19]
+        # Border: encoder last → LLM first fan-in 4:1 on TP×SP
+        # ------------------------------------------------------------------
+        (
+            20,
+            {encoder1_template: (4, 2)},
+            (llm_template_2stages, 2, 1),
+            [
+                {"prev": [], "next": [8]},    # rank 0. encoder stage 0 SP=0 TP=0
+                {"prev": [], "next": [9]},
+                {"prev": [], "next": [10]},
+                {"prev": [], "next": [11]},
+                {"prev": [], "next": [12]},   # rank 4. encoder stage 0 SP=1 TP=0
+                {"prev": [], "next": [13]},
+                {"prev": [], "next": [14]},
+                {"prev": [], "next": [15]},
+                {"prev": [0], "next": [16]},  # rank 8. encoder stage 1 SP=0 TP=0
+                {"prev": [1], "next": [16]},
+                {"prev": [2], "next": [17]},
+                {"prev": [3], "next": [17]},
+                {"prev": [4], "next": [16]},  # rank 12. encoder stage 1 SP=1 TP=0
+                {"prev": [5], "next": [16]},
+                {"prev": [6], "next": [17]},
+                {"prev": [7], "next": [17]},
+                {"prev": [8, 9, 12, 13], "next": [18]},   # rank 16. LLM stage 0
+                {"prev": [10, 11, 14, 15], "next": [19]},
+                {"prev": [16], "next": []},  # rank 18. LLM last stage
+                {"prev": [17], "next": []},
             ],
         ),
     ],
@@ -400,6 +493,89 @@ def test_multimodal_pipeline_stage_manager(
                 tuple(range(36, 44)): (False, True),
             },
         ),
+        # ------------------------------------------------------------------
+        # Case A: encoder TP=4 SP=1 (PP=2), LLM TP=2 SP=1 (PP=2), DP=1
+        # encoder ranks 0-7; LLM ranks 8-11
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 4},
+            (llm_template_2stages, 2, 1),
+            {
+                # global: encoder stage 0 = first, LLM stage 1 = last
+                (0, 1, 2, 3): (True, False),
+                (4, 5, 6, 7, 8, 9): (False, False),
+                (10, 11): (False, True),
+            },
+            {
+                # modal-local: encoder stage 0 = first, encoder stage 1 = last;
+                #              LLM stage 0 = first (in modal), LLM stage 1 = last
+                (0, 1, 2, 3): (True, False),
+                (4, 5, 6, 7): (False, True),
+                (8, 9): (True, False),
+                (10, 11): (False, True),
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case B: encoder TP=2 SP=1 (PP=2), LLM TP=2 SP=2 (PP=2), DP=1
+        # encoder ranks 0-3; LLM ranks 4-11
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 2},
+            (llm_template_2stages, 2, 2),
+            {
+                (0, 1): (True, False),
+                (2, 3, 4, 5, 6, 7): (False, False),
+                (8, 9, 10, 11): (False, True),
+            },
+            {
+                (0, 1): (True, False),
+                (2, 3): (False, True),
+                (4, 5, 6, 7): (True, False),
+                (8, 9, 10, 11): (False, True),
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case C: encoder TP=2 SP=2 (PP=2), LLM TP=2 SP=1 (PP=2), DP=1
+        # encoder ranks 0-7; LLM ranks 8-11
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: (2, 2)},
+            (llm_template_2stages, 2, 1),
+            {
+                (0, 1, 2, 3): (True, False),
+                (4, 5, 6, 7, 8, 9): (False, False),
+                (10, 11): (False, True),
+            },
+            {
+                (0, 1, 2, 3): (True, False),
+                (4, 5, 6, 7): (False, True),
+                (8, 9): (True, False),
+                (10, 11): (False, True),
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case D: encoder TP=4 SP=2 (PP=2), LLM TP=2 SP=1 (PP=2), DP=1
+        # encoder ranks 0-15; LLM ranks 16-19
+        # ------------------------------------------------------------------
+        (
+            20,
+            {encoder1_template: (4, 2)},
+            (llm_template_2stages, 2, 1),
+            {
+                tuple(range(0, 8)): (True, False),
+                tuple(range(8, 18)): (False, False),
+                (18, 19): (False, True),
+            },
+            {
+                tuple(range(0, 8)): (True, False),
+                tuple(range(8, 16)): (False, True),
+                (16, 17): (True, False),
+                (18, 19): (False, True),
+            },
+        ),
     ],
 )
 # expected_first_last_stage: dict of list of ranks -> tuple of expected (is_first_stage, is_last_stage)
@@ -460,219 +636,150 @@ def test_first_last_stage(
 @pytest.mark.parametrize(
     "world_size, encoder_templates, llm_template, expected_ranks_in_stage",
     [
+        # ------------------------------------------------------------------
+        # encoder TP=2 SP=1 (PP=2), LLM TP=4 SP=1 (PP=2), DP=2
+        # Stage indices are modal-local (0 = first stage of ANY modal).
+        # max valid index = min(PP across all modals) - 1 = 1
+        # ------------------------------------------------------------------
         (
             24,
             {encoder1_template: 2},
             (llm_template_2stages, 4, 1),
             {
-                (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
-                (0, 2): [
-                    [0, 8],
-                    [0, 9],
-                    [1, 10],
-                    [1, 11],
-                    [2, 12],
-                    [2, 13],
-                    [3, 14],
-                    [3, 15],
-                ],
-                (0, 3): [
-                    [0, 16],
-                    [0, 17],
-                    [1, 18],
-                    [1, 19],
-                    [2, 20],
-                    [2, 21],
-                    [3, 22],
-                    [3, 23],
-                ],
-                (1, 2): [
-                    [4, 8],
-                    [4, 9],
-                    [5, 10],
-                    [5, 11],
-                    [6, 12],
-                    [6, 13],
-                    [7, 14],
-                    [7, 15],
-                ],
-                (0, 1, 3): [
-                    [0, 4, 16],
-                    [0, 4, 17],
-                    [1, 5, 18],
-                    [1, 5, 19],
-                    [2, 6, 20],
-                    [2, 6, 21],
-                    [3, 7, 22],
-                    [3, 7, 23],
+                (0, 1): [
+                    # encoder1 PP groups: stage0=[0..3] × stage1=[4..7]
+                    [0, 4], [1, 5], [2, 6], [3, 7],
+                    # LLM PP groups (DP=2, TP=4): stage0=[8..15] × stage1=[16..23]
+                    [8, 16], [9, 17], [10, 18], [11, 19],
+                    [12, 20], [13, 21], [14, 22], [15, 23],
                 ],
             },
         ),
+        # ------------------------------------------------------------------
+        # encoder1 TP=2 (PP=2), encoder2 TP=2 (PP=3), LLM TP=4 (PP=2), DP=1
+        # max valid index = 1 (limited by PP=2 modals)
+        # ------------------------------------------------------------------
         (
             18,
             {encoder1_template: 2, encoder2_template: 2},
             (llm_template_2stages, 4, 1),
             {
-                (0, 1): [[0, 2], [1, 3]],
-                (0, 2): [[0, 4], [1, 5]],
-                (0, 3): [[0, 6], [1, 7]],
-                (1, 2): [[2, 4], [3, 5]],
-                (0, 1, 2): [[0, 2, 4], [1, 3, 5]],
-                (0, 5): [[0, 10], [0, 11], [1, 12], [1, 13]],
-                (4, 5): [[8, 10], [8, 11], [9, 12], [9, 13]],
-                (2, 5, 6): [[4, 10, 14], [4, 11, 15], [5, 12, 16], [5, 13, 17]],
-                (3, 5, 6): [[6, 10, 14], [6, 11, 15], [7, 12, 16], [7, 13, 17]],
+                (0, 1): [
+                    # encoder1: stage0=[0,1] stage1=[2,3]
+                    [0, 2], [1, 3],
+                    # encoder2: stage0=[4,5] stage1=[6,7]
+                    [4, 6], [5, 7],
+                    # LLM: stage0=[10..13] stage1=[14..17]
+                    [10, 14], [11, 15], [12, 16], [13, 17],
+                ],
             },
         ),
+        # ------------------------------------------------------------------
+        # encoder2 TP=4 (PP=3), LLM TP=4 (PP=4), DP=3
+        # max valid index = 2 (limited by encoder2 PP=3)
+        # ------------------------------------------------------------------
         (
             84,
             {encoder2_template: 4},
             (llm_template_4stages, 4, 1),
             {
                 (0, 1): [
-                    [0, 12],
-                    [1, 13],
-                    [2, 14],
-                    [3, 15],
-                    [4, 16],
-                    [5, 17],
-                    [6, 18],
-                    [7, 19],
-                    [8, 20],
-                    [9, 21],
-                    [10, 22],
-                    [11, 23],
+                    # encoder2 (PP=3, DP=3, TP=4): 12 stage0+1 pairs
+                    [0, 12], [1, 13], [2, 14], [3, 15],
+                    [4, 16], [5, 17], [6, 18], [7, 19],
+                    [8, 20], [9, 21], [10, 22], [11, 23],
+                    # LLM (PP=4, DP=3, TP=4): 12 stage0+1 pairs
+                    [36, 48], [37, 49], [38, 50], [39, 51],
+                    [40, 52], [41, 53], [42, 54], [43, 55],
+                    [44, 56], [45, 57], [46, 58], [47, 59],
                 ],
-                (0, 2): [
-                    [0, 24],
-                    [1, 25],
-                    [2, 26],
-                    [3, 27],
-                    [4, 28],
-                    [5, 29],
-                    [6, 30],
-                    [7, 31],
-                    [8, 32],
-                    [9, 33],
-                    [10, 34],
-                    [11, 35],
-                ],
-                (1, 3): [
-                    [12, 36],
-                    [13, 37],
-                    [14, 38],
-                    [15, 39],
-                    [16, 40],
-                    [17, 41],
-                    [18, 42],
-                    [19, 43],
-                    [20, 44],
-                    [21, 45],
-                    [22, 46],
-                    [23, 47],
-                ],
-                (4, 5, 6): [
-                    [48, 60, 72],
-                    [49, 61, 73],
-                    [50, 62, 74],
-                    [51, 63, 75],
-                    [52, 64, 76],
-                    [53, 65, 77],
-                    [54, 66, 78],
-                    [55, 67, 79],
-                    [56, 68, 80],
-                    [57, 69, 81],
-                    [58, 70, 82],
-                    [59, 71, 83],
+                (0, 1, 2): [
+                    # encoder2: all 3 stages
+                    [0, 12, 24], [1, 13, 25], [2, 14, 26], [3, 15, 27],
+                    [4, 16, 28], [5, 17, 29], [6, 18, 30], [7, 19, 31],
+                    [8, 20, 32], [9, 21, 33], [10, 22, 34], [11, 23, 35],
+                    # LLM stages 0+1+2 (stage 3 excluded)
+                    [36, 48, 60], [37, 49, 61], [38, 50, 62], [39, 51, 63],
+                    [40, 52, 64], [41, 53, 65], [42, 54, 66], [43, 55, 67],
+                    [44, 56, 68], [45, 57, 69], [46, 58, 70], [47, 59, 71],
                 ],
             },
         ),
+        # ------------------------------------------------------------------
+        # encoder TP=2 SP=1 (PP=2), LLM TP=4 SP=2 (PP=2), DP=2
+        # max valid index = 1
+        # LLM mesh [2,2,2,4]: stage0=[8..23], stage1=[24..39]
+        # ------------------------------------------------------------------
         (
-            40,  # 20 ranks * 2 dp
+            40,
             {encoder1_template: 2},
             (llm_template_2stages, 4, 2),
             {
-                (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
-                (1, 2): [
-                    [4, 8],
-                    [4, 9],
-                    [4, 12],
-                    [4, 13],
-                    [5, 10],
-                    [5, 11],
-                    [5, 14],
-                    [5, 15],
-                    [6, 16],
-                    [6, 17],
-                    [6, 20],
-                    [6, 21],
-                    [7, 18],
-                    [7, 19],
-                    [7, 22],
-                    [7, 23],
+                (0, 1): [
+                    # encoder1 (PP=2, DP=2, SP=1, TP=2): 4 pairs
+                    [0, 4], [1, 5], [2, 6], [3, 7],
+                    # LLM (PP=2, DP=2, SP=2, TP=4): 16 pairs
+                    [8, 24], [9, 25], [10, 26], [11, 27],
+                    [12, 28], [13, 29], [14, 30], [15, 31],
+                    [16, 32], [17, 33], [18, 34], [19, 35],
+                    [20, 36], [21, 37], [22, 38], [23, 39],
                 ],
-                (2, 3): [[i, i + 16] for i in range(8, 24)],
             },
         ),
+        # ------------------------------------------------------------------
+        # encoder1 TP=2 (PP=2), encoder2 TP=2 (PP=3), LLM TP=4 SP=4 (PP=2), DP=1
+        # max valid index = 1
+        # LLM mesh [2,1,4,4]: stage0=[10..25], stage1=[26..41]
+        # ------------------------------------------------------------------
         (
             42,
             {encoder1_template: 2, encoder2_template: 2},
             (llm_template_2stages, 4, 4),
             {
                 (0, 1): [
-                    [0, 2],
-                    [1, 3],
+                    # encoder1: stage0=[0,1] stage1=[2,3]
+                    [0, 2], [1, 3],
+                    # encoder2: stage0=[4,5] stage1=[6,7]
+                    [4, 6], [5, 7],
+                    # LLM (PP=2, SP=4, TP=4): 16 stage0+1 pairs
+                    [10, 26], [11, 27], [12, 28], [13, 29],
+                    [14, 30], [15, 31], [16, 32], [17, 33],
+                    [18, 34], [19, 35], [20, 36], [21, 37],
+                    [22, 38], [23, 39], [24, 40], [25, 41],
                 ],
-                (1, 4, 5): [
-                    [2, 8, 10],
-                    [2, 8, 11],
-                    [2, 8, 14],
-                    [2, 8, 15],
-                    [2, 8, 18],
-                    [2, 8, 19],
-                    [2, 8, 22],
-                    [2, 8, 23],
-                    [3, 9, 12],
-                    [3, 9, 13],
-                    [3, 9, 16],
-                    [3, 9, 17],
-                    [3, 9, 20],
-                    [3, 9, 21],
-                    [3, 9, 24],
-                    [3, 9, 25],
-                ],
-                (5, 6): [[i, i + 16] for i in range(10, 26)],
             },
         ),
+        # ------------------------------------------------------------------
+        # encoder2 TP=4 (PP=3), LLM TP=2 SP=4 (PP=4), DP=1
+        # max valid index = 2 (encoder2 PP=3 is the limiting modal)
+        # encoder2 mesh [3,1,1,4]: stage0=[0..3], stage1=[4..7], stage2=[8..11]
+        # LLM     mesh [4,1,4,2]: stage0=[12..19], stage1=[20..27],
+        #                          stage2=[28..35], stage3=[36..43]
+        # ------------------------------------------------------------------
         (
             44,
             {encoder2_template: 4},
             (llm_template_4stages, 2, 4),
             {
-                (0, 1): [[0, 4], [1, 5], [2, 6], [3, 7]],
-                (2, 3): [
-                    [8, 12],
-                    [8, 14],
-                    [8, 16],
-                    [8, 18],
-                    [9, 12],
-                    [9, 14],
-                    [9, 16],
-                    [9, 18],
-                    [10, 13],
-                    [10, 15],
-                    [10, 17],
-                    [10, 19],
-                    [11, 13],
-                    [11, 15],
-                    [11, 17],
-                    [11, 19],
+                (0, 1): [
+                    # encoder2: stage0+1
+                    [0, 4], [1, 5], [2, 6], [3, 7],
+                    # LLM: stage0+1 (SP=4, TP=2 → 8 pairs per stage pair)
+                    [12, 20], [13, 21], [14, 22], [15, 23],
+                    [16, 24], [17, 25], [18, 26], [19, 27],
+                ],
+                (0, 1, 2): [
+                    # encoder2: all 3 stages
+                    [0, 4, 8], [1, 5, 9], [2, 6, 10], [3, 7, 11],
+                    # LLM: stages 0+1+2
+                    [12, 20, 28], [13, 21, 29], [14, 22, 30], [15, 23, 31],
+                    [16, 24, 32], [17, 25, 33], [18, 26, 34], [19, 27, 35],
                 ],
             },
         ),
     ],
 )
-# expected_ranks_in_stage: list of stage indices -> list of list of ranks
+# expected_ranks_in_stage: modal-local stage indices → list of [rank…] per group
 def test_process_group_by_stages(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
@@ -686,7 +793,9 @@ def test_process_group_by_stages(
     def record_new_group_call_decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            recorded_new_group_calls[dist.get_rank()].append(args[0])
+            # dist.new_group is called with ranks= as a keyword argument
+            ranks = args[0] if args else kwargs.get("ranks", [])
+            recorded_new_group_calls[dist.get_rank()].append(tuple(sorted(ranks)))
             return func(*args, **kwargs)
 
         return wrapper
@@ -740,8 +849,8 @@ def test_process_group_by_stages(
             {
                 (0, 1, 2, 3): (0, 0),
                 (4, 5, 6, 7): (1, 1),
-                (8, 9, 10, 11, 12, 13, 14, 15): (2, 0),
-                (16, 17, 18, 19, 20, 21, 22, 23): (3, 1),
+                (8, 9, 10, 11, 12, 13, 14, 15): (0, 0),   # LLM stage 0 (modal-local)
+                (16, 17, 18, 19, 20, 21, 22, 23): (1, 1),  # LLM stage 1 (modal-local)
             },
         ),
         (
@@ -749,13 +858,13 @@ def test_process_group_by_stages(
             {encoder1_template: 2, encoder2_template: 2},
             (llm_template_2stages, 4, 1),
             {
-                (0, 1): (0, 0),
-                (2, 3): (1, 1),
-                (4, 5): (2, 0),
-                (6, 7): (3, 1),
-                (8, 9): (4, 2),
-                (10, 11, 12, 13): (5, 0),
-                (14, 15, 16, 17): (6, 1),
+                (0, 1): (0, 0),   # encoder1 stage 0
+                (2, 3): (1, 1),   # encoder1 stage 1
+                (4, 5): (0, 0),   # encoder2 stage 0 (modal-local)
+                (6, 7): (1, 1),   # encoder2 stage 1 (modal-local)
+                (8, 9): (2, 2),   # encoder2 stage 2 (modal-local)
+                (10, 11, 12, 13): (0, 0),  # LLM stage 0 (modal-local)
+                (14, 15, 16, 17): (1, 1),  # LLM stage 1 (modal-local)
             },
         ),
         (
@@ -766,10 +875,66 @@ def test_process_group_by_stages(
                 tuple(range(0, 12)): (0, 0),
                 tuple(range(12, 24)): (1, 1),
                 tuple(range(24, 36)): (2, 2),
-                tuple(range(36, 48)): (3, 0),
-                tuple(range(48, 60)): (4, 1),
-                tuple(range(60, 72)): (5, 2),
-                tuple(range(72, 84)): (6, 3),
+                tuple(range(36, 48)): (0, 0),   # LLM stage 0 (modal-local)
+                tuple(range(48, 60)): (1, 1),   # LLM stage 1 (modal-local)
+                tuple(range(60, 72)): (2, 2),   # LLM stage 2 (modal-local)
+                tuple(range(72, 84)): (3, 3),   # LLM stage 3 (modal-local)
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case A: encoder TP=4 SP=1, LLM TP=2 SP=1, world_size=12
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 4},
+            (llm_template_2stages, 2, 1),
+            {
+                (0, 1, 2, 3): (0, 0),   # encoder stage 0
+                (4, 5, 6, 7): (1, 1),   # encoder stage 1
+                (8, 9): (0, 0),          # LLM stage 0 (modal-local)
+                (10, 11): (1, 1),        # LLM stage 1 (modal-local)
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case B: encoder TP=2 SP=1, LLM TP=2 SP=2, world_size=12
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 2},
+            (llm_template_2stages, 2, 2),
+            {
+                (0, 1): (0, 0),    # encoder stage 0
+                (2, 3): (1, 1),    # encoder stage 1
+                (4, 5, 6, 7): (0, 0),    # LLM stage 0 (modal-local)
+                (8, 9, 10, 11): (1, 1),  # LLM stage 1 (modal-local)
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case C: encoder TP=2 SP=2, LLM TP=2 SP=1, world_size=12
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: (2, 2)},
+            (llm_template_2stages, 2, 1),
+            {
+                (0, 1, 2, 3): (0, 0),   # encoder stage 0
+                (4, 5, 6, 7): (1, 1),   # encoder stage 1
+                (8, 9): (0, 0),          # LLM stage 0 (modal-local)
+                (10, 11): (1, 1),        # LLM stage 1 (modal-local)
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case D: encoder TP=4 SP=2, LLM TP=2 SP=1, world_size=20
+        # ------------------------------------------------------------------
+        (
+            20,
+            {encoder1_template: (4, 2)},
+            (llm_template_2stages, 2, 1),
+            {
+                (0, 1, 2, 3, 4, 5, 6, 7): (0, 0),   # encoder stage 0
+                (8, 9, 10, 11, 12, 13, 14, 15): (1, 1),  # encoder stage 1
+                (16, 17): (0, 0),  # LLM stage 0 (modal-local)
+                (18, 19): (1, 1),  # LLM stage 1 (modal-local)
             },
         ),
     ],
@@ -801,23 +966,22 @@ def test_stage(
 
 
 @pytest.mark.parametrize(
-    "world_size, encoder_templates, llm_template, expected_layer_distribution, expected_stage_index_per_modal",
+    "world_size, encoder_templates, llm_template, expected_layer_distributions, expected_stage_index_per_modal",
     [
         (
             24,
             {encoder1_template: 2},
             (llm_template_2stages, 4, 1),
-            [2, 2, 3, 2],
+            # Per-modal layers-per-stage (modal-local)
+            {"encoder1": [2, 2], "llm": [3, 2]},
             {
                 (0, 1, 2, 3, 4, 5, 6, 7): {  # encoder1
                     (0,): (0, 2),
                     (1,): (2, 4),
-                    (2, 3): (0, 0),
                 },
                 tuple(range(8, 24)): {  # llm
-                    (0, 1): (0, 0),
-                    (2,): (0, 3),
-                    (3,): (3, 5),
+                    (0,): (0, 3),
+                    (1,): (3, 5),
                 },
             },
         ),
@@ -825,23 +989,20 @@ def test_stage(
             18,
             {encoder1_template: 2, encoder2_template: 2},
             (llm_template_2stages, 4, 1),
-            [2, 2, 2, 2, 2, 3, 2],
+            {"encoder1": [2, 2], "encoder2": [2, 2, 2], "llm": [3, 2]},
             {
-                (0, 1, 2, 3): {  # ranks in encoder1
+                (0, 1, 2, 3): {  # encoder1
                     (0,): (0, 2),
                     (1,): (2, 4),
-                    (2, 3, 4, 5, 6): (0, 0),
                 },
-                (4, 5, 6, 7, 8, 9): {  # ranks in encoder2
-                    (0, 1, 5, 6): (0, 0),
-                    (2,): (0, 2),
-                    (3,): (2, 4),
-                    (4,): (4, 6),
+                (4, 5, 6, 7, 8, 9): {  # encoder2
+                    (0,): (0, 2),
+                    (1,): (2, 4),
+                    (2,): (4, 6),
                 },
-                tuple(range(10, 18)): {  # ranks in llm
-                    (0, 1, 2, 3, 4): (0, 0),
-                    (5,): (0, 3),
-                    (6,): (3, 5),
+                tuple(range(10, 18)): {  # llm
+                    (0,): (0, 3),
+                    (1,): (3, 5),
                 },
             },
         ),
@@ -849,20 +1010,18 @@ def test_stage(
             44,
             {encoder2_template: 4},
             (llm_template_4stages, 2, 4),
-            [2, 2, 2, 3, 1, 4, 2],
+            {"encoder2": [2, 2, 2], "llm": [3, 1, 4, 2]},
             {
-                tuple(range(0, 12)): {  # ranks in encoder2
+                tuple(range(0, 12)): {  # encoder2
                     (0,): (0, 2),
                     (1,): (2, 4),
                     (2,): (4, 6),
-                    (3, 4, 5, 6): (0, 0),
                 },
-                tuple(range(12, 44)): {  # ranks in llm
-                    (0, 1, 2): (0, 0),
-                    (3,): (0, 3),
-                    (4,): (3, 4),
-                    (5,): (4, 8),
-                    (6,): (8, 10),
+                tuple(range(12, 44)): {  # llm
+                    (0,): (0, 3),
+                    (1,): (3, 4),
+                    (2,): (4, 8),
+                    (3,): (8, 10),
                 },
             },
         ),
@@ -872,8 +1031,8 @@ def test_layer_distribution(
     world_size: int,
     encoder_templates: dict[PipelineTemplate, int],
     llm_template: tuple[PipelineTemplate, int, int],
-    expected_layer_distribution: list[list[str]],
-    # dict of list of ranks -> dict of stage indices -> tuple of start and end layer index
+    expected_layer_distributions: dict[str, list[int]],
+    # dict of rank-tuple → dict of modal-local stage index tuple → (start, end)
     expected_stage_index_per_modal: dict[
         tuple[int, ...], dict[tuple[int, ...], tuple[int, int]]
     ],
@@ -886,11 +1045,12 @@ def test_layer_distribution(
         stage_manager = MultiModalPipelineStageManager(mesh, mesh.pp_axis)
 
         layers = stage_manager.distribute_layers()
+        modal_name = mesh.my_modal.model_name
+        expected_layers = expected_layer_distributions[modal_name]
         assert (
-            layers == expected_layer_distribution
-        ), f"layer distribution expected: {expected_layer_distribution}, got: {layers}."
+            layers == expected_layers
+        ), f"rank {rank} ({modal_name}) layer distribution expected: {expected_layers}, got: {layers}."
 
-        stage_index = stage_manager.get_stage_index(layers)
         expected_stage_indices_for_rank = next(
             value
             for ranks, value in expected_stage_index_per_modal.items()
