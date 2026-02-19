@@ -762,11 +762,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
 
         self.load_batch(data_iter)
 
-        my_modal = self.stage_manager.stage_index_to_modal[
-            self.stage_manager.pg_mesh.coords[0][self.stage_manager.pipeline_axis]
-        ]
-        if isinstance(my_modal, list):
-            my_modal = my_modal[0]
+        my_modal = self.stage_manager.pg_mesh.my_modal
 
         # If LLM exists, calculate the number of warmup microbatches considering
         # LLM pipeline stages.

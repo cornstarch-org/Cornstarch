@@ -92,9 +92,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
 
         # Cache my modal so that do forward only on the modal
         stage_manager: MultiModalPipelineStageManager = self.stage_manager
-        my_modal_template = stage_manager.stage_index_to_modal[
-            stage_manager.pg_mesh.coords[0][stage_manager.pipeline_axis]
-        ]
+        my_modal_template = stage_manager.pg_mesh.my_modal
         my_modal_name: str = None
         if my_modal_template in stage_manager.pg_mesh.encoder_templates.keys():
             my_modal_name = next(
@@ -533,6 +531,9 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.tp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.tp_axis)
         self.sp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.sp_axis)
         self.pp_groups = self.pg_mesh.get_group_along_axis(self.pg_mesh.pp_axis)
+        # Global PP group spans all pipeline stages across all modals in one DP replica.
+        # Used by the optimizer for gradient-norm computation.
+        self.global_pp_group = self.pg_mesh.get_global_pp_group()
 
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
@@ -548,11 +549,8 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             dist.get_world_size(self.tp_group) > 1
         )
 
-        target_plugin: ModalParallelPlugin
-        my_modal_template = self.stage_manager.stage_index_to_modal[
-            self.stage_manager.pg_mesh.coords[0][self.stage_manager.pipeline_axis]
-        ]
-        if my_modal_template == self.stage_manager.pg_mesh.llm_template[0]:
+        my_modal = self.stage_manager.pg_mesh.my_modal
+        if my_modal == self.stage_manager.pg_mesh.llm_template[0]:
             target_plugin = self.language_model_plugin
         else:
             target_plugin = list(self.encoder_plugins.values())[0]
@@ -634,7 +632,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                         param_info=param_info,
                         precision=self.precision,
                         max_norm=self.max_norm,
-                        pp_process_group=self.pp_groups[0],
+                        pp_process_group=self.global_pp_group,
                         tp_process_group=self.tp_group,
                         **self.amp_config,
                     )
@@ -645,7 +643,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                         use_pipeline=self.enable_pipeline_parallelism,
                         param_info=param_info,
                         max_norm=self.max_norm,
-                        pp_process_group=self.pp_groups[0],
+                        pp_process_group=self.global_pp_group,
                         tp_process_group=self.tp_group,
                     )
                 # inject update_master_params

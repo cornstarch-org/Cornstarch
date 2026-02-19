@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import itertools
 from typing import Optional
 
 import numpy as np
@@ -13,10 +12,19 @@ from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh impor
 
 
 class MultiModalPipelineStageManager(PipelineStageManager):
-    """PipelineStageManager is a helper class to manage pipeline stages.
+    """PipelineStageManager for multimodal models with heterogeneous parallelism.
 
-    Unlike traditional unimodal pipeline, where a stage always follows the previous one,
-    some stages in multimodal pipeline may be executed in parallel.
+    Unlike a traditional unimodal pipeline where every stage follows the previous one
+    linearly, multimodal pipelines execute encoder(s) and the LLM on disjoint sets of
+    ranks that communicate only at modal boundaries.
+
+    Key design differences from the parent class
+    --------------------------------------------
+    * Each modal has its own ``ProcessGroupMesh``; stages are numbered *within* the
+      modal (0 … modal.num_stages-1), not globally.
+    * ``get_prev_ranks`` / ``get_next_ranks`` return a list because a single rank may
+      fan-out to (or receive from) multiple ranks at a modal boundary.
+    * ``get_prev_rank`` / ``get_next_rank`` are intentionally removed.
     """
 
     def __init__(
@@ -29,222 +37,148 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         self.p2p_groups: dict[tuple[int, int], dist.ProcessGroup] = {}
         self.is_interleave = False
         self.num_model_chunks = 1
-        self.stage_index_to_modal = list(
-            itertools.chain.from_iterable(
-                [modal] * modal.num_stages
-                for modal in pg_mesh.topological_sorted_modals
-            )
+
+        # Convenience references
+        my_modal = pg_mesh.my_modal
+        my_mesh = pg_mesh.modal_meshes[my_modal]
+        my_rank = dist.get_rank()
+        my_coords = pg_mesh.coords  # list of (pp, dp, sp, tp) tuples, always len 1
+
+        my_pp_stage = my_coords[0][pipeline_axis]
+        my_modal_pp_size = my_mesh.shape[pipeline_axis]
+
+        # ------------------------------------------------------------------
+        # Compute prev/next ranks
+        # ------------------------------------------------------------------
+        prev_ranks_set: set[int] = set()
+        next_ranks_set: set[int] = set()
+
+        # Determine whether there are predecessor / successor modals
+        has_prev_modal = bool(pg_mesh.backward_border_map) and any(
+            my_rank in bmap
+            for bmap in pg_mesh.backward_border_map.values()
+        )
+        has_next_modal = bool(pg_mesh.forward_border_map) and any(
+            my_rank in fmap
+            for fmap in pg_mesh.forward_border_map.values()
         )
 
-        coords = self.pg_mesh.coords
-        prev_coords = []
-        next_coords = []
-        my_modal = self.stage_index_to_modal[coords[0][self.pipeline_axis]]
+        if my_pp_stage == 0 and has_prev_modal:
+            # First stage in this modal: previous ranks come from the border map
+            prev_ranks_set.update(pg_mesh.get_border_prev_ranks(my_rank))
+        elif my_pp_stage > 0:
+            # Not the first stage: predecessor is the previous PP row (same DP/SP/TP)
+            pp_coord, dp_coord, sp_coord, tp_coord = my_coords[0]
+            prev_pp = pp_coord - 1
+            prev_rank = int(my_mesh[prev_pp, dp_coord, sp_coord, tp_coord])
+            prev_ranks_set.add(prev_rank)
 
-        previous_modals = []
-        next_modals = []
+        if my_pp_stage == my_modal_pp_size - 1 and has_next_modal:
+            # Last stage in this modal: next ranks come from the border map
+            next_ranks_set.update(pg_mesh.get_border_next_ranks(my_rank))
+        elif my_pp_stage < my_modal_pp_size - 1:
+            # Not the last stage: successor is the next PP row (same DP/SP/TP)
+            pp_coord, dp_coord, sp_coord, tp_coord = my_coords[0]
+            next_pp = pp_coord + 1
+            next_rank = int(my_mesh[next_pp, dp_coord, sp_coord, tp_coord])
+            next_ranks_set.add(next_rank)
 
-        if my_modal in pg_mesh.encoder_templates.keys():
-            if pg_mesh.llm_template is not None:
-                next_modals.append(pg_mesh.llm_template[0])
-                previous_modals.append(pg_mesh.llm_template[0])
-            else:
-                assert (
-                    len(pg_mesh.decoder_templates) == 0
-                ), "Encoder-decoder model without llm is not supported."
+        self.prev_ranks: list[int] = sorted(prev_ranks_set)
+        self.next_ranks: list[int] = sorted(next_ranks_set)
 
-        elif pg_mesh.llm_template is not None and my_modal == pg_mesh.llm_template[0]:
-            if (
-                len(pg_mesh.encoder_templates) > 0
-                and len(pg_mesh.decoder_templates) > 0
-            ):
-                previous_modals.extend(list(pg_mesh.encoder_templates.keys()))
-                next_modals.extend(list(pg_mesh.decoder_templates.keys()))
-            elif len(pg_mesh.encoder_templates) > 0:
-                assert len(pg_mesh.decoder_templates) == 0
-                previous_modals.extend(list(pg_mesh.encoder_templates.keys()))
-                next_modals.extend(list(pg_mesh.encoder_templates.keys()))
-            elif len(pg_mesh.decoder_templates) > 0:
-                assert len(pg_mesh.encoder_templates) == 0
-                previous_modals.extend(list(pg_mesh.decoder_templates.keys()))
-                next_modals.extend(list(pg_mesh.decoder_templates.keys()))
-        elif my_modal in pg_mesh.decoder_templates.keys():
-            assert (
-                pg_mesh.llm_template is not None
-            ), "Decoder model without llm is not supported."
-            previous_modals.append(pg_mesh.llm_template[0])
-            next_modals.append(pg_mesh.llm_template[0])
+    # ------------------------------------------------------------------
+    # Stage position helpers
+    # ------------------------------------------------------------------
 
-        for i in range(len(coords)):
-            if (
-                # if this stage is the first first stage
-                coords[i][self.pipeline_axis]
-                == 0
-            ) or (
-                # if previous stage is in the different modal
-                self.stage_index_to_modal[coords[i][self.pipeline_axis] - 1]
-                != my_modal
-            ):
-                last_stage_indices_of_previous_modals = []
-                for previous_modal in previous_modals:
-                    last_stage_indices_of_previous_modals.append(
-                        [
-                            index
-                            for index, modal in enumerate(self.stage_index_to_modal)
-                            if modal == previous_modal
-                        ][-1]
-                    )
+    @property
+    def stage(self) -> int:
+        """PP stage index *within the current modal* (0-based)."""
+        return self.pg_mesh.coords[0][self.pipeline_axis]
 
-                for stage_index in last_stage_indices_of_previous_modals:
-                    prev_coords.append(
-                        (
-                            coords[i][: self.pipeline_axis]
-                            + (stage_index,)
-                            + coords[i][self.pipeline_axis + 1 :]
-                        )
-                    )
-            else:
-                # previous stage is in the same modal
-                prev_coords.append(
-                    (
-                        coords[i][: self.pipeline_axis]
-                        + (coords[i][self.pipeline_axis] - 1,)
-                        + coords[i][self.pipeline_axis + 1 :]
-                    )
-                )
+    @property
+    def num_stages(self) -> int:
+        """Number of PP stages in the current modal."""
+        return self.pg_mesh.modal_meshes[self.pg_mesh.my_modal].shape[
+            self.pipeline_axis
+        ]
 
-            if (
-                # if this stage is the last last stage
-                coords[i][self.pipeline_axis]
-                == self.pg_mesh.shape[self.pipeline_axis] - 1
-            ) or (
-                # if next stage is in the different modal
-                self.stage_index_to_modal[coords[i][self.pipeline_axis] + 1]
-                != my_modal
-            ):
-                first_stage_indices_of_next_modals = []
-                for next_modal in next_modals:
-                    first_stage_indices_of_next_modals.append(
-                        [
-                            index
-                            for index, modal in enumerate(self.stage_index_to_modal)
-                            if modal == next_modal
-                        ][0]
-                    )
+    @property
+    def num_stages_in_modal(self) -> int:
+        """Alias for ``num_stages`` (stages are already modal-relative)."""
+        return self.num_stages
 
-                for stage_index in first_stage_indices_of_next_modals:
-                    next_coords.append(
-                        (
-                            coords[i][: self.pipeline_axis]
-                            + (stage_index,)
-                            + coords[i][self.pipeline_axis + 1 :]
-                        )
-                    )
-            else:
-                # next stage is in the same modal
-                next_coords.append(
-                    (
-                        coords[i][: self.pipeline_axis]
-                        + (coords[i][self.pipeline_axis] + 1,)
-                        + coords[i][self.pipeline_axis + 1 :]
-                    )
-                )
-
-        self.prev_ranks: list[int] = list(
-            sorted(set([self.pg_mesh.mesh[prev_coord] for prev_coord in prev_coords]))
-        )
-        self.next_ranks: list[int] = list(
-            sorted(set([self.pg_mesh.mesh[next_coord] for next_coord in next_coords]))
-        )
+    @property
+    def stage_in_modal(self) -> int:
+        """Stage index within the modal (same as ``stage``)."""
+        return self.stage
 
     def is_first_stage(
         self, ignore_chunk: bool = False, check_only_in_modal: bool = True
     ) -> bool:
-        """Is the current stage the first stage.
+        """Return True if this rank is at the first PP stage.
 
-        NOTE:
-            - Even if the stage index is not 0, the stage can still be the first stage in MultiModalPipeline.
-            - Determining if the stage is the first is done by checking the modal dependency.
-
-        Returns:
-            bool: Whether the current stage is the first stage.
+        Args:
+            check_only_in_modal: When True, check only whether this is the first
+                stage *within* the current modal.  When False, additionally require
+                that this modal is an encoder (or the LLM when no encoders exist),
+                i.e. that there is no modal that feeds into it.
         """
-        my_modal = self.stage_index_to_modal[self.stage]
-        stage_indices_of_modal = [
-            index
-            for index, modal in enumerate(self.stage_index_to_modal)
-            if modal == my_modal
-        ]
-
+        if self.stage != 0:
+            return False
         if check_only_in_modal:
-            # If `check_only_in_modal` is set True, check only if the rank is the first in the modal
-            if self.stage == stage_indices_of_modal[0]:
-                return True
-            else:
-                return False
-        else:
-            # This is the first stage only if it is the first stage of encoders
-            # or llm if there is no encoders.
-            if (
-                (my_modal in self.pg_mesh.encoder_templates.keys())
-                or (
-                    len(self.pg_mesh.encoder_templates) == 0
-                    and my_modal == self.pg_mesh.llm_template[0]
-                )
-            ) and self.stage == stage_indices_of_modal[0]:
-                return True
-            else:
-                return False
+            return True
+        # Global first: must be an encoder (or LLM when there are no encoders)
+        my_modal = self.pg_mesh.my_modal
+        if my_modal in self.pg_mesh.encoder_templates:
+            return True
+        if (
+            not self.pg_mesh.encoder_templates
+            and self.pg_mesh.llm_template is not None
+            and my_modal == self.pg_mesh.llm_template[0]
+        ):
+            return True
+        return False
 
     def is_last_stage(
         self, ignore_chunk: bool = False, check_only_in_modal: bool = True
     ) -> bool:
-        """Is the current stage the last stage.
+        """Return True if this rank is at the last PP stage.
 
-        NOTE:
-            - Even if the stage index is not num_stages - 1, the stage can still be the last stage in MultiModalPipeline.
-            - Determining if the stage is the last is done by checking the modal dependency.
-
-        Returns:
-            bool: Whether the current stage is the last stage.
+        Args:
+            check_only_in_modal: When True, check only whether this is the last
+                stage *within* the current modal.  When False, additionally require
+                that this modal is a decoder (or the LLM when there are no decoders).
         """
-        my_modal = self.stage_index_to_modal[self.stage]
-        stage_indices_of_modal = [
-            index
-            for index, modal in enumerate(self.stage_index_to_modal)
-            if modal == my_modal
-        ]
-
+        if self.stage != self.num_stages - 1:
+            return False
         if check_only_in_modal:
-            # If `check_only_in_modal` is set True, check only if the rank is the last in the modal
-            if self.stage == stage_indices_of_modal[-1]:
-                return True
-            else:
-                return False
-        else:
-            # This is the last stage only if it is the last stage of decoders or
-            # llm if there is no decoders
-            if (
-                (my_modal in self.pg_mesh.decoder_templates.keys())
-                or (
-                    len(self.pg_mesh.decoder_templates) == 0
-                    and my_modal == self.pg_mesh.llm_template[0]
-                )
-            ) and self.stage == stage_indices_of_modal[-1]:
-                return True
-            else:
-                return False
+            return True
+        # Global last: must be a decoder (or LLM when there are no decoders)
+        my_modal = self.pg_mesh.my_modal
+        if my_modal in self.pg_mesh.decoder_templates:
+            return True
+        if (
+            not self.pg_mesh.decoder_templates
+            and self.pg_mesh.llm_template is not None
+            and my_modal == self.pg_mesh.llm_template[0]
+        ):
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Rank accessors
+    # ------------------------------------------------------------------
 
     def get_prev_rank(self) -> int:
         raise NotImplementedError(
-            "This method is removed from MultimodalPipelineStageManager. "
-            "Use `get_prev_ranks` instead."
+            "get_prev_rank is removed from MultiModalPipelineStageManager. "
+            "Use get_prev_ranks instead."
         )
 
     def get_next_rank(self) -> int:
         raise NotImplementedError(
-            "This method is removed from MultimodalPipelineStageManager. "
-            "Use `get_next_ranks` instead."
+            "get_next_rank is removed from MultiModalPipelineStageManager. "
+            "Use get_next_ranks instead."
         )
 
     def get_prev_ranks(self) -> list[int]:
@@ -253,45 +187,19 @@ class MultiModalPipelineStageManager(PipelineStageManager):
     def get_next_ranks(self) -> list[int]:
         return self.next_ranks
 
+    # ------------------------------------------------------------------
+    # Process group helpers
+    # ------------------------------------------------------------------
+
     def init_process_group_by_stages(
         self, stages: list[int]
     ) -> dist.ProcessGroup | list[dist.ProcessGroup]:
-        """Get the process group of the given stages.
-
-        Args:
-            stages (list[int]): List of stages.
-
-        Returns:
-            ProcessGrooup | list[ProcessGroup]: Process groups of the given stages.
-            Returns a list only when there are multiple process groups.
-        """
+        """Get the intra-modal PP process group restricted to ``stages``."""
         return self.pg_mesh.get_group_along_axis(self.pipeline_axis, stages)
 
-    @property
-    def num_stages(self) -> int:
-        group = self.pg_mesh.get_group_along_axis(self.pipeline_axis)
-        if group is None:
-            # This is one-stage pipeline
-            return 1
-
-        return self.pg_mesh.shape[self.pipeline_axis]
-
-    @property
-    def num_stages_in_modal(self) -> int:
-        return self.stage_index_to_modal[self.stage].num_stages
-
-    @property
-    def stage(self) -> int:
-        return self.pg_mesh.coords[0][self.pipeline_axis]
-
-    @property
-    def stage_in_modal(self) -> int:
-        first_stage_index = next(
-            index
-            for index, modal in enumerate(self.stage_index_to_modal)
-            if modal == self.stage_index_to_modal[self.stage]
-        )
-        return self.stage - first_stage_index
+    # ------------------------------------------------------------------
+    # Layer distribution
+    # ------------------------------------------------------------------
 
     def distribute_layers(
         self,
@@ -299,35 +207,12 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         num_stages: Optional[int] = None,
         num_model_chunks: Optional[int] = None,
     ) -> list[int]:
-        """
-        Distributed layers across stages.
+        """Return layers-per-stage for the current modal.
 
-        Returns:
-            - list[int]: the number of layers for each stage
+        The returned list has length ``num_stages`` and its values sum to the
+        total number of layers in the current modal.
         """
-        return list(
-            itertools.chain.from_iterable(
-                modal.get_num_layers_per_stage()
-                for modal in self.pg_mesh.topological_sorted_modals
-            )
-        )
-
-    def _check_my_rank_in_the_stage(self, stage_index: int) -> bool:
-        """
-        Check if the current rank is in the stage.
-
-        Args:
-            stage_index (int): the stage index
-
-        Returns:
-            - bool: whether the current rank is in the stage
-        """
-        ranks_in_modal = next(
-            ranks
-            for modal, ranks in self.pg_mesh.modal_to_ranks.items()
-            if self.stage_index_to_modal[stage_index] == modal
-        )
-        return dist.get_rank() in ranks_in_modal
+        return self.pg_mesh.my_modal.get_num_layers_per_stage()
 
     def get_stage_index(
         self,
@@ -336,37 +221,18 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         num_model_chunks: Optional[int] = None,
         num_stages: Optional[int] = None,
     ) -> tuple[int, int]:
-        """
-        Get the start index and end index of layers for each stage in the coresponding modal.
-        If this rank is not in the modal, return [0, 0].
+        """Return (start, end) layer indices for the given stage within the current modal.
 
         Args:
-            layers_per_stage (list[int]): number of layers for each stage
-            stage (int): the stage index
-            num_stages (int): number of stages
-            num_model_chunks (int): number of model chunks
+            layers_per_stage: Number of layers per stage (output of ``distribute_layers``).
+            stage: Stage index within the current modal.  Defaults to ``self.stage``.
 
         Returns:
-            - tuple[int, int]: the start index and end index of this stage
+            (start_idx, end_idx) — exclusive end, relative to the modal's layer 0.
+            Returns (0, 0) when the requested stage is outside this modal.
         """
         stage = self.stage if stage is None else stage
-        num_stages = self.num_stages if num_stages is None else num_stages
-
-        if not self._check_my_rank_in_the_stage(stage):
+        if stage >= self.num_stages:
             return (0, 0)
-
-        # Find the first stage index of this modal and subtract it from stage
-        # to make it zero-based index
-        first_stage_index = next(
-            index
-            for index, modal in enumerate(self.stage_index_to_modal)
-            if modal == self.stage_index_to_modal[stage]
-        )
-
-        num_layers_per_stage_accumulated = np.insert(np.cumsum(layers_per_stage), 0, 0)
-        return (
-            num_layers_per_stage_accumulated[stage]
-            - num_layers_per_stage_accumulated[first_stage_index],
-            num_layers_per_stage_accumulated[stage + 1]
-            - num_layers_per_stage_accumulated[first_stage_index],
-        )
+        accumulated = np.insert(np.cumsum(layers_per_stage), 0, 0)
+        return (int(accumulated[stage]), int(accumulated[stage + 1]))
