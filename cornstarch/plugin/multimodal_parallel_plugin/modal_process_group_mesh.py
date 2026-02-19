@@ -178,13 +178,12 @@ class MultiModalProcessGroupMesh:
                         tp_ratio_inv = tp_A // tp_B
                         t_B_range = range(t_A // tp_ratio_inv, t_A // tp_ratio_inv + 1)
 
-                    # SP dimension mapping
-                    if sp_B >= sp_A:
-                        sp_ratio = sp_B // sp_A
-                        s_B_range = range(s_A * sp_ratio, (s_A + 1) * sp_ratio)
-                    else:
-                        sp_ratio_inv = sp_A // sp_B
-                        s_B_range = range(s_A // sp_ratio_inv, s_A // sp_ratio_inv + 1)
+                    # SP dimension mapping: always include all LLM SP ranks.
+                    # Unlike TP, the schedule cannot determine at this level which
+                    # LLM SP rank needs which encoder SP rank's tokens (that is
+                    # model-specific). Hooks registered on the schedule handle
+                    # the actual per-rank routing.
+                    s_B_range = range(0, sp_B)
 
                     for s_B in s_B_range:
                         for t_B in t_B_range:

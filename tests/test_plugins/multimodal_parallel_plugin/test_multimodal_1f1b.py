@@ -279,6 +279,256 @@ class HomogeneousTensorParallelTestCase(GlooDistributedTestBase):
                 assert all(obj == backward_obj for obj in recv_backward_objs)
 
 
+@instantiate_parametrized_tests
+class HeterogeneousParallelTestCase(GlooDistributedTestBase):
+    """
+    Tests for heterogeneous TP/SP configurations across the encoder-LLM boundary.
+
+    Three configurations (all DP=2, 1 encoder with 2 PP stages, LLM with 2 PP stages):
+      - TP fan-out : enc_tp=2, enc_sp=1 → llm_tp=4, llm_sp=1  (world=24)
+      - TP fan-in  : enc_tp=4, enc_sp=1 → llm_tp=2, llm_sp=1  (world=24)
+      - SP fan-in  : enc_tp=2, enc_sp=2 → llm_tp=2, llm_sp=1  (world=24)
+
+    All tests use the default (no-hook) broadcast semantics.
+    """
+
+    @property
+    def world_size(self):
+        enc_tp = int(os.environ["ENC_TP"])
+        enc_sp = int(os.environ["ENC_SP"])
+        llm_tp = int(os.environ["LLM_TP"])
+        llm_sp = int(os.environ["LLM_SP"])
+        dp = 2
+        enc_ranks = encoder1_template.num_stages * enc_tp * enc_sp * dp
+        llm_ranks = llm_template_2stages.num_stages * llm_tp * llm_sp * dp
+        return enc_ranks + llm_ranks
+
+    def setUp(self) -> None:
+        pattern = r"enc_tp=(\d+)_enc_sp=(\d+)_llm_tp=(\d+)_llm_sp=(\d+)"
+        match = re.search(pattern, self._testMethodName)
+        assert match is not None, (
+            f"Could not parse parallelism params from {self._testMethodName}"
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "ENC_TP": match.group(1),
+                "ENC_SP": match.group(2),
+                "LLM_TP": match.group(3),
+                "LLM_SP": match.group(4),
+            },
+        ):
+            super().setUp()
+
+    def create_p2p(
+        self,
+        enc_tp: int,
+        enc_sp: int,
+        llm_tp: int,
+        llm_sp: int,
+    ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
+        pg_mesh = MultiModalProcessGroupMesh(
+            encoder_templates={encoder1_template: (enc_tp, enc_sp)},
+            llm_template=(llm_template_2stages, llm_tp, llm_sp),
+        )
+        stage_manager = MultiModalPipelineStageManager(pg_mesh, pg_mesh.pp_axis)
+        p2p = MultimodalPipelineP2PCommunication(stage_manager=stage_manager)
+        return stage_manager, p2p
+
+    @parametrize(
+        "enc_tp,enc_sp,llm_tp,llm_sp",
+        [(2, 1, 4, 1), (4, 1, 2, 1), (2, 2, 2, 1)],
+        name_fn=lambda enc_tp, enc_sp, llm_tp, llm_sp: (
+            f"enc_tp={enc_tp}_enc_sp={enc_sp}_llm_tp={llm_tp}_llm_sp={llm_sp}"
+        ),
+    )
+    @parametrize("is_broadcast", [True, False], name_fn=lambda x: "bd" if x else "nbd")
+    def test_p2p_communication_forward_first(
+        self,
+        enc_tp: int,
+        enc_sp: int,
+        llm_tp: int,
+        llm_sp: int,
+        is_broadcast: bool,
+    ):
+        stage_manager, p2p = self.create_p2p(enc_tp, enc_sp, llm_tp, llm_sp)
+        data = create_data()
+
+        recv_forward_objs = None
+        recv_backward_objs = None
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_backward(
+                    make_backward_object(backward_obj, is_broadcast, stage_manager),
+                    is_broadcast=is_broadcast,
+                )
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                p2p.send_forward(forward_obj, is_broadcast=True)
+                recv_backward_objs = p2p.recv_backward()
+            else:
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_forward(forward_obj, is_broadcast=True)
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_backward(
+                    make_backward_object(backward_obj, is_broadcast, stage_manager),
+                    is_broadcast=is_broadcast,
+                )
+
+            if recv_forward_objs:
+                assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
+                assert all(obj == forward_obj for obj in recv_forward_objs)
+
+            if recv_backward_objs:
+                assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
+                assert all(obj == backward_obj for obj in recv_backward_objs)
+
+    @parametrize(
+        "enc_tp,enc_sp,llm_tp,llm_sp",
+        [(2, 1, 4, 1), (4, 1, 2, 1), (2, 2, 2, 1)],
+        name_fn=lambda enc_tp, enc_sp, llm_tp, llm_sp: (
+            f"enc_tp={enc_tp}_enc_sp={enc_sp}_llm_tp={llm_tp}_llm_sp={llm_sp}"
+        ),
+    )
+    @parametrize("is_broadcast", [True, False], name_fn=lambda x: "bd" if x else "nbd")
+    def test_p2p_communication_backward_first(
+        self,
+        enc_tp: int,
+        enc_sp: int,
+        llm_tp: int,
+        llm_sp: int,
+        is_broadcast: bool,
+    ):
+        stage_manager, p2p = self.create_p2p(enc_tp, enc_sp, llm_tp, llm_sp)
+        data = create_data()
+
+        recv_forward_objs = None
+        recv_backward_objs = None
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                p2p.send_backward(
+                    make_backward_object(backward_obj, is_broadcast, stage_manager),
+                    is_broadcast=is_broadcast,
+                )
+                recv_forward_objs = p2p.recv_forward()
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_forward(forward_obj, is_broadcast=True)
+            else:
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_backward(
+                    make_backward_object(backward_obj, is_broadcast, stage_manager),
+                    is_broadcast=is_broadcast,
+                )
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_forward(forward_obj, is_broadcast=True)
+
+            if recv_forward_objs:
+                assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
+                assert all(obj == forward_obj for obj in recv_forward_objs)
+
+            if recv_backward_objs:
+                assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
+                assert all(obj == backward_obj for obj in recv_backward_objs)
+
+    @parametrize(
+        "enc_tp,enc_sp,llm_tp,llm_sp",
+        [(2, 1, 4, 1), (4, 1, 2, 1), (2, 2, 2, 1)],
+        name_fn=lambda enc_tp, enc_sp, llm_tp, llm_sp: (
+            f"enc_tp={enc_tp}_enc_sp={enc_sp}_llm_tp={llm_tp}_llm_sp={llm_sp}"
+        ),
+    )
+    @parametrize("send_first", [True, False], name_fn=lambda x: "sf" if x else "rf")
+    def test_p2p_communication_coalesced_forward_first(
+        self,
+        enc_tp: int,
+        enc_sp: int,
+        llm_tp: int,
+        llm_sp: int,
+        send_first: bool,
+    ):
+        stage_manager, p2p = self.create_p2p(enc_tp, enc_sp, llm_tp, llm_sp)
+        data = create_data()
+
+        recv_forward_objs = None
+        recv_backward_objs = None
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                recv_forward_objs = p2p.recv_forward()
+                p2p.send_backward(backward_obj, is_broadcast=True)
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                p2p.send_forward(forward_obj, is_broadcast=True)
+                recv_backward_objs = p2p.recv_backward()
+            else:
+                recv_forward_objs = p2p.send_forward_recv_forward(
+                    forward_obj, send_first=send_first, is_broadcast=True
+                )
+                recv_backward_objs = p2p.send_backward_recv_backward(
+                    backward_obj, send_first=send_first, is_broadcast=True
+                )
+
+            if recv_forward_objs:
+                assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
+                assert all(obj == forward_obj for obj in recv_forward_objs)
+
+            if recv_backward_objs:
+                assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
+                assert all(obj == backward_obj for obj in recv_backward_objs)
+
+    @parametrize(
+        "enc_tp,enc_sp,llm_tp,llm_sp",
+        [(2, 1, 4, 1), (4, 1, 2, 1), (2, 2, 2, 1)],
+        name_fn=lambda enc_tp, enc_sp, llm_tp, llm_sp: (
+            f"enc_tp={enc_tp}_enc_sp={enc_sp}_llm_tp={llm_tp}_llm_sp={llm_sp}"
+        ),
+    )
+    @parametrize("send_first", [True, False], name_fn=lambda x: "sf" if x else "rf")
+    def test_p2p_communication_coalesced_backward_first(
+        self,
+        enc_tp: int,
+        enc_sp: int,
+        llm_tp: int,
+        llm_sp: int,
+        send_first: bool,
+    ):
+        stage_manager, p2p = self.create_p2p(enc_tp, enc_sp, llm_tp, llm_sp)
+        data = create_data()
+
+        recv_forward_objs = None
+        recv_backward_objs = None
+
+        for forward_obj, backward_obj in zip(data, reversed(data)):
+            if stage_manager.is_last_stage(check_only_in_modal=False):
+                p2p.send_backward(
+                    make_backward_object(backward_obj, True, stage_manager),
+                    is_broadcast=True,
+                )
+                recv_forward_objs = p2p.recv_forward()
+            elif stage_manager.is_first_stage(check_only_in_modal=False):
+                recv_backward_objs = p2p.recv_backward()
+                p2p.send_forward(forward_obj, is_broadcast=True)
+            else:
+                recv_backward_objs = p2p.send_backward_recv_backward(
+                    make_backward_object(backward_obj, True, stage_manager),
+                    send_first=send_first,
+                    is_broadcast=True,
+                )
+                recv_forward_objs = p2p.send_forward_recv_forward(
+                    forward_obj, send_first=send_first, is_broadcast=True
+                )
+
+            if recv_forward_objs:
+                assert len(stage_manager.get_prev_ranks()) == len(recv_forward_objs)
+                assert all(obj == forward_obj for obj in recv_forward_objs)
+
+            if recv_backward_objs:
+                assert len(stage_manager.get_next_ranks()) == len(recv_backward_objs)
+                assert all(obj == backward_obj for obj in recv_backward_objs)
+
+
 # @instantiate_parametrized_tests
 # class TestHomogeneousTensorParallelMultiEncoderClass(GlooDistributedTestBase):
 #     """

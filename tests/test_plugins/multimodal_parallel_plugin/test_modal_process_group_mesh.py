@@ -1011,6 +1011,41 @@ def test_create_group_along_axis_order(
                 },
             },
         ),
+        # ------------------------------------------------------------------
+        # Case 11: SP fan-out with multiple encoder SP ranks (enc SP=2 → LLM SP=4)
+        # enc TP=2, SP=2, PP=2 → LLM TP=2, SP=4, PP=2, DP=1
+        # encoder mesh [2,1,2,2]: last stage ranks [4,5,6,7]
+        # LLM     mesh [2,1,4,2]: first stage ranks [8..15]
+        #
+        # Under the new "all LLM SP ranks" rule:
+        #   s_A=0, t_A=0 (rank 4) → s_B=[0,1,2,3], t_B=0 → [8,10,12,14]
+        #   s_A=0, t_A=1 (rank 5) → s_B=[0,1,2,3], t_B=1 → [9,11,13,15]
+        #   s_A=1, t_A=0 (rank 6) → s_B=[0,1,2,3], t_B=0 → [8,10,12,14]  (same as rank 4!)
+        #   s_A=1, t_A=1 (rank 7) → s_B=[0,1,2,3], t_B=1 → [9,11,13,15]  (same as rank 5!)
+        #
+        # Old ratio-based rule would give: rank 4→[8,10], rank 6→[12,14] (different ranges).
+        # ------------------------------------------------------------------
+        (
+            24,
+            {encoder1_template: (2, 2)},
+            (llm_template_2stages, 2, 4),
+            {
+                (encoder1_template, llm_template_2stages): {
+                    4: [8, 10, 12, 14],
+                    5: [9, 11, 13, 15],
+                    6: [8, 10, 12, 14],
+                    7: [9, 11, 13, 15],
+                },
+            },
+            {
+                (encoder1_template, llm_template_2stages): {
+                    8: [4, 6], 9: [5, 7],
+                    10: [4, 6], 11: [5, 7],
+                    12: [4, 6], 13: [5, 7],
+                    14: [4, 6], 15: [5, 7],
+                },
+            },
+        ),
     ],
 )
 def test_border_maps(
