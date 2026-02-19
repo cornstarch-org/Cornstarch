@@ -790,3 +790,301 @@ def test_create_group_along_axis_order(
 
     for rank, calls in recorded_new_group_calls.items():
         assert calls == recorded_new_group_calls[0]
+
+
+# ---------------------------------------------------------------------------
+# test_border_maps
+#
+# Directly asserts forward_border_map, backward_border_map,
+# get_border_next_ranks, and get_border_prev_ranks for a comprehensive
+# set of TP/SP configurations.
+#
+# Border map notation:
+#   forward_border_map[(enc, llm)][a_rank] = [b_rank, ...]
+#     where a_rank is at enc's last PP stage and b_rank is at llm's first PP stage.
+#   backward_border_map is the inverse.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "world_size, encoder_templates, llm_template, "
+    "expected_forward_border_maps, expected_backward_border_maps",
+    [
+        # ------------------------------------------------------------------
+        # Case 1: Homogeneous (encoder TP=LLM TP=2, SP=1), DP=1
+        # encoder mesh [2,1,1,2]: last stage ranks [2,3]
+        # LLM    mesh [2,1,1,2]: first stage ranks [4,5]
+        # 1:1 mapping
+        # ------------------------------------------------------------------
+        (
+            8,
+            {encoder1_template: 2},
+            (llm_template_2stages, 2, 1),
+            {
+                (encoder1_template, llm_template_2stages): {2: [4], 3: [5]},
+            },
+            {
+                (encoder1_template, llm_template_2stages): {4: [2], 5: [3]},
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 2: Homogeneous (encoder TP=LLM TP=2, SP=1), DP=2
+        # encoder mesh [2,2,1,2]: last stage ranks [4,5,6,7]
+        # LLM    mesh [2,2,1,2]: first stage ranks [8,9,10,11]
+        # DP keeps mapping per-replica
+        # ------------------------------------------------------------------
+        (
+            16,
+            {encoder1_template: 2},
+            (llm_template_2stages, 2, 1),
+            {
+                (encoder1_template, llm_template_2stages): {
+                    4: [8], 5: [9], 6: [10], 7: [11],
+                },
+            },
+            {
+                (encoder1_template, llm_template_2stages): {
+                    8: [4], 9: [5], 10: [6], 11: [7],
+                },
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 3: TP fan-out (encoder TP=2 < LLM TP=4), SP=1, DP=1
+        # encoder mesh [2,1,1,2]: last stage ranks [2,3]
+        # LLM    mesh [2,1,1,4]: first stage ranks [4,5,6,7]
+        # t_A=0 → t_B=[0,1]; t_A=1 → t_B=[2,3]
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (encoder1_template, llm_template_2stages): {2: [4, 5], 3: [6, 7]},
+            },
+            {
+                (encoder1_template, llm_template_2stages): {
+                    4: [2], 5: [2], 6: [3], 7: [3],
+                },
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 4: TP fan-in (encoder TP=4 > LLM TP=2), SP=1, DP=1
+        # encoder mesh [2,1,1,4]: last stage ranks [4,5,6,7]
+        # LLM    mesh [2,1,1,2]: first stage ranks [8,9]
+        # t_A=0,1 → t_B=0; t_A=2,3 → t_B=1
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 4},
+            (llm_template_2stages, 2, 1),
+            {
+                (encoder1_template, llm_template_2stages): {
+                    4: [8], 5: [8], 6: [9], 7: [9],
+                },
+            },
+            {
+                (encoder1_template, llm_template_2stages): {8: [4, 5], 9: [6, 7]},
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 5: SP fan-out (encoder SP=1 < LLM SP=2), TP=2, DP=1
+        # encoder mesh [2,1,1,2]: last stage ranks [2,3]
+        # LLM    mesh [2,1,2,2]: first stage ranks [[4,5],[6,7]]
+        # s_A=0, t_A=0 → s_B=[0,1], t_B=0 → b=[4,6]
+        # s_A=0, t_A=1 → s_B=[0,1], t_B=1 → b=[5,7]
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: 2},
+            (llm_template_2stages, 2, 2),
+            {
+                (encoder1_template, llm_template_2stages): {2: [4, 6], 3: [5, 7]},
+            },
+            {
+                (encoder1_template, llm_template_2stages): {
+                    4: [2], 5: [3], 6: [2], 7: [3],
+                },
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 6: SP fan-in (encoder SP=2 > LLM SP=1), TP=2, DP=1
+        # encoder mesh [2,1,2,2]: last stage ranks [[4,5],[6,7]]
+        # LLM    mesh [2,1,1,2]: first stage ranks [8,9]
+        # s_A=0, t_A=0 → s_B=0, t_B=0 → b=8
+        # s_A=1, t_A=0 → s_B=0, t_B=0 → b=8  (fan-in)
+        # ------------------------------------------------------------------
+        (
+            12,
+            {encoder1_template: (2, 2)},
+            (llm_template_2stages, 2, 1),
+            {
+                (encoder1_template, llm_template_2stages): {
+                    4: [8], 5: [9], 6: [8], 7: [9],
+                },
+            },
+            {
+                (encoder1_template, llm_template_2stages): {8: [4, 6], 9: [5, 7]},
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 7: Both TP and SP fan-in (encoder TP=4 SP=2 > LLM TP=2 SP=1), DP=1
+        # encoder mesh [2,1,2,4]: last stage ranks [[8,9,10,11],[12,13,14,15]]
+        # LLM    mesh [2,1,1,2]: first stage ranks [16,17]
+        # 8 encoder ranks converge onto 2 LLM ranks
+        # ------------------------------------------------------------------
+        (
+            20,
+            {encoder1_template: (4, 2)},
+            (llm_template_2stages, 2, 1),
+            {
+                (encoder1_template, llm_template_2stages): {
+                    8: [16], 9: [16], 10: [17], 11: [17],
+                    12: [16], 13: [16], 14: [17], 15: [17],
+                },
+            },
+            {
+                (encoder1_template, llm_template_2stages): {
+                    16: [8, 9, 12, 13], 17: [10, 11, 14, 15],
+                },
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 8: TP fan-out with DP=2 (encoder TP=2, LLM TP=4)
+        # encoder mesh [2,2,1,2]: last stage ranks [4,5,6,7]
+        # LLM    mesh [2,2,1,4]: first stage ranks [8..15]
+        # DP separates replicas; within each replica fan-out by 2
+        # ------------------------------------------------------------------
+        (
+            24,
+            {encoder1_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (encoder1_template, llm_template_2stages): {
+                    4: [8, 9], 5: [10, 11], 6: [12, 13], 7: [14, 15],
+                },
+            },
+            {
+                (encoder1_template, llm_template_2stages): {
+                    8: [4], 9: [4], 10: [5], 11: [5],
+                    12: [6], 13: [6], 14: [7], 15: [7],
+                },
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 9: Two encoders → two separate border maps, DP=1
+        # encoder1 mesh [2,1,1,2]: last stage ranks [2,3]
+        # encoder2 mesh [3,1,1,2]: last stage ranks [8,9]
+        # LLM     mesh [2,1,1,4]: first stage ranks [10,11,12,13]
+        # get_border_prev_ranks(10) accumulates from both maps → [2,8]
+        # ------------------------------------------------------------------
+        (
+            18,
+            {encoder1_template: 2, encoder2_template: 2},
+            (llm_template_2stages, 4, 1),
+            {
+                (encoder1_template, llm_template_2stages): {2: [10, 11], 3: [12, 13]},
+                (encoder2_template, llm_template_2stages): {8: [10, 11], 9: [12, 13]},
+            },
+            {
+                (encoder1_template, llm_template_2stages): {
+                    10: [2], 11: [2], 12: [3], 13: [3],
+                },
+                (encoder2_template, llm_template_2stages): {
+                    10: [8], 11: [8], 12: [9], 13: [9],
+                },
+            },
+        ),
+        # ------------------------------------------------------------------
+        # Case 10: encoder2 (PP=3) with SP fan-out, DP=1
+        # encoder2 mesh [3,1,1,2]: last stage ranks [4,5]
+        # LLM     mesh [2,1,2,2]: first stage ranks [[6,7],[8,9]]
+        # s_A=0, t_A=0 → s_B=[0,1], t_B=0 → b=[6,8]
+        # ------------------------------------------------------------------
+        (
+            14,
+            {encoder2_template: 2},
+            (llm_template_2stages, 2, 2),
+            {
+                (encoder2_template, llm_template_2stages): {4: [6, 8], 5: [7, 9]},
+            },
+            {
+                (encoder2_template, llm_template_2stages): {
+                    6: [4], 7: [5], 8: [4], 9: [5],
+                },
+            },
+        ),
+    ],
+)
+def test_border_maps(
+    world_size: int,
+    encoder_templates: dict[PipelineTemplate, int | tuple[int, int]],
+    llm_template: tuple[PipelineTemplate, int, int],
+    expected_forward_border_maps: dict[
+        tuple[PipelineTemplate, PipelineTemplate], dict[int, list[int]]
+    ],
+    expected_backward_border_maps: dict[
+        tuple[PipelineTemplate, PipelineTemplate], dict[int, list[int]]
+    ],
+):
+    for rank in range(world_size):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=rank, world_size=world_size
+        )
+        mesh = MultiModalProcessGroupMesh(encoder_templates, llm_template)
+
+        # Verify the number of border map entries matches
+        assert len(mesh.forward_border_map) == len(expected_forward_border_maps), (
+            f"rank {rank}: expected {len(expected_forward_border_maps)} forward border "
+            f"maps, got {len(mesh.forward_border_map)}"
+        )
+        assert len(mesh.backward_border_map) == len(expected_backward_border_maps), (
+            f"rank {rank}: expected {len(expected_backward_border_maps)} backward border "
+            f"maps, got {len(mesh.backward_border_map)}"
+        )
+
+        # Verify each forward and backward map entry
+        for (modal_a, modal_b), expected_fmap in expected_forward_border_maps.items():
+            assert (modal_a, modal_b) in mesh.forward_border_map, (
+                f"rank {rank}: missing forward border map for "
+                f"({modal_a.model_name}, {modal_b.model_name})"
+            )
+            assert mesh.forward_border_map[(modal_a, modal_b)] == expected_fmap, (
+                f"rank {rank}: forward border map mismatch for "
+                f"({modal_a.model_name}, {modal_b.model_name}):\n"
+                f"  expected: {expected_fmap}\n"
+                f"  got:      {mesh.forward_border_map[(modal_a, modal_b)]}"
+            )
+            expected_bmap = expected_backward_border_maps[(modal_a, modal_b)]
+            assert (modal_a, modal_b) in mesh.backward_border_map, (
+                f"rank {rank}: missing backward border map for "
+                f"({modal_a.model_name}, {modal_b.model_name})"
+            )
+            assert mesh.backward_border_map[(modal_a, modal_b)] == expected_bmap, (
+                f"rank {rank}: backward border map mismatch for "
+                f"({modal_a.model_name}, {modal_b.model_name}):\n"
+                f"  expected: {expected_bmap}\n"
+                f"  got:      {mesh.backward_border_map[(modal_a, modal_b)]}"
+            )
+
+        # Verify get_border_next_ranks and get_border_prev_ranks for every rank.
+        # For non-border ranks the expected result is [].
+        for r in range(world_size):
+            expected_next = sorted({
+                b
+                for fmap in expected_forward_border_maps.values()
+                for b in fmap.get(r, [])
+            })
+            assert mesh.get_border_next_ranks(r) == expected_next, (
+                f"rank {rank}: get_border_next_ranks({r}) mismatch: "
+                f"expected {expected_next}, got {mesh.get_border_next_ranks(r)}"
+            )
+
+            expected_prev = sorted({
+                a
+                for bmap in expected_backward_border_maps.values()
+                for a in bmap.get(r, [])
+            })
+            assert mesh.get_border_prev_ranks(r) == expected_prev, (
+                f"rank {rank}: get_border_prev_ranks({r}) mismatch: "
+                f"expected {expected_prev}, got {mesh.get_border_prev_ranks(r)}"
+            )
+
+        dist.destroy_process_group()
