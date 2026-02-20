@@ -1,11 +1,5 @@
 from typing import Any, Callable, Iterable, Optional, Union
 
-# Type aliases for cross-modal communication hooks.
-# pre_pipeline_send_hook:  (output, border_next_ranks) → [tensor_per_rank, ...]
-# post_pipeline_recv_hook: (received_list, border_prev_ranks) → aggregated
-CrossModalSendHook = Callable[[Any, list[int]], list[Any]]
-CrossModalRecvHook = Callable[[list[Any], list[int]], Any]
-
 import torch
 from colossalai.accelerator import get_accelerator
 from colossalai.interface import ModelWrapper, OptimizerWrapper
@@ -490,10 +484,23 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
     In multimodal execution, a pipeline stage may have multiple senders and receivers.
     The Multimodal1F1BSchedule is designed to handle such cases.
 
+    At the encoder→LLM pipeline border:
+    - TP: encoder all-reduces inside the projector, so all encoder TP ranks hold the
+      same full tensor. The LLM takes the first received tensor and discards duplicates.
+    - SP all_to_all: each encoder SP rank holds a contiguous chunk of the sequence.
+      The LLM concatenates all received chunks along the sequence dimension to restore
+      the full encoder output, then splits the gradient on the backward pass.
+    - SP ring_attn: the projector's post_projection already calls
+      gather_forward_split_backward, so each encoder SP rank holds the full tensor at
+      the border. encoder_sp_gather=True selects the take-first path.
+
     Args:
         stage_manager (MultiModalPipelineStageManager): "Multimodal" pipeline stage manager.
         num_microbatches(int): The number of microbatches.
         microbatch_size(int): Microbatch size.
+        encoder_sp_gather(bool): Whether the encoder projector already gathers across
+            SP ranks (ring_attn mode). When True, take-first is used at the border
+            instead of concatenation. Defaults to False.
     """
 
     stage_manager: MultiModalPipelineStageManager
@@ -503,10 +510,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         stage_manager: MultiModalPipelineStageManager,
         num_microbatches: int,
         microbatch_size: int,
-        pre_pipeline_send_hook: Optional[CrossModalSendHook] = None,
-        post_pipeline_recv_hook: Optional[CrossModalRecvHook] = None,
-        pre_pipeline_send_backward_hook: Optional[CrossModalSendHook] = None,
-        post_pipeline_recv_backward_hook: Optional[CrossModalRecvHook] = None,
+        encoder_sp_gather: bool = False,
     ):
         assert (
             num_microbatches is not None and microbatch_size is not None
@@ -530,14 +534,97 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         self.last_batch_size: Optional[int] = None
         self.microbatch_offset: Optional[int] = None
 
-        # Optional hooks for model-specific cross-modal communication.
-        # When registered (by a ShardFormer policy), they replace the default
-        # broadcast / take-first / _merge_tensors / _split_tensors behaviour
-        # at encoder-LLM pipeline boundaries.
-        self.pre_pipeline_send_hook = pre_pipeline_send_hook
-        self.post_pipeline_recv_hook = post_pipeline_recv_hook
-        self.pre_pipeline_send_backward_hook = pre_pipeline_send_backward_hook
-        self.post_pipeline_recv_backward_hook = post_pipeline_recv_backward_hook
+        self.encoder_sp_gather = encoder_sp_gather
+
+    # ------------------------------------------------------------------
+    # Border communication helpers (called only on LLM first-stage ranks)
+    # ------------------------------------------------------------------
+
+    def _compute_border_info(self) -> tuple[int, int]:
+        """Return (sp_A, tp_group_size) derived from the encoder mesh shape.
+
+        sp_A is the number of encoder SP ranks.
+        tp_group_size = max(1, tp_A // tp_B) is the number of encoder TP ranks
+        per SP position that send to this LLM TP rank (TP fan-in case).
+        Sorted prev_ranks are laid out in blocks of tp_group_size per SP group.
+        """
+        pg_mesh = self.stage_manager.pg_mesh
+        enc_mesh = pg_mesh.modal_meshes[list(pg_mesh.encoder_templates.keys())[0]]
+        sp_A = enc_mesh.shape[pg_mesh.sp_axis]
+        tp_A = enc_mesh.shape[pg_mesh.tp_axis]
+        tp_B = pg_mesh.modal_meshes[pg_mesh.llm_template[0]].shape[pg_mesh.tp_axis]
+        return sp_A, max(1, tp_A // tp_B)
+
+    def _merge_cross_modal_recv(self, input_tensors: list[Any]) -> Any:
+        """Merge encoder outputs received at the LLM first stage.
+
+        Step 1 — TP deduplication: within each SP group, all tp_group_size encoder
+        TP ranks sent identical tensors (after all-reduce). Take the first.
+
+        Step 2 — SP assembly:
+          - encoder_sp_gather=True or sp_A==1: all SP groups hold the same full
+            tensor (ring_attn gathered or single rank). Return tensors_per_sp[0].
+          - encoder_sp_gather=False and sp_A>1: each SP group holds a contiguous
+            chunk. Concatenate hidden_states along the sequence dimension
+            (dim 0 for 2D tensors, dim 1 for 3D tensors).
+        """
+        sp_A, tp_group_size = self._compute_border_info()
+
+        # Step 1: one representative tensor per SP group
+        tensors_per_sp = [input_tensors[i * tp_group_size] for i in range(sp_A)]
+
+        # Step 2: SP assembly
+        if self.encoder_sp_gather or sp_A == 1:
+            return tensors_per_sp[0]
+
+        # all_to_all: concatenate SP chunks along the sequence dimension
+        first = tensors_per_sp[0]
+        if not isinstance(first, dict) or "hidden_states" not in first:
+            # Fallback: take first (unexpected structure)
+            return first
+
+        hs_list = [t["hidden_states"] for t in tensors_per_sp]
+        seq_dim = 0 if hs_list[0].ndim == 2 else 1
+        merged = dict(first)
+        merged["hidden_states"] = torch.cat(hs_list, dim=seq_dim)
+        return merged
+
+    def _split_cross_modal_grad(self, input_tensor_grad: Any) -> list[Any]:
+        """Split the LLM first-stage gradient for each encoder rank.
+
+        Inverse of _merge_cross_modal_recv:
+          - encoder_sp_gather=True or sp_A==1: broadcast the full gradient to all
+            encoder ranks (ring_attn handles internal splitting via autograd).
+          - encoder_sp_gather=False and sp_A>1: split hidden_states along the
+            sequence dimension into sp_A equal chunks; replicate each chunk
+            tp_group_size times to match the flat prev_ranks list.
+        """
+        sp_A, tp_group_size = self._compute_border_info()
+        prev_ranks = self.stage_manager.get_prev_ranks()
+
+        if self.encoder_sp_gather or sp_A == 1:
+            return [input_tensor_grad] * len(prev_ranks)
+
+        if not isinstance(input_tensor_grad, dict) or "hidden_states" not in input_tensor_grad:
+            return [input_tensor_grad] * len(prev_ranks)
+
+        grad = input_tensor_grad["hidden_states"]
+        seq_dim = 0 if grad.ndim == 2 else 1
+        chunk_size = grad.shape[seq_dim] // sp_A
+
+        per_rank: list[Any] = []
+        for i in range(sp_A):
+            chunk = torch.narrow(grad, seq_dim, i * chunk_size, chunk_size)
+            chunk_grad = dict(input_tensor_grad)
+            chunk_grad["hidden_states"] = chunk
+            for _ in range(tp_group_size):
+                per_rank.append(chunk_grad)
+
+        return per_rank
+
+    # ------------------------------------------------------------------
+    # Schedule send/recv methods
+    # ------------------------------------------------------------------
 
     def recv_forward(self) -> Any:
         input_tensors = None
@@ -548,17 +635,8 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 assert isinstance(input_tensors, list) and len(input_tensors) == 1
                 input_tensors = input_tensors[0]
             else:
-                # Cross-modal receive (LLM first stage from the single encoder).
-                if self.post_pipeline_recv_hook is not None:
-                    input_tensors = self.post_pipeline_recv_hook(
-                        input_tensors,
-                        self.stage_manager.get_prev_ranks(),
-                    )
-                else:
-                    # Take-first: with TP fan-in (encoder TP > LLM TP) the
-                    # projector's Linear1D_Row/Col gathers output so all
-                    # encoder TP ranks hold the same tensor; one copy suffices.
-                    input_tensors = input_tensors[0]
+                # Cross-modal receive (LLM first stage from encoder).
+                input_tensors = self._merge_cross_modal_recv(input_tensors)
 
         return input_tensors
 
@@ -575,46 +653,26 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 output_tensor_grads = output_tensor_grads[0]
             else:
                 # Cross-modal receive (encoder last stage from LLM).
-                if self.post_pipeline_recv_backward_hook is not None:
-                    output_tensor_grads = self.post_pipeline_recv_backward_hook(
-                        output_tensor_grads,
-                        self.stage_manager.get_next_ranks(),
-                    )
-                else:
-                    # Default: take-first (all LLM target ranks produced identical
-                    # gradients because the same tensor was broadcast to all of them).
-                    output_tensor_grads = output_tensor_grads[0]
+                # All LLM SP ranks send the identical grad chunk for this encoder
+                # rank, so take the first received tensor.
+                output_tensor_grads = output_tensor_grads[0]
 
         return output_tensor_grads
 
     def send_forward(self, output_tensor: Any) -> None:
         if not self.stage_manager.is_last_stage(check_only_in_modal=False):
-            if (
-                self.pre_pipeline_send_hook is not None
-                and self.stage_manager.is_last_stage()
-            ):
-                # Cross-modal send with hook: produce one tensor per target rank.
-                per_rank = self.pre_pipeline_send_hook(
-                    output_tensor,
-                    self.stage_manager.get_next_ranks(),
-                )
-                self.comm.send_forward(per_rank, is_broadcast=False)
-            else:
-                self.comm.send_forward(output_tensor, is_broadcast=True)
+            # Broadcast: encoder sends its (SP) chunk to all LLM ranks,
+            # or intra-modal send to single next stage.
+            self.comm.send_forward(output_tensor, is_broadcast=True)
 
     def send_backward(self, input_tensor: Any, input_tensor_grad: Any) -> None:
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
-            prev_ranks = self.stage_manager.get_prev_ranks()
-            if (
-                self.pre_pipeline_send_backward_hook is not None
-                and self.stage_manager.is_first_stage()
-            ):
-                # Cross-modal send with hook: produce one grad per target rank.
-                per_rank = self.pre_pipeline_send_backward_hook(
-                    input_tensor_grad, prev_ranks
-                )
+            if self.stage_manager.is_first_stage():
+                # Cross-modal: LLM first stage splits grad for each encoder SP rank.
+                per_rank = self._split_cross_modal_grad(input_tensor_grad)
                 self.comm.send_backward(per_rank, is_broadcast=False)
             else:
+                # Intra-modal: single predecessor.
                 self.comm.send_backward(input_tensor_grad, is_broadcast=True)
 
     def send_forward_recv_backward(
@@ -622,37 +680,13 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
     ) -> Any:
         output_tensor_grads = None
         if not self.stage_manager.is_last_stage(check_only_in_modal=False):
-            is_cross_modal = self.stage_manager.is_last_stage()
-            if is_cross_modal and self.pre_pipeline_send_hook is not None:
-                per_rank = self.pre_pipeline_send_hook(
-                    output_tensor,
-                    self.stage_manager.get_next_ranks(),
-                )
-                output_tensor_grads = self.comm.send_forward_recv_backward(
-                    per_rank, send_first=send_first, is_broadcast=False
-                )
-            else:
-                output_tensor_grads = self.comm.send_forward_recv_backward(
-                    output_tensor, send_first=send_first, is_broadcast=True
-                )
-
-            if not is_cross_modal:
-                # Intra-modal receive: always exactly one sender.
-                assert (
-                    isinstance(output_tensor_grads, list)
-                    and len(output_tensor_grads) == 1
-                )
-                output_tensor_grads = output_tensor_grads[0]
-            else:
-                # Cross-modal backward receive (encoder last stage from LLM).
-                if self.post_pipeline_recv_backward_hook is not None:
-                    output_tensor_grads = self.post_pipeline_recv_backward_hook(
-                        output_tensor_grads,
-                        self.stage_manager.get_next_ranks(),
-                    )
-                else:
-                    # Default: take-first (all LLM ranks produced identical grads).
-                    output_tensor_grads = output_tensor_grads[0]
+            # Send forward (broadcast) and receive backward (take first).
+            # For both encoder last stage (cross-modal) and intra-modal stages,
+            # the send is a broadcast and the backward receive is a single tensor.
+            output_tensor_grads = self.comm.send_forward_recv_backward(
+                output_tensor, send_first=send_first, is_broadcast=True
+            )
+            output_tensor_grads = output_tensor_grads[0]
 
         return output_tensor_grads
 
@@ -664,38 +698,22 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
     ) -> Any:
         input_tensors = None
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
-            is_cross_modal = self.stage_manager.is_first_stage()
-            prev_ranks = self.stage_manager.get_prev_ranks()
-
-            if is_cross_modal and self.pre_pipeline_send_backward_hook is not None:
-                per_rank = self.pre_pipeline_send_backward_hook(
-                    input_tensor_grad, prev_ranks
-                )
+            if self.stage_manager.is_first_stage():
+                # Cross-modal: split grad for encoder SP ranks, then recv and merge.
+                per_rank = self._split_cross_modal_grad(input_tensor_grad)
                 input_tensors = self.comm.send_backward_recv_forward(
                     per_rank, send_first=send_first, is_broadcast=False
                 )
+                input_tensors = self._merge_cross_modal_recv(input_tensors)
             else:
+                # Intra-modal: single predecessor.
                 input_tensors = self.comm.send_backward_recv_forward(
                     input_tensor_grad,
                     send_first=send_first,
                     is_broadcast=True,
                 )
-
-            if not is_cross_modal:
-                # Intra-modal receive: always exactly one sender.
                 assert isinstance(input_tensors, list) and len(input_tensors) == 1
                 input_tensors = input_tensors[0]
-            else:
-                # Cross-modal forward receive (LLM first stage from the single encoder).
-                if self.post_pipeline_recv_hook is not None:
-                    input_tensors = self.post_pipeline_recv_hook(
-                        input_tensors, prev_ranks
-                    )
-                else:
-                    # Take-first: with TP fan-in (encoder TP > LLM TP) the
-                    # projector's Linear1D_Row/Col gathers output so all
-                    # encoder TP ranks hold the same tensor; one copy suffices.
-                    input_tensors = input_tensors[0]
 
         return input_tensors
 

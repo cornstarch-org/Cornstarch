@@ -534,9 +534,16 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = dist.get_world_size(group=self.pp_groups[0])
 
-        # TODO: implement a new one if needed!
+        enc_plugin = list(self.encoder_plugins.values())[0]
+        encoder_sp_gather = (
+            enc_plugin.sequence_parallelism_mode == "ring_attn"
+            and enc_plugin.sp_size > 1
+        )
         self.schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
-            self.stage_manager, self.num_microbatches, self.microbatch_size
+            self.stage_manager,
+            self.num_microbatches,
+            self.microbatch_size,
+            encoder_sp_gather=encoder_sp_gather,
         )
 
         self.shard_config.tensor_parallel_process_group = self.tp_group
