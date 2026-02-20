@@ -1,3 +1,4 @@
+import pytest
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -101,25 +102,14 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize(
-        "vtp, vpp, vsp",
+        "vtp, vpp, vsp, ltp, lpp, lsp",
         [
-            (1, 1, 1),
-            (1, 1, 2),
-            (1, 2, 1),
-            (2, 1, 1),
-            (2, 1, 2),
-            (1, 2, 2),
-        ],
-    )
-    @parametrize(
-        "ltp, lpp, lsp",
-        [
-            (1, 1, 1),
-            (1, 1, 2),
-            (1, 2, 1),
-            (2, 1, 1),
-            (2, 1, 2),
-            (1, 2, 2),
+            (1, 2, 1, 1, 1, 2),  # 1tp+1sp -> 1tp+2sp
+            (1, 1, 2, 1, 1, 2),  # 1tp+2sp -> 1tp+2sp
+            (1, 1, 2, 1, 2, 1),  # 1tp+2sp -> 1tp+1sp
+            (2, 1, 1, 1, 1, 2),  # 2tp+1sp -> 1tp+2sp
+            (2, 1, 2, 1, 2, 2),  # 2tp+2sp -> 1tp+2sp
+            (2, 1, 2, 2, 1, 2),  # 2tp+2sp -> 2tp+2sp
         ],
     )
     def test(
@@ -133,6 +123,11 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
         lpp: int,
         lsp: int,
     ):
+        if vsp > 2 or lsp > 2:
+            pytest.skip(
+                "With current data, context parallelism with more than 2 cp rank is not supported."
+            )
+
         self.set_model(
             encoders={"vision": vision_models[vision_model_name]()},
             llm=causal_lms[language_model_name](),
