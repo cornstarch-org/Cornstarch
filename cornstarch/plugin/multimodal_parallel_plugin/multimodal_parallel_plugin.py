@@ -190,17 +190,9 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
             if stage_manager.is_first_stage(check_only_in_modal=True):
                 # Forward in the first stage of the language model
 
-                # merging functions accept either BaseModelOutput or tuple of tensors,
-                # and the first tensor (last_hidden_state) is merged.
                 encoders_outputs: dict[str, tuple[torch.Tensor]] = {}
-
-                for encoder_outputs, modal_key in zip(
-                    hidden_states, module.encoders.keys()
-                ):
-                    encoder_module: ModalEncoderModule = getattr(
-                        module, f"{modal_key}_encoder"
-                    )
-                    encoders_outputs[modal_key] = (encoder_outputs,)
+                modal_key = list(module.encoders.keys())[0]
+                encoders_outputs[modal_key] = (hidden_states,)
 
                 # step 2. merge encoded multimodal features into text embeddings
                 # mask out special tokens from input_ids to avoid out of index error
@@ -436,6 +428,10 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
     ):
         PipelinePluginBase.__init__(self)
         self.logger = get_dist_logger()
+        assert encoder_plugins is not None and len(encoder_plugins) == 1, (
+            "MultimodalParallelPlugin requires exactly one encoder plugin, "
+            f"got {len(encoder_plugins) if encoder_plugins else 0}."
+        )
         self.encoder_plugins = encoder_plugins
         self.language_model_plugin = language_model_plugin
 

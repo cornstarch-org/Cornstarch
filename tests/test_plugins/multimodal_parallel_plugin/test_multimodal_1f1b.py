@@ -17,7 +17,7 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
 )
 
 from ...distributed_base import GlooDistributedTestBase
-from ..common import encoder1_template, encoder2_template, llm_template_2stages
+from ..common import encoder1_template, llm_template_2stages
 
 
 def create_data() -> list[Any]:
@@ -49,18 +49,12 @@ class HomogeneousTensorParallelTestCase(GlooDistributedTestBase):
         tp_size = int(os.environ["TP_SIZE"])
         llm_sp_size = int(os.environ["LLM_SP_SIZE"])
         llm_pp_size = llm_template_2stages.num_stages
-        num_encoders = int(os.environ["NUM_ENCODERS"])
-        assert num_encoders in [1, 2]
-        encoder_pp_size = (
-            encoder1_template.num_stages
-            if num_encoders == 1
-            else encoder1_template.num_stages + encoder2_template.num_stages
-        )
+        encoder_pp_size = encoder1_template.num_stages
         return dp_size * tp_size * (encoder_pp_size + llm_sp_size * llm_pp_size)
 
     def setUp(self) -> None:
-        # Extract tp_size, llm_sp_size, and num_encoders from the test method name
-        pattern = r"tp=(\d+)_sp=(\d+)_enc=(\d+)"
+        # Extract tp_size and llm_sp_size from the test method name
+        pattern = r"tp=(\d+)_sp=(\d+)"
         match = re.search(pattern, self._testMethodName)
         assert match is not None
 
@@ -69,7 +63,6 @@ class HomogeneousTensorParallelTestCase(GlooDistributedTestBase):
             {
                 "TP_SIZE": match.group(1),
                 "LLM_SP_SIZE": match.group(2),
-                "NUM_ENCODERS": match.group(3),
             },
         ):
             super().setUp()
@@ -78,21 +71,9 @@ class HomogeneousTensorParallelTestCase(GlooDistributedTestBase):
         self,
         tp_size: int,
         llm_sp_size: int = 1,
-        num_encoders: int = 1,
     ) -> tuple[MultiModalPipelineStageManager, MultimodalPipelineP2PCommunication]:
-        assert num_encoders in [1, 2]
-        encoder_templates = (
-            {
-                encoder1_template: tp_size,
-                encoder2_template: tp_size,
-            }
-            if num_encoders == 2
-            else {
-                encoder1_template: tp_size,
-            }
-        )
         pg_mesh = MultiModalProcessGroupMesh(
-            encoder_templates=encoder_templates,
+            encoder_templates={encoder1_template: tp_size},
             llm_template=(llm_template_2stages, tp_size, llm_sp_size),
         )
 
@@ -103,17 +84,16 @@ class HomogeneousTensorParallelTestCase(GlooDistributedTestBase):
 
     @parametrize("tp_size", [1, 2, 4], name_fn=lambda x: f"tp={x}")
     @parametrize("llm_sp_size", [1, 2, 4], name_fn=lambda x: f"sp={x}")
-    @parametrize("num_encoders", [1, 2], name_fn=lambda x: f"enc={x}")
     @parametrize("is_broadcast", [True, False], name_fn=lambda x: "bd" if x else "nbd")
     def test_p2p_communication_forward_first(
-        self, tp_size: int, llm_sp_size: int, num_encoders: int, is_broadcast: bool
+        self, tp_size: int, llm_sp_size: int, is_broadcast: bool
     ):
         """
         Test p2p communication without coalescing
         (using send_forward, recv_forward, send_backward, recv_backward)
         Send forward first.
         """
-        stage_manager, p2p = self.create_p2p(tp_size, llm_sp_size, num_encoders)
+        stage_manager, p2p = self.create_p2p(tp_size, llm_sp_size)
         data = create_data()
 
         recv_forward_objs = None
@@ -148,17 +128,16 @@ class HomogeneousTensorParallelTestCase(GlooDistributedTestBase):
 
     @parametrize("tp_size", [1, 2, 4], name_fn=lambda x: f"tp={x}")
     @parametrize("llm_sp_size", [1, 2, 4], name_fn=lambda x: f"sp={x}")
-    @parametrize("num_encoders", [1, 2], name_fn=lambda x: f"enc={x}")
     @parametrize("is_broadcast", [True, False], name_fn=lambda x: "bd" if x else "nbd")
     def test_p2p_communication_backward_first(
-        self, tp_size: int, llm_sp_size: int, num_encoders: int, is_broadcast: bool
+        self, tp_size: int, llm_sp_size: int, is_broadcast: bool
     ):
         """
         Test p2p communication without coalescing
         (using send_forward, recv_forward, send_backward, recv_backward)
         Send backward first.
         """
-        stage_manager, p2p = self.create_p2p(tp_size, llm_sp_size, num_encoders)
+        stage_manager, p2p = self.create_p2p(tp_size, llm_sp_size)
         data = create_data()
 
         recv_forward_objs = None
@@ -193,17 +172,16 @@ class HomogeneousTensorParallelTestCase(GlooDistributedTestBase):
 
     @parametrize("tp_size", [1, 2, 4], name_fn=lambda x: f"tp={x}")
     @parametrize("llm_sp_size", [1, 2, 4], name_fn=lambda x: f"sp={x}")
-    @parametrize("num_encoders", [1, 2], name_fn=lambda x: f"enc={x}")
     @parametrize("send_first", [True, False], name_fn=lambda x: "sf" if x else "rf")
     def test_p2p_communication_coalesced_forward_first(
-        self, tp_size: int, llm_sp_size: int, num_encoders: int, send_first: bool
+        self, tp_size: int, llm_sp_size: int, send_first: bool
     ):
         """
         Test p2p communication with coalescing
         (using send_forward_recv_forward / send_backward_recv_backward)
         Send forward first.
         """
-        stage_manager, p2p = self.create_p2p(tp_size, llm_sp_size, num_encoders)
+        stage_manager, p2p = self.create_p2p(tp_size, llm_sp_size)
         data = create_data()
 
         recv_forward_objs = None
@@ -234,17 +212,16 @@ class HomogeneousTensorParallelTestCase(GlooDistributedTestBase):
 
     @parametrize("tp_size", [1, 2, 4], name_fn=lambda x: f"tp={x}")
     @parametrize("llm_sp_size", [1, 2, 4], name_fn=lambda x: f"sp={x}")
-    @parametrize("num_encoders", [1, 2], name_fn=lambda x: f"enc={x}")
     @parametrize("send_first", [True, False], name_fn=lambda x: "sf" if x else "rf")
     def test_p2p_communication_coalesced_backward_first(
-        self, tp_size: int, llm_sp_size: int, num_encoders: int, send_first: bool
+        self, tp_size: int, llm_sp_size: int, send_first: bool
     ):
         """
         Test p2p communication with coalescing
         (using send_forward_recv_forward / send_backward_recv_backward)
         Send backward first.
         """
-        stage_manager, p2p = self.create_p2p(tp_size, llm_sp_size, num_encoders)
+        stage_manager, p2p = self.create_p2p(tp_size, llm_sp_size)
         data = create_data()
 
         recv_forward_objs = None

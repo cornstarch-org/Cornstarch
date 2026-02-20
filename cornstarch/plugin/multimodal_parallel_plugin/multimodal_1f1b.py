@@ -539,40 +539,6 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         self.pre_pipeline_send_backward_hook = pre_pipeline_send_backward_hook
         self.post_pipeline_recv_backward_hook = post_pipeline_recv_backward_hook
 
-    def _merge_tensors(
-        self, tensors_list: list[dict[str, torch.Tensor]], out_shapes: bool
-    ) -> dict[str, list[torch.Tensor]]:
-        assert isinstance(tensors_list, list)
-
-        if len(tensors_list) == 0:
-            return None
-
-        assert all(isinstance(tensors, dict) for tensors in tensors_list)
-
-        objects: dict[str, list[torch.Tensor]] = {}
-        for tensor_dict in tensors_list:
-            for key, tensor in tensor_dict.items():
-                if key not in objects:
-                    objects[key] = []
-                objects[key].append(tensor)
-
-        return objects
-
-    def _split_tensors(
-        self, tensors_dict: dict[str, list[torch.Tensor]]
-    ) -> list[dict[str, torch.Tensor]]:
-        assert len(tensors_dict) > 0
-
-        objects: list[dict[str, torch.Tensor]] = [
-            {} for _ in range(max(len(v) for v in tensors_dict.values()))
-        ]
-
-        for key, tensors in tensors_dict.items():
-            for i, tensor in enumerate(tensors):
-                objects[i][key] = tensor
-
-        return objects
-
     def recv_forward(self) -> Any:
         input_tensors = None
         if not self.stage_manager.is_first_stage(check_only_in_modal=False):
@@ -582,17 +548,18 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 assert isinstance(input_tensors, list) and len(input_tensors) == 1
                 input_tensors = input_tensors[0]
             else:
-                # Cross-modal receive (LLM first stage from encoder(s)).
+                # Cross-modal receive (LLM first stage from the single encoder).
                 if self.post_pipeline_recv_hook is not None:
                     input_tensors = self.post_pipeline_recv_hook(
                         input_tensors,
                         self.stage_manager.get_prev_ranks(),
                     )
-                elif len(input_tensors) == 1:
-                    # Single encoder source: unlist instead of wrapping in a list.
-                    input_tensors = input_tensors[0]
                 else:
-                    input_tensors = self._merge_tensors(input_tensors, out_shapes=True)
+                    assert len(input_tensors) == 1, (
+                        "Expected exactly one encoder source, got "
+                        f"{len(input_tensors)}"
+                    )
+                    input_tensors = input_tensors[0]
 
         return input_tensors
 
@@ -648,11 +615,6 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                     input_tensor_grad, prev_ranks
                 )
                 self.comm.send_backward(per_rank, is_broadcast=False)
-            elif len(prev_ranks) > 1:
-                self.comm.send_backward(
-                    self._split_tensors(input_tensor_grad),
-                    is_broadcast=False,
-                )
             else:
                 self.comm.send_backward(input_tensor_grad, is_broadcast=True)
 
@@ -713,12 +675,6 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 input_tensors = self.comm.send_backward_recv_forward(
                     per_rank, send_first=send_first, is_broadcast=False
                 )
-            elif len(prev_ranks) > 1:
-                input_tensors = self.comm.send_backward_recv_forward(
-                    self._split_tensors(input_tensor_grad),
-                    send_first=send_first,
-                    is_broadcast=False,
-                )
             else:
                 input_tensors = self.comm.send_backward_recv_forward(
                     input_tensor_grad,
@@ -731,15 +687,17 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 assert isinstance(input_tensors, list) and len(input_tensors) == 1
                 input_tensors = input_tensors[0]
             else:
-                # Cross-modal forward receive (LLM first stage from encoder(s)).
+                # Cross-modal forward receive (LLM first stage from the single encoder).
                 if self.post_pipeline_recv_hook is not None:
                     input_tensors = self.post_pipeline_recv_hook(
                         input_tensors, prev_ranks
                     )
-                elif len(input_tensors) == 1:
-                    input_tensors = input_tensors[0]
                 else:
-                    input_tensors = self._merge_tensors(input_tensors, out_shapes=True)
+                    assert len(input_tensors) == 1, (
+                        "Expected exactly one encoder source, got "
+                        f"{len(input_tensors)}"
+                    )
+                    input_tensors = input_tensors[0]
 
         return input_tensors
 

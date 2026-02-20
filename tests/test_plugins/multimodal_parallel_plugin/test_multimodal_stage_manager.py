@@ -63,31 +63,6 @@ def destroy_process_group():
             ],
         ),
         (
-            18,
-            {encoder1_template: 2, encoder2_template: 2},
-            (llm_template_2stages, 4, 1),
-            [
-                {"prev": [], "next": [2]},  # rank = 0. encoder1 stage 0
-                {"prev": [], "next": [3]},
-                {"prev": [0], "next": [10, 11]},  # rank = 2. encoder1 stage 1 → llm
-                {"prev": [1], "next": [12, 13]},
-                {"prev": [], "next": [6]},  # rank = 4. encoder2 stage 0
-                {"prev": [], "next": [7]},
-                {"prev": [4], "next": [8]},
-                {"prev": [5], "next": [9]},
-                {"prev": [6], "next": [10, 11]},  # rank = 8. encoder2 last → llm
-                {"prev": [7], "next": [12, 13]},
-                {"prev": [2, 8], "next": [14]},
-                {"prev": [2, 8], "next": [15]},
-                {"prev": [3, 9], "next": [16]},  # rank = 12
-                {"prev": [3, 9], "next": [17]},
-                {"prev": [10], "next": []},  # rank = 14. LLM last stage
-                {"prev": [11], "next": []},
-                {"prev": [12], "next": []},  # rank = 16
-                {"prev": [13], "next": []},
-            ],
-        ),
-        (
             84,
             {encoder2_template: 4},
             (llm_template_4stages, 4, 1),
@@ -143,55 +118,6 @@ def destroy_process_group():
                 {"prev": [21], "next": []},
                 {"prev": [22], "next": []},
                 {"prev": [23], "next": []},
-            ],
-        ),
-        (
-            42,
-            {encoder1_template: 2, encoder2_template: 2},
-            (llm_template_2stages, 4, 4),
-            [
-                {"prev": [], "next": [2]},  # rank = 0. encoder1 stage 0
-                {"prev": [], "next": [3]},
-                {"prev": [0], "next": [10, 11, 14, 15, 18, 19, 22, 23]},
-                {"prev": [1], "next": [12, 13, 16, 17, 20, 21, 24, 25]},
-                {"prev": [], "next": [6]},  # rank = 4. encoder2 stage 0
-                {"prev": [], "next": [7]},
-                {"prev": [4], "next": [8]},
-                {"prev": [5], "next": [9]},
-                {"prev": [6], "next": [10, 11, 14, 15, 18, 19, 22, 23]},
-                {"prev": [7], "next": [12, 13, 16, 17, 20, 21, 24, 25]},
-                {"prev": [2, 8], "next": [26]},  # rank = 10, LLM stage 0
-                {"prev": [2, 8], "next": [27]},
-                {"prev": [3, 9], "next": [28]},
-                {"prev": [3, 9], "next": [29]},
-                {"prev": [2, 8], "next": [30]},  # rank = 14
-                {"prev": [2, 8], "next": [31]},
-                {"prev": [3, 9], "next": [32]},
-                {"prev": [3, 9], "next": [33]},
-                {"prev": [2, 8], "next": [34]},  # rank = 18
-                {"prev": [2, 8], "next": [35]},
-                {"prev": [3, 9], "next": [36]},
-                {"prev": [3, 9], "next": [37]},
-                {"prev": [2, 8], "next": [38]},  # rank = 22
-                {"prev": [2, 8], "next": [39]},
-                {"prev": [3, 9], "next": [40]},
-                {"prev": [3, 9], "next": [41]},
-                {"prev": [10], "next": []},  # rank = 26. LLM last stage
-                {"prev": [11], "next": []},
-                {"prev": [12], "next": []},
-                {"prev": [13], "next": []},
-                {"prev": [14], "next": []},  # rank = 30
-                {"prev": [15], "next": []},
-                {"prev": [16], "next": []},
-                {"prev": [17], "next": []},
-                {"prev": [18], "next": []},  # rank = 34
-                {"prev": [19], "next": []},
-                {"prev": [20], "next": []},
-                {"prev": [21], "next": []},
-                {"prev": [22], "next": []},  # rank = 38
-                {"prev": [23], "next": []},
-                {"prev": [24], "next": []},
-                {"prev": [25], "next": []},
             ],
         ),
         (
