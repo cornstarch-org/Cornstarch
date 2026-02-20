@@ -555,10 +555,9 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                         self.stage_manager.get_prev_ranks(),
                     )
                 else:
-                    assert len(input_tensors) == 1, (
-                        "Expected exactly one encoder source, got "
-                        f"{len(input_tensors)}"
-                    )
+                    # Take-first: with TP fan-in (encoder TP > LLM TP) the
+                    # projector's Linear1D_Row/Col gathers output so all
+                    # encoder TP ranks hold the same tensor; one copy suffices.
                     input_tensors = input_tensors[0]
 
         return input_tensors
@@ -693,10 +692,9 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                         input_tensors, prev_ranks
                     )
                 else:
-                    assert len(input_tensors) == 1, (
-                        "Expected exactly one encoder source, got "
-                        f"{len(input_tensors)}"
-                    )
+                    # Take-first: with TP fan-in (encoder TP > LLM TP) the
+                    # projector's Linear1D_Row/Col gathers output so all
+                    # encoder TP ranks hold the same tensor; one copy suffices.
                     input_tensors = input_tensors[0]
 
         return input_tensors

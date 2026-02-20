@@ -57,29 +57,32 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize(
-        "tp_size, vision_pp_size, language_pp_size",
+        "vtp, vpp, ltp, lpp",
         [
-            (1, 1, 1),
-            (2, 1, 1),
-            (2, 2, 2),
+            (1, 1, 1, 1),
+            (1, 2, 2, 1),
+            (1, 2, 1, 2),
+            (2, 1, 2, 1),
+            (2, 1, 1, 2),
+            (2, 2, 2, 2),
         ],
-        name_fn=lambda tp, vpp, lpp: f"tp={tp}, pp={vpp},{lpp}",
     )
     def test(
         self,
         vision_model_name: str,
         language_model_name: str,
-        tp_size: int,
-        vision_pp_size: int,
-        language_pp_size: int,
+        vtp: int,
+        ltp: int,
+        vpp: int,
+        lpp: int,
     ):
         self.set_model(
             encoders={"vision": vision_models[vision_model_name]()},
             llm=causal_lms[language_model_name](),
         )
         self.run_multimodal_parallel(
-            tp_size,
-            {"vision": vision_pp_size, "llm": language_pp_size},
+            {"vision": vtp, "llm": ltp},
+            {"vision": vpp, "llm": lpp},
         )
 
 
@@ -98,32 +101,44 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
     @parametrize(
-        "tp_size, vision_pp_size, vision_sp_size, language_pp_size, language_sp_size",
+        "vtp, vpp, vsp",
         [
-            (1, 1, 2, 1, 2),
-            (1, 2, 2, 2, 2),
-            (1, 2, 1, 1, 2),
-            (2, 1, 2, 1, 2),
-            (2, 2, 1, 1, 2),
+            (1, 1, 1),
+            (1, 1, 2),
+            (1, 2, 1),
+            (2, 1, 1),
+            (2, 1, 2),
+            (1, 2, 2),
         ],
-        name_fn=lambda tp, vpp, vsp, lpp, lsp: f"tp={tp}, pp=({vpp},{lpp}), sp=({vsp},{lsp})",
+    )
+    @parametrize(
+        "ltp, lpp, lsp",
+        [
+            (1, 1, 1),
+            (1, 1, 2),
+            (1, 2, 1),
+            (2, 1, 1),
+            (2, 1, 2),
+            (1, 2, 2),
+        ],
     )
     def test(
         self,
         vision_model_name: str,
         language_model_name: str,
-        tp_size: int,
-        vision_pp_size: int,
-        language_pp_size: int,
-        vision_sp_size: int,
-        language_sp_size: int,
+        vtp: int,
+        vpp: int,
+        vsp: int,
+        ltp: int,
+        lpp: int,
+        lsp: int,
     ):
         self.set_model(
             encoders={"vision": vision_models[vision_model_name]()},
             llm=causal_lms[language_model_name](),
         )
         self.run_multimodal_parallel(
-            tp_size,
-            {"vision": vision_pp_size, "llm": language_pp_size},
-            {"vision": vision_sp_size, "llm": language_sp_size},
+            {"vision": vtp, "llm": ltp},
+            {"vision": vpp, "llm": lpp},
+            {"vision": vsp, "llm": lsp},
         )

@@ -597,7 +597,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
     def run_multimodal_parallel(
         self,
-        tp_size: int,
+        modal_tp_size: dict[str, int],
         modal_pp_size: dict[str, int],
         modal_sp_size: dict[str, int] = {},
         run_original_model: bool = True,
@@ -619,7 +619,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             criterion,
             booster,
         ) = self.build_model_from_multimodal_plugin(
-            tp_size=tp_size,
+            module_tp_size=modal_tp_size,
             module_pp_size=modal_pp_size,
             module_sp_size=modal_sp_size,
             test_config=test_config,
@@ -805,7 +805,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
     def parallelize_model(
         self,
         model: MultimodalModel,
-        tp_size: int,
+        module_tp_size: dict[str, int],
         module_pp_size: dict[str, int],
         module_sp_size: dict[str, int],
         test_config: dict[str, Any],
@@ -821,7 +821,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             if modal_name == "llm":
                 llm_sp_size = module_sp_size.get("llm", 1)
                 llm_plugin = ModalParallelPlugin(
-                    tp_size=tp_size,
+                    tp_size=module_tp_size.get("llm", 1),
                     sp_size=llm_sp_size,
                     sequence_parallelism_mode="ring_attn" if llm_sp_size > 1 else None,
                     pipeline_template=self.get_pipeline_template(
@@ -831,7 +831,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             else:
                 modal_sp_size = module_sp_size.get(modal_name, 1)
                 plugins[modal_name] = ModalParallelPlugin(
-                    tp_size=tp_size,
+                    tp_size=module_tp_size.get(modal_name, 1),
                     sp_size=modal_sp_size,
                     sequence_parallelism_mode=(
                         "ring_attn" if modal_sp_size > 1 else None
@@ -864,7 +864,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
     def build_model_from_multimodal_plugin(
         self,
-        tp_size: int,
+        module_tp_size: dict[str, int],
         module_pp_size: dict[str, int],
         module_sp_size: dict[str, int],
         test_config: dict[str, Any],
@@ -891,7 +891,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
         sharded_model, sharded_optimizer, criterion, booster = self.parallelize_model(
             sharded_model,
-            tp_size,
+            module_tp_size,
             module_pp_size,
             module_sp_size,
             test_config,
