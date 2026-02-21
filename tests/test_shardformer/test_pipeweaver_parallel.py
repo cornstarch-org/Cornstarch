@@ -14,7 +14,7 @@ from .model_zoo import (
     Qwen2ForCausalLMBase,
     Qwen2VisionTransformerBase,
 )
-from .utils import CornstarchMultimodalParallelBase
+from .utils import PipeweaverParallelBase
 
 vision_models = dict(
     clip=CLIPModelBase,
@@ -28,7 +28,7 @@ causal_lms = dict(
 
 
 @instantiate_parametrized_tests
-class VisionLanguagePipeweaverParallel(CornstarchMultimodalParallelBase):
+class VisionLanguagePipeweaverParallel(PipeweaverParallelBase):
     @property
     def world_size(self) -> int:
         tp = int(os.environ["TP"])

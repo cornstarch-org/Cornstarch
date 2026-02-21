@@ -894,6 +894,152 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             booster,
         )
 
+    @staticmethod
+    def get_pipeline_template(model: nn.Module, num_stages: int) -> PipelineTemplate:
+        modules = PipelineTemplate.get_modules(model)
+        num_layers = sum(bool(re.search(r"\.\d", s)) for s in modules)
+
+        # Get the number of layers per stage
+        base_size = num_layers // num_stages
+        remainder = num_layers % num_stages
+        num_layers_per_stage = [
+            base_size + 1 if i < remainder else base_size for i in range(num_stages)
+        ]
+        assert sum(num_layers_per_stage) == num_layers
+
+        first_layer_index = next(
+            i for i, layer in enumerate(modules) if re.search(r"\.0", layer)
+        )
+        last_layer_index = next(
+            i
+            for i, layer in enumerate(modules)
+            if re.search(rf"\.{num_layers - 1}", layer)
+        )
+
+        modules_per_stages = [[] for _ in range(num_stages)]
+        modules_per_stages[0].extend(modules[:first_layer_index])
+        layer_idx = 0
+        for stage_idx, num_layers in enumerate(num_layers_per_stage):
+            idx = first_layer_index + layer_idx
+            modules_per_stages[stage_idx].extend(modules[idx : idx + num_layers])
+            layer_idx += num_layers
+        modules_per_stages[-1].extend(modules[last_layer_index + 1 :])
+
+        return PipelineTemplate(
+            (
+                model.config[0].model_type
+                if isinstance(model, ModalEncoderModule)
+                else model.config.model_type
+            ),
+            modules_per_stages,
+        )
+
+    def postprocess_data_for_original_model(
+        self, data: dict[str, torch.Tensor], precision: torch.dtype
+    ) -> dict:
+        assert isinstance(data, dict)
+
+        new_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                v = v.to(dtype=precision)
+            new_data[k] = v.clone().to("cuda")
+
+        """
+        Inject encoder tokens to the input_ids for the multimodal model.
+        """
+        input_ids: torch.Tensor = new_data["input_ids"]
+        encoder_tokens: list[torch.Tensor] = []
+        for modal_key in self.encoders.keys():
+            # num_encoder_tokens is a list[int] type, a list of number of tokens for each batch.
+            # Implement a 2D tensor with the shape of (batch_size, num_encoder_tokens)
+            encoder_tokens.append(
+                torch.full(
+                    (input_ids.shape[0], self.encoders[modal_key].num_tokens),
+                    fill_value=self.token_ids[modal_key],
+                    dtype=torch.long,
+                    device=input_ids.device,
+                )
+            )
+
+        # prepend it to input_ids
+        input_ids = torch.cat(encoder_tokens + [input_ids], dim=1)
+        new_data["input_ids"] = input_ids
+        new_data["labels"] = input_ids
+        new_data["use_cache"] = False
+
+        return new_data
+
+    def postprocess_data_for_sharded_model(
+        self, data: dict[str, torch.Tensor], precision: torch.dtype
+    ):
+        return self.postprocess_data_for_original_model(data, precision)
+
+    def run_forward_backward_with_multimodal_plugin(
+        self,
+        org_model: nn.Module,
+        sharded_model: nn.Module,
+        sharded_optimizer: Optimizer,
+        criterion: Callable[[torch.Tensor], torch.Tensor],
+        output_transform_fn: Callable,
+        booster: Booster,
+        precision: torch.dtype,
+        run_original_model: bool = True,
+        run_sharded_model: bool = True,
+    ):
+        def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
+            outputs = output_transform_fn(outputs)
+            loss = criterion(outputs)
+            return loss
+
+        data = {}
+        batch_size = self.microbatch_size * self.num_microbatches
+        for model_base in self.encoders.values():
+            data.update(model_base.data_gen_fn(batch_size))
+        data.update(self.llm.data_gen_fn(batch_size))
+
+        unshard_test_data = self.postprocess_data_for_original_model(data, precision)
+        shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
+
+        org_loss, org_output = None, None
+        if run_original_model:
+            org_model.train()
+
+            # org_output = org_model(**unshard_test_data)
+            # org_loss = criterion(org_output)
+            # org_loss.backward()
+
+            org_loss = torch.scalar_tensor(0, device="cuda")
+            for i in range(self.num_microbatches):
+                input = get_micro_batch(
+                    unshard_test_data, i * self.microbatch_size, self.microbatch_size
+                )
+                for k, v in input.items():
+                    if isinstance(v, torch.Tensor):
+                        input[k] = v.contiguous()
+                output = org_model(**input)
+                loss = criterion(output) / self.num_microbatches
+                loss.backward()
+                org_loss.add_(loss.data)
+
+        sharded_loss, sharded_output = None, None
+        if run_sharded_model:
+            sharded_model.train()
+            data_iter = iter([shard_test_data])
+            sharded_output = booster.execute_pipeline(
+                data_iter,
+                sharded_model,
+                _criterion,
+                sharded_optimizer,
+                return_loss=True,
+                return_outputs=False,
+            )
+            sharded_loss = sharded_output["loss"]
+
+        return org_loss, org_output, sharded_loss, sharded_output
+
+
+class PipeweaverParallelBase(CornstarchMultimodalParallelBase):
     def parallelize_model_pipeweaver(
         self,
         model: MultimodalModel,
@@ -1219,150 +1365,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
         dist.barrier()
         check_all_grad_tensors(grads_to_check)
-
-    @staticmethod
-    def get_pipeline_template(model: nn.Module, num_stages: int) -> PipelineTemplate:
-        modules = PipelineTemplate.get_modules(model)
-        num_layers = sum(bool(re.search(r"\.\d", s)) for s in modules)
-
-        # Get the number of layers per stage
-        base_size = num_layers // num_stages
-        remainder = num_layers % num_stages
-        num_layers_per_stage = [
-            base_size + 1 if i < remainder else base_size for i in range(num_stages)
-        ]
-        assert sum(num_layers_per_stage) == num_layers
-
-        first_layer_index = next(
-            i for i, layer in enumerate(modules) if re.search(r"\.0", layer)
-        )
-        last_layer_index = next(
-            i
-            for i, layer in enumerate(modules)
-            if re.search(rf"\.{num_layers - 1}", layer)
-        )
-
-        modules_per_stages = [[] for _ in range(num_stages)]
-        modules_per_stages[0].extend(modules[:first_layer_index])
-        layer_idx = 0
-        for stage_idx, num_layers in enumerate(num_layers_per_stage):
-            idx = first_layer_index + layer_idx
-            modules_per_stages[stage_idx].extend(modules[idx : idx + num_layers])
-            layer_idx += num_layers
-        modules_per_stages[-1].extend(modules[last_layer_index + 1 :])
-
-        return PipelineTemplate(
-            (
-                model.config[0].model_type
-                if isinstance(model, ModalEncoderModule)
-                else model.config.model_type
-            ),
-            modules_per_stages,
-        )
-
-    def postprocess_data_for_original_model(
-        self, data: dict[str, torch.Tensor], precision: torch.dtype
-    ) -> dict:
-        assert isinstance(data, dict)
-
-        new_data = {}
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                v = v.to(dtype=precision)
-            new_data[k] = v.clone().to("cuda")
-
-        """
-        Inject encoder tokens to the input_ids for the multimodal model.
-        """
-        input_ids: torch.Tensor = new_data["input_ids"]
-        encoder_tokens: list[torch.Tensor] = []
-        for modal_key in self.encoders.keys():
-            # num_encoder_tokens is a list[int] type, a list of number of tokens for each batch.
-            # Implement a 2D tensor with the shape of (batch_size, num_encoder_tokens)
-            encoder_tokens.append(
-                torch.full(
-                    (input_ids.shape[0], self.encoders[modal_key].num_tokens),
-                    fill_value=self.token_ids[modal_key],
-                    dtype=torch.long,
-                    device=input_ids.device,
-                )
-            )
-
-        # prepend it to input_ids
-        input_ids = torch.cat(encoder_tokens + [input_ids], dim=1)
-        new_data["input_ids"] = input_ids
-        new_data["labels"] = input_ids
-        new_data["use_cache"] = False
-
-        return new_data
-
-    def postprocess_data_for_sharded_model(
-        self, data: dict[str, torch.Tensor], precision: torch.dtype
-    ):
-        return self.postprocess_data_for_original_model(data, precision)
-
-    def run_forward_backward_with_multimodal_plugin(
-        self,
-        org_model: nn.Module,
-        sharded_model: nn.Module,
-        sharded_optimizer: Optimizer,
-        criterion: Callable[[torch.Tensor], torch.Tensor],
-        output_transform_fn: Callable,
-        booster: Booster,
-        precision: torch.dtype,
-        run_original_model: bool = True,
-        run_sharded_model: bool = True,
-    ):
-        def _criterion(outputs: BaseModelOutputWithPast, inputs: Any):
-            outputs = output_transform_fn(outputs)
-            loss = criterion(outputs)
-            return loss
-
-        data = {}
-        batch_size = self.microbatch_size * self.num_microbatches
-        for model_base in self.encoders.values():
-            data.update(model_base.data_gen_fn(batch_size))
-        data.update(self.llm.data_gen_fn(batch_size))
-
-        unshard_test_data = self.postprocess_data_for_original_model(data, precision)
-        shard_test_data = self.postprocess_data_for_sharded_model(data, precision)
-
-        org_loss, org_output = None, None
-        if run_original_model:
-            org_model.train()
-
-            # org_output = org_model(**unshard_test_data)
-            # org_loss = criterion(org_output)
-            # org_loss.backward()
-
-            org_loss = torch.scalar_tensor(0, device="cuda")
-            for i in range(self.num_microbatches):
-                input = get_micro_batch(
-                    unshard_test_data, i * self.microbatch_size, self.microbatch_size
-                )
-                for k, v in input.items():
-                    if isinstance(v, torch.Tensor):
-                        input[k] = v.contiguous()
-                output = org_model(**input)
-                loss = criterion(output) / self.num_microbatches
-                loss.backward()
-                org_loss.add_(loss.data)
-
-        sharded_loss, sharded_output = None, None
-        if run_sharded_model:
-            sharded_model.train()
-            data_iter = iter([shard_test_data])
-            sharded_output = booster.execute_pipeline(
-                data_iter,
-                sharded_model,
-                _criterion,
-                sharded_optimizer,
-                return_loss=True,
-                return_outputs=False,
-            )
-            sharded_loss = sharded_output["loss"]
-
-        return org_loss, org_output, sharded_loss, sharded_output
 
 
 def check_output_hidden_state(
