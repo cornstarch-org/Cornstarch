@@ -55,6 +55,10 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
     MultimodalParallelPlugin,
     MultiModalPipelineStageManager,
 )
+from cornstarch.plugin.pipeweaver_parallel_plugin import (
+    PipeweaverParallelPlugin,
+    PipeweaverPipelineStageManager,
+)
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
 from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
 
@@ -889,6 +893,166 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             criterion,
             booster,
         )
+
+    def parallelize_model_pipeweaver(
+        self,
+        model: MultimodalModel,
+        tp_size: int,
+        pp_size: int,
+        sp_size: int,
+        test_config: dict[str, Any],
+        precision: torch.dtype,
+    ) -> tuple[nn.Module, OptimizerWrapper, Callable, Booster]:
+        assert (
+            len(self.encoders) == 1
+        ), "PipeWeaver tests currently support one encoder."
+        encoder_name = next(iter(self.encoders.keys()))
+
+        llm_plugin = ModalParallelPlugin(
+            tp_size=tp_size,
+            sp_size=sp_size,
+            sequence_parallelism_mode="ring_attn" if sp_size > 1 else None,
+            pipeline_template=self.get_pipeline_template(model.language_model, pp_size),
+        )
+        encoder_plugin = ModalParallelPlugin(
+            tp_size=tp_size,
+            sp_size=sp_size,
+            sequence_parallelism_mode="ring_attn" if sp_size > 1 else None,
+            pipeline_template=self.get_pipeline_template(
+                model.get_submodule(f"{encoder_name}_encoder"), pp_size
+            ),
+        )
+
+        plugin = PipeweaverParallelPlugin(
+            encoder_plugin=encoder_plugin,
+            encoder_name=encoder_name,
+            language_model_plugin=llm_plugin,
+            **test_config,
+        )
+        plugin.init_distributed()
+        plugin.pp_group = plugin.global_pp_group
+        all_ranks = list(range(dist.get_world_size()))
+        plugin.pg_mesh.modal_to_ranks = {
+            encoder_plugin.pipeline_template: all_ranks,
+            llm_plugin.pipeline_template: all_ranks,
+        }
+
+        if precision == torch.bfloat16:
+            model.to(dtype=precision)
+            plugin.precision = None
+        else:
+            plugin.precision = "fp16"
+        booster = Booster(plugin=plugin)
+
+        optimizer = Adam(model.parameters(), lr=1e-3)
+        from cornstarch.shardformer.policies import multimodal as multimodal_policy
+
+        with patch.object(
+            multimodal_policy,
+            "MultiModalPipelineStageManager",
+            (MultiModalPipelineStageManager, PipeweaverPipelineStageManager),
+        ):
+            model, optimizer, criterion, _, _ = booster.boost(
+                model, optimizer, self.llm.loss_fn
+            )
+        return model, optimizer, criterion, booster
+
+    def build_model_from_pipeweaver_plugin(
+        self,
+        tp_size: int,
+        pp_size: int,
+        sp_size: int,
+        test_config: dict[str, Any],
+        precision: torch.dtype,
+    ) -> tuple[
+        MultimodalModel,
+        Optimizer,
+        nn.Module,
+        OptimizerWrapper,
+        Callable,
+        Booster,
+    ]:
+        use_lazy_init: bool = test_config.pop("use_lazy_init", False)
+        ctx = LazyInitContext() if use_lazy_init else nullcontext()
+        with ctx:
+            org_model = self.build_model_from_config()
+            sharded_model = copy.deepcopy(org_model)
+
+        if use_lazy_init:
+            ctx.materialize(org_model)
+
+        org_optimizer = Adam(org_model.parameters(), lr=1e-3)
+        sharded_model, sharded_optimizer, criterion, booster = (
+            self.parallelize_model_pipeweaver(
+                sharded_model, tp_size, pp_size, sp_size, test_config, precision
+            )
+        )
+
+        org_model.update_language_model_to_use_bitfield_attention_mask()
+        sharded_model.unwrap().update_language_model_to_use_bitfield_attention_mask()
+
+        return (
+            org_model,
+            org_optimizer,
+            sharded_model,
+            sharded_optimizer,
+            criterion,
+            booster,
+        )
+
+    def run_pipeweaver_parallel(
+        self,
+        tp_size: int,
+        pp_size: int,
+        sp_size: int,
+        run_original_model: bool = True,
+        run_sharded_model: bool = True,
+    ) -> tuple[nn.Module, ModelWrapper, Optimizer, OptimizerWrapper, Booster]:
+        precision = torch.bfloat16
+        test_config = dict(
+            num_microbatches=self.num_microbatches,
+            microbatch_size=self.microbatch_size,
+            initial_scale=1,
+        )
+
+        (
+            org_model,
+            org_optimizer,
+            sharded_model,
+            sharded_optimizer,
+            criterion,
+            booster,
+        ) = self.build_model_from_pipeweaver_plugin(
+            tp_size=tp_size,
+            pp_size=pp_size,
+            sp_size=sp_size,
+            test_config=test_config,
+            precision=precision,
+        )
+
+        org_loss, org_output, sharded_loss, sharded_output = (
+            self.run_forward_backward_with_multimodal_plugin(
+                org_model=org_model,
+                sharded_model=sharded_model,
+                sharded_optimizer=sharded_optimizer,
+                criterion=criterion,
+                output_transform_fn=lambda x: x,
+                booster=booster,
+                precision=precision,
+                run_original_model=run_original_model,
+                run_sharded_model=run_sharded_model,
+            )
+        )
+
+        if run_original_model and run_sharded_model:
+            stage_manager = booster.plugin.stage_manager
+            if stage_manager.is_last_stage():
+                check_loss(
+                    org_loss, sharded_loss, atol=self.llm.atol, rtol=self.llm.rtol
+                )
+            dist.barrier()
+
+        return org_model, sharded_model, org_optimizer, sharded_optimizer, booster
 
     @staticmethod
     def get_pipeline_template(model: nn.Module, num_stages: int) -> PipelineTemplate:
