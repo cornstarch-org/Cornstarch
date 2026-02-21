@@ -1045,14 +1045,180 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         )
 
         if run_original_model and run_sharded_model:
-            stage_manager = booster.plugin.stage_manager
-            if stage_manager.is_last_stage():
-                check_loss(
-                    org_loss, sharded_loss, atol=self.llm.atol, rtol=self.llm.rtol
-                )
-            dist.barrier()
+            self.check_fn_pipeweaver(
+                booster=booster,
+                org_model=org_model,
+                sharded_model=sharded_model,
+                org_optim=org_optimizer,
+                sharded_optim=sharded_optimizer,
+                org_output=org_output,
+                sharded_output=sharded_output,
+                org_loss=org_loss,
+                sharded_loss=sharded_loss,
+            )
 
         return org_model, sharded_model, org_optimizer, sharded_optimizer, booster
+
+    def check_fn_pipeweaver(
+        self,
+        booster: Booster,
+        org_model: MultimodalModel,
+        sharded_model: nn.Module,
+        org_optim: Optimizer,
+        sharded_optim: OptimizerWrapper,
+        org_output: ModelOutput,
+        sharded_output: dict,
+        org_loss: torch.Tensor,
+        sharded_loss: torch.Tensor,
+    ):
+        plugin = booster.plugin
+        stage_manager = plugin.stage_manager
+
+        # Loss check on pipeline last stage, same convention as multimodal check_fn.
+        if stage_manager.is_last_stage():
+            check_loss(org_loss, sharded_loss, atol=self.llm.atol, rtol=self.llm.rtol)
+
+        dist.barrier()
+
+        tp_group: dist.ProcessGroup = plugin.tp_group
+        sharded_model_unwrapped: MultimodalModel = sharded_model.unwrap()
+        grads_to_check = {}
+
+        # Keep the same "first-stage only" scope used by existing multimodal checks.
+        if stage_manager.is_first_stage():
+            # LLM checks
+            grads_to_check.update(
+                get_grad_tensors_for_check(
+                    org_model.language_model,
+                    sharded_model_unwrapped.language_model,
+                    self.llm.row_layers_to_check,
+                    tp_group,
+                    atol=self.llm.atol,
+                    rtol=self.llm.rtol,
+                    dim=0,
+                    verbose=False,
+                )
+            )
+            grads_to_check.update(
+                get_grad_tensors_for_check(
+                    org_model.language_model,
+                    sharded_model_unwrapped.language_model,
+                    self.llm.col_layers_to_check,
+                    tp_group,
+                    atol=self.llm.atol,
+                    rtol=self.llm.rtol,
+                    dim=1,
+                    verbose=False,
+                )
+            )
+            grads_to_check.update(
+                get_grad_tensors_for_check(
+                    org_model.language_model,
+                    sharded_model_unwrapped.language_model,
+                    self.llm.norm_layers_to_check,
+                    tp_group,
+                    atol=self.llm.atol,
+                    rtol=self.llm.rtol,
+                    dim=1,
+                    verbose=False,
+                )
+            )
+
+            # Encoder checks
+            for encoder_name, encoder_base in self.encoders.items():
+                org_encoder = org_model.get_submodule(f"{encoder_name}_encoder").module
+                sharded_encoder = sharded_model_unwrapped.get_submodule(
+                    f"{encoder_name}_encoder"
+                ).module
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_encoder,
+                        sharded_encoder,
+                        encoder_base.row_layers_to_check,
+                        tp_group,
+                        atol=encoder_base.atol,
+                        rtol=encoder_base.rtol,
+                        dim=0,
+                        verbose=False,
+                    )
+                )
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_encoder,
+                        sharded_encoder,
+                        encoder_base.col_layers_to_check,
+                        tp_group,
+                        atol=encoder_base.atol,
+                        rtol=encoder_base.rtol,
+                        dim=1,
+                        verbose=False,
+                    )
+                )
+                grads_to_check.update(
+                    get_grad_tensors_for_check(
+                        org_encoder,
+                        sharded_encoder,
+                        encoder_base.norm_layers_to_check,
+                        tp_group,
+                        atol=encoder_base.atol,
+                        rtol=encoder_base.rtol,
+                        dim=1,
+                        verbose=False,
+                    )
+                )
+
+        dist.barrier()
+
+        # Parameter update and post-step equivalence checks.
+        org_optim.step()
+        sharded_optim.step()
+
+        if stage_manager.is_first_stage():
+            check_weight(
+                org_model.language_model,
+                sharded_model_unwrapped.language_model,
+                self.llm.row_layers_to_check,
+                tp_group,
+                dim=0,
+                atol=self.llm.atol,
+                rtol=self.llm.rtol,
+            )
+            check_weight(
+                org_model.language_model,
+                sharded_model_unwrapped.language_model,
+                self.llm.col_layers_to_check,
+                tp_group,
+                dim=1,
+                atol=self.llm.atol,
+                rtol=self.llm.rtol,
+            )
+
+            for encoder_name, encoder_base in self.encoders.items():
+                org_encoder = org_model.get_submodule(f"{encoder_name}_encoder").module
+                sharded_encoder = sharded_model_unwrapped.get_submodule(
+                    f"{encoder_name}_encoder"
+                ).module
+                check_weight(
+                    org_encoder,
+                    sharded_encoder,
+                    encoder_base.row_layers_to_check,
+                    tp_group,
+                    dim=0,
+                    atol=encoder_base.atol,
+                    rtol=encoder_base.rtol,
+                )
+                check_weight(
+                    org_encoder,
+                    sharded_encoder,
+                    encoder_base.col_layers_to_check,
+                    tp_group,
+                    dim=1,
+                    atol=encoder_base.atol,
+                    rtol=encoder_base.rtol,
+                )
+
+        dist.barrier()
+        check_all_grad_tensors(grads_to_check)
 
     @staticmethod
     def get_pipeline_template(model: nn.Module, num_stages: int) -> PipelineTemplate:
