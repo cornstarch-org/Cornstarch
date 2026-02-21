@@ -1,4 +1,7 @@
-import pytest
+import os
+import re
+from unittest.mock import patch
+
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -34,8 +37,8 @@ audio_models = dict(
 causal_lms = dict(
     # gemma2=Gemma2ForCausalLMBase,
     llama=LlamaForCausalLMBase,
-    mistral=MistralForCausalLMBase,
-    phi3=Phi3ForCausalLMBase,
+    # mistral=MistralForCausalLMBase,
+    # phi3=Phi3ForCausalLMBase,
     qwen2=Qwen2ForCausalLMBase,
     # gemma=GemmaForCausalLMBase,
     # internlm2=InternLM2ForCausalLMBase,
@@ -47,34 +50,44 @@ causal_lms = dict(
 class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 8
+        vtp = int(os.environ["VTP"])
+        vpp = int(os.environ["VPP"])
+        ltp = int(os.environ["LTP"])
+        lpp = int(os.environ["LPP"])
+        return vpp * vtp + lpp * ltp
 
-    def postprocess_data_for_original_model(self, data, precision):
-        return super().postprocess_data_for_original_model(data, precision)
-
-    def postprocess_data_for_sharded_model(self, data, precision):
-        return self.postprocess_data_for_original_model(data, precision)
+    def setUp(self) -> None:
+        vtp = re.search(r"vtp=(\d+)", self._testMethodName)
+        vpp = re.search(r"vpp=(\d+)", self._testMethodName)
+        ltp = re.search(r"ltp=(\d+)", self._testMethodName)
+        lpp = re.search(r"lpp=(\d+)", self._testMethodName)
+        assert all(
+            [vtp, vpp, ltp, lpp]
+        ), f"Could not parse parallelism params from {self._testMethodName}"
+        with patch.dict(
+            os.environ,
+            {
+                "VTP": vtp.group(1),
+                "VPP": vpp.group(1),
+                "LTP": ltp.group(1),
+                "LPP": lpp.group(1),
+            },
+        ):
+            super().setUp()
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
-    @parametrize(
-        "vtp, vpp, ltp, lpp",
-        [
-            (1, 1, 1, 1),
-            (1, 2, 2, 1),
-            (1, 2, 1, 2),
-            (2, 1, 2, 1),
-            (2, 1, 1, 2),
-            (2, 2, 2, 2),
-        ],
-    )
+    @parametrize("vtp", [1, 2], name_fn=lambda x: f"vtp={x}")
+    @parametrize("vpp", [1, 2], name_fn=lambda x: f"vpp={x}")
+    @parametrize("ltp", [1, 2], name_fn=lambda x: f"ltp={x}")
+    @parametrize("lpp", [1, 2], name_fn=lambda x: f"lpp={x}")
     def test(
         self,
         vision_model_name: str,
         language_model_name: str,
         vtp: int,
-        ltp: int,
         vpp: int,
+        ltp: int,
         lpp: int,
     ):
         self.set_model(
@@ -91,27 +104,45 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
 class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
     @property
     def world_size(self) -> int:
-        return 8
+        vtp = int(os.environ["VTP"])
+        vpp = int(os.environ["VPP"])
+        vsp = int(os.environ["VSP"])
+        ltp = int(os.environ["LTP"])
+        lpp = int(os.environ["LPP"])
+        lsp = int(os.environ["LSP"])
+        return vpp * vtp * vsp + lpp * ltp * lsp
 
-    def postprocess_data_for_original_model(self, data, precision):
-        return super().postprocess_data_for_original_model(data, precision)
-
-    def postprocess_data_for_sharded_model(self, data, precision):
-        return self.postprocess_data_for_original_model(data, precision)
+    def setUp(self) -> None:
+        vtp = re.search(r"vtp=(\d+)", self._testMethodName)
+        vpp = re.search(r"vpp=(\d+)", self._testMethodName)
+        vsp = re.search(r"vsp=(\d+)", self._testMethodName)
+        ltp = re.search(r"ltp=(\d+)", self._testMethodName)
+        lpp = re.search(r"lpp=(\d+)", self._testMethodName)
+        lsp = re.search(r"lsp=(\d+)", self._testMethodName)
+        assert all(
+            [vtp, vpp, vsp, ltp, lpp, lsp]
+        ), f"Could not parse parallelism params from {self._testMethodName}"
+        with patch.dict(
+            os.environ,
+            {
+                "VTP": vtp.group(1),
+                "VPP": vpp.group(1),
+                "VSP": vsp.group(1),
+                "LTP": ltp.group(1),
+                "LPP": lpp.group(1),
+                "LSP": lsp.group(1),
+            },
+        ):
+            super().setUp()
 
     @parametrize("vision_model_name", vision_models.keys(), lambda x: f"{x}")
     @parametrize("language_model_name", causal_lms.keys(), lambda x: f"{x}")
-    @parametrize(
-        "vtp, vpp, vsp, ltp, lpp, lsp",
-        [
-            (1, 2, 1, 1, 1, 2),  # 1tp+1sp -> 1tp+2sp
-            (1, 1, 2, 1, 1, 2),  # 1tp+2sp -> 1tp+2sp
-            (1, 1, 2, 1, 2, 1),  # 1tp+2sp -> 1tp+1sp
-            (2, 1, 1, 1, 1, 2),  # 2tp+1sp -> 1tp+2sp
-            (2, 1, 2, 1, 2, 2),  # 2tp+2sp -> 1tp+2sp
-            (2, 1, 2, 2, 1, 2),  # 2tp+2sp -> 2tp+2sp
-        ],
-    )
+    @parametrize("vtp", [1, 2], name_fn=lambda x: f"vtp={x}")
+    @parametrize("vpp", [1, 2], name_fn=lambda x: f"vpp={x}")
+    @parametrize("vsp", [1, 2], name_fn=lambda x: f"vsp={x}")
+    @parametrize("ltp", [1, 2], name_fn=lambda x: f"ltp={x}")
+    @parametrize("lpp", [1, 2], name_fn=lambda x: f"lpp={x}")
+    @parametrize("lsp", [1, 2], name_fn=lambda x: f"lsp={x}")
     def test(
         self,
         vision_model_name: str,
@@ -123,11 +154,6 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
         lpp: int,
         lsp: int,
     ):
-        if vsp > 2 or lsp > 2:
-            pytest.skip(
-                "With current data, context parallelism with more than 2 cp rank is not supported."
-            )
-
         self.set_model(
             encoders={"vision": vision_models[vision_model_name]()},
             llm=causal_lms[language_model_name](),

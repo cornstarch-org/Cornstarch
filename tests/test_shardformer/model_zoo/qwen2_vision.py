@@ -67,3 +67,10 @@ class Qwen2VisionTransformerBase(ModelClassBase):
             "pixel_values": torch.stack([pixel_values] * num_batch, dim=0),
             "image_grid_thw": torch.stack([image_grid_thw] * num_batch, dim=0),
         }
+
+    @property
+    def num_tokens(self) -> int:
+        image_size = 256  # minimum pixel size
+        num_grid = image_size // self.config.patch_size
+
+        return num_grid**2 // self.config.spatial_merge_size**2

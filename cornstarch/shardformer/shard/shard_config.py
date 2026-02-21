@@ -32,6 +32,7 @@ class ShardConfig(ColossalShardConfig):
     pipeline_stage_manager: Optional[PipelineStageManager] = None
     pipeline_template: Optional[PipelineTemplate] = None
     enable_tensor_parallelism: bool = True
+    encoder_tp_scatter: bool = False
     enable_all_optimization: bool = False
     enable_fused_normalization: bool = False
     enable_flash_attention: bool = False

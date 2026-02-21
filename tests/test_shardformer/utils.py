@@ -697,14 +697,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             batch_size, -1, language_hidden_size
         )
 
-        output.hidden_states = output.hidden_states[:, :32]
-        return output
-
-    @staticmethod
-    def postprocess_projector_callback(
-        inputs: dict, output: ModelOutput
-    ) -> ModelOutput:
-        output.hidden_states = output.hidden_states[:, :32]
         return output
 
     def build_model_from_pretrained(
@@ -768,21 +760,9 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                     ),
                     additional_args=["pixel_values", "image_grid_thw"],
                 )
-            elif model_base.__class__.__name__ == "Phi4MultimodalAudioModelBase":
-                encoders[modal_key] = ModalEncoderModule(
-                    encoder,
-                    preprocess_callback=self.phi4_audio_preprocess_callback,
-                    postprocess_projector_callback=self.postprocess_projector_callback,
-                    additional_args=[
-                        "audio_input_features",
-                        "audio_attention_mask",
-                        "chunk_pad_size",
-                    ],
-                )
             else:
                 encoders[modal_key] = ModalEncoderModule(
                     encoder,
-                    postprocess_projector_callback=self.postprocess_projector_callback,
                 )
 
         llm = self.llm.model_fn()
@@ -971,7 +951,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             # Implement a 2D tensor with the shape of (batch_size, num_encoder_tokens)
             encoder_tokens.append(
                 torch.full(
-                    (input_ids.shape[0], 32),
+                    (input_ids.shape[0], self.encoders[modal_key].num_tokens),
                     fill_value=self.token_ids[modal_key],
                     dtype=torch.long,
                     device=input_ids.device,
@@ -988,7 +968,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
     def postprocess_data_for_sharded_model(
         self, data: dict[str, torch.Tensor], precision: torch.dtype
-    ) -> dict:
+    ):
         return self.postprocess_data_for_original_model(data, precision)
 
     def run_forward_backward_with_multimodal_plugin(

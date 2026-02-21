@@ -11,6 +11,8 @@ from colossalai.shardformer.policies.base_policy import (
 )
 from torch import nn
 
+from cornstarch.shardformer.layers.linear import Linear1D_Row_ReduceScatter
+
 from cornstarch.models.multimodal_language_model import (
     ModalDecoderModule,
     ModalEncoderModule,
@@ -75,13 +77,17 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
             )
 
         if self.shard_config.enable_tensor_parallelism:
+            tp_scatter = getattr(self.shard_config, "encoder_tp_scatter", False)
             self.append_or_create_submodule_replacement(
                 description=[
                     SubModuleReplacementDescription(
                         "projection.linear",
                         target_module=Linear1D_Col,
                         ignore_if_not_exist=True,
-                        kwargs=dict(gather_output=True, seq_parallel_mode=sp_mode),
+                        kwargs=dict(
+                            gather_output=not tp_scatter,
+                            seq_parallel_mode=sp_mode,
+                        ),
                     ),
                     SubModuleReplacementDescription(
                         "projection.in_proj",
@@ -91,7 +97,9 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
                     ),
                     SubModuleReplacementDescription(
                         "projection.out_proj",
-                        target_module=Linear1D_Row,
+                        target_module=(
+                            Linear1D_Row_ReduceScatter if tp_scatter else Linear1D_Row
+                        ),
                         ignore_if_not_exist=True,
                         kwargs=dict(seq_parallel_mode=sp_mode),
                     ),

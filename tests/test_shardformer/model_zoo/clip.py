@@ -56,3 +56,9 @@ class CLIPModelBase(ModelClassBase):
         return {
             "pixel_values": torch.randn(num_batch, num_channels, image_size, image_size)
         }
+
+    @property
+    def num_tokens(self) -> int:
+        image_size = self.config.image_size
+        patch_size = self.config.patch_size
+        return (image_size // patch_size) ** 2 + 1

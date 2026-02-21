@@ -501,6 +501,12 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         encoder_sp_gather(bool): Whether the encoder projector already gathers across
             SP ranks (ring_attn mode). When True, take-first is used at the border
             instead of concatenation. Defaults to False.
+        encoder_tp_hidden_scatter(bool): Whether the encoder projector uses
+            reduce-scatter along the hidden dimension (enc_tp > llm_tp case).
+            When True, each encoder TP rank sends a unique hidden shard and the
+            LLM concatenates them along dim=-1 instead of discarding duplicates.
+            The hidden split in the backward pass applies even when enc_sp==1.
+            Defaults to False.
     """
 
     stage_manager: MultiModalPipelineStageManager
@@ -511,6 +517,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         num_microbatches: int,
         microbatch_size: int,
         encoder_sp_gather: bool = False,
+        encoder_tp_hidden_scatter: bool = False,
     ):
         assert (
             num_microbatches is not None and microbatch_size is not None
@@ -535,6 +542,7 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         self.microbatch_offset: Optional[int] = None
 
         self.encoder_sp_gather = encoder_sp_gather
+        self.encoder_tp_hidden_scatter = encoder_tp_hidden_scatter
 
     # ------------------------------------------------------------------
     # Border communication helpers (called only on LLM first-stage ranks)
@@ -558,8 +566,13 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
     def _merge_cross_modal_recv(self, input_tensors: list[Any]) -> Any:
         """Merge encoder outputs received at the LLM first stage.
 
-        Step 1 — TP deduplication: within each SP group, all tp_group_size encoder
-        TP ranks sent identical tensors (after all-reduce). Take the first.
+        Step 1 — TP assembly: within each SP group, collect tp_group_size tensors.
+
+        - encoder_tp_hidden_scatter=False (default): encoder TP ranks all-reduced,
+          so every shard is identical. Take the first tensor in each group.
+        - encoder_tp_hidden_scatter=True: encoder TP ranks reduce-scattered along
+          dim=-1, so each shard is a unique hidden slice. Concatenate along dim=-1
+          to reconstruct the full hidden tensor for this SP position.
 
         Step 2 — SP assembly:
           - encoder_sp_gather=True or sp_A==1: all SP groups hold the same full
@@ -570,8 +583,18 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         """
         sp_A, tp_group_size = self._compute_border_info()
 
-        # Step 1: one representative tensor per SP group
-        tensors_per_sp = [input_tensors[i * tp_group_size] for i in range(sp_A)]
+        # Step 1: one assembled tensor per SP group
+        if self.encoder_tp_hidden_scatter and tp_group_size > 1:
+            tensors_per_sp = []
+            for i in range(sp_A):
+                shards = [input_tensors[i * tp_group_size + j] for j in range(tp_group_size)]
+                if isinstance(shards[0], dict) and "hidden_states" in shards[0]:
+                    hs = torch.cat([s["hidden_states"] for s in shards], dim=-1)
+                    tensors_per_sp.append({**shards[0], "hidden_states": hs})
+                else:
+                    tensors_per_sp.append(torch.cat(shards, dim=-1))
+        else:
+            tensors_per_sp = [input_tensors[i * tp_group_size] for i in range(sp_A)]
 
         # Step 2: SP assembly
         if self.encoder_sp_gather or sp_A == 1:
@@ -593,16 +616,30 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         """Split the LLM first-stage gradient for each encoder rank.
 
         Inverse of _merge_cross_modal_recv:
-          - encoder_sp_gather=True or sp_A==1: broadcast the full gradient to all
-            encoder ranks (ring_attn handles internal splitting via autograd).
-          - encoder_sp_gather=False and sp_A>1: split hidden_states along the
-            sequence dimension into sp_A equal chunks; replicate each chunk
-            tp_group_size times to match the flat prev_ranks list.
+
+        Sequence axis (SP dimension):
+          - encoder_sp_gather=True (ring_attn): every encoder SP rank already
+            holds the full sequence, so all sp_A SP groups receive the same
+            full-sequence gradient chunk (no torch.narrow along seq_dim).
+          - Otherwise: split hidden_states along the sequence dimension into
+            sp_A equal contiguous chunks.
+
+        Hidden axis (TP dimension):
+          - encoder_tp_hidden_scatter=True and tp_group_size>1: split each
+            sequence chunk along dim=-1 into tp_group_size unique hidden shards
+            so each encoder TP rank receives only its column slice.
+          - Otherwise: broadcast the same chunk to all tp_group_size TP ranks.
+
+        Early return (broadcast full gradient):
+          - When neither axis needs splitting.
         """
         sp_A, tp_group_size = self._compute_border_info()
         prev_ranks = self.stage_manager.get_prev_ranks()
 
-        if self.encoder_sp_gather or sp_A == 1:
+        needs_tp_scatter = self.encoder_tp_hidden_scatter and tp_group_size > 1
+
+        # Fast path: no splitting of any kind needed.
+        if not needs_tp_scatter and (self.encoder_sp_gather or sp_A == 1):
             return [input_tensor_grad] * len(prev_ranks)
 
         if not isinstance(input_tensor_grad, dict) or "hidden_states" not in input_tensor_grad:
@@ -614,11 +651,30 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
 
         per_rank: list[Any] = []
         for i in range(sp_A):
-            chunk = torch.narrow(grad, seq_dim, i * chunk_size, chunk_size)
+            # ring_attn: all encoder SP ranks hold the full sequence; every SP
+            # group receives the same unsplit gradient.
+            # all_to_all SP: narrow to this SP group's contiguous sequence chunk.
+            if self.encoder_sp_gather:
+                chunk = grad
+            else:
+                chunk = torch.narrow(grad, seq_dim, i * chunk_size, chunk_size)
+
             chunk_grad = dict(input_tensor_grad)
-            chunk_grad["hidden_states"] = chunk
-            for _ in range(tp_group_size):
-                per_rank.append(chunk_grad)
+
+            if needs_tp_scatter:
+                # Split the hidden dimension into tp_group_size shards; each
+                # encoder TP rank receives its unique column slice.
+                H = chunk.shape[-1]
+                shard_size = H // tp_group_size
+                for j in range(tp_group_size):
+                    hidden_shard = torch.narrow(chunk, -1, j * shard_size, shard_size)
+                    per_rank.append({**chunk_grad, "hidden_states": hidden_shard})
+            else:
+                # No hidden split: broadcast the same chunk to all tp_group_size
+                # encoder TP ranks (they all sent identical all-reduced tensors).
+                chunk_grad["hidden_states"] = chunk
+                for _ in range(tp_group_size):
+                    per_rank.append(chunk_grad)
 
         return per_rank
 

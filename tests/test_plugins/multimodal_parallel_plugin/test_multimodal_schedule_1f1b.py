@@ -741,6 +741,18 @@ _TPSP_CONFIGS = [
     (4, 1, 1, 4),
 ]
 
+# Subset of _TPSP_CONFIGS where tp_group_size = max(1, enc_tp // llm_tp) > 1.
+# Used by test_combined_tp_sp_hidden_scatter.
+#   enc_tp  enc_sp  llm_tp  llm_sp  tp_group_size
+#   4       1       2       2       2
+#   2       2       1       4       2
+#   4       1       1       4       4
+_TPSP_SCATTER_CONFIGS = [
+    (4, 1, 2, 2),
+    (2, 2, 1, 4),
+    (4, 1, 1, 4),
+]
+
 
 @instantiate_parametrized_tests
 class TestScheduleHeterogeneousTPSPClass(GlooDistributedTestBase):
@@ -929,6 +941,183 @@ class TestScheduleHeterogeneousTPSPClass(GlooDistributedTestBase):
                 atol=1e-4,
                 rtol=1e-4,
             )
+
+    @parametrize(
+        "enc_tp,enc_sp,llm_tp,llm_sp",
+        _TPSP_SCATTER_CONFIGS,
+        name_fn=lambda e_tp, e_sp, l_tp, l_sp: (
+            f"enc_tp{e_tp}sp{e_sp}__llm_tp{l_tp}sp{l_sp}"
+        ),
+    )
+    @parametrize("num_microbatches", [2, 4], name_fn=lambda x: f"mb={x}")
+    def test_combined_tp_sp_hidden_scatter(
+        self,
+        enc_tp: int,
+        enc_sp: int,
+        llm_tp: int,
+        llm_sp: int,
+        num_microbatches: int,
+    ):
+        """Schedule correctness with encoder_tp_hidden_scatter=True.
+
+        Each encoder TP rank sends only its hidden shard (H/tp_group_size).
+        The LLM first stage concatenates tp_group_size shards along dim=-1 to
+        recover the full hidden tensor — identical to what the non-scatter path
+        produces.
+
+        Gradient contract (scatter differs from all-reduce):
+          • Each encoder rank holds non-zero gradient only for its hidden shard
+            columns.  Ranks that process the same SP slice AND the same shard
+            index are duplicates; there are ``enc_tp // tp_group_size`` of them.
+          • all_reduce(grad, all_enc_group) / (enc_tp // tp_group_size) == ref
+        """
+        total_seq = 16
+        seq_per_sp = total_seq // enc_sp
+        microbatch_size = seq_per_sp // num_microbatches
+        tp_group_size = max(1, enc_tp // llm_tp)
+
+        enc_modal_name = f"enc_tp{enc_tp}sp{enc_sp}"
+        llm_modal_name = f"llm_tp{llm_tp}sp{llm_sp}"
+
+        model_ref = self._make_model(enc_modal_name, llm_modal_name)
+        for p in model_ref.parameters():
+            dist.broadcast(p.data, src=0)
+        pp_model = _HeteroVarModelTPScatter(
+            enc_modal_name=enc_modal_name,
+            llm_modal_name=llm_modal_name,
+            llm_num_stages=1,
+        ).to("cuda")
+        # Copy weights from ref so all ranks start identical.
+        for (name_ref, p_ref), (_, p_pp) in zip(
+            model_ref.named_parameters(), pp_model.named_parameters()
+        ):
+            p_pp.data.copy_(p_ref.data)
+
+        stage_manager = self._create_stage_manager(
+            enc_tp, enc_sp, llm_tp, llm_sp, enc_modal_name, llm_modal_name
+        )
+        schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
+            stage_manager,
+            num_microbatches=num_microbatches,
+            microbatch_size=microbatch_size,
+            encoder_sp_gather=False,
+            encoder_tp_hidden_scatter=True,
+        )
+
+        x_full = torch.rand(total_seq, _H, device="cuda")
+        dist.broadcast(x_full, src=0)
+
+        # Non-PP baseline: full model, full input.
+        y_ref = model_ref.enc(x_full)
+        out_ref = model_ref.llm_layers[0](y_ref)
+        loss_ref = criterion(out_ref)
+        loss_ref.backward()
+
+        # PP schedule.
+        # Encoder ranks feed their SP sequence slice; the model internally
+        # slices the hidden dim to produce the TP scatter shard.
+        pg_mesh = stage_manager.pg_mesh
+        my_modal = pg_mesh.my_modal
+        sp_coord = pg_mesh.coords[0][pg_mesh.sp_axis]
+        tp_coord = pg_mesh.coords[0][pg_mesh.tp_axis]
+
+        if my_modal.model_name == enc_modal_name:
+            x_local = x_full[sp_coord * seq_per_sp : (sp_coord + 1) * seq_per_sp]
+            input_list = [x_local.detach().clone()]
+        else:
+            input_list = [
+                torch.zeros(num_microbatches * microbatch_size, _H, device="cuda")
+            ]
+
+        pp_model.pp_config = {
+            "modal_name": my_modal.model_name,
+            "stage_manager": stage_manager,
+            "tp_group_size": tp_group_size,
+            "tp_coord": tp_coord,
+        }
+        pp_optimizer = OptimizerWrapper(torch.optim.SGD(pp_model.parameters(), lr=0))
+        pp_ret = schedule.forward_backward_step(
+            pp_model,
+            iter(input_list),
+            criterion,
+            pp_optimizer,
+            return_loss=True,
+        )
+
+        dist.barrier()
+
+        # --- Loss check (LLM sees the same merged tensor as the baseline) ---
+        if stage_manager.is_last_stage(check_only_in_modal=False):
+            torch.testing.assert_close(loss_ref, pp_ret["loss"], atol=1e-4, rtol=1e-4)
+
+        # --- Gradient checks (collective: all 8 ranks call get_group_along_axis) ---
+        enc_all_group = pg_mesh.get_group_along_axis([pg_mesh.sp_axis, pg_mesh.tp_axis])
+
+        if my_modal.model_name == enc_modal_name:
+            enc_grad = pp_model.enc.weight.grad.clone()
+
+            # In the scatter case each encoder TP rank contributes only its shard
+            # columns to enc.weight.grad.  Ranks that lie in the same SP group and
+            # share the same shard index (i.e. tp_coord % tp_group_size is equal)
+            # produce identical contributions, so the all-reduce overcounts by a
+            # factor of enc_tp // tp_group_size.
+            full_sum = enc_grad.clone()
+            dist.all_reduce(full_sum, group=enc_all_group)
+            divisor = enc_tp // tp_group_size
+            if divisor > 1:
+                full_sum /= divisor
+            torch.testing.assert_close(
+                model_ref.enc.weight.grad, full_sum, atol=1e-4, rtol=1e-4
+            )
+        else:
+            # LLM receives the same merged (seq, H) tensor as the baseline.
+            torch.testing.assert_close(
+                model_ref.llm_layers[0].weight.grad,
+                pp_model.llm_layers[0].weight.grad,
+                atol=1e-4,
+                rtol=1e-4,
+            )
+
+
+class _HeteroVarModelTPScatter(_HeteroVarModel):
+    """Encoder returns a H/tp_group_size hidden shard to simulate reduce-scatter.
+
+    The shard index is ``tp_coord % tp_group_size``; shard size is
+    ``H // tp_group_size``.  ``tp_group_size`` and ``tp_coord`` must be
+    stored in ``pp_config`` before calling ``forward``.
+
+    In baseline mode (``pp_config=None``) the full model runs sequentially.
+    """
+
+    def forward(
+        self,
+        x: torch.Tensor | None = None,
+        hidden_states: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        if self.pp_config is None:
+            return super().forward(x, hidden_states, **kwargs)
+
+        modal_name: str = self.pp_config["modal_name"]
+        sm: MultiModalPipelineStageManager = self.pp_config["stage_manager"]
+
+        if modal_name == self._enc_modal_name:
+            enc_out = self.enc(x)  # (seq_per_sp, H)
+            tp_group_size: int = self.pp_config.get("tp_group_size", 1)
+            if tp_group_size > 1:
+                tp_coord: int = self.pp_config["tp_coord"]
+                shard_idx = tp_coord % tp_group_size
+                shard_size = enc_out.shape[-1] // tp_group_size
+                enc_out = enc_out[
+                    :, shard_idx * shard_size : (shard_idx + 1) * shard_size
+                ]
+            return {"hidden_states": enc_out}
+        else:
+            inp = hidden_states if hidden_states is not None else x
+            out = self.llm_layers[sm.stage_in_modal](inp)
+            if sm.is_last_stage(check_only_in_modal=False):
+                return out
+            return {"hidden_states": out}
 
 
 # ---------------------------------------------------------------------------

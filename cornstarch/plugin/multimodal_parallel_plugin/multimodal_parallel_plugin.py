@@ -539,12 +539,19 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             enc_plugin.sequence_parallelism_mode == "ring_attn"
             and enc_plugin.sp_size > 1
         )
+        # Scatter the encoder's final TP layer output along the hidden
+        # dimension only when the encoder has more TP ranks than the LLM
+        # (TP fan-in case).  When enc_tp == llm_tp no deduplication happens
+        # and the LLM expects a full (seq, H) tensor.
+        tp_hidden_scatter = enc_plugin.tp_size > self.language_model_plugin.tp_size
         self.schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             self.stage_manager,
             self.num_microbatches,
             self.microbatch_size,
             encoder_sp_gather=encoder_sp_gather,
+            encoder_tp_hidden_scatter=tp_hidden_scatter,
         )
+        self._encoder_tp_scatter = tp_hidden_scatter
 
         self.shard_config.tensor_parallel_process_group = self.tp_group
         self.shard_config.pipeline_stage_manager = self.stage_manager
@@ -597,6 +604,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 shard_config = replace(
                     self.shard_config,
                     pipeline_template=encoder.pipeline_template,
+                    encoder_tp_scatter=self._encoder_tp_scatter,
                 )
                 module = model.get_submodule(f"{modal_name}_encoder")
                 module = encoder.configure(module, shard_config, self.stage_manager)
