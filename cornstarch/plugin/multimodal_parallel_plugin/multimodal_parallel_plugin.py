@@ -732,10 +732,8 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
 
         return DataLoader(
             dataset,
-            batch_size=batch_size,
-            sampler=sampler,
+            batch_sampler=sampler,
             worker_init_fn=seed_worker,
-            drop_last=drop_last,
             pin_memory=pin_memory,
             num_workers=num_workers,
             **_kwargs,
