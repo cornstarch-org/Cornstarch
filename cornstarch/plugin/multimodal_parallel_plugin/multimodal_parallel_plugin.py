@@ -25,7 +25,10 @@ from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
+
+from cornstarch.plugin.multimodal_parallel_plugin.global_batch_reorder_sampler import (
+    GlobalBatchReorderSampler,
+)
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
 
@@ -673,19 +676,51 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         drop_last: bool = False,
         pin_memory: bool = False,
         num_workers: int = 0,
-        distributed_sampler_cls=None,
+        metadata_fn: Optional[Callable[[int], float]] = None,
+        batch_reorder_fn: Optional[Callable[[list], list]] = None,
         **kwargs,
     ):
+        """Prepare a dataloader for distributed training.
+
+        At most one of ``metadata_fn`` / ``batch_reorder_fn`` may be set.
+        When neither is provided, samples are partitioned across ranks in
+        contiguous slices with no reordering (identity).
+
+        Args:
+            dataset: Dataset to load from.
+            batch_size: Per data-parallel replica batch size.
+            shuffle: Shuffle indices each epoch.
+            seed: Random seed for shuffling and worker init.
+            drop_last: Drop the last incomplete global batch.
+            pin_memory: Pin CPU memory in DataLoader workers.
+            num_workers: Number of DataLoader worker processes.
+            metadata_fn: ``(index: int) -> float`` — scalar cost per sample.
+                Precomputed once at sampler construction; samples within each
+                global batch are sorted by descending cost so rank 0 receives
+                the highest-cost samples. Mutually exclusive with
+                ``batch_reorder_fn``.
+            batch_reorder_fn: ``(indices: List[int]) -> List[int]`` — fully
+                custom reordering applied to each global batch during
+                iteration. Mutually exclusive with ``metadata_fn``.
+            **kwargs: Extra arguments forwarded to ``DataLoader``.
+        """
         assert dist.is_initialized(), "torch.distributed is not initialized."
         self.init_distributed()
 
         _kwargs = kwargs.copy()
-        distributed_sampler_cls = distributed_sampler_cls or DistributedSampler
-        sampler = distributed_sampler_cls(
+        dp_size = self.pg_mesh.size(self.pg_mesh.dp_axis)
+        dp_rank = self.pg_mesh.coords[0][self.pg_mesh.dp_axis]
+
+        sampler = GlobalBatchReorderSampler(
             dataset,
-            num_replicas=self.pg_mesh.size(self.pg_mesh.dp_axis),
-            rank=self.pg_mesh.coords[0][self.pg_mesh.dp_axis],
+            num_replicas=dp_size,
+            rank=dp_rank,
+            local_batch_size=batch_size,
+            metadata_fn=metadata_fn,
+            batch_reorder_fn=batch_reorder_fn,
             shuffle=shuffle,
+            seed=seed,
+            drop_last=drop_last,
         )
 
         # Deterministic dataloader
