@@ -7,6 +7,75 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 
+def noop_batch_reorder_fn(indices: List[int]) -> List[int]:
+    """No-op implementation of ``batch_reorder_fn``: returns indices unchanged.
+
+    This is the default reorder function used when neither ``metadata_fn`` nor
+    ``batch_reorder_fn`` is supplied to ``GlobalBatchReorderSampler``. It also
+    serves as a reference for the expected signature.
+
+    A custom ``batch_reorder_fn`` must:
+
+    * Accept a ``List[int]`` of length ``global_batch_size`` — the dataset
+      indices that form one global batch, in their current (possibly shuffled)
+      order.
+    * Return a ``List[int]`` containing exactly the same indices in the desired
+      order. Rank 0 will receive the first ``global_batch_size // num_replicas``
+      entries, rank 1 the next slice, and so on.
+
+    Example — sort by descending sequence length using a precomputed array::
+
+        lengths: List[int] = [len(dataset[i]["input_ids"]) for i in range(len(dataset))]
+
+        def sort_by_length(indices: List[int]) -> List[int]:
+            return sorted(indices, key=lambda i: lengths[i], reverse=True)
+
+    Args:
+        indices: Global batch index list of length ``global_batch_size``.
+
+    Returns:
+        The same list, unmodified.
+    """
+    return indices
+
+
+def constant_cost_metadata_fn(index: int) -> float:
+    """No-op implementation of ``metadata_fn``: returns 0.0 for every sample.
+
+    This serves as a reference for the expected signature of ``metadata_fn``.
+    Because all samples receive the same cost, no reordering is produced —
+    samples remain in their shuffled / sequential order.
+
+    A custom ``metadata_fn`` must:
+
+    * Accept a single ``int`` — a dataset index in ``[0, len(dataset))``.
+    * Return a ``float`` representing the computational cost of that sample.
+      Higher values mean higher cost; ``GlobalBatchReorderSampler`` sorts each
+      global batch in **descending** cost order so that rank 0 always receives
+      the most expensive samples.
+
+    The function is called **once per dataset index** during sampler
+    construction (``__init__``), not during iteration, so accessing
+    ``dataset[index]`` or any pre-computed metadata array is safe and
+    will not cause double-loading at training time.
+
+    Example — VLM token-count cost using pre-computed metadata::
+
+        def vlm_cost(index: int) -> float:
+            meta = dataset.get_metadata(index)   # lightweight lookup
+            return meta["text_length"] + compute_vision_tokens(
+                meta["image_height"], meta["image_width"]
+            )
+
+    Args:
+        index: Dataset index.
+
+    Returns:
+        ``0.0`` — constant cost (no reordering effect).
+    """
+    return 0.0
+
+
 class GlobalBatchReorderSampler(Sampler[int]):
     """A distributed sampler that reorders samples within each global batch for
     workload balancing across data-parallel ranks.
@@ -107,8 +176,7 @@ class GlobalBatchReorderSampler(Sampler[int]):
                 indices, key=lambda i: costs[i], reverse=True
             )
         else:
-            # Default: no reordering — contiguous partition per global batch.
-            self._reorder_fn = lambda indices: indices
+            self._reorder_fn = noop_batch_reorder_fn
 
     def __iter__(self) -> Iterator[int]:
         if self.shuffle:
