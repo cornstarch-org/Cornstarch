@@ -13,9 +13,9 @@ class GlobalBatchReorderSampler(Sampler[int]):
 
     Standard ``DistributedSampler`` assigns indices independently to each rank.
     This sampler instead groups indices into global batches of size
-    ``local_batch_size * num_replicas``, applies a user-supplied reordering
-    within each global batch, and then hands each rank its contiguous slice
-    ``[rank * local_batch_size : (rank + 1) * local_batch_size]``.
+    ``global_batch_size``, applies a user-supplied reordering within each
+    global batch, and then hands each rank its contiguous slice of
+    ``global_batch_size // num_replicas`` indices.
 
     Because every rank runs identical ``__iter__`` logic with the same seed and
     epoch, the reordering is deterministic and requires no inter-rank
@@ -29,8 +29,9 @@ class GlobalBatchReorderSampler(Sampler[int]):
         dataset: The dataset to sample from.
         num_replicas: Number of data-parallel replicas (dp_size).
         rank: Rank of the current process within the data-parallel group.
-        local_batch_size: Per-replica batch size (the ``batch_size`` passed to
-            ``DataLoader``).
+        global_batch_size: Total number of samples across all replicas in one
+            step (``per_replica_batch_size * num_replicas``). Must be divisible
+            by ``num_replicas``.
         metadata_fn: A callable ``(index: int) -> float`` that returns a scalar
             cost for sample ``index``. Called for **every** dataset index once
             during ``__init__`` to build a cost array; afterwards only O(1)
@@ -40,8 +41,8 @@ class GlobalBatchReorderSampler(Sampler[int]):
         batch_reorder_fn: A callable
             ``(indices: List[int]) -> List[int]`` that receives the global
             batch index list and returns a reordered list. Called once per
-            global batch during ``__iter__``. Takes precedence over
-            ``metadata_fn`` if both are supplied (raises ``ValueError``).
+            global batch during ``__iter__``. Mutually exclusive with
+            ``metadata_fn``.
         shuffle: If ``True``, shuffle the full index list at the start of each
             epoch using ``seed + epoch`` as the generator seed.
         seed: Base random seed used for shuffling.
@@ -55,7 +56,7 @@ class GlobalBatchReorderSampler(Sampler[int]):
         dataset: Dataset,
         num_replicas: int,
         rank: int,
-        local_batch_size: int,
+        global_batch_size: int,
         metadata_fn: Optional[Callable[[int], float]] = None,
         batch_reorder_fn: Optional[Callable[[List[int]], List[int]]] = None,
         shuffle: bool = False,
@@ -73,11 +74,17 @@ class GlobalBatchReorderSampler(Sampler[int]):
                 f"num_replicas={num_replicas}."
             )
 
+        if global_batch_size % num_replicas != 0:
+            raise ValueError(
+                f"global_batch_size ({global_batch_size}) must be divisible by "
+                f"num_replicas ({num_replicas})."
+            )
+
         self.dataset = dataset
         self.num_replicas = num_replicas
         self.rank = rank
-        self.local_batch_size = local_batch_size
-        self.global_batch_size = local_batch_size * num_replicas
+        self.global_batch_size = global_batch_size
+        self.per_rank_size = global_batch_size // num_replicas
         self.shuffle = shuffle
         self.seed = seed
         self.drop_last = drop_last
@@ -89,7 +96,7 @@ class GlobalBatchReorderSampler(Sampler[int]):
         else:
             num_global_batches = math.ceil(n / self.global_batch_size)
         self.total_size = num_global_batches * self.global_batch_size
-        self.num_samples = self.total_size // num_replicas
+        self.num_samples = num_global_batches * self.per_rank_size
 
         if batch_reorder_fn is not None:
             self._reorder_fn: Callable[[List[int]], List[int]] = batch_reorder_fn
@@ -123,11 +130,11 @@ class GlobalBatchReorderSampler(Sampler[int]):
 
         # Reorder within each global batch and collect this rank's slice.
         local_indices: List[int] = []
+        rank_start = self.rank * self.per_rank_size
+        rank_end = rank_start + self.per_rank_size
         for start in range(0, self.total_size, self.global_batch_size):
             global_batch = indices[start : start + self.global_batch_size]
             reordered = self._reorder_fn(global_batch)
-            rank_start = self.rank * self.local_batch_size
-            rank_end = rank_start + self.local_batch_size
             local_indices.extend(reordered[rank_start:rank_end])
 
         assert len(local_indices) == self.num_samples

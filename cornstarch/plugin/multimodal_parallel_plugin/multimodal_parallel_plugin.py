@@ -715,7 +715,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             dataset,
             num_replicas=dp_size,
             rank=dp_rank,
-            local_batch_size=batch_size,
+            global_batch_size=batch_size * dp_size,
             metadata_fn=metadata_fn,
             batch_reorder_fn=batch_reorder_fn,
             shuffle=shuffle,
