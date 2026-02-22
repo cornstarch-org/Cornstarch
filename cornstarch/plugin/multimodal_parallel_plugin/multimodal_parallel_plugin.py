@@ -25,8 +25,9 @@ from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
-from cornstarch.plugin.multimodal_parallel_plugin.global_batch_reorder_sampler import (
+from cornstarch.plugin.multimodal_parallel_plugin.global_batch_reorder_sampler import (  # noqa: F401  # re-exported for callers
     GlobalBatchReorderSampler,
 )
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -676,32 +677,30 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         drop_last: bool = False,
         pin_memory: bool = False,
         num_workers: int = 0,
-        metadata_fn: Optional[Callable[[int], float]] = None,
-        batch_reorder_fn: Optional[Callable[[list], list]] = None,
+        sampler=None,
         **kwargs,
     ):
         """Prepare a dataloader for distributed training.
 
-        At most one of ``metadata_fn`` / ``batch_reorder_fn`` may be set.
-        When neither is provided, samples are partitioned across ranks in
-        contiguous slices with no reordering (identity).
-
         Args:
             dataset: Dataset to load from.
-            batch_size: Per data-parallel replica batch size.
-            shuffle: Shuffle indices each epoch.
+            batch_size: Per data-parallel replica batch size. Used only when
+                ``sampler`` is ``None`` (default ``DistributedSampler`` path).
+            shuffle: Shuffle indices each epoch. Used only when ``sampler``
+                is ``None``.
             seed: Random seed for shuffling and worker init.
-            drop_last: Drop the last incomplete global batch.
+            drop_last: Drop the last incomplete global batch. Used only when
+                ``sampler`` is ``None``.
             pin_memory: Pin CPU memory in DataLoader workers.
             num_workers: Number of DataLoader worker processes.
-            metadata_fn: ``(index: int) -> float`` — scalar cost per sample.
-                Precomputed once at sampler construction; samples within each
-                global batch are sorted by descending cost so rank 0 receives
-                the highest-cost samples. Mutually exclusive with
-                ``batch_reorder_fn``.
-            batch_reorder_fn: ``(indices: List[int]) -> List[int]`` — fully
-                custom reordering applied to each global batch during
-                iteration. Mutually exclusive with ``metadata_fn``.
+            sampler: An optional pre-built batch sampler instance (e.g.
+                ``SimpleSchedulerSampler`` or ``ManduSampler`` from MANDu).
+                After ``init_distributed()`` the correct data-parallel
+                ``rank`` and ``num_replicas`` are injected into the sampler
+                (if it exposes those attributes), then the sampler is used
+                as ``batch_sampler`` in the DataLoader.
+                When ``None`` (default), a standard ``DistributedSampler``
+                is created with the resolved DP rank / size.
             **kwargs: Extra arguments forwarded to ``DataLoader``.
         """
         assert dist.is_initialized(), "torch.distributed is not initialized."
@@ -711,28 +710,42 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         dp_size = self.pg_mesh.size(self.pg_mesh.dp_axis)
         dp_rank = self.pg_mesh.coords[0][self.pg_mesh.dp_axis]
 
-        sampler = GlobalBatchReorderSampler(
-            dataset,
-            num_replicas=dp_size,
-            rank=dp_rank,
-            global_batch_size=batch_size * dp_size,
-            metadata_fn=metadata_fn,
-            batch_reorder_fn=batch_reorder_fn,
-            shuffle=shuffle,
-            seed=seed,
-            drop_last=drop_last,
-        )
-
-        # Deterministic dataloader
+        # Deterministic worker seeding
         def seed_worker(worker_id):
             worker_seed = seed
             np.random.seed(worker_seed)
             torch.manual_seed(worker_seed)
             random.seed(worker_seed)
 
+        if sampler is not None:
+            # Inject the correct DP rank / size into the sampler so that
+            # callers don't need to know process group internals upfront.
+            if hasattr(sampler, "num_replicas"):
+                sampler.num_replicas = dp_size
+            if hasattr(sampler, "rank"):
+                sampler.rank = dp_rank
+            return DataLoader(
+                dataset,
+                batch_sampler=sampler,
+                worker_init_fn=seed_worker,
+                pin_memory=pin_memory,
+                num_workers=num_workers,
+                **_kwargs,
+            )
+
+        # Default: standard DistributedSampler (no workload-aware reordering)
+        default_sampler = DistributedSampler(
+            dataset,
+            num_replicas=dp_size,
+            rank=dp_rank,
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=drop_last,
+        )
         return DataLoader(
             dataset,
-            batch_sampler=sampler,
+            sampler=default_sampler,
+            batch_size=batch_size,
             worker_init_fn=seed_worker,
             pin_memory=pin_memory,
             num_workers=num_workers,

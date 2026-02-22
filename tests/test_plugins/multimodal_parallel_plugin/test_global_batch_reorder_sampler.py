@@ -30,7 +30,6 @@ def collect_all_ranks(
     num_replicas: int,
     global_batch_size: int,
     *,
-    metadata_fn=None,
     batch_reorder_fn=None,
     shuffle: bool = False,
     seed: int = 0,
@@ -49,7 +48,6 @@ def collect_all_ranks(
             num_replicas=num_replicas,
             rank=rank,
             global_batch_size=global_batch_size,
-            metadata_fn=metadata_fn,
             batch_reorder_fn=batch_reorder_fn,
             shuffle=shuffle,
             seed=seed,
@@ -75,18 +73,6 @@ class TestConstruction:
         # Contiguous: rank 0 gets [0,1] and [4,5]; rank 1 gets [2,3] and [6,7]
         assert per_rank[0] == [0, 1, 4, 5]
         assert per_rank[1] == [2, 3, 6, 7]
-
-    def test_both_fn_raises(self):
-        ds = make_dataset(10)
-        with pytest.raises(ValueError, match="not both"):
-            GlobalBatchReorderSampler(
-                ds,
-                num_replicas=2,
-                rank=0,
-                global_batch_size=4,
-                metadata_fn=lambda i: float(i),
-                batch_reorder_fn=lambda idxs: idxs,
-            )
 
     def test_global_batch_size_not_divisible_raises_without_batch_reorder_fn(self):
         ds = make_dataset(10)
@@ -119,7 +105,6 @@ class TestConstruction:
                 num_replicas=2,
                 rank=2,
                 global_batch_size=4,
-                metadata_fn=lambda i: float(i),
             )
 
     def test_negative_rank_raises(self):
@@ -130,7 +115,6 @@ class TestConstruction:
                 num_replicas=2,
                 rank=-1,
                 global_batch_size=4,
-                metadata_fn=lambda i: float(i),
             )
 
 
@@ -148,7 +132,6 @@ class TestLen:
             num_replicas=3,
             rank=0,
             global_batch_size=6,
-            metadata_fn=lambda i: float(i),
         )
         assert len(sampler) == 2  # 2 global batches
 
@@ -160,7 +143,6 @@ class TestLen:
             num_replicas=3,
             rank=0,
             global_batch_size=6,
-            metadata_fn=lambda i: float(i),
             drop_last=True,
         )
         assert len(sampler) == 2  # 2 global batches
@@ -173,89 +155,9 @@ class TestLen:
             num_replicas=3,
             rank=0,
             global_batch_size=6,
-            metadata_fn=lambda i: float(i),
             drop_last=False,
         )
         assert len(sampler) == 3  # 3 global batches
-
-
-# ---------------------------------------------------------------------------
-# metadata_fn path: sort-by-descending-cost
-# ---------------------------------------------------------------------------
-
-
-class TestMetadataFn:
-    def test_within_global_batch_sorted_descending(self):
-        """Within each global batch, rank 0 must get the highest-cost samples."""
-        n, num_replicas, global_bs = 12, 3, 6
-        # Cost = identity (cost[i] == i)
-        per_rank = collect_all_ranks(
-            make_dataset(n),
-            num_replicas=num_replicas,
-            global_batch_size=global_bs,
-            metadata_fn=lambda i: float(i),
-        )
-        # global batches: [0..5] → sorted desc [5,4,3,2,1,0]
-        #                 [6..11] → sorted desc [11,10,9,8,7,6]
-        # rank 0 (per_rank_size=2): [5,4] + [11,10]
-        assert per_rank[0] == [5, 4, 11, 10]
-        # rank 1: [3,2] + [9,8]
-        assert per_rank[1] == [3, 2, 9, 8]
-        # rank 2: [1,0] + [7,6]
-        assert per_rank[2] == [1, 0, 7, 6]
-
-    def test_no_sample_lost_or_duplicated(self):
-        """All samples in each global batch must appear exactly once across ranks."""
-        n, num_replicas, global_bs = 12, 3, 6
-        per_rank = collect_all_ranks(
-            make_dataset(n),
-            num_replicas=num_replicas,
-            global_batch_size=global_bs,
-            metadata_fn=lambda i: float(i),
-        )
-        all_seen = [idx for rank_indices in per_rank for idx in rank_indices]
-        assert sorted(all_seen) == list(range(n))
-
-    def test_metadata_fn_called_once_per_sample(self):
-        """metadata_fn must be called exactly len(dataset) times during __init__."""
-        n = 20
-        call_count = []
-        ds = make_dataset(n)
-
-        def counting_fn(i: int) -> float:
-            call_count.append(i)
-            return float(i)
-
-        GlobalBatchReorderSampler(
-            ds,
-            num_replicas=2,
-            rank=0,
-            global_batch_size=4,
-            metadata_fn=counting_fn,
-        )
-        assert sorted(call_count) == list(range(n))
-
-    def test_metadata_fn_not_called_during_iteration(self):
-        """After __init__, iterating must not trigger metadata_fn again."""
-        n = 20
-        ds = make_dataset(n)
-        init_calls = []
-
-        def counting_fn(i: int) -> float:
-            init_calls.append(i)
-            return float(i)
-
-        sampler = GlobalBatchReorderSampler(
-            ds,
-            num_replicas=2,
-            rank=0,
-            global_batch_size=4,
-            metadata_fn=counting_fn,
-        )
-        calls_after_init = len(init_calls)
-        _ = list(sampler)
-        _ = list(sampler)
-        assert len(init_calls) == calls_after_init  # no additional calls
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +245,6 @@ class TestDropLastAndPadding:
             make_dataset(n),
             num_replicas=num_replicas,
             global_batch_size=global_bs,
-            metadata_fn=lambda i: float(i),
             drop_last=True,
         )
         # total_size=6, num_samples per rank=2
@@ -360,7 +261,6 @@ class TestDropLastAndPadding:
             make_dataset(n),
             num_replicas=num_replicas,
             global_batch_size=global_bs,
-            metadata_fn=lambda i: float(i),
             drop_last=False,
         )
         for rank_indices in per_rank:
@@ -374,6 +274,7 @@ class TestDropLastAndPadding:
     def test_len_matches_iter_len(self):
         # __len__ returns num_global_batches; iterating the sampler yields
         # exactly that many lists.
+        per_rank_size = 6 // 3
         for drop_last in (True, False):
             for n in (10, 12, 13):
                 ds = make_dataset(n)
@@ -382,7 +283,6 @@ class TestDropLastAndPadding:
                     num_replicas=3,
                     rank=0,
                     global_batch_size=6,
-                    metadata_fn=lambda i: float(i),
                     drop_last=drop_last,
                 )
                 batches = list(sampler)
@@ -390,7 +290,7 @@ class TestDropLastAndPadding:
                 # Each yielded element must be a list of per_rank_size indices.
                 for batch in batches:
                     assert isinstance(batch, list)
-                    assert len(batch) == sampler.per_rank_size
+                    assert len(batch) == per_rank_size
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +307,6 @@ class TestShuffleAndEpoch:
             num_replicas=2,
             rank=0,
             global_batch_size=4,
-            metadata_fn=lambda i: float(i),
             shuffle=False,
         )
         result_e0 = list(sampler)
@@ -423,7 +322,6 @@ class TestShuffleAndEpoch:
             num_replicas=2,
             rank=0,
             global_batch_size=8,
-            metadata_fn=lambda i: float(i),
             shuffle=True,
             seed=42,
         )
@@ -441,7 +339,6 @@ class TestShuffleAndEpoch:
             make_dataset(n),
             num_replicas=num_replicas,
             global_batch_size=global_bs,
-            metadata_fn=lambda i: float(i),
             shuffle=True,
             seed=7,
             epoch=0,
@@ -463,7 +360,6 @@ class TestShuffleAndEpoch:
             make_dataset(n),
             num_replicas=num_replicas,
             global_batch_size=global_bs,
-            metadata_fn=lambda i: float(i),
             shuffle=True,
             seed=0,
             drop_last=False,
@@ -480,7 +376,6 @@ class TestShuffleAndEpoch:
             num_replicas=2,
             rank=0,
             global_batch_size=4,
-            metadata_fn=lambda i: float(i),
             shuffle=True,
             seed=99,
         )
@@ -489,7 +384,6 @@ class TestShuffleAndEpoch:
             num_replicas=2,
             rank=0,
             global_batch_size=4,
-            metadata_fn=lambda i: float(i),
             shuffle=True,
             seed=99,
         )
@@ -508,6 +402,7 @@ class TestBatchSamplerDataLoader:
         batch of exactly per_rank_size indices — no cross-batch-boundary
         mixing regardless of which rank is used."""
         n, num_replicas, global_bs = 24, 3, 6
+        per_rank_size = global_bs // num_replicas
         ds = make_dataset(n)
 
         for rank in range(num_replicas):
@@ -516,15 +411,14 @@ class TestBatchSamplerDataLoader:
                 num_replicas=num_replicas,
                 rank=rank,
                 global_batch_size=global_bs,
-                metadata_fn=lambda i: float(i),
             )
             dl = DataLoader(ds, batch_sampler=sampler)
             steps = 0
             collected = []
             for batch in dl:
                 step_indices = batch[0].long().tolist()
-                assert len(step_indices) == sampler.per_rank_size, (
-                    f"rank {rank} step {steps}: expected {sampler.per_rank_size} "
+                assert len(step_indices) == per_rank_size, (
+                    f"rank {rank} step {steps}: expected {per_rank_size} "
                     f"indices per step, got {len(step_indices)}"
                 )
                 collected.extend(step_indices)
@@ -547,7 +441,6 @@ class TestBatchSamplerDataLoader:
                 num_replicas=num_replicas,
                 rank=rank,
                 global_batch_size=global_bs,
-                metadata_fn=lambda i: float(i),
             )
             dl = DataLoader(ds, batch_sampler=sampler)
             for batch in dl:

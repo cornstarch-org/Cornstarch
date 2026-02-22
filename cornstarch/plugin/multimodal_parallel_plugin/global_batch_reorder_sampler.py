@@ -7,22 +7,6 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 
-def noop_batch_reorder_fn(indices: List[int]) -> List[int]:
-    """No-op reorder used internally by ``GlobalBatchReorderSampler`` when
-    neither ``metadata_fn`` nor ``batch_reorder_fn`` is provided.
-
-    This is **not** the interface for ``batch_reorder_fn``. For that interface
-    see ``noop_partitioned_batch_reorder_fn`` below.
-
-    Args:
-        indices: Global batch index list of length ``global_batch_size``.
-
-    Returns:
-        The same list, unmodified.
-    """
-    return indices
-
-
 def noop_partitioned_batch_reorder_fn(
     num_replicas: int,
 ) -> Callable[[List[int]], List[List[int]]]:
@@ -69,43 +53,6 @@ def noop_partitioned_batch_reorder_fn(
     return fn
 
 
-def constant_cost_metadata_fn(index: int) -> float:
-    """No-op implementation of ``metadata_fn``: returns 0.0 for every sample.
-
-    This serves as a reference for the expected signature of ``metadata_fn``.
-    Because all samples receive the same cost, no reordering is produced —
-    samples remain in their shuffled / sequential order.
-
-    A custom ``metadata_fn`` must:
-
-    * Accept a single ``int`` — a dataset index in ``[0, len(dataset))``.
-    * Return a ``float`` representing the computational cost of that sample.
-      Higher values mean higher cost; ``GlobalBatchReorderSampler`` sorts each
-      global batch in **descending** cost order so that rank 0 always receives
-      the most expensive samples.
-
-    The function is called **once per dataset index** during sampler
-    construction (``__init__``), not during iteration, so accessing
-    ``dataset[index]`` or any pre-computed metadata array is safe and
-    will not cause double-loading at training time.
-
-    Example — VLM token-count cost using pre-computed metadata::
-
-        def vlm_cost(index: int) -> float:
-            meta = dataset.get_metadata(index)   # lightweight lookup
-            return meta["text_length"] + compute_vision_tokens(
-                meta["image_height"], meta["image_width"]
-            )
-
-    Args:
-        index: Dataset index.
-
-    Returns:
-        ``0.0`` — constant cost (no reordering effect).
-    """
-    return 0.0
-
-
 class GlobalBatchReorderSampler(Sampler[List[int]]):
     """A distributed batch sampler that reorders samples within each global
     batch for workload balancing across data-parallel ranks.
@@ -125,9 +72,9 @@ class GlobalBatchReorderSampler(Sampler[List[int]]):
     epoch, the reordering is deterministic and requires no inter-rank
     communication.
 
-    Both ``metadata_fn`` and ``batch_reorder_fn`` are optional. When neither is
-    provided the sampler behaves as a standard distributed batch sampler with
-    contiguous per-rank slices and no cost-based reordering.
+    When ``batch_reorder_fn`` is not provided the sampler behaves as a
+    standard distributed batch sampler with contiguous per-rank slices and no
+    cost-based reordering.
 
     Args:
         dataset: The dataset to sample from.
@@ -135,16 +82,9 @@ class GlobalBatchReorderSampler(Sampler[List[int]]):
         rank: Rank of the current process within the data-parallel group.
         global_batch_size: Total number of samples across all replicas in one
             step. Must be divisible by ``num_replicas`` when ``batch_reorder_fn``
-            is **not** provided (equal-split paths). When ``batch_reorder_fn``
+            is **not** provided (equal-split path). When ``batch_reorder_fn``
             is provided, divisibility is not required because the function
             controls partitioning directly.
-        metadata_fn: A callable ``(index: int) -> float`` that returns a scalar
-            cost for sample ``index``. Called for **every** dataset index once
-            during ``__init__`` to build a cost array; afterwards only O(1)
-            lookups are performed per step. Samples within each global batch are
-            sorted in descending cost order so that rank 0 receives the
-            highest-cost samples; all ranks receive equal-sized slices.
-            Mutually exclusive with ``batch_reorder_fn``.
         batch_reorder_fn: A callable
             ``(indices: List[int]) -> List[List[int]]`` that receives the
             global batch index list and returns a **list of per-rank index
@@ -152,7 +92,7 @@ class GlobalBatchReorderSampler(Sampler[List[int]]):
             indices assigned to rank ``r``; sublists may have different lengths,
             enabling unequal splits. Called once per global batch during
             ``__iter__``. See ``noop_partitioned_batch_reorder_fn`` for a
-            reference implementation. Mutually exclusive with ``metadata_fn``.
+            reference implementation.
         shuffle: If ``True``, shuffle the full index list at the start of each
             epoch using ``seed + epoch`` as the generator seed.
         seed: Base random seed used for shuffling.
@@ -167,24 +107,18 @@ class GlobalBatchReorderSampler(Sampler[List[int]]):
         num_replicas: int,
         rank: int,
         global_batch_size: int,
-        metadata_fn: Optional[Callable[[int], float]] = None,
         batch_reorder_fn: Optional[Callable[[List[int]], List[List[int]]]] = None,
         shuffle: bool = False,
         seed: int = 0,
         drop_last: bool = False,
     ) -> None:
-        if metadata_fn is not None and batch_reorder_fn is not None:
-            raise ValueError(
-                "Provide either metadata_fn or batch_reorder_fn, not both."
-            )
-
         if rank < 0 or rank >= num_replicas:
             raise ValueError(
                 f"rank must be in [0, num_replicas), got rank={rank}, "
                 f"num_replicas={num_replicas}."
             )
 
-        # Equal-split paths require divisibility; batch_reorder_fn controls
+        # Equal-split path requires divisibility; batch_reorder_fn controls
         # partitioning itself so the constraint does not apply.
         if batch_reorder_fn is None and global_batch_size % num_replicas != 0:
             raise ValueError(
@@ -210,23 +144,11 @@ class GlobalBatchReorderSampler(Sampler[List[int]]):
         self.total_size = num_global_batches * self.global_batch_size
 
         if batch_reorder_fn is not None:
-            # User controls full partitioning; per_rank_size is not fixed.
-            self._batch_reorder_fn: Optional[Callable[[List[int]], List[List[int]]]] = (
+            self._batch_reorder_fn: Callable[[List[int]], List[List[int]]] = (
                 batch_reorder_fn
             )
-            self._reorder_fn: Optional[Callable[[List[int]], List[int]]] = None
-            self.per_rank_size: Optional[int] = None
         else:
-            self._batch_reorder_fn = None
-            self.per_rank_size = global_batch_size // num_replicas
-            if metadata_fn is not None:
-                # Precompute costs once; sort descending so rank 0 gets highest cost.
-                costs = [metadata_fn(i) for i in range(n)]
-                self._reorder_fn = lambda indices: sorted(
-                    indices, key=lambda i: costs[i], reverse=True
-                )
-            else:
-                self._reorder_fn = noop_batch_reorder_fn
+            self._batch_reorder_fn = noop_partitioned_batch_reorder_fn(num_replicas)
 
     def __iter__(self) -> Iterator[List[int]]:
         if self.shuffle:
@@ -248,22 +170,14 @@ class GlobalBatchReorderSampler(Sampler[List[int]]):
 
         for start in range(0, self.total_size, self.global_batch_size):
             global_batch = indices[start : start + self.global_batch_size]
-            if self._batch_reorder_fn is not None:
-                # User controls full partitioning → returns one list per rank.
-                per_rank_lists = self._batch_reorder_fn(global_batch)
-                if len(per_rank_lists) != self.num_replicas:
-                    raise ValueError(
-                        f"batch_reorder_fn must return a list of "
-                        f"{self.num_replicas} sublists (one per replica), "
-                        f"got {len(per_rank_lists)}."
-                    )
-                yield per_rank_lists[self.rank]
-            else:
-                # Equal-split path: reorder then take contiguous slice.
-                reordered = self._reorder_fn(global_batch)  # type: ignore[misc]
-                rank_start = self.rank * self.per_rank_size  # type: ignore[operator]
-                rank_end = rank_start + self.per_rank_size  # type: ignore[operator]
-                yield reordered[rank_start:rank_end]
+            per_rank_lists = self._batch_reorder_fn(global_batch)
+            if len(per_rank_lists) != self.num_replicas:
+                raise ValueError(
+                    f"batch_reorder_fn must return a list of "
+                    f"{self.num_replicas} sublists (one per replica), "
+                    f"got {len(per_rank_lists)}."
+                )
+            yield per_rank_lists[self.rank]
 
     def __len__(self) -> int:
         """Return the number of batches (steps) per epoch for this rank."""
