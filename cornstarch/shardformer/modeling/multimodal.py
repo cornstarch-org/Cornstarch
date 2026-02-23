@@ -104,6 +104,9 @@ class ModalModulePipelineForwards:
         dim: int = 1,
         grad_scale: float = 1.0,
     ) -> torch.Tensor:
+        if hidden_states.dim() == 2:
+            dim = 0
+
         return gather_forward_split_backward(
             hidden_states,
             dim=dim,

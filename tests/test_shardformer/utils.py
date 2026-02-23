@@ -699,20 +699,6 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
 
         return inputs
 
-    @staticmethod
-    def qwen2_vision_postprocess_projector_callback(
-        inputs: dict, output: ModelOutput, language_hidden_size: int
-    ) -> ModelOutput:
-        # Qwen2Vision specific
-        batch_size = inputs[
-            "image_grid_thw" if "image_grid_thw" in inputs else "grid_thw"
-        ].shape[0]
-        output.hidden_states = output.hidden_states.view(
-            batch_size, -1, language_hidden_size
-        )
-
-        return output
-
     def build_model_from_pretrained(
         self,
         encoder_paths: dict[str, tuple[Path, Path]],
@@ -768,16 +754,10 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 encoders[modal_key] = ModalEncoderModule(
                     encoder,
                     preprocess_callback=self.qwen2_vision_preprocess_callback,
-                    postprocess_projector_callback=functools.partial(
-                        self.qwen2_vision_postprocess_projector_callback,
-                        language_hidden_size=self.llm.config.hidden_size,
-                    ),
                     additional_args=["pixel_values", "image_grid_thw"],
                 )
             else:
-                encoders[modal_key] = ModalEncoderModule(
-                    encoder,
-                )
+                encoders[modal_key] = ModalEncoderModule(encoder)
 
         llm = self.llm.model_fn()
 
@@ -1004,9 +984,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             return loss
 
         effective_num_microbatches = (
-            self.num_microbatches
-            if num_microbatches is None
-            else num_microbatches
+            self.num_microbatches if num_microbatches is None else num_microbatches
         )
 
         data = {}

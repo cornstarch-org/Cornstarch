@@ -136,25 +136,32 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
         if self.shard_config.enable_tensor_parallelism:
             policy[Qwen2VLVisionBlock] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="attn.qkv",
                         target_module=FusedLinear1D_Col,
-                        kwargs=dict(split_sizes=[config.embed_dim] * 3),
+                        kwargs=dict(
+                            split_sizes=[config.embed_dim] * 3,
+                            seq_parallel_mode=sp_mode,
+                        ),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attn.proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.fc1",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.fc2",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                 ],
             )
@@ -164,10 +171,12 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="mlp.0",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.2",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                 ],
             )
