@@ -4,6 +4,7 @@ from .multimodal_1f1b import (
     MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
     MultimodalPipelineP2PCommunication,
 )
+from .multimodal_zbpp import MultimodalEncoderTrainingZeroBubblePipelineSchedule
 from .multimodal_parallel_plugin import (
     MultimodalParallelModule,
     MultimodalParallelPlugin,

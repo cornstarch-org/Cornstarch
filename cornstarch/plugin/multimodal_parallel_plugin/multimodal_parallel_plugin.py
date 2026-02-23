@@ -46,6 +46,9 @@ from cornstarch.plugin.multimodal_parallel_plugin.modal_process_group_mesh impor
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_1f1b import (
     MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
 )
+from cornstarch.plugin.multimodal_parallel_plugin.multimodal_zbpp import (
+    MultimodalEncoderTrainingZeroBubblePipelineSchedule,
+)
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
@@ -429,6 +432,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         max_norm: float = 0,
         parallel_output: bool = True,
         make_vocab_size_divisible_by: int = 64,
+        pipeline_schedule: str = "1f1b",
     ):
         PipelinePluginBase.__init__(self)
         self.logger = get_dist_logger()
@@ -450,6 +454,12 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         self.num_microbatches = num_microbatches
         self.global_batch_size = microbatch_size * num_microbatches
         self.max_norm = max_norm
+        self.pipeline_schedule = pipeline_schedule.lower()
+        if self.pipeline_schedule not in {"1f1b", "zbpp"}:
+            raise ValueError(
+                "pipeline_schedule must be one of {'1f1b', 'zbpp'}, "
+                f"got {pipeline_schedule!r}."
+            )
 
         self.shard_config = ShardConfig(
             tensor_parallel_process_group=None,
@@ -548,7 +558,12 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         # (TP fan-in case).  When enc_tp == llm_tp no deduplication happens
         # and the LLM expects a full (seq, H) tensor.
         tp_hidden_scatter = enc_plugin.tp_size > self.language_model_plugin.tp_size
-        self.schedule = MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
+        schedule_cls = (
+            MultimodalEncoderTrainingOneForwardOneBackwardSchedule
+            if self.pipeline_schedule == "1f1b"
+            else MultimodalEncoderTrainingZeroBubblePipelineSchedule
+        )
+        self.schedule = schedule_cls(
             self.stage_manager,
             self.num_microbatches,
             self.microbatch_size,
