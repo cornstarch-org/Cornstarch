@@ -28,7 +28,7 @@ def collate_fn(batches: list[dict], processor: MultimodalProcessor):
     ).to(dtype=torch.bfloat16, device="cuda")
 
     inputs["labels"] = inputs["input_ids"].clone()
-    return inputs
+    return inputs.data
 
 
 def collate_fn_llava_pretrain(
@@ -59,7 +59,7 @@ def collate_fn_llava_pretrain(
     ).to(dtype=torch.bfloat16, device="cuda")
 
     inputs["labels"] = inputs["input_ids"].clone()
-    return inputs
+    return inputs.data
 
 
 model_names: dict[str, str] = {

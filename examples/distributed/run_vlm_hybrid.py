@@ -119,7 +119,7 @@ def pretrain(
         ]
         dataloader = DataLoader(
             dataset=dataset,
-            batch_size=4,
+            batch_size=16,
             shuffle=True,
             drop_last=True,
             collate_fn=functools.partial(
@@ -133,7 +133,7 @@ def pretrain(
         dataset = FakeDataset(image_size=(720, 480))
         dataloader = DataLoader(
             dataset=dataset,
-            batch_size=4,
+            batch_size=16,
             collate_fn=functools.partial(collate_fn, processor=processor),
         )
 
@@ -176,7 +176,7 @@ def pretrain(
         num_training_steps=total_steps,
     )
 
-    model, optimizer, criterion, *_ = booster.booster(
+    model, optimizer, criterion, *_ = booster.boost(
         model=model,
         optimizer=optimizer,
         criterion=lambda outputs, inputs: outputs.loss,
