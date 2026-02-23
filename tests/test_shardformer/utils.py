@@ -604,15 +604,24 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         modal_tp_size: dict[str, int],
         modal_pp_size: dict[str, int],
         modal_sp_size: dict[str, int] = {},
+        pipeline_schedule: str = "1f1b",
         run_original_model: bool = True,
         run_sharded_model: bool = True,
     ) -> tuple[nn.Module, ModelWrapper, Optimizer, OptimizerWrapper, Booster]:
         precision = torch.bfloat16
 
+        # ZBPP requires num_microbatches >= 2 * global_pp_stages.
+        # Keep the default for 1F1B; bump only when ZBPP is selected.
+        num_microbatches = self.num_microbatches
+        if pipeline_schedule.lower() == "zbpp":
+            global_pp_stages = sum(modal_pp_size.values())
+            num_microbatches = max(num_microbatches, 2 * global_pp_stages)
+
         test_config = dict(
-            num_microbatches=self.num_microbatches,
+            num_microbatches=num_microbatches,
             microbatch_size=self.microbatch_size,
             initial_scale=1,
+            pipeline_schedule=pipeline_schedule,
         )
 
         (
@@ -639,6 +648,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                 output_transform_fn=lambda x: x,
                 booster=booster,
                 precision=precision,
+                num_microbatches=num_microbatches,
                 run_original_model=run_original_model,
                 run_sharded_model=run_sharded_model,
             )
@@ -984,6 +994,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
         output_transform_fn: Callable,
         booster: Booster,
         precision: torch.dtype,
+        num_microbatches: Optional[int] = None,
         run_original_model: bool = True,
         run_sharded_model: bool = True,
     ):
@@ -992,8 +1003,14 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             loss = criterion(outputs)
             return loss
 
+        effective_num_microbatches = (
+            self.num_microbatches
+            if num_microbatches is None
+            else num_microbatches
+        )
+
         data = {}
-        batch_size = self.microbatch_size * self.num_microbatches
+        batch_size = self.microbatch_size * effective_num_microbatches
         for model_base in self.encoders.values():
             data.update(model_base.data_gen_fn(batch_size))
         data.update(self.llm.data_gen_fn(batch_size))
@@ -1010,7 +1027,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
             # org_loss.backward()
 
             org_loss = torch.scalar_tensor(0, device="cuda")
-            for i in range(self.num_microbatches):
+            for i in range(effective_num_microbatches):
                 input = get_micro_batch(
                     unshard_test_data, i * self.microbatch_size, self.microbatch_size
                 )
@@ -1018,7 +1035,7 @@ class CornstarchMultimodalParallelBase(GlooDistributedTestBase):
                     if isinstance(v, torch.Tensor):
                         input[k] = v.contiguous()
                 output = org_model(**input)
-                loss = criterion(output) / self.num_microbatches
+                loss = criterion(output) / effective_num_microbatches
                 loss.backward()
                 org_loss.add_(loss.data)
 

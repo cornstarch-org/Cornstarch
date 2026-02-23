@@ -563,7 +563,7 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             if self.pipeline_schedule == "1f1b"
             else MultimodalEncoderTrainingZeroBubblePipelineSchedule
         )
-        self.schedule = schedule_cls(
+        self.scheduler = schedule_cls(
             self.stage_manager,
             self.num_microbatches,
             self.microbatch_size,

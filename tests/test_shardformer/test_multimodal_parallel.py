@@ -81,6 +81,11 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
     @parametrize("vpp", [1, 2], name_fn=lambda x: f"vpp={x}")
     @parametrize("ltp", [1, 2], name_fn=lambda x: f"ltp={x}")
     @parametrize("lpp", [1, 2], name_fn=lambda x: f"lpp={x}")
+    @parametrize(
+        "pipeline_schedule",
+        ["1f1b", "zbpp"],
+        name_fn=lambda x: f"pp={x}",
+    )
     def test(
         self,
         vision_model_name: str,
@@ -89,6 +94,7 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         vpp: int,
         ltp: int,
         lpp: int,
+        pipeline_schedule: str,
     ):
         self.set_model(
             encoders={"vision": vision_models[vision_model_name]()},
@@ -97,6 +103,7 @@ class VisionLanguageMultimodalParallel(CornstarchMultimodalParallelBase):
         self.run_multimodal_parallel(
             {"vision": vtp, "llm": ltp},
             {"vision": vpp, "llm": lpp},
+            pipeline_schedule=pipeline_schedule,
         )
 
 
@@ -143,6 +150,11 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
     @parametrize("ltp", [1, 2], name_fn=lambda x: f"ltp={x}")
     @parametrize("lpp", [1, 2], name_fn=lambda x: f"lpp={x}")
     @parametrize("lsp", [1, 2], name_fn=lambda x: f"lsp={x}")
+    @parametrize(
+        "pipeline_schedule",
+        ["1f1b", "zbpp"],
+        name_fn=lambda x: f"pp={x}",
+    )
     def test(
         self,
         vision_model_name: str,
@@ -153,6 +165,7 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
         ltp: int,
         lpp: int,
         lsp: int,
+        pipeline_schedule: str,
     ):
         self.set_model(
             encoders={"vision": vision_models[vision_model_name]()},
@@ -162,4 +175,5 @@ class VisionLanguageMultimodalContextParallel(CornstarchMultimodalParallelBase):
             {"vision": vtp, "llm": ltp},
             {"vision": vpp, "llm": lpp},
             {"vision": vsp, "llm": lsp},
+            pipeline_schedule=pipeline_schedule,
         )
