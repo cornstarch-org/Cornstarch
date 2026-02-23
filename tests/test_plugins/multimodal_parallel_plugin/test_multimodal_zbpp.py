@@ -2,6 +2,7 @@ import os
 import re
 from unittest.mock import patch
 
+import pytest
 import torch
 import torch.distributed as dist
 from torch.testing._internal.common_utils import (
@@ -40,6 +41,17 @@ def _expected_event_sequence(i: int, p: int, num_microbatches: int) -> list[str]
 
 @instantiate_parametrized_tests
 class TestMultimodalZBPPBasic(GlooDistributedTestBase):
+    _CONFIGS = [
+        (1, 1, 1, 1),
+        (2, 1, 4, 1),
+        (2, 2, 2, 1),
+        (2, 1, 2, 2),
+        (2, 1, 4, 2),
+        (2, 2, 4, 2),
+        (2, 2, 2, 4),
+        (2, 4, 1, 2),
+    ]
+
     @property
     def world_size(self):
         enc_tp = int(os.environ["ENC_TP"])
@@ -54,9 +66,9 @@ class TestMultimodalZBPPBasic(GlooDistributedTestBase):
     def setUp(self) -> None:
         pattern = r"enc_tp=(\d+)_enc_sp=(\d+)_llm_tp=(\d+)_llm_sp=(\d+)"
         match = re.search(pattern, self._testMethodName)
-        assert match is not None, (
-            f"Could not parse parallelism params from {self._testMethodName}"
-        )
+        assert (
+            match is not None
+        ), f"Could not parse parallelism params from {self._testMethodName}"
         with patch.dict(
             os.environ,
             {
@@ -93,12 +105,7 @@ class TestMultimodalZBPPBasic(GlooDistributedTestBase):
 
     @parametrize(
         "enc_tp,enc_sp,llm_tp,llm_sp",
-        [
-            (1, 1, 1, 1),
-            (2, 1, 4, 1),
-            (2, 2, 2, 1),
-            (2, 1, 2, 2),
-        ],
+        _CONFIGS,
         name_fn=lambda enc_tp, enc_sp, llm_tp, llm_sp: (
             f"enc_tp={enc_tp}_enc_sp={enc_sp}_llm_tp={llm_tp}_llm_sp={llm_sp}"
         ),
@@ -106,6 +113,11 @@ class TestMultimodalZBPPBasic(GlooDistributedTestBase):
     def test_global_stage_info(
         self, enc_tp: int, enc_sp: int, llm_tp: int, llm_sp: int
     ):
+        """Validate global stage indexing across heterogeneous TP/SP layouts.
+
+        Ensures all ranks agree on total pipeline depth `p=4`, cover stage ids
+        {0,1,2,3}, and have expected per-stage rank multiplicities from TP/SP.
+        """
         schedule = self._create_schedule(
             num_microbatches=8,
             enc_tp=enc_tp,
@@ -120,18 +132,45 @@ class TestMultimodalZBPPBasic(GlooDistributedTestBase):
         dist.all_gather(gathered, payload, group=dist.group.WORLD)
 
         assert p == 4
-        gathered_i = sorted(int(t[0].item()) for t in gathered)
-        assert gathered_i == [0, 1, 2, 3]
+        gathered_i = [int(t[0].item()) for t in gathered]
+        assert sorted(set(gathered_i)) == [0, 1, 2, 3]
+        assert gathered_i.count(0) == enc_tp * enc_sp
+        assert gathered_i.count(1) == enc_tp * enc_sp
+        assert gathered_i.count(2) == llm_tp * llm_sp
+        assert gathered_i.count(3) == llm_tp * llm_sp
         assert all(int(t[1].item()) == 4 for t in gathered)
 
     @parametrize(
         "enc_tp,enc_sp,llm_tp,llm_sp",
-        [
-            (1, 1, 1, 1),
-            (2, 1, 4, 1),
-            (2, 2, 2, 1),
-            (2, 1, 2, 2),
-        ],
+        _CONFIGS,
+        name_fn=lambda enc_tp, enc_sp, llm_tp, llm_sp: (
+            f"enc_tp={enc_tp}_enc_sp={enc_sp}_llm_tp={llm_tp}_llm_sp={llm_sp}"
+        ),
+    )
+    def test_num_microbatches_lower_bound(
+        self, enc_tp: int, enc_sp: int, llm_tp: int, llm_sp: int
+    ):
+        """Enforce ZBPP precondition: num_microbatches must satisfy N >= 2*p."""
+        schedule = self._create_schedule(
+            num_microbatches=7,  # For p=4, ZBPP requires at least 2*p=8.
+            enc_tp=enc_tp,
+            enc_sp=enc_sp,
+            llm_tp=llm_tp,
+            llm_sp=llm_sp,
+        )
+        with pytest.raises(ValueError, match="requires num_microbatches >="):
+            schedule.run_forward_backward(
+                model=torch.nn.Identity(),
+                data_iter=iter([{}]),
+                criterion=lambda _output, _micro_batch: torch.tensor(0.0),
+                optimizer=object(),
+                return_loss=False,
+                return_outputs=False,
+            )
+
+    @parametrize(
+        "enc_tp,enc_sp,llm_tp,llm_sp",
+        _CONFIGS,
         name_fn=lambda enc_tp, enc_sp, llm_tp, llm_sp: (
             f"enc_tp={enc_tp}_enc_sp={enc_sp}_llm_tp={llm_tp}_llm_sp={llm_sp}"
         ),
@@ -139,6 +178,11 @@ class TestMultimodalZBPPBasic(GlooDistributedTestBase):
     def test_phase_event_order(
         self, enc_tp: int, enc_sp: int, llm_tp: int, llm_sp: int
     ):
+        """Check phase-level execution order matches ZBPP schedule formula.
+
+        The test patches runtime comm/compute hooks and records symbolic events:
+        F (forward), BI (input-grad backward), BP (weight-grad backward).
+        """
         num_microbatches = 8
         schedule = self._create_schedule(
             num_microbatches=num_microbatches,
@@ -183,4 +227,3 @@ class TestMultimodalZBPPBasic(GlooDistributedTestBase):
         assert result["loss"] is None
         assert result["outputs"] is None
         assert events == _expected_event_sequence(i, p, num_microbatches)
-

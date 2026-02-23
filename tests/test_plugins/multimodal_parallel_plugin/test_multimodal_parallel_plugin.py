@@ -13,7 +13,11 @@ from cornstarch.models.multimodal_language_model import (
     MultimodalProjector,
 )
 from cornstarch.pipeline_template import PipelineTemplate
-from cornstarch.plugin.multimodal_parallel_plugin import ModalParallelPlugin
+from cornstarch.plugin.multimodal_parallel_plugin import (
+    ModalParallelPlugin,
+    MultimodalEncoderTrainingOneForwardOneBackwardSchedule,
+    MultimodalEncoderTrainingZeroBubblePipelineSchedule,
+)
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_parallel_plugin import (
     MultimodalParallelModule,
     MultimodalParallelPlugin,
@@ -292,4 +296,70 @@ class TestSingleEncoderModelInitializationClass(
 
             dist.destroy_process_group()
 
+
+class TestMultimodalPluginScheduleSelectionClass(
+    TestPluginInitializationWithFakeBackendBase
+):
+    @staticmethod
+    def _build_plugins() -> tuple[ModalParallelPlugin, ModalParallelPlugin]:
+        encoder_plugin = ModalParallelPlugin(
+            tp_size=1,
+            pipeline_template=PipelineTemplate("enc", [["enc"]]),
+        )
+        llm_plugin = ModalParallelPlugin(
+            tp_size=1,
+            pipeline_template=PipelineTemplate("llm", [["llm"]]),
+        )
+        return encoder_plugin, llm_plugin
+
+    def test_pipeline_schedule_string_normalization(self):
+        """Accept case-insensitive scheduler names and normalize to lowercase."""
+        encoder_plugin, llm_plugin = self._build_plugins()
+        plugin = MultimodalParallelPlugin(
+            encoder_plugins={"encoder": encoder_plugin},
+            language_model_plugin=llm_plugin,
+            num_microbatches=8,
+            microbatch_size=1,
+            pipeline_schedule="ZBPP",
+        )
+        assert plugin.pipeline_schedule == "zbpp"
+
+    def test_pipeline_schedule_invalid_raises(self):
+        """Reject unknown scheduler names with a clear validation error."""
+        encoder_plugin, llm_plugin = self._build_plugins()
+        with pytest.raises(ValueError, match="pipeline_schedule must be one of"):
+            MultimodalParallelPlugin(
+                encoder_plugins={"encoder": encoder_plugin},
+                language_model_plugin=llm_plugin,
+                num_microbatches=8,
+                microbatch_size=1,
+                pipeline_schedule="invalid",
+            )
+
+    @pytest.mark.parametrize(
+        "schedule_name,expected_cls",
+        [
+            ("1f1b", MultimodalEncoderTrainingOneForwardOneBackwardSchedule),
+            ("zbpp", MultimodalEncoderTrainingZeroBubblePipelineSchedule),
+        ],
+    )
+    def test_init_distributed_selects_schedule_class(
+        self, schedule_name: str, expected_cls: type
+    ):
+        """Instantiate the correct schedule class during distributed init."""
+        encoder_plugin, llm_plugin = self._build_plugins()
+        for rank in range(2):
+            plugin = MultimodalParallelPlugin(
+                encoder_plugins={"encoder": encoder_plugin},
+                language_model_plugin=llm_plugin,
+                num_microbatches=8,
+                microbatch_size=1,
+                pipeline_schedule=schedule_name,
+            )
+            dist.init_process_group(
+                backend="fake", store=FakeStore(), rank=rank, world_size=2
+            )
+            plugin.init_distributed()
+            assert isinstance(plugin.schedule, expected_cls)
+            dist.destroy_process_group()
 
