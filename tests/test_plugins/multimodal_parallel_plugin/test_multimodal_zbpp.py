@@ -199,8 +199,17 @@ class TestMultimodalZBPPBasic(GlooDistributedTestBase):
         schedule.load_batch = lambda *_args, **_kwargs: None
         schedule.recv_forward = lambda: {"x": torch.tensor([1.0])}
         schedule.send_forward = lambda _output_obj: None
+        # ZBPP now uses fused comm paths in warmup/steady to avoid send/recv deadlocks.
+        schedule.send_forward_recv_backward = (
+            lambda _output_obj, send_first=None: {"x": torch.tensor([1.0])}
+        )
         schedule.recv_backward = lambda: {"x": torch.tensor([1.0])}
         schedule.send_backward = lambda _input_obj, _input_obj_grad: None
+        schedule.send_backward_recv_forward = (
+            lambda _input_obj, _input_obj_grad, send_first=None: {
+                "x": torch.tensor([1.0])
+            }
+        )
         schedule.forward_step = (
             lambda _model, _input_obj, _criterion, _accum_loss=None, _outputs=None: (
                 events.append("F"),

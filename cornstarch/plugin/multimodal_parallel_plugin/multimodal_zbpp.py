@@ -151,6 +151,40 @@ class MultimodalEncoderTrainingZeroBubblePipelineSchedule(
 
         warmup1_target = (p - i - 1) * 2
         warmup2_target = (p - 1) * 2
+        # Use global stage parity so cross-modal neighbors keep opposite send/recv ordering.
+        send_first = i % 2 == 0
+        # Backward sends cannot safely start before this many forwards have been launched
+        # on this stage; sending earlier was the root cause of the distributed deadlock.
+        backward_send_ready_f = (p - i) * 2
+        is_global_first_stage = self.stage_manager.is_first_stage(
+            check_only_in_modal=False
+        )
+
+        # Forward input prefetched by fused backward->forward exchange.
+        next_input_obj: Any = None
+        # Grads received by fused send_forward_recv_backward() are consumed by BI later.
+        pending_output_obj_grads: list[Any] = []
+        # Delay backward sends until peers are guaranteed to have matching recvs posted.
+        pending_backward_sends: list[tuple[Any, Any]] = []
+
+        def _take_forward_input() -> Any:
+            nonlocal next_input_obj
+            if next_input_obj is not None:
+                input_obj_local = next_input_obj
+                next_input_obj = None
+                return input_obj_local
+            return self.recv_forward()
+
+        def _maybe_send_one_pending_backward(force: bool = False) -> None:
+            if not pending_backward_sends:
+                return
+
+            if not force and f_scheduled < backward_send_ready_f:
+                # Keep BI results buffered during early warmup to avoid unmatched send_backward().
+                return
+
+            send_input_obj, send_input_obj_grad = pending_backward_sends.pop(0)
+            self.send_backward(send_input_obj, send_input_obj_grad)
 
         # Phase 1: warmup1 (F only)
         while f_scheduled < warmup1_target:
@@ -165,43 +199,91 @@ class MultimodalEncoderTrainingZeroBubblePipelineSchedule(
 
         # Phase 2: warmup2 (F + BI)
         while f_scheduled < warmup2_target:
-            input_obj = self.recv_forward()
+            input_obj = _take_forward_input()
             output_obj = self.forward_step(
                 model, input_obj, criterion, accum_loss, outputs
             )
-            self.send_forward(output_obj)
+            # Fused send+recv keeps both directions progressing in one P2P step.
+            output_obj_grad = self.send_forward_recv_backward(
+                output_obj, send_first=send_first
+            )
+            pending_output_obj_grads.append(output_obj_grad)
             input_objs.append(input_obj)
             output_objs.append(output_obj)
             f_scheduled += 1
 
             bi_input_obj = input_objs.pop(0)
             bi_output_obj = output_objs.pop(0)
-            output_obj_grad = self.recv_backward()
+            output_obj_grad = pending_output_obj_grads.pop(0)
             input_obj_grad = self.backward_b_step(
                 model, optimizer, bi_input_obj, bi_output_obj, output_obj_grad
             )
-            self.send_backward(bi_input_obj, input_obj_grad)
+            pending_backward_sends.append((bi_input_obj, input_obj_grad))
+            sent_by_fused_bwd_fwd = False
+            if f_scheduled < self.num_microbatches:
+                if (
+                    pending_backward_sends
+                    and f_scheduled >= backward_send_ready_f
+                    and not is_global_first_stage
+                ):
+                    # Once the window is safe, fuse backward send with next forward recv.
+                    send_input_obj, send_input_obj_grad = pending_backward_sends.pop(0)
+                    next_input_obj = self.send_backward_recv_forward(
+                        send_input_obj,
+                        send_input_obj_grad,
+                        send_first=send_first,
+                    )
+                    sent_by_fused_bwd_fwd = True
+                else:
+                    # Otherwise only prefetch forward input; backward send stays deferred.
+                    next_input_obj = self.recv_forward()
+            if not sent_by_fused_bwd_fwd:
+                _maybe_send_one_pending_backward()
             WeightGradStore.flush(chunk=0)
             bi_scheduled += 1
 
         # Phase 3: steady (F + BI + BP)
         while f_scheduled < self.num_microbatches:
-            input_obj = self.recv_forward()
+            input_obj = _take_forward_input()
             output_obj = self.forward_step(
                 model, input_obj, criterion, accum_loss, outputs
             )
-            self.send_forward(output_obj)
+            # Keep steady-state forward/backward communication paired.
+            output_obj_grad = self.send_forward_recv_backward(
+                output_obj, send_first=send_first
+            )
+            pending_output_obj_grads.append(output_obj_grad)
             input_objs.append(input_obj)
             output_objs.append(output_obj)
             f_scheduled += 1
 
             bi_input_obj = input_objs.pop(0)
             bi_output_obj = output_objs.pop(0)
-            output_obj_grad = self.recv_backward()
+            output_obj_grad = pending_output_obj_grads.pop(0)
             input_obj_grad = self.backward_b_step(
                 model, optimizer, bi_input_obj, bi_output_obj, output_obj_grad
             )
-            self.send_backward(bi_input_obj, input_obj_grad)
+            pending_backward_sends.append((bi_input_obj, input_obj_grad))
+            sent_by_fused_bwd_fwd = False
+            if f_scheduled < self.num_microbatches:
+                if (
+                    pending_backward_sends
+                    and f_scheduled >= backward_send_ready_f
+                    and not is_global_first_stage
+                ):
+                    # Safe point: combine backward send with next forward recv.
+                    send_input_obj, send_input_obj_grad = pending_backward_sends.pop(0)
+                    next_input_obj = self.send_backward_recv_forward(
+                        send_input_obj,
+                        send_input_obj_grad,
+                        send_first=send_first,
+                    )
+                    sent_by_fused_bwd_fwd = True
+                else:
+                    # Unsafe to send backward yet; only receive the next forward input.
+                    next_input_obj = self.recv_forward()
+            if not sent_by_fused_bwd_fwd:
+                _maybe_send_one_pending_backward()
             WeightGradStore.flush(chunk=0)
             bi_scheduled += 1
 
@@ -212,16 +294,25 @@ class MultimodalEncoderTrainingZeroBubblePipelineSchedule(
         while bi_scheduled < self.num_microbatches:
             bi_input_obj = input_objs.pop(0)
             bi_output_obj = output_objs.pop(0)
-            output_obj_grad = self.recv_backward()
+            if pending_output_obj_grads:
+                output_obj_grad = pending_output_obj_grads.pop(0)
+            else:
+                output_obj_grad = self.recv_backward()
             input_obj_grad = self.backward_b_step(
                 model, optimizer, bi_input_obj, bi_output_obj, output_obj_grad
             )
-            self.send_backward(bi_input_obj, input_obj_grad)
+            pending_backward_sends.append((bi_input_obj, input_obj_grad))
+            # Cooldown must drain all remaining delayed backward sends.
+            _maybe_send_one_pending_backward(force=True)
             WeightGradStore.flush(chunk=0)
             bi_scheduled += 1
 
             self.backward_w_step()
             bp_scheduled += 1
+
+        # Safety net: no delayed backward sends may survive beyond cooldown.
+        while pending_backward_sends:
+            _maybe_send_one_pending_backward(force=True)
 
         # Phase 5: cooldown2 (BP only)
         while bp_scheduled < self.num_microbatches:
@@ -231,6 +322,9 @@ class MultimodalEncoderTrainingZeroBubblePipelineSchedule(
         assert f_scheduled == self.num_microbatches
         assert bi_scheduled == self.num_microbatches
         assert bp_scheduled == self.num_microbatches
+        assert next_input_obj is None
+        assert len(pending_output_obj_grads) == 0
+        assert len(pending_backward_sends) == 0
         assert len(input_objs) == 0 and len(output_objs) == 0
 
         if outputs is not None:
