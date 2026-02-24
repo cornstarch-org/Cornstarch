@@ -141,11 +141,11 @@ class Qwen2VisionModelForwards:
             if stage_manager is None or stage_manager.is_first_stage():
                 hidden_states = hidden_states[local_indices]
 
-            # Store global cu_seqlens as cu_seqlens_k so the attention forward can
-            # build the correct global KV layout after all-gather.
-            shard_config._varlen_cu_seqlens_k = cu_seqlens
-
-            block_cu_seqlens = cu_seqlens_q
+            # Pack [cu_seqlens_q, cu_seqlens_k] as a [2, N+1] tensor so that
+            # both boundaries are captured as a proper tensor argument by GC
+            # (instead of via a mutable shard_config side-channel).  The
+            # attention unpacks them based on sp_mode.
+            block_cu_seqlens = torch.stack([cu_seqlens_q, cu_seqlens])
         else:
             position_embeddings = (full_cos, full_sin)
             block_cu_seqlens = cu_seqlens
@@ -250,10 +250,11 @@ class Qwen2VisionAttentionForwards:
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
         if sp_mode == "ring_attn":
-            # cu_seqlens holds local chunk boundaries (cu_seqlens_q).
-            # cu_seqlens_k is the global per-image boundaries stored by the model forward.
-            cu_seqlens_q = cu_seqlens
-            cu_seqlens_k = getattr(shard_config, "_varlen_cu_seqlens_k", cu_seqlens)
+            # cu_seqlens is a stacked [2, N+1] tensor: [cu_seqlens_q, cu_seqlens_k].
+            # Passing both as a single tensor argument lets GC capture them
+            # correctly without any mutable side-channel on shard_config.
+            cu_seqlens_q = cu_seqlens[0]
+            cu_seqlens_k = cu_seqlens[1]
             max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max())
             max_seqlen_k = int((cu_seqlens_k[1:] - cu_seqlens_k[:-1]).max())
             attn_output = context_parallel_varlen_flash_attention(
