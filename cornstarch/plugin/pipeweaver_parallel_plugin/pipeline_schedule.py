@@ -160,6 +160,36 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
         assert isinstance(result, list) and len(result) == 1
         return result[0]
 
+    def load_micro_batch(self) -> Any:
+        """Load a micro batch from the current batch.
+        Support Qwen2Vision.
+
+        Returns:
+            Any: Micro batch.
+        """
+        assert self.microbatch_offset <= self.batch_size, "Microbatches exhausted"
+        micro_batch = get_micro_batch(
+            self.batch, self.microbatch_offset, self.microbatch_size
+        )
+
+        if "image_grid_thw" in micro_batch:
+            previous_num_tokens = torch.sum(
+                torch.prod(
+                    self.batch["image_grid_thw"][: self.microbatch_offset], dim=1
+                )
+            ).item()
+            current_num_tokens = torch.sum(
+                torch.prod(micro_batch["image_grid_thw"], dim=1)
+            ).item()
+            micro_batch["pixel_values"] = self.batch["pixel_values"][
+                previous_num_tokens : previous_num_tokens + current_num_tokens
+            ]
+            self.microbatch_offset += self.microbatch_size
+            return tree_map(
+                partial(to_device, device=get_accelerator().get_current_device()),
+                micro_batch,
+            )
+
     # ------------------------------------------------------------------
     # Forward / backward primitives
     # ------------------------------------------------------------------
@@ -293,9 +323,9 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
 
         def recv_llm_input(mb: int) -> Any:
             if stage == 0:
-                assert llm_prefetched_inputs, (
-                    "Missing prefetched border input on stage 0."
-                )
+                assert (
+                    llm_prefetched_inputs
+                ), "Missing prefetched border input on stage 0."
                 return llm_prefetched_inputs.pop(0)
             return self.recv_forward()
 
