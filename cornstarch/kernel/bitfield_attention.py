@@ -1220,8 +1220,33 @@ class BitfieldAttentionFunction(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
 
-        compressed_mask = BitfieldUtils.materialize_compressed_mask_from_bitfield_mask(
-            bitfield_mask
+        # Compute compressed_mask directly without the class-level cache.
+        # Using BitfieldUtils.compressed_mask_cache here would be incorrect with
+        # gradient checkpointing: the cache is a shared mutable class attribute that
+        # can be overwritten by a later microbatch's forward pass, making GC
+        # recomputation of earlier microbatches see the wrong (stale) mask shape.
+        batch_size, seq_len = bitfield_mask.shape
+        cm_shape = (
+            batch_size,
+            triton.cdiv(seq_len, BLOCK_M),
+            triton.cdiv(seq_len, BLOCK_N),
+        )
+        compressed_mask = torch.zeros(
+            cm_shape, dtype=torch.int8, device=bitfield_mask.device
+        )
+        _materialize_compressed_mask[cm_shape](
+            bitfield_mask,
+            compressed_mask,
+            bitfield_mask.stride(0),
+            compressed_mask.stride(0),
+            compressed_mask.stride(1),
+            seq_len,
+            seq_len,
+            None,
+            None,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            num_warps=4,
         )
 
         o, lse, ctx.softmax_scale = _bitfield_attn_forward(
