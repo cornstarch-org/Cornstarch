@@ -619,30 +619,47 @@ class PipeweaverParallelPlugin(HybridParallelPlugin):
         drop_last: bool = False,
         pin_memory: bool = False,
         num_workers: int = 0,
-        distributed_sampler_cls=None,
+        sampler=None,
         **kwargs,
     ) -> DataLoader:
         assert dist.is_initialized(), "torch.distributed is not initialized."
         self.init_distributed()
 
         _kwargs = kwargs.copy()
-        distributed_sampler_cls = distributed_sampler_cls or DistributedSampler
-        sampler = distributed_sampler_cls(
-            dataset,
-            num_replicas=self.pg_mesh.size(self.pg_mesh.dp_axis),
-            rank=self.pg_mesh.coordinate(self.pg_mesh.dp_axis),
-            shuffle=shuffle,
-        )
 
         def seed_worker(worker_id: int) -> None:
             np.random.seed(seed)
             torch.manual_seed(seed)
             random.seed(seed)
 
+        if sampler is not None:
+            # Custom batch sampler: inject dp_rank / dp_size and use as
+            # batch_sampler so the caller controls partitioning.
+            dp_size = self.pg_mesh.size(self.pg_mesh.dp_axis)
+            dp_rank = self.pg_mesh.coordinate(self.pg_mesh.dp_axis)
+            if hasattr(sampler, "num_replicas"):
+                sampler.num_replicas = dp_size
+            if hasattr(sampler, "rank"):
+                sampler.rank = dp_rank
+            return DataLoader(
+                dataset,
+                batch_sampler=sampler,
+                worker_init_fn=seed_worker,
+                pin_memory=pin_memory,
+                num_workers=num_workers,
+                **_kwargs,
+            )
+
+        default_sampler = DistributedSampler(
+            dataset,
+            num_replicas=self.pg_mesh.size(self.pg_mesh.dp_axis),
+            rank=self.pg_mesh.coordinate(self.pg_mesh.dp_axis),
+            shuffle=shuffle,
+        )
         return DataLoader(
             dataset,
             batch_size=batch_size,
-            sampler=sampler,
+            sampler=default_sampler,
             worker_init_fn=seed_worker,
             drop_last=drop_last,
             pin_memory=pin_memory,
