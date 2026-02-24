@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any, Callable, Iterable, Optional, Union
 
 import torch
@@ -587,7 +588,9 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         if self.encoder_tp_hidden_scatter and tp_group_size > 1:
             tensors_per_sp = []
             for i in range(sp_A):
-                shards = [input_tensors[i * tp_group_size + j] for j in range(tp_group_size)]
+                shards = [
+                    input_tensors[i * tp_group_size + j] for j in range(tp_group_size)
+                ]
                 if isinstance(shards[0], dict) and "hidden_states" in shards[0]:
                     hs = torch.cat([s["hidden_states"] for s in shards], dim=-1)
                     tensors_per_sp.append({**shards[0], "hidden_states": hs})
@@ -642,7 +645,10 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
         if not needs_tp_scatter and (self.encoder_sp_gather or sp_A == 1):
             return [input_tensor_grad] * len(prev_ranks)
 
-        if not isinstance(input_tensor_grad, dict) or "hidden_states" not in input_tensor_grad:
+        if (
+            not isinstance(input_tensor_grad, dict)
+            or "hidden_states" not in input_tensor_grad
+        ):
             return [input_tensor_grad] * len(prev_ranks)
 
         grad = input_tensor_grad["hidden_states"]
@@ -772,6 +778,36 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
                 input_tensors = input_tensors[0]
 
         return input_tensors
+
+    def load_micro_batch(self) -> Any:
+        """Load a micro batch from the current batch.
+        Support Qwen2Vision.
+
+        Returns:
+            Any: Micro batch.
+        """
+        assert self.microbatch_offset <= self.batch_size, "Microbatches exhausted"
+        micro_batch = get_micro_batch(
+            self.batch, self.microbatch_offset, self.microbatch_size
+        )
+
+        if "image_grid_thw" in micro_batch:
+            previous_num_tokens = torch.sum(
+                torch.prod(
+                    self.batch["image_grid_thw"][: self.microbatch_offset], dim=1
+                )
+            ).item()
+            current_num_tokens = torch.sum(
+                torch.prod(micro_batch["image_grid_thw"], dim=1)
+            ).item()
+            micro_batch["pixel_values"] = self.batch["pixel_values"][
+                previous_num_tokens : previous_num_tokens + current_num_tokens
+            ]
+            self.microbatch_offset += self.microbatch_size
+            return tree_map(
+                partial(to_device, device=get_accelerator().get_current_device()),
+                micro_batch,
+            )
 
     def forward_step(
         self,
