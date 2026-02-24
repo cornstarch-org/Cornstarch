@@ -1,7 +1,13 @@
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_forward
+from flash_attn import flash_attn_varlen_func
+from flash_attn.flash_attn_interface import (
+    _flash_attn_backward,
+    _flash_attn_forward,
+    _flash_attn_varlen_backward,
+    _flash_attn_varlen_forward,
+)
 
 
 class ContextParallelFlashAttention(torch.autograd.Function):
@@ -281,3 +287,233 @@ def context_parallel_flash_attention(
     )
 
     return attn_output, None
+
+
+class ContextParallelFlashAttentionVarlen(torch.autograd.Function):
+    """Context-parallel flash attention for variable-length sequences.
+
+    q, k, v: [total_local, nheads, headdim] — flat varlen format (NOT batched).
+    cu_seqlens_q: [N+1] int32 — cumulative local chunk lengths.
+    cu_seqlens_k_global: [N+1] int32 — cumulative full image lengths.
+
+    Forward: all-gather K/V from all SP ranks (rank-interleaved), reorder to
+    image-contiguous layout, then call flash_attn_varlen_fwd.
+    Backward: recompute reordered K/V, run flash_attn_varlen_bwd, all-reduce
+    dK/dV across ranks, and slice to recover each rank's local gradient.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k_global: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        total_local, nheads, d = q.shape
+        p = dist.get_world_size(sp_group)
+        my_rank = dist.get_rank(sp_group)
+        softmax_scale = d ** (-0.5)
+
+        # 1. All-gather seqlen_per_rank
+        seqlen_tensors = [
+            torch.empty(1, dtype=torch.long, device=k.device) for _ in range(p)
+        ]
+        dist.all_gather(
+            seqlen_tensors,
+            torch.tensor(total_local, device=k.device),
+            group=sp_group,
+        )
+        seqlen_per_rank = [s.item() for s in seqlen_tensors]
+        total_global = sum(seqlen_per_rank)
+
+        cum_spr = [0] * (p + 1)
+        for r in range(p):
+            cum_spr[r + 1] = cum_spr[r] + seqlen_per_rank[r]
+
+        # 2. Compute inv_perm: maps reordered_pos -> gathered_pos.
+        # After all-gather, gathered KV is rank-interleaved:
+        #   [rank0_chunks, rank1_chunks, ..., rank_{p-1}_chunks]
+        # Each rank r holds: [chunk_r_img_0, ..., chunk_r_img_{N-1}]
+        # chunk_r_img_i has n_ri = seqlens[i]*(r+1)//p - seqlens[i]*r//p tokens.
+        # Desired image-contiguous order: [img_0_full, img_1_full, ...]
+        # where img_i_full = [chunk_0_img_i, ..., chunk_{p-1}_img_i].
+        seqlens = (cu_seqlens_k_global[1:] - cu_seqlens_k_global[:-1]).cpu().long()
+        N = seqlens.shape[0]
+        local_n = torch.stack(
+            [seqlens * (r + 1) // p - seqlens * r // p for r in range(p)], dim=0
+        )  # [p, N]
+        cu_k_cpu = cu_seqlens_k_global.cpu().long()
+
+        inv_perm = torch.empty(total_global, dtype=torch.long)
+        for r in range(p):
+            offset_r = cum_spr[r]
+            cum_img_r = 0
+            for i in range(N):
+                n_ri = local_n[r, i].item()
+                if n_ri > 0:
+                    gathered_start = offset_r + cum_img_r
+                    reordered_start = cu_k_cpu[i].item() + local_n[:r, i].sum().item()
+                    inv_perm[reordered_start : reordered_start + n_ri] = torch.arange(
+                        gathered_start, gathered_start + n_ri, dtype=torch.long
+                    )
+                cum_img_r += n_ri
+
+        inv_perm = inv_perm.to(k.device)
+
+        # 3. All-gather K and V
+        gathered_k = torch.empty(total_global, nheads, d, dtype=k.dtype, device=k.device)
+        gathered_v = torch.empty(total_global, nheads, d, dtype=v.dtype, device=v.device)
+        dist.all_gather(
+            [gathered_k[cum_spr[r] : cum_spr[r + 1]] for r in range(p)],
+            k.contiguous(),
+            group=sp_group,
+        )
+        dist.all_gather(
+            [gathered_v[cum_spr[r] : cum_spr[r + 1]] for r in range(p)],
+            v.contiguous(),
+            group=sp_group,
+        )
+
+        # 4. Reorder gathered KV to image-contiguous layout
+        reordered_k = gathered_k[inv_perm].contiguous()
+        reordered_v = gathered_v[inv_perm].contiguous()
+
+        # 5. Flash attention varlen forward
+        out, softmax_lse, _, _ = _flash_attn_varlen_forward(
+            q.contiguous(),
+            reordered_k,
+            reordered_v,
+            cu_seqlens_q,
+            cu_seqlens_k_global,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p=0.0,
+            softmax_scale=softmax_scale,
+            causal=False,
+            window_size_left=-1,
+            window_size_right=-1,
+            softcap=0.0,
+            alibi_slopes=None,
+            return_softmax=False,
+        )
+
+        ctx.save_for_backward(
+            q, k, v, reordered_k, reordered_v, out, softmax_lse, inv_perm
+        )
+        ctx.seqlen_per_rank = seqlen_per_rank
+        ctx.cum_spr = cum_spr
+        ctx.softmax_scale = softmax_scale
+        ctx.sp_group = sp_group
+        ctx.cu_seqlens_q = cu_seqlens_q
+        ctx.cu_seqlens_k_global = cu_seqlens_k_global
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
+        ctx.my_rank = my_rank
+
+        return out
+
+    @staticmethod
+    def backward(ctx: torch.autograd.function.FunctionCtx, do: torch.Tensor):
+        (
+            q,
+            k,
+            v,
+            reordered_k,
+            reordered_v,
+            out,
+            softmax_lse,
+            inv_perm,
+        ) = ctx.saved_tensors
+        seqlen_per_rank: list[int] = ctx.seqlen_per_rank
+        cum_spr: list[int] = ctx.cum_spr
+        softmax_scale: float = ctx.softmax_scale
+        sp_group: dist.ProcessGroup = ctx.sp_group
+        cu_seqlens_q = ctx.cu_seqlens_q
+        cu_seqlens_k_global = ctx.cu_seqlens_k_global
+        max_seqlen_q = ctx.max_seqlen_q
+        max_seqlen_k = ctx.max_seqlen_k
+        my_rank = ctx.my_rank
+
+        total_local, nheads, d = q.shape
+        total_global = sum(seqlen_per_rank)
+
+        dq = torch.empty_like(q)
+        dk_reordered = torch.zeros(
+            total_global, nheads, d, dtype=k.dtype, device=k.device
+        )
+        dv_reordered = torch.zeros(
+            total_global, nheads, d, dtype=v.dtype, device=v.device
+        )
+
+        _flash_attn_varlen_backward(
+            dout=do.contiguous(),
+            q=q.contiguous(),
+            k=reordered_k,
+            v=reordered_v,
+            out=out,
+            softmax_lse=softmax_lse,
+            dq=dq,
+            dk=dk_reordered,
+            dv=dv_reordered,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k_global,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            dropout_p=0.0,
+            softmax_scale=softmax_scale,
+            causal=False,
+            window_size_left=-1,
+            window_size_right=-1,
+            softcap=0.0,
+            alibi_slopes=None,
+            deterministic=False,
+        )
+
+        # Undo reorder: since reordered_k = gathered_k[inv_perm],
+        # the backward gives dk_gathered = dk_reordered[argsort(inv_perm)].
+        perm = torch.argsort(inv_perm)
+        dk_gathered = dk_reordered[perm].contiguous()  # [total_global, nheads, d]
+        dv_gathered = dv_reordered[perm].contiguous()
+
+        # Sum contributions from all SP ranks (each rank computed partial gradients
+        # from its own Q chunks attending to the full global KV).
+        dist.all_reduce(dk_gathered, op=dist.ReduceOp.SUM, group=sp_group)
+        dist.all_reduce(dv_gathered, op=dist.ReduceOp.SUM, group=sp_group)
+
+        dk = dk_gathered[cum_spr[my_rank] : cum_spr[my_rank + 1]].contiguous()
+        dv = dv_gathered[cum_spr[my_rank] : cum_spr[my_rank + 1]].contiguous()
+
+        return dq, dk, dv, None, None, None, None, None
+
+
+def context_parallel_varlen_flash_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sp_group: dist.ProcessGroup,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k_global: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+) -> torch.Tensor:
+    """Context-parallel flash attention for variable-length sequences.
+
+    q, k, v: [total_local, nheads, headdim] — flat varlen format.
+    cu_seqlens_q: local chunk cumulative lengths (int32).
+    cu_seqlens_k_global: full image cumulative lengths (int32).
+    """
+    return ContextParallelFlashAttentionVarlen.apply(
+        q,
+        k,
+        v,
+        sp_group,
+        cu_seqlens_q,
+        cu_seqlens_k_global,
+        max_seqlen_q,
+        max_seqlen_k,
+    )

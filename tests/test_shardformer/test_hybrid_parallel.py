@@ -32,6 +32,7 @@ from .model_zoo import (
     Qwen2ForCausalLMBase,
     Qwen2ModelBase,
     Qwen2VisionTransformerBase,
+    Qwen2VisionTransformerVarlenBase,
     Qwen3ForCausalLMBase,
     Qwen3ModelBase,
     Qwen3MoeForCausalLMBase,
@@ -334,3 +335,45 @@ class AudioHybridParallel(ColossalaiHybridParallelBase):
             }
 
         return data
+
+
+@instantiate_parametrized_tests
+class Qwen2VisionContextParallel(ColossalaiHybridParallelBase):
+    """Tests for Qwen2Vision variable-length context parallelism (ring_attn).
+
+    Each batch contains images with different grid sizes. Each SP rank holds
+    a contiguous chunk of tokens from each image (chunk r of rank r).
+    """
+
+    @parametrize("sp_size", [2, 4], name_fn=lambda s: f"sp{s}")
+    def test_varlen(self, sp_size: int):
+        self.set_model(Qwen2VisionTransformerVarlenBase())
+        self.run_hybrid_parallel(
+            tp_size=1,
+            pp_size=1,
+            attention="flash_attention_2",
+            precision="bf16",
+            sp_mode="ring_attn",
+            sp_size_override=sp_size,
+        )
+
+    def postprocess_data_for_original_model(self, data, precision):
+        # The original model's forward (transformers default) uses hidden_states
+        # and grid_thw. Pixel values are already flat [total_T, H].
+        pixel_values = data["pixel_values"]
+        if pixel_values.is_floating_point():
+            pixel_values = pixel_values.to(dtype=precision)
+        return {
+            "hidden_states": pixel_values.cuda(),
+            "grid_thw": data["image_grid_thw"].cuda(),
+        }
+
+    def postprocess_data_for_sharded_model(self, data, precision):
+        # The sharded forward accepts pixel_values/image_grid_thw (same flat format).
+        pixel_values = data["pixel_values"]
+        if pixel_values.is_floating_point():
+            pixel_values = pixel_values.to(dtype=precision)
+        return {
+            "pixel_values": pixel_values.cuda(),
+            "image_grid_thw": data["image_grid_thw"].cuda(),
+        }

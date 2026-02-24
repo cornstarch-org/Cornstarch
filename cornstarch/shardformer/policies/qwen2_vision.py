@@ -171,12 +171,14 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="mlp.0",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        # seq_parallel_mode is intentionally omitted: the SP
+                        # all-gather before the merger is explicit in
+                        # qwen2_vision_transformer_forward, so we must not
+                        # apply a second all-gather here via seq_parallel_mode.
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.2",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
                     ),
                 ],
             )

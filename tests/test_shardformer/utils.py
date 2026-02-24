@@ -226,6 +226,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
         precision: str,
         sp_mode: str | None = None,
         ring_attn_mode: ContextParallelDistributionMode | None = None,
+        sp_size_override: int | None = None,
     ):
         assert precision in ["bf16", "fp16"]
         precision = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -245,7 +246,7 @@ class ColossalaiHybridParallelBase(GlooDistributedTestBase):
                 {
                     "enable_sequence_parallelism": True,
                     "sequence_parallelism_mode": sp_mode,
-                    "sp_size": 2,
+                    "sp_size": sp_size_override if sp_size_override is not None else 2,
                     # context_parallel_distribution_mode will be set later,
                     # as HybirdParallelPlugin doesn't support it
                 }
