@@ -190,6 +190,14 @@ class LlamaModelForwards:
                 }
             )
 
+        # Clear any stale compressed_mask cache left by a previous microbatch's
+        # gradient-checkpoint recomputation.  Each new forward pass must build a
+        # fresh cache; the end-of-forward clear_cache() call below does not run
+        # during recomputation (only decoder_layer.__call__ is re-invoked), so
+        # without this guard the wrong per-microbatch mask is returned and the
+        # checkpoint shape-check fails on backward.
+        BitfieldUtils.clear_cache()
+
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)

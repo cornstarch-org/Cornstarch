@@ -137,6 +137,8 @@ class Qwen3MoeModelForwards:
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
 
+        BitfieldUtils.clear_cache()
+
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)

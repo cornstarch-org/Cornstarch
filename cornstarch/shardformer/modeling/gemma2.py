@@ -228,6 +228,8 @@ class Gemma2ModelForwards:
                 }
             )
 
+        BitfieldUtils.clear_cache()
+
         # decoder layers
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:

@@ -201,6 +201,8 @@ class Llama4ModelForwards:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
 
+        BitfieldUtils.clear_cache()
+
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)

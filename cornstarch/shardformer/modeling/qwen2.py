@@ -194,6 +194,8 @@ class Qwen2ModelForwards:
                 }
             )
 
+        BitfieldUtils.clear_cache()
+
         for decoder_layer in self.layers[start_idx:end_idx]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
