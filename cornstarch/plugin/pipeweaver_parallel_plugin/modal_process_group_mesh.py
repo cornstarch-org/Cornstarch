@@ -79,6 +79,14 @@ class PipeweaverProcessGroupMesh(ProcessGroupMesh):
                     self.encoder_to_llm_border_map[last_rank] = first_rank
                     self.llm_to_encoder_border_map[first_rank] = last_rank
 
+        # Every rank co-hosts both encoder and LLM in PipeWeaver, so all ranks
+        # participate in both modals.
+        all_ranks = list(range(dist.get_world_size()))
+        self.modal_to_ranks: dict[PipelineTemplate, list[int]] = {
+            encoder_template: all_ranks,
+            llm_template: all_ranks,
+        }
+
     # ------------------------------------------------------------------
     # Convenience properties
     # ------------------------------------------------------------------

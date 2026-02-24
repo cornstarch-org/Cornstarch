@@ -7,6 +7,7 @@ from dataclasses import replace
 from types import MethodType
 from typing import Any, Callable, Optional, Tuple
 
+from colossalai.checkpoint_io import CheckpointIO
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -79,9 +80,9 @@ class PipeweaverParallelModule(ModelWrapper, AMPModelMixin):
         encoder_shard_config: ShardConfig,
         llm_shard_config: ShardConfig,
     ) -> None:
-        assert isinstance(module, MultimodalModel), (
-            f"Expected MultimodalModel, got {type(module)}"
-        )
+        assert isinstance(
+            module, MultimodalModel
+        ), f"Expected MultimodalModel, got {type(module)}"
         assert llm_shard_config is not None
 
         if (
@@ -386,18 +387,16 @@ class PipeweaverParallelPlugin(HybridParallelPlugin):
         PipelinePluginBase.__init__(self)
         self.logger = get_dist_logger()
 
-        assert encoder_plugin.tp_size == language_model_plugin.tp_size, (
-            "PipeWeaver requires encoder and LLM to share the same TP size."
-        )
-        assert encoder_plugin.sp_size == language_model_plugin.sp_size, (
-            "PipeWeaver requires encoder and LLM to share the same SP size."
-        )
+        assert (
+            encoder_plugin.tp_size == language_model_plugin.tp_size
+        ), "PipeWeaver requires encoder and LLM to share the same TP size."
+        assert (
+            encoder_plugin.sp_size == language_model_plugin.sp_size
+        ), "PipeWeaver requires encoder and LLM to share the same SP size."
         assert (
             encoder_plugin.pipeline_template.num_stages
             == language_model_plugin.pipeline_template.num_stages
-        ), (
-            "PipeWeaver requires encoder and LLM to have the same PP size."
-        )
+        ), "PipeWeaver requires encoder and LLM to have the same PP size."
 
         self.encoder_plugin = encoder_plugin
         self.encoder_name = encoder_name
@@ -493,11 +492,12 @@ class PipeweaverParallelPlugin(HybridParallelPlugin):
         # Global PP group spans all pipeline stages for one DP replica.
         # In PipeWeaver, this equals the ordinary PP group.
         self.global_pp_group = self.pp_groups[0] if self.pp_groups else None
+        self.pp_group = self.global_pp_group
 
         self.dp_size = dist.get_world_size(group=self.dp_group)
         self.pp_size = self.pg_mesh.size(self.pg_mesh.pp_axis)
 
-        self.schedule = PipeweaverEncoderTrainingPipeweaverScheduler(
+        self.scheduler = PipeweaverEncoderTrainingPipeweaverScheduler(
             self.stage_manager,
             self.num_microbatches,
             self.microbatch_size,
@@ -649,3 +649,6 @@ class PipeweaverParallelPlugin(HybridParallelPlugin):
             num_workers=num_workers,
             **_kwargs,
         )
+
+    def get_checkpoint_io(self) -> CheckpointIO:
+        return None

@@ -57,7 +57,6 @@ from cornstarch.plugin.multimodal_parallel_plugin import (
 )
 from cornstarch.plugin.pipeweaver_parallel_plugin import (
     PipeweaverParallelPlugin,
-    PipeweaverPipelineStageManager,
 )
 from cornstarch.shardformer.policies.auto_policy import get_autopolicy
 from cornstarch.shardformer.shard.shard_config import ContextParallelDistributionMode
@@ -1071,14 +1070,6 @@ class PipeweaverParallelBase(CornstarchMultimodalParallelBase):
             language_model_plugin=llm_plugin,
             **test_config,
         )
-        plugin.init_distributed()
-        plugin.pp_group = plugin.global_pp_group
-        all_ranks = list(range(dist.get_world_size()))
-        plugin.pg_mesh.modal_to_ranks = {
-            encoder_plugin.pipeline_template: all_ranks,
-            llm_plugin.pipeline_template: all_ranks,
-        }
-
         if precision == torch.bfloat16:
             model.to(dtype=precision)
             plugin.precision = None
@@ -1087,16 +1078,9 @@ class PipeweaverParallelBase(CornstarchMultimodalParallelBase):
         booster = Booster(plugin=plugin)
 
         optimizer = Adam(model.parameters(), lr=1e-3)
-        from cornstarch.shardformer.policies import multimodal as multimodal_policy
-
-        with patch.object(
-            multimodal_policy,
-            "MultiModalPipelineStageManager",
-            (MultiModalPipelineStageManager, PipeweaverPipelineStageManager),
-        ):
-            model, optimizer, criterion, _, _ = booster.boost(
-                model, optimizer, self.llm.loss_fn
-            )
+        model, optimizer, criterion, _, _ = booster.boost(
+            model, optimizer, self.llm.loss_fn
+        )
         return model, optimizer, criterion, booster
 
     def build_model_from_pipeweaver_plugin(

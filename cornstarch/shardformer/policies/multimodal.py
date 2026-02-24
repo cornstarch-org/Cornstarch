@@ -24,6 +24,9 @@ from cornstarch.pipeline_template import PipelineTemplate
 from cornstarch.plugin.multimodal_parallel_plugin.multimodal_stage_manager import (
     MultiModalPipelineStageManager,
 )
+from cornstarch.plugin.pipeweaver_parallel_plugin.pipeweaver_stage_manager import (
+    PipeweaverPipelineStageManager,
+)
 from cornstarch.shardformer.modeling.multimodal import ModalModulePipelineForwards
 from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
@@ -140,7 +143,10 @@ class ModalModulePolicyMixin:
         assert self.pipeline_stage_manager is not None
 
         stage_manager: MultiModalPipelineStageManager = self.pipeline_stage_manager
-        assert isinstance(stage_manager, MultiModalPipelineStageManager)
+        assert isinstance(
+            stage_manager,
+            (MultiModalPipelineStageManager, PipeweaverPipelineStageManager),
+        )
         return dist.get_rank() in stage_manager.pg_mesh.modal_to_ranks[modal]
 
 
