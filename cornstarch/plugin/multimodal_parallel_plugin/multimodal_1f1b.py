@@ -810,11 +810,12 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             micro_batch["pixel_values"] = self.batch["pixel_values"][
                 previous_num_tokens : previous_num_tokens + current_num_tokens
             ]
-            self.microbatch_offset += self.microbatch_size
-            return tree_map(
-                partial(to_device, device=get_accelerator().get_current_device()),
-                micro_batch,
-            )
+
+        self.microbatch_offset += self.microbatch_size
+        return tree_map(
+            partial(to_device, device=get_accelerator().get_current_device()),
+            micro_batch,
+        )
 
     def forward_step(
         self,
