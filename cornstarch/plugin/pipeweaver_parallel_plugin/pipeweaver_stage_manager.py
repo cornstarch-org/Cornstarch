@@ -37,6 +37,7 @@ class PipeweaverPipelineStageManager(PipelineStageManager):
         self.p2p_groups: dict[tuple[int, int], dist.ProcessGroup] = {}
         self.is_interleave = False
         self.num_model_chunks = 1
+        self.use_zbv = False
 
         my_rank = dist.get_rank()
         coords = pg_mesh.coords  # (pp, dp, sp, tp)
