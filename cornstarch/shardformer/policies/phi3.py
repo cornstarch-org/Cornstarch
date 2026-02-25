@@ -5,6 +5,7 @@ from typing import Dict, List, cast
 from colossalai.shardformer.layer import (
     FusedRMSNorm,
     Linear1D_Row,
+    LinearWithGradAccum,
     PaddingEmbedding,
     PaddingLMHead,
     VocabParallelEmbedding1D,
@@ -176,6 +177,11 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         if self.shard_config.enable_tensor_parallelism:
             policy[Phi3DecoderLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
@@ -185,12 +191,13 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
                         kwargs=dict(
                             split_sizes=[config.hidden_size] * 3,
                             seq_parallel_mode=sp_mode,
+                            use_zbv=use_zbv,
                         ),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.o_proj",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.gate_up_proj",
@@ -198,12 +205,38 @@ class Phi3Policy(PipelineTemplatePolicyBase, Policy):
                         kwargs=dict(
                             split_sizes=[config.intermediate_size] * 2,
                             seq_parallel_mode=sp_mode,
+                            use_zbv=use_zbv,
                         ),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.down_proj",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
+                    ),
+                ],
+            )
+        elif use_zbv:
+            policy[Phi3DecoderLayer] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.qkv_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.o_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.gate_up_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.down_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
                     ),
                 ],
             )

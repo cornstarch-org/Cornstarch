@@ -2,7 +2,7 @@ import functools
 from typing import Any, Dict, cast
 
 import torch.distributed as dist
-from colossalai.shardformer.layer import Linear1D_Col, Linear1D_Row
+from colossalai.shardformer.layer import Linear1D_Col, Linear1D_Row, LinearWithGradAccum
 from colossalai.shardformer.policies.auto_policy import _fullname
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -79,6 +79,11 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         if self.shard_config.enable_tensor_parallelism:
             tp_scatter = getattr(self.shard_config, "encoder_tp_scatter", False)
             self.append_or_create_submodule_replacement(
@@ -90,13 +95,14 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
                         kwargs=dict(
                             gather_output=not tp_scatter,
                             seq_parallel_mode=sp_mode,
+                            use_zbv=use_zbv,
                         ),
                     ),
                     SubModuleReplacementDescription(
                         "projection.in_proj",
                         target_module=Linear1D_Col,
                         ignore_if_not_exist=True,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         "projection.out_proj",
@@ -104,7 +110,33 @@ class MultimodalProjectorPolicy(PipelineTemplatePolicyBase, Policy):
                             Linear1D_Row_ReduceScatter if tp_scatter else Linear1D_Row
                         ),
                         ignore_if_not_exist=True,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
+                    ),
+                    # TODO: add qformer layers
+                ],
+                policy=policy,
+                target_key=MultimodalProjector,
+            )
+        elif use_zbv:
+            self.append_or_create_submodule_replacement(
+                description=[
+                    SubModuleReplacementDescription(
+                        "projection.linear",
+                        target_module=LinearWithGradAccum,
+                        ignore_if_not_exist=True,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        "projection.in_proj",
+                        target_module=LinearWithGradAccum,
+                        ignore_if_not_exist=True,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        "projection.out_proj",
+                        target_module=LinearWithGradAccum,
+                        ignore_if_not_exist=True,
+                        kwargs=dict(use_zbv=True),
                     ),
                     # TODO: add qformer layers
                 ],

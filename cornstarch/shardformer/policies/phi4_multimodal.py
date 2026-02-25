@@ -6,6 +6,7 @@ from colossalai.shardformer.layer import (
     FusedLayerNorm,
     Linear1D_Col,
     Linear1D_Row,
+    LinearWithGradAccum,
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -126,6 +127,11 @@ class Phi4MultimodalAudioModelPolicy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         sp_mode = self.shard_config.sequence_parallelism_mode or None
         if self.shard_config.enable_tensor_parallelism:
             policy[Phi4MultimodalAudioConformerEncoderLayer] = ModulePolicyDescription(
@@ -133,42 +139,87 @@ class Phi4MultimodalAudioModelPolicy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.k_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.v_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.o_proj",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward_in.gate_up_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward_in.down_proj",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward_out.gate_up_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward_out.down_proj",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
+                    ),
+                ],
+            )
+        elif use_zbv:
+            policy[Phi4MultimodalAudioConformerEncoderLayer] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.q_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.k_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.v_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.o_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward_in.gate_up_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward_in.down_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward_out.gate_up_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward_out.down_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
                     ),
                 ],
             )

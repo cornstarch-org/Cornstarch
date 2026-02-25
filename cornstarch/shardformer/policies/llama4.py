@@ -8,6 +8,7 @@ from colossalai.shardformer.layer import (
     FusedRMSNorm,
     Linear1D_Col,
     Linear1D_Row,
+    LinearWithGradAccum,
     PaddingLMHead,
     VocabParallelLMHead1D,
 )
@@ -180,43 +181,48 @@ class Llama4Policy(PipelineTemplatePolicyBase, Policy):
                 attribute_replacement={"config._attn_implementation": "sdpa"},
             )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         if self.shard_config.enable_tensor_parallelism:
             policy[Llama4TextDecoderLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.k_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.v_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.o_proj",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward.shared_expert.gate_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward.shared_expert.up_proj",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward.shared_expert.down_proj",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                 ]
             )
@@ -224,6 +230,46 @@ class Llama4Policy(PipelineTemplatePolicyBase, Policy):
                 method_replacement={
                     "forward": Llama4TextMoeForwards.forward,
                 }
+            )
+        elif use_zbv:
+            policy[Llama4TextDecoderLayer] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.q_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.k_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.v_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.o_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward.shared_expert.gate_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward.shared_expert.up_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward.shared_expert.down_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                ]
             )
 
         if self.shard_config.enable_fused_normalization:

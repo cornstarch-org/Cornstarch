@@ -10,6 +10,7 @@ from colossalai.shardformer.layer import (
     LayerNorm,
     Linear1D_Col,
     Linear1D_Row,
+    LinearWithGradAccum,
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -123,6 +124,11 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
             },
         )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         if self.shard_config.enable_tensor_parallelism:
             policy[Dinov2Embeddings] = ModulePolicyDescription(
                 sub_module_replacement=[
@@ -138,18 +144,22 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="attention.attention.query",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.key",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.value",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.output.dense",
                         target_module=Linear1D_Row,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix=(
@@ -158,6 +168,7 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                             else "mlp.fc1"
                         ),
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix=(
@@ -166,6 +177,50 @@ class Dinov2Policy(PipelineTemplatePolicyBase, Policy):
                             else "mlp.fc2"
                         ),
                         target_module=Linear1D_Row,
+                        kwargs=dict(use_zbv=use_zbv),
+                    ),
+                ],
+            )
+        elif use_zbv:
+            policy[Dinov2Layer] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="attention.attention.query",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.attention.key",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.attention.value",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.output.dense",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix=(
+                            "mlp.weights_in"
+                            if self.model.config.use_swiglu_ffn
+                            else "mlp.fc1"
+                        ),
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix=(
+                            "mlp.weights_out"
+                            if self.model.config.use_swiglu_ffn
+                            else "mlp.fc2"
+                        ),
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
                     ),
                 ],
             )

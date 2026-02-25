@@ -8,6 +8,7 @@ from colossalai.shardformer.layer import (
     FusedLinear1D_Col,
     Linear1D_Col,
     Linear1D_Row,
+    LinearWithGradAccum,
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -136,6 +137,11 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         sp_mode = self.shard_config.sequence_parallelism_mode or None
         if self.shard_config.enable_tensor_parallelism:
             policy[Qwen2VLVisionBlock] = ModulePolicyDescription(
@@ -146,22 +152,23 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                         kwargs=dict(
                             split_sizes=[config.embed_dim] * 3,
                             seq_parallel_mode=sp_mode,
+                            use_zbv=use_zbv,
                         ),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attn.proj",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.fc1",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.fc2",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                 ],
             )
@@ -175,10 +182,52 @@ class Qwen2VisionTransformerPolicy(PipelineTemplatePolicyBase, Policy):
                         # all-gather before the merger is explicit in
                         # qwen2_vision_transformer_forward, so we must not
                         # apply a second all-gather here via seq_parallel_mode.
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.2",
                         target_module=Linear1D_Row,
+                        kwargs=dict(use_zbv=use_zbv),
+                    ),
+                ],
+            )
+        elif use_zbv:
+            policy[Qwen2VLVisionBlock] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="attn.qkv",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attn.proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.fc1",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.fc2",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                ],
+            )
+
+            policy[PatchMerger] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="mlp.0",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="mlp.2",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
                     ),
                 ],
             )

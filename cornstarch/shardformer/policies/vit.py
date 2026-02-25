@@ -8,6 +8,7 @@ from colossalai.shardformer.layer import (
     FusedLayerNorm,
     Linear1D_Col,
     Linear1D_Row,
+    LinearWithGradAccum,
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -119,6 +120,11 @@ class ViTModelPolicy(PipelineTemplatePolicyBase, Policy):
                 },
             )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         sp_mode = self.shard_config.sequence_parallelism_mode or None
         if self.shard_config.enable_tensor_parallelism:
             policy[ViTLayer] = ModulePolicyDescription(
@@ -126,32 +132,67 @@ class ViTModelPolicy(PipelineTemplatePolicyBase, Policy):
                     SubModuleReplacementDescription(
                         suffix="attention.attention.query",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.key",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.attention.value",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.output.dense",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="intermediate.dense",
                         target_module=Linear1D_Col,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="output.dense",
                         target_module=Linear1D_Row,
-                        kwargs=dict(seq_parallel_mode=sp_mode),
+                        kwargs=dict(seq_parallel_mode=sp_mode, use_zbv=use_zbv),
+                    ),
+                ]
+            )
+        elif use_zbv:
+            policy[ViTLayer] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="attention.attention.query",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.attention.key",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.attention.value",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.output.dense",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="intermediate.dense",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="output.dense",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
                     ),
                 ]
             )

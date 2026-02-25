@@ -31,12 +31,14 @@ class MultiModalPipelineStageManager(PipelineStageManager):
         self,
         pg_mesh: MultiModalProcessGroupMesh,
         pipeline_axis: int,
+        use_zbv: bool = False,
     ):
         self.pg_mesh = pg_mesh
         self.pipeline_axis = pipeline_axis
         self.p2p_groups: dict[tuple[int, int], dist.ProcessGroup] = {}
         self.is_interleave = False
         self.num_model_chunks = 1
+        self.use_zbv = use_zbv
 
         # Convenience references
         my_modal = pg_mesh.my_modal

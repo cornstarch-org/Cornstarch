@@ -8,6 +8,7 @@ from colossalai.shardformer.layer import (
     FusedRMSNorm,
     Linear1D_Col,
     Linear1D_Row,
+    LinearWithGradAccum,
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -122,36 +123,88 @@ class PixtralVisionModelPolicy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         if self.shard_config.enable_tensor_parallelism:
             policy[PixtralAttentionLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="attention.q_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.k_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.v_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="attention.o_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward.gate_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward.up_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="feed_forward.down_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(use_zbv=use_zbv),
+                    ),
+                ],
+            )
+        elif use_zbv:
+            policy[PixtralAttentionLayer] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="attention.q_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.k_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.v_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="attention.o_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward.gate_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward.up_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="feed_forward.down_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
                     ),
                 ],
             )

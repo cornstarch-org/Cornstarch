@@ -535,7 +535,9 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
             ),
         )
         self.stage_manager = MultiModalPipelineStageManager(
-            self.pg_mesh, self.pg_mesh.pp_axis
+            self.pg_mesh,
+            self.pg_mesh.pp_axis,
+            use_zbv=(self.pipeline_schedule == "zbpp"),
         )
         self.dp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.dp_axis)
         self.tp_group = self.pg_mesh.get_group_along_axis(self.pg_mesh.tp_axis)

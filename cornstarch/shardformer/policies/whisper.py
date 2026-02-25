@@ -6,6 +6,7 @@ from colossalai.shardformer.layer import (
     FusedLayerNorm,
     Linear1D_Col,
     Linear1D_Row,
+    LinearWithGradAccum,
 )
 from colossalai.shardformer.policies.base_policy import (
     ModulePolicyDescription,
@@ -145,32 +146,78 @@ class WhisperEncoderPolicy(PipelineTemplatePolicyBase, Policy):
                 }
             )
 
+        use_zbv = (
+            self.pipeline_stage_manager is not None
+            and self.pipeline_stage_manager.use_zbv
+        )
+
         if self.shard_config.enable_tensor_parallelism:
             policy[WhisperEncoderLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.k_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.v_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.out_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="fc1",
                         target_module=Linear1D_Col,
+                        kwargs=dict(use_zbv=use_zbv),
                     ),
                     SubModuleReplacementDescription(
                         suffix="fc2",
                         target_module=Linear1D_Row,
+                        kwargs=dict(use_zbv=use_zbv),
+                    ),
+                ],
+            )
+        elif use_zbv:
+            policy[WhisperEncoderLayer] = ModulePolicyDescription(
+                sub_module_replacement=[
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.q_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.k_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.v_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="self_attn.out_proj",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="fc1",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
+                    ),
+                    SubModuleReplacementDescription(
+                        suffix="fc2",
+                        target_module=LinearWithGradAccum,
+                        kwargs=dict(use_zbv=True),
                     ),
                 ],
             )
