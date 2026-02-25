@@ -105,6 +105,27 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
         micro_batch = get_micro_batch(
             self.batch, self.microbatch_offset, self.microbatch_size
         )
+
+        # Remove unnecessary padding
+        num_tokens = max(torch.sum(micro_batch["attention_mask"], dim=1)).item()
+        micro_batch["input_ids"] = micro_batch["input_ids"][:, :num_tokens]
+        micro_batch["attention_mask"] = micro_batch["attention_mask"][:, :num_tokens]
+        if "labels" in micro_batch:
+            micro_batch["labels"] = micro_batch["labels"][:, :num_tokens]
+
+        if "image_grid_thw" in micro_batch:
+            previous_num_tokens = torch.sum(
+                torch.prod(
+                    self.batch["image_grid_thw"][: self.microbatch_offset], dim=1
+                )
+            ).item()
+            current_num_tokens = torch.sum(
+                torch.prod(micro_batch["image_grid_thw"], dim=1)
+            ).item()
+            micro_batch["pixel_values"] = self.batch["pixel_values"][
+                previous_num_tokens : previous_num_tokens + current_num_tokens
+            ]
+
         self.microbatch_offset += self.microbatch_size
         return tree_map(
             partial(to_device, device=get_accelerator().get_current_device()),
