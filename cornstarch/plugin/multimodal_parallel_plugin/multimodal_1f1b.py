@@ -791,12 +791,12 @@ class MultimodalEncoderTrainingOneForwardOneBackwardSchedule(
             self.batch, self.microbatch_offset, self.microbatch_size
         )
 
-        # Remove unnecessary padding
-        num_tokens = max(torch.sum(micro_batch["attention_mask"], dim=1)).item()
-        micro_batch["input_ids"] = micro_batch["input_ids"][:, :num_tokens]
-        micro_batch["attention_mask"] = micro_batch["attention_mask"][:, :num_tokens]
-        if "labels" in micro_batch:
-            micro_batch["labels"] = micro_batch["labels"][:, :num_tokens]
+        # # Remove unnecessary padding
+        # num_tokens = max(torch.sum(micro_batch["attention_mask"], dim=1)).item()
+        # micro_batch["input_ids"] = micro_batch["input_ids"][:, :num_tokens]
+        # micro_batch["attention_mask"] = micro_batch["attention_mask"][:, :num_tokens]
+        # if "labels" in micro_batch:
+        #     micro_batch["labels"] = micro_batch["labels"][:, :num_tokens]
 
         if "image_grid_thw" in micro_batch:
             previous_num_tokens = torch.sum(
