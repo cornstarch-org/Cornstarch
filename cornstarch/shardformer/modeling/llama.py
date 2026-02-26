@@ -3,7 +3,9 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from colossalai.shardformer.layer import dist_cross_entropy
+from colossalai.shardformer.layer.loss import cross_entropy_1d
 from colossalai.shardformer.layer._operation import (
     all_to_all_comm,
     gather_sp_output,
@@ -11,7 +13,9 @@ from colossalai.shardformer.layer._operation import (
 )
 from colossalai.shardformer.shard.shard_config import ShardConfig
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from flash_attn import flash_attn_varlen_func
+from flash_attn.bert_padding import index_first_axis
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs, _get_unpad_data
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
@@ -61,6 +65,10 @@ class LlamaModelForwards:
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
         offsets_per_rank: Optional[list[torch.Tensor]] = None,
+        packed_seq_indices: Optional[torch.Tensor] = None,
+        packed_seq_cu_seqlens: Optional[torch.Tensor] = None,
+        packed_seq_max_seqlen: Optional[int] = None,
+        packed_seq_shape: Optional[Tuple[int, int]] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -127,6 +135,13 @@ class LlamaModelForwards:
 
         if self.config._attn_implementation == "bitfield_attention":
             attn_mask = attention_mask
+        elif packed_seq_indices is not None and not (
+            stage_manager is None or stage_manager.is_first_stage()
+        ):
+            # Non-first PP stage with already-packed hidden_states: skip _update_causal_mask
+            # because the tensor shape is (total_tokens, hidden_dim), not (batch, seq, hidden_dim).
+            # The packed attention path sets attn_mask=None anyway.
+            attn_mask = None
         else:
             attn_mask = self._update_causal_mask(
                 attention_mask,
@@ -173,6 +188,46 @@ class LlamaModelForwards:
             offsets_per_rank
         )
 
+        # Packed sequence path: pack hidden_states once before the layer loop so all N layers
+        # (attention + MLP) and lm_head operate on valid tokens only.
+        if (
+            sp_mode is None
+            and self.config._attn_implementation == "flash_attention_2"
+            and attention_mask is not None
+            and not use_cache
+            and (stage_manager is None or stage_manager.is_first_stage())
+        ):
+            batch_size, seq_len = hidden_states.shape[:2]
+            hidden_dim = hidden_states.shape[-1]
+            packed_seq_indices, packed_seq_cu_seqlens, packed_seq_max_seqlen = (
+                _get_unpad_data(attention_mask)
+            )
+            packed_seq_shape = (batch_size, seq_len)
+            hidden_states = index_first_axis(
+                hidden_states.view(batch_size * seq_len, hidden_dim), packed_seq_indices
+            )
+            cos, sin = position_embeddings
+            cos = cos.expand(batch_size, seq_len, -1).reshape(
+                batch_size * seq_len, -1
+            )[packed_seq_indices]
+            sin = sin.expand(batch_size, seq_len, -1).reshape(
+                batch_size * seq_len, -1
+            )[packed_seq_indices]
+            position_embeddings = (cos, sin)
+            flash_attn_kwargs["cu_seq_lens_q"] = packed_seq_cu_seqlens
+            flash_attn_kwargs["cu_seq_lens_k"] = packed_seq_cu_seqlens
+            flash_attn_kwargs["max_length_q"] = packed_seq_max_seqlen
+            flash_attn_kwargs["max_length_k"] = packed_seq_max_seqlen
+            attn_mask = None
+        elif packed_seq_indices is not None:
+            # Non-first PP stage: hidden_states and position_embeddings are already packed;
+            # inject the pre-computed cu_seqlens into flash_attn_kwargs.
+            flash_attn_kwargs["cu_seq_lens_q"] = packed_seq_cu_seqlens
+            flash_attn_kwargs["cu_seq_lens_k"] = packed_seq_cu_seqlens
+            flash_attn_kwargs["max_length_q"] = packed_seq_max_seqlen
+            flash_attn_kwargs["max_length_k"] = packed_seq_max_seqlen
+            attn_mask = None
+
         if stage_manager is not None:
             layers_per_stage = stage_manager.distribute_layers(len(self.layers))
             start_idx, end_idx = stage_manager.get_stage_index(layers_per_stage)
@@ -189,6 +244,9 @@ class LlamaModelForwards:
                     "offsets_per_rank": offsets_per_rank,
                 }
             )
+        # Pass flash_attn_kwargs to decoder layers so cu_seq_lens_q/k and max_length_q/k
+        # (injected above for the packed path) reach LlamaAttentionForwards.forward.
+        kwargs.update(flash_attn_kwargs)
 
         # Clear any stale compressed_mask cache left by a previous microbatch's
         # gradient-checkpoint recomputation.  Each new forward pass must build a
@@ -246,6 +304,11 @@ class LlamaModelForwards:
                 outputs["all_hidden_states"] = all_hidden_states
             if output_attentions:
                 outputs["all_self_attentions"] = all_self_attentions
+            if packed_seq_indices is not None:
+                outputs["packed_seq_indices"] = packed_seq_indices
+                outputs["packed_seq_cu_seqlens"] = packed_seq_cu_seqlens
+                outputs["packed_seq_max_seqlen"] = packed_seq_max_seqlen
+                outputs["packed_seq_shape"] = packed_seq_shape
             outputs.update(kwargs)
             return outputs
 
@@ -288,6 +351,10 @@ class LlamaModelForwards:
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         offsets_per_rank: Optional[list[torch.Tensor]] = None,
+        packed_seq_indices: Optional[torch.Tensor] = None,
+        packed_seq_cu_seqlens: Optional[torch.Tensor] = None,
+        packed_seq_max_seqlen: Optional[int] = None,
+        packed_seq_shape: Optional[Tuple[int, int]] = None,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
@@ -316,6 +383,25 @@ class LlamaModelForwards:
                     "output_hidden_states=True is not supported for pipeline models at the moment."
                 )
                 output_hidden_states = False
+
+        # Determine if packed sequence path will be used.
+        # Resolve use_cache the same way llama_model_forward does so the condition matches.
+        resolved_use_cache = use_cache if use_cache is not None else self.config.use_cache
+        if resolved_use_cache and self.model.gradient_checkpointing and self.training:
+            resolved_use_cache = False
+        sp_mode = shard_config.sequence_parallelism_mode
+        if (
+            packed_seq_indices is None  # not already computed by a prior PP stage
+            and sp_mode is None
+            and self.config._attn_implementation == "flash_attention_2"
+            and attention_mask is not None
+            and not resolved_use_cache
+            and (stage_manager is None or stage_manager.is_first_stage())
+        ):
+            packed_seq_indices, packed_seq_cu_seqlens, packed_seq_max_seqlen = (
+                _get_unpad_data(attention_mask)
+            )
+            packed_seq_shape = (attention_mask.shape[0], attention_mask.shape[1])
 
         if (
             shard_config.sequence_parallelism_mode == "ring_attn"
@@ -370,6 +456,10 @@ class LlamaModelForwards:
             shard_config=shard_config,
             force_sp_gather=False,
             offsets_per_rank=offsets_per_rank,
+            packed_seq_indices=packed_seq_indices,
+            packed_seq_cu_seqlens=packed_seq_cu_seqlens,
+            packed_seq_max_seqlen=packed_seq_max_seqlen,
+            packed_seq_shape=packed_seq_shape,
             **kwargs,
         )
         past_key_values = None
@@ -377,27 +467,69 @@ class LlamaModelForwards:
         if not (stage_manager is None or stage_manager.is_last_stage()):
             return outputs
 
+        # For PP last stage, packed_seq params arrive in the outputs dict.
+        if isinstance(outputs, dict):
+            packed_seq_indices = outputs.get("packed_seq_indices", packed_seq_indices)
+            packed_seq_shape = outputs.get("packed_seq_shape", packed_seq_shape)
+
         hidden_states = outputs[0]
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = (
-            slice(-logits_to_keep, None)
-            if isinstance(logits_to_keep, int)
-            else logits_to_keep
-        )
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
-        if labels is not None:
-            # Upcast to float if we need to compute the loss to avoid potential precision issues
-            logits = logits.float()
+        if packed_seq_indices is not None:
+            # Packed sequence path: hidden_states is (total_tokens, hidden_dim).
+            # lm_head, shift, and loss are all computed on packed tensors.
+            packed_logits = self.lm_head(hidden_states).float()  # (total_tokens, vocab)
 
-            loss = dist_cross_entropy(
-                labels,
-                logits,
-                shard_config,
-                self.lm_head.out_features,
-                self.model.dtype,
+            if labels is not None:
+                batch_size, seq_len = packed_seq_shape
+                # Build shift_labels in the full padded space, then index with the same
+                # packed_seq_indices used for hidden_states.
+                shift_labels_padded = F.pad(
+                    labels[:, 1:].contiguous(), (0, 1), value=-100
+                )  # (batch, seq)
+                packed_labels = shift_labels_padded.view(batch_size * seq_len)[
+                    packed_seq_indices
+                ]  # (total_tokens,)
+
+                if shard_config.enable_tensor_parallelism and shard_config.parallel_output:
+                    loss = cross_entropy_1d(
+                        packed_logits,
+                        packed_labels,
+                        process_group=shard_config.tensor_parallel_process_group,
+                        vocab_size=self.lm_head.out_features,
+                        dtype=self.model.dtype,
+                        mode="sum",
+                    )
+                    num_nonzero = (packed_labels != -100).sum()
+                    loss = (loss / num_nonzero).squeeze()
+                else:
+                    from torch.nn import CrossEntropyLoss
+
+                    loss = CrossEntropyLoss(ignore_index=-100)(
+                        packed_logits, packed_labels
+                    )
+
+            logits = packed_logits
+        else:
+            # Standard padded-batch path.
+            slice_indices = (
+                slice(-logits_to_keep, None)
+                if isinstance(logits_to_keep, int)
+                else logits_to_keep
             )
+            logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+            if labels is not None:
+                # Upcast to float if we need to compute the loss to avoid potential precision issues
+                logits = logits.float()
+
+                loss = dist_cross_entropy(
+                    labels,
+                    logits,
+                    shard_config,
+                    self.lm_head.out_features,
+                    self.model.dtype,
+                )
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -429,6 +561,37 @@ class LlamaAttentionForwards:
         This adds preprocessing of context parallelism that the original transformers
         doesn't have.
         """
+        # Packed sequence path: hidden_states is (total_tokens, hidden_dim), position_embeddings
+        # are (total_tokens, head_dim) each.  cu_seq_lens_q is injected by llama_model_forward.
+        if kwargs.get("cu_seq_lens_q") is not None and past_key_value is None:
+            cu_seqlens: torch.Tensor = kwargs["cu_seq_lens_q"]
+            max_seqlen: int = kwargs["max_length_q"]
+
+            q = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
+            k = self.k_proj(hidden_states).view(-1, self.num_key_value_heads, self.head_dim)
+            v = self.v_proj(hidden_states).view(-1, self.num_key_value_heads, self.head_dim)
+
+            # cos/sin: (total_tokens, head_dim); unsqueeze_dim=1 adds a broadcast dim over heads
+            cos, sin = position_embeddings
+            q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1)
+
+            attn_output = flash_attn_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                dropout_p=0.0 if not self.training else self.attention_dropout,
+                softmax_scale=self.scaling,
+                causal=self.is_causal,
+            )  # (total_tokens, num_heads, head_dim)
+
+            attn_output = attn_output.reshape(-1, self.hidden_size)
+            attn_output = self.o_proj(attn_output)
+            return attn_output, None
+
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
