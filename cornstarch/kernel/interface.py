@@ -47,7 +47,6 @@ def cornstarch_attention_forward(
         query,
         key,
         value,
-        mask=attention_mask,
     )
 
     return attn_output, None
