@@ -380,6 +380,61 @@ class MultiModalProcessGroupMesh:
             return my_groups[0]
         return None
 
+    def inherit_groups_from(self, other: "MultiModalProcessGroupMesh") -> None:
+        """Pre-populate the group cache from *other* to reuse unchanged groups.
+
+        After seeding the cache, any :meth:`_get_group` call whose rank tuple
+        already exists will return the existing ``dist.ProcessGroup`` instead of
+        calling ``dist.new_group`` again.  Only rank sets that are genuinely new
+        in this mesh will trigger a collective ``dist.new_group`` call.
+
+        Typical usage inside :meth:`reconfigure`::
+
+            new_mesh = MultiModalProcessGroupMesh(...)
+            new_mesh.inherit_groups_from(old_mesh)
+            # … _init_communication_groups() only creates truly new groups …
+            old_mesh.destroy_stale_groups(set(new_mesh._ranks_to_group))
+        """
+        for ranks, group in other._ranks_to_group.items():
+            if ranks not in self._ranks_to_group:
+                self._ranks_to_group[ranks] = group
+                self._group_to_ranks[group] = ranks
+
+    def destroy_stale_groups(
+        self, active_rank_sets: "set[tuple[int, ...]]"
+    ) -> None:
+        """Destroy groups whose rank sets are absent from *active_rank_sets*.
+
+        Call this after the new mesh has finished creating its groups.  Any
+        entry in this mesh's cache that was not reused by the new mesh is no
+        longer needed and should be destroyed to release resources.
+
+        The destruction is local (non-collective).  No barrier is needed before
+        calling this method because ``dist.new_group`` (a collective) was already
+        called by the new mesh's :meth:`_init_communication_groups`; the implied
+        collective barrier from those calls is sufficient synchronisation.
+        """
+        stale = [
+            (ranks, group)
+            for ranks, group in list(self._ranks_to_group.items())
+            if ranks not in active_rank_sets
+        ]
+        for ranks, group in stale:
+            try:
+                dist.destroy_process_group(group)
+            except Exception:
+                pass
+            self._ranks_to_group.pop(ranks, None)
+            self._group_to_ranks.pop(group, None)
+
+    def destroy_all_groups(self) -> None:
+        """Destroy every process group owned by this mesh and clear the cache.
+
+        Convenience wrapper around :meth:`destroy_stale_groups` with an empty
+        active set; useful when the entire mesh is being torn down.
+        """
+        self.destroy_stale_groups(set())
+
     def get_global_pp_group(self) -> dist.ProcessGroup:
         """Return a process group spanning all pipeline stages of one DP replica.
 

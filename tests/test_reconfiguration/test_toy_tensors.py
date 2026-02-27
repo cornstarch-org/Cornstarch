@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.testing._internal.common_utils import instantiate_parametrized_tests
 
 from cornstarch.reconfiguration.data_structures import LayerOwnership
-from cornstarch.reconfiguration.executor import ReconfigurationExecutor
+from cornstarch.reconfiguration.executor import ReconfigurationExecutor, TransferPiece
 
 from ..distributed_base import GlooDistributedTestBase
 
@@ -182,3 +182,90 @@ class ToyTensorRedistribution(GlooDistributedTestBase):
                 f"Rank {self.rank}: {param_name} values changed unexpectedly"
 
         print(f"Rank {self.rank}: Identity test passed!")
+
+    def test_tp_shard_to_shard(self):
+        """Direct TP shard-to-shard redistribution: TP=4 → TP=2.
+
+        Source: 4 ranks, each holding 1/4 of a [8,4] weight (shard_dim=0).
+        Target: 2 ranks holding 1/2 each; ranks 2 and 3 become non-owners.
+
+        Expected transfers (no gather step):
+          src 0 → dst 0  (rows 0-1 → rows 0-1 of dst's [4,4] shard)
+          src 1 → dst 0  (rows 2-3 → rows 2-3 of dst's [4,4] shard)
+          src 2 → dst 1  (rows 4-5 → rows 0-1 of dst's [4,4] shard)
+          src 3 → dst 1  (rows 6-7 → rows 2-3 of dst's [4,4] shard)
+        """
+        torch.manual_seed(42)
+        full_weight = torch.randn(8, 4)  # full param, same on all ranks
+        dist.broadcast(full_weight, src=0)
+
+        # Each rank holds 1/4 of the rows.
+        rows_per_rank = 2  # 8 / 4
+        my_shard = full_weight[self.rank * rows_per_rank:(self.rank + 1) * rows_per_rank].clone()
+
+        model = SimpleModel()
+        model.param1.data = my_shard  # use param1 as the TP-sharded weight
+
+        # --- Verify _get_transfer_pieces logic (pure, no communication) ---
+        # Build source ownership: each rank owns a 2-row shard.
+        src_ownership = {}
+        for r in range(self.world_size):
+            sr = (r * rows_per_rank, (r + 1) * rows_per_rank)
+            src_ownership[r] = LayerOwnership(
+                rank=r,
+                layer_names=["param1"],
+                is_placeholder={"param1": False},
+                shard_range={"param1": sr},
+                shard_dim={"param1": 0},
+            )
+        # Target ownership: ranks 0 and 1 each get 4 rows; ranks 2,3 are non-owners.
+        tgt_ownership = {}
+        for r in range(self.world_size):
+            if r < 2:
+                tr = (r * 4, (r + 1) * 4)
+                tgt_ownership[r] = LayerOwnership(
+                    rank=r,
+                    layer_names=["param1"],
+                    is_placeholder={"param1": False},
+                    shard_range={"param1": tr},
+                    shard_dim={"param1": 0},
+                )
+            else:
+                tgt_ownership[r] = LayerOwnership(
+                    rank=r,
+                    layer_names=[],
+                    is_placeholder={"param1": True},
+                    shard_range={"param1": None},
+                    shard_dim={"param1": None},
+                )
+
+        pieces = ReconfigurationExecutor._get_transfer_pieces(
+            "param1", src_ownership, tgt_ownership
+        )
+        # Should be exactly 4 transfers (2 pieces per target rank).
+        assert len(pieces) == 4, f"Expected 4 pieces, got {len(pieces)}: {pieces}"
+        # All pieces send rows of size 2 (the source shard size).
+        for p in pieces:
+            assert p.src_local_end - p.src_local_start == 2, f"Wrong piece size: {p}"
+            assert p.shard_dim == 0
+
+        # --- Execute redistribution and verify assembled values ---
+        executor = ReconfigurationExecutor(model)
+        executor.execute(src_ownership, tgt_ownership)
+
+        if self.rank < 2:
+            expected = full_weight[self.rank * 4:(self.rank + 1) * 4]
+            param = model.param1
+            assert param is not None, f"Rank {self.rank} should own param1"
+            assert param.shape == (4, 4), f"Rank {self.rank}: wrong shape {param.shape}"
+            assert torch.allclose(param.data, expected, atol=1e-6), (
+                f"Rank {self.rank}: assembled shard incorrect"
+            )
+        else:
+            # Non-owner ranks should have their param replaced with placeholder.
+            param = model.param1
+            assert param is None or isinstance(param, type(None)), (
+                f"Rank {self.rank} should not own param1, got {type(param)}"
+            )
+
+        print(f"Rank {self.rank}: TP shard-to-shard test passed!")

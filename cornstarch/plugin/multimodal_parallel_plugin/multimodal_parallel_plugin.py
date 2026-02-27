@@ -522,7 +522,12 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
     def init_distributed(self):
         if self.distributed_initialized:
             return
+        self._init_pg_mesh()
+        self._init_communication_groups()
+        self.distributed_initialized = True
 
+    def _init_pg_mesh(self):
+        """Create the MultiModalProcessGroupMesh from current plugin configs."""
         self.pg_mesh = MultiModalProcessGroupMesh(
             encoder_templates={
                 plugin.pipeline_template: (plugin.tp_size, plugin.sp_size)
@@ -534,6 +539,13 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 self.language_model_plugin.sp_size,
             ),
         )
+
+    def _init_communication_groups(self):
+        """Create stage manager, process groups, scheduler and update shard config.
+
+        Called both from :meth:`init_distributed` and from :meth:`reconfigure`
+        (where ``self.pg_mesh`` has already been set to the new mesh).
+        """
         self.stage_manager = MultiModalPipelineStageManager(
             self.pg_mesh,
             self.pg_mesh.pp_axis,
@@ -602,7 +614,120 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
                 [self.pg_mesh.dp_axis, self.pg_mesh.sp_axis]
             )
 
-        self.distributed_initialized = True
+    def reconfigure(
+        self,
+        new_encoder_plugins: dict,
+        new_language_model_plugin,
+        model,
+        optimizer=None,
+    ) -> None:
+        """Reconfigure the plugin for a new parallel topology.
+
+        Redistributes model parameters and optimizer states across the cluster
+        to match the new configuration, then rebuilds all process groups.
+
+        Preconditions:
+        - ``dist.is_initialized()`` must be True.
+        - No gradients exist (call after ``optimizer.step()``).
+        - ``init_distributed()`` (and ``configure()``) have already been called.
+
+        Args:
+            new_encoder_plugins: New ``{name: ModalParallelPlugin}`` mapping.
+            new_language_model_plugin: New LLM ``ModalParallelPlugin``.
+            model: The wrapped ``MultimodalParallelModule``.
+            optimizer: Optional ColossalAI ``OptimizerWrapper``.
+        """
+        from cornstarch.reconfiguration.executor import ReconfigurationExecutor
+        from cornstarch.reconfiguration.ownership_analyzer import (
+            TensorOwnershipAnalyzer,
+            build_target_ownership,
+        )
+
+        assert dist.is_initialized(), "torch.distributed must be initialized."
+        assert self.distributed_initialized, "Call init_distributed() first."
+
+        # Phase 1: Analyze source ownership.  Pass the current TP group so
+        # that TP-sharded parameters (Linear1D_Col / Linear1D_Row) are
+        # annotated with their exact shard ranges rather than treated as full
+        # tensors.  No gather step is needed.
+        source_ownership = TensorOwnershipAnalyzer(model).analyze(
+            tp_group=self.tp_group
+        )
+
+        # Phase 2: Build new pg_mesh (topology only — no dist.new_group calls
+        # yet).  Immediately seed its cache from the old mesh so that unchanged
+        # rank-set groups are reused rather than recreated.
+        new_pg_mesh = MultiModalProcessGroupMesh(
+            encoder_templates={
+                plugin.pipeline_template: (plugin.tp_size, plugin.sp_size)
+                for plugin in new_encoder_plugins.values()
+            },
+            llm_template=(
+                new_language_model_plugin.pipeline_template,
+                new_language_model_plugin.tp_size,
+                new_language_model_plugin.sp_size,
+            ),
+        )
+        new_pg_mesh.inherit_groups_from(self.pg_mesh)
+
+        # Phase 3: Compute target ownership from new topology.  Pass
+        # source_ownership so shard_dim and full-param sizes are propagated
+        # to the target shard-range annotations (no extra communication).
+        target_ownership = build_target_ownership(
+            model,
+            new_pg_mesh,
+            new_encoder_plugins,
+            new_language_model_plugin,
+            source_ownership=source_ownership,
+        )
+
+        # Phase 4 (pre): Capture parameter snapshot before execute() replaces
+        # parameter objects so that optimizer-state lookup by identity still works.
+        param_snapshot = {n: p for n, p in model.named_parameters()}
+
+        # Phase 4: Redistribute model parameters with direct shard-to-shard
+        # all-to-all — no intermediate full-tensor assembly.
+        executor = ReconfigurationExecutor(model)
+        executor.execute(source_ownership, target_ownership)
+
+        # Phase 5: Redistribute optimizer states (same pattern).
+        if optimizer is not None:
+            executor.redistribute_optimizer_states(
+                optimizer, source_ownership, target_ownership,
+                param_snapshot=param_snapshot,
+            )
+
+        # Phase 6: Update plugin configuration.
+        self.encoder_plugins = new_encoder_plugins
+        self.language_model_plugin = new_language_model_plugin
+
+        # Phase 7: Install the new pg_mesh and rebuild stage manager / groups /
+        # shard config / scheduler.  _init_communication_groups() will call
+        # dist.new_group() only for rank sets that are genuinely new (i.e. not
+        # already in new_pg_mesh._ranks_to_group from inherit_groups_from).
+        old_pg_mesh = self.pg_mesh
+        self.pg_mesh = new_pg_mesh
+        self._init_communication_groups()
+
+        # Phase 8 (deferred): Now that new groups are established, destroy only
+        # the groups the new configuration no longer needs.  Groups reused by
+        # new_pg_mesh are kept alive.  No additional barrier is needed here:
+        # the collective dist.new_group() calls in _init_communication_groups()
+        # already provided the necessary synchronisation across all ranks.
+        old_pg_mesh.destroy_stale_groups(set(new_pg_mesh._ranks_to_group))
+
+        # Phase 9: Update live references on the model wrapper.
+        model.dp_group = self.dp_group
+        model.tp_group = self.tp_group
+        model.sp_group = self.sp_group
+        model.stage_manager = self.stage_manager
+
+        # Update optimizer's process group references.
+        if optimizer is not None:
+            if hasattr(optimizer, "tp_pg"):
+                optimizer.tp_pg = self.tp_group
+            if hasattr(optimizer, "pp_pg"):
+                optimizer.pp_pg = self.global_pp_group
 
     def configure(
         self,

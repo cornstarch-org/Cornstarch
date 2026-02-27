@@ -1,28 +1,35 @@
 """Data structures for dynamic parallel reconfiguration."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
 
 @dataclass
 class LayerOwnership:
-    """Describes which model layers a rank owns.
+    """Describes which model layers a rank owns and what portion of each.
+
+    For parameters that are TP-sharded, ``shard_range`` records the
+    [start, end) interval of the full parameter tensor that this rank holds
+    along ``shard_dim``.  ``None`` means the rank holds the complete tensor
+    (no TP sharding for that parameter).
 
     Attributes:
-        rank: The rank ID
-        layer_names: List of parameter names held by this rank
-        is_placeholder: Mapping from parameter name to whether it's a placeholder
+        rank:          The rank ID.
+        layer_names:   Parameter names held (fully or partially) by this rank.
+        is_placeholder: True when the name is a placeholder (not actually held).
+        shard_range:   param_name → (start, end) in the full tensor, or None.
+        shard_dim:     param_name → which axis is sharded, or None.
     """
     rank: int
     layer_names: List[str]
     is_placeholder: Dict[str, bool] = field(default_factory=dict)
+    shard_range: Dict[str, Optional[Tuple[int, int]]] = field(default_factory=dict)
+    shard_dim: Dict[str, Optional[int]] = field(default_factory=dict)
 
     def __post_init__(self):
-        """Initialize is_placeholder dict if not provided."""
         if not self.is_placeholder:
-            # By default, all layer_names are not placeholders
             self.is_placeholder = {name: False for name in self.layer_names}
 
 
