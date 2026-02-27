@@ -1,5 +1,5 @@
 import inspect
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
@@ -8,31 +8,53 @@ signature = inspect.signature(dist.broadcast).parameters
 is_group_src_present = "group_src" in signature
 
 
+class _BatchWork:
+    """Aggregate multiple gloo P2P works into a single waitable object."""
+
+    def __init__(
+        self, works: list[dist.Work], post_wait_copies: list[Callable[[], None]]
+    ) -> None:
+        self._works = works
+        self._post_wait_copies = post_wait_copies
+        self._completed = False
+
+    def wait(self) -> bool:
+        with torch.no_grad():
+            for work in self._works:
+                if work is not None:
+                    work.wait()
+            for copy_fn in self._post_wait_copies:
+                copy_fn()
+        self._completed = True
+        return True
+
+    def is_completed(self) -> bool:
+        return self._completed
+
+
 def batch_isend_irecv_gloo(p2p_op_list: list[dist.P2POp]) -> list[dist.Work]:
-    reqs: list[tuple[dist.Work, torch.Tensor]] = []
+    works: list[dist.Work] = []
+    post_wait_copies: list[Callable[[], None]] = []
+    keepalive_tensors: list[torch.Tensor] = []
+
     for p2p_op in p2p_op_list:
         if p2p_op.op == dist.isend:
             tensor = p2p_op.tensor.to("cpu")
-            work = p2p_op.op(tensor, p2p_op.peer, p2p_op.group, p2p_op.tag)
+            keepalive_tensors.append(tensor)
+            works.append(p2p_op.op(tensor, p2p_op.peer, p2p_op.group, p2p_op.tag))
         else:
             tensor = torch.empty_like(p2p_op.tensor, device="cpu")
-            work = p2p_op.op(tensor, p2p_op.peer, p2p_op.group, p2p_op.tag)
+            keepalive_tensors.append(tensor)
+            works.append(p2p_op.op(tensor, p2p_op.peer, p2p_op.group, p2p_op.tag))
+            post_wait_copies.append(lambda src=tensor, dst=p2p_op.tensor: dst.copy_(src))
 
-        reqs.append((work, tensor))
+    if not works:
+        return []
 
-    send_reqs = []
-    with torch.no_grad():
-        for (req, tensor), p2p_op in zip(reqs, p2p_op_list):
-            if req is None:
-                continue
-
-            if p2p_op.op == dist.irecv:
-                req.wait()
-                p2p_op.tensor.copy_(tensor)
-            else:
-                send_reqs.append(req)
-
-    return send_reqs
+    # Keep CPU staging tensors alive until wait() is called.
+    batch = _BatchWork(works=works, post_wait_copies=post_wait_copies)
+    setattr(batch, "_keepalive_tensors", keepalive_tensors)
+    return [batch]
 
 
 def all_to_all_gloo(
