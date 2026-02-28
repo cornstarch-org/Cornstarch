@@ -6,7 +6,9 @@ from typing import Any, Callable, Iterable, Optional, Union
 import torch
 from colossalai.accelerator import get_accelerator
 from colossalai.interface import OptimizerWrapper
-from colossalai.pipeline.p2p import PipelineP2PCommunication
+from colossalai.pipeline.p2p import (
+    PipelineP2PCommunication,
+)
 from colossalai.pipeline.schedule._utils import (
     detach,
     get_batch_size,
@@ -40,6 +42,22 @@ class PipeweaverP2PCommunication(MultimodalPipelineP2PCommunication):
     def __init__(self, stage_manager: PipeweaverPipelineStageManager) -> None:
         assert isinstance(stage_manager, PipeweaverPipelineStageManager)
         PipelineP2PCommunication.__init__(self, stage_manager, overlap_p2p=False)
+
+    def send_forward_recv_forward(
+        self, output_object: Any, send_first: bool, is_broadcast: bool
+    ) -> Any:
+        result = super().send_forward_recv_forward(
+            output_object, send_first=send_first, is_broadcast=is_broadcast
+        )
+        return result if result else None
+
+    def send_backward_recv_backward(
+        self, input_object: Any, send_first: bool, is_broadcast: bool
+    ) -> Any:
+        result = super().send_backward_recv_backward(
+            input_object, send_first=send_first, is_broadcast=is_broadcast
+        )
+        return result if result else None
 
 
 class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
@@ -268,28 +286,53 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
 
         # ==============================================================
         # Phase 1 — All encoder forwards
+        #
+        # Each rank runs its M encoder microbatches purely.  The last
+        # encoder stage (rank N-1) sends its outputs to rank 0 via
+        # encoder_next_ranks=[0], which is the same physical channel as
+        # rank 0's llm_prev_ranks=[N-1].  Those messages accumulate in
+        # the network buffer and are drained by recv_llm_input() in
+        # Phase 2.  We must NOT recv them here on rank 0: doing so
+        # creates a deadlock because rank N-1 cannot send until the
+        # pipeline has filled (it needs mb data from ranks 1..N-2, which
+        # in turn need rank 0 to keep sending encoder outputs — but rank
+        # 0 would be blocked waiting for a recv that can never arrive).
         # ==============================================================
         self.stage_manager.set_encoder_mode()
         enc_input_objs: list[Any] = []
         enc_output_objs: list[Any] = []
-        llm_prefetched_inputs: list[Any] = []
+
+        input_obj = self.recv_forward()
 
         for mb in range(M):
-            input_obj = self.recv_forward()
-
             output_obj = self.forward_step(
                 model, input_obj, criterion, compute_loss=False
             )
-            if stage == 0:
-                self.send_forward(output_obj)
-                self.stage_manager.set_llm_mode()
-                llm_input_obj = self.recv_forward()
-                llm_prefetched_inputs.append(llm_input_obj)
-                self.stage_manager.set_encoder_mode()
-            else:
-                self.send_forward(output_obj)
             enc_input_objs.append(input_obj)
             enc_output_objs.append(output_obj)
+
+            if self.stage_manager.is_last_stage():
+                # Last encoder stage: buffer output (sent in bulk after Phase 1).
+                if mb < M - 1:
+                    input_obj = self.recv_forward()
+            else:
+                # Non-last encoder stage: pipeline send to next, recv from prev.
+                # Rank 0 (encoder first stage) recv_forward returns None.
+                self.send_forward(output_obj)
+                if mb < M - 1:
+                    input_obj = self.recv_forward()
+
+        # Full tail flush: rank N-1 sends all M encoder outputs to rank 0 in bulk.
+        # Rank 0 will pre-buffer these in Phase 2 before starting LLM work.
+        # Still in encoder mode so get_next_ranks() = [0].
+        if self.stage_manager.is_last_stage():
+            for i in range(M):
+                self.send_forward(enc_output_objs[i])
+
+        # enc_grad_buffer is populated by rank N-1 during Phase 2 steady state
+        # (live recvs from rank 0) and topped up in Phase 3 pre-buffer
+        # (rank 0 cooldown grads bulk-flushed after Phase 2).
+        enc_grad_buffer: list[Any] = []
 
         # ==============================================================
         # Phase 2 — LLM 1F1B
@@ -302,19 +345,29 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
 
         llm_input_objs: list[Any] = []
         llm_output_objs: list[Any] = []
+        # Rank 0: cooldown grads buffered here and bulk-flushed to rank N-1 after Phase 2.
         border_input_obj_grads: list[Any] = []
 
-        def recv_llm_input(mb: int) -> Any:
+        # Rank 0: pre-buffer all M LLM inputs from rank N-1 before any LLM work.
+        # Rank N-1 is sending them in bulk (Phase 1→2 flush), so this drains that flush.
+        llm_input_buffer: list[Any] = []
+        if stage == 0:
+            for _ in range(M):
+                llm_input_buffer.append(self.recv_forward())
+
+        llm_buf_idx = 0  # index into llm_input_buffer for rank 0
+
+        def recv_llm_input() -> Any:
+            nonlocal llm_buf_idx
             if stage == 0:
-                assert (
-                    llm_prefetched_inputs
-                ), "Missing prefetched border input on stage 0."
-                return llm_prefetched_inputs.pop(0)
+                obj = llm_input_buffer[llm_buf_idx]
+                llm_buf_idx += 1
+                return obj
             return self.recv_forward()
 
         # --- warmup: pure forwards ---
         for i in range(num_warmup):
-            input_obj = recv_llm_input(i)
+            input_obj = recv_llm_input()
             output_obj = self.forward_step(
                 model, input_obj, criterion, accum_loss, outputs, compute_loss=True
             )
@@ -323,7 +376,14 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
             llm_output_objs.append(output_obj)
 
         if num_remaining > 0:
-            input_obj = recv_llm_input(num_warmup)
+            input_obj = recv_llm_input()
+
+        # Rank N-1 starts live-receiving from rank 0 at steady iteration i_start.
+        # i_start = num_stages // 2; total live recvs = M - (num_stages - 1).
+        # Even num_stages: recv after send_forward_recv_backward, before backward_step.
+        # Odd  num_stages: recv after send_backward_recv_forward, after backward_step.
+        i_start = num_stages // 2
+        live_recv_count = M - (num_stages - 1)
 
         # --- steady state: interleaved fwd + bwd ---
         for i in range(num_remaining):
@@ -336,6 +396,16 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
                 output_obj, send_first=(stage % 2 == 0)
             )
 
+            # Even num_stages: rank N-1 live-recvs from rank 0 here (before bwd).
+            if (
+                stage == num_stages - 1
+                and num_stages % 2 == 0
+                and i_start <= i < i_start + live_recv_count
+            ):
+                self.stage_manager.set_encoder_mode()
+                enc_grad_buffer.append(self.recv_backward())
+                self.stage_manager.set_llm_mode()
+
             llm_input_objs.append(input_obj)
             llm_output_objs.append(output_obj)
 
@@ -346,9 +416,23 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
             )
 
             if stage == 0:
-                border_input_obj_grads.append(input_obj_grad)
+                # Live send to rank N-1.  Rank N-1 is at its steady iteration
+                # i+(num_stages//2), where it has already posted recv_backward.
+                self.send_backward(input_obj_grad)
                 if not last_iteration:
-                    input_obj = recv_llm_input(num_warmup + i + 1)
+                    input_obj = recv_llm_input()
+            elif stage == num_stages - 1:
+                if last_iteration:
+                    self.send_backward(input_obj_grad)
+                else:
+                    input_obj = self.send_backward_recv_forward(
+                        input_obj_grad, send_first=(stage % 2 == 0)
+                    )
+                # Odd num_stages: rank N-1 live-recvs from rank 0 after send_bwd_recv_fwd.
+                if num_stages % 2 == 1 and i_start <= i < i_start + live_recv_count:
+                    self.stage_manager.set_encoder_mode()
+                    enc_grad_buffer.append(self.recv_backward())
+                    self.stage_manager.set_llm_mode()
             elif last_iteration:
                 self.send_backward(input_obj_grad)
             else:
@@ -357,7 +441,7 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
                 )
 
         # --- cooldown: pure backwards ---
-        for _ in range(num_warmup):
+        for _i in range(num_warmup):
             input_obj = llm_input_objs.pop(0)
             output_obj = llm_output_objs.pop(0)
             output_obj_grad = self.recv_backward()
@@ -375,13 +459,30 @@ class PipeweaverEncoderTrainingPipeweaverScheduler(PipelineSchedule):
         self.stage_manager.set_encoder_mode()
 
         for mb in range(M):
-            if stage == 0:
-                self.stage_manager.set_llm_mode()
-                self.send_backward(border_input_obj_grads[mb])
-                self.stage_manager.set_encoder_mode()
-                output_obj_grad = self.recv_backward()
+            if self.stage_manager.is_last_stage():
+                output_obj_grad = enc_grad_buffer[mb]
             else:
                 output_obj_grad = self.recv_backward()
+
+            # Rank 0 sends cooldown grads; rank N-1 recvs them.
+            # Both reach this point simultaneously: rank 0 enters Phase 3 after
+            # num_stages-1 cooldown steps, while rank N-1 independently completes
+            # num_stages-1 encoder backward steps (using buffered enc_grad_buffer).
+            if mb == self.stage_manager.stage:
+                if self.stage_manager.is_first_stage():
+                    # LLM mode: send_backward uses llm_prev_ranks = [rank N-1]
+                    self.stage_manager.set_llm_mode()
+                    assert len(border_input_obj_grads) == num_stages - 1
+                    for grad in border_input_obj_grads:
+                        self.send_backward(grad)
+                    self.stage_manager.set_encoder_mode()
+                elif self.stage_manager.is_last_stage():
+                    # Encoder mode: recv_backward uses encoder_next_ranks = [rank 0],
+                    # which is the wrap-around channel matching rank 0's LLM send_backward.
+                    for _ in range(num_stages - 1):
+                        enc_grad_buffer.append(self.recv_backward())
+                    assert len(enc_grad_buffer) == M
+
             input_obj = enc_input_objs[mb]
             output_obj = enc_output_objs[mb]
             input_obj_grad = self.backward_step(
