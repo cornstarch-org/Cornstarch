@@ -114,28 +114,38 @@ def get_param_by_name(model: nn.Module, param_name: str) -> nn.Parameter:
 def set_param_by_name(model: nn.Module, param_name: str, value: torch.Tensor) -> None:
     """Set a parameter by its full name.
 
+    Preserves the existing ``nn.Parameter`` object's identity when the slot
+    already holds a parameter, updating only its ``.data``.  This keeps
+    optimizer ``param_groups`` / ``state`` keys valid across reconfiguration.
+    A new ``nn.Parameter`` is created only when the slot was previously a
+    placeholder (``None``) or did not exist.
+
     Args:
         model: The model
         param_name: Full parameter name
         value: New parameter value
     """
-    # Navigate through the module hierarchy
     parts = param_name.split('.')
     module = model
 
-    # Navigate to the parent module
     for part in parts[:-1]:
         if part.isdigit():
             module = module[int(part)]
         else:
             module = getattr(module, part)
 
-    # Set the parameter
     param_local_name = parts[-1]
-    if hasattr(module, param_local_name):
-        # Replace parameter
-        delattr(module, param_local_name)
-    module.register_parameter(param_local_name, nn.Parameter(value))
+    existing = getattr(module, param_local_name, None)
+
+    if isinstance(existing, nn.Parameter):
+        # In-place update: preserves object identity so the optimizer's
+        # param_groups and state dict keys remain valid.
+        existing.data = value
+    else:
+        # Slot was a placeholder (None) or absent — create a fresh Parameter.
+        if hasattr(module, param_local_name):
+            delattr(module, param_local_name)
+        module.register_parameter(param_local_name, nn.Parameter(value))
 
 
 def get_parent_module(model: nn.Module, param_name: str) -> nn.Module:

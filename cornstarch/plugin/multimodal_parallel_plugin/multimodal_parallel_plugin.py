@@ -98,29 +98,7 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         self.decoder_shard_configs = decoder_shard_configs
 
         # Cache my modal so that do forward only on the modal
-        stage_manager: MultiModalPipelineStageManager = self.stage_manager
-        my_modal_template = stage_manager.pg_mesh.my_modal
-        my_modal_name: str = None
-        if my_modal_template in stage_manager.pg_mesh.encoder_templates.keys():
-            my_modal_name = next(
-                modal_name
-                for modal_name, shard_config in encoder_shard_configs.items()
-                if shard_config.pipeline_template == my_modal_template
-            )
-            my_modal_name = f"{my_modal_name}_encoder"
-        elif my_modal_template == stage_manager.pg_mesh.llm_template[0]:
-            my_modal_name = "language_model"
-        elif my_modal_template in stage_manager.pg_mesh.decoder_templates.keys():
-            my_modal_name = next(
-                modal_name
-                for modal_name, shard_config in decoder_shard_configs.items()
-                if shard_config.pipeline_template == my_modal_template
-            )
-            my_modal_name = f"{my_modal_name}_decoder"
-        assert (
-            my_modal_name is not None
-        ), f"Cannot find a modal module that rank {dist.get_rank()} owns."
-        self.my_modal_name = my_modal_name
+        self.my_modal_name = self._resolve_my_modal_name()
 
         # setting mixed_precision
         self.mixed_precision = None
@@ -134,6 +112,44 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
         module = module.to(get_accelerator().get_current_device())
 
         super().__init__(module)
+
+    def _resolve_my_modal_name(self) -> str:
+        """Determine which modal sub-module this rank owns.
+
+        Uses ``self.stage_manager``, ``self.encoder_shard_configs``, and
+        ``self.decoder_shard_configs`` so the result is always consistent with
+        the latest reconfiguration.  Called from ``__init__`` and from Phase 9
+        of :meth:`MultimodalParallelPlugin.reconfigure` after shard configs
+        have been refreshed.
+        """
+        stage_manager: MultiModalPipelineStageManager = self.stage_manager
+        my_modal_template = stage_manager.pg_mesh.my_modal
+        my_modal_name: Optional[str] = None
+
+        if my_modal_template in stage_manager.pg_mesh.encoder_templates.keys():
+            my_modal_name = next(
+                modal_name
+                for modal_name, shard_config in self.encoder_shard_configs.items()
+                if shard_config.pipeline_template == my_modal_template
+            )
+            my_modal_name = f"{my_modal_name}_encoder"
+        elif my_modal_template == stage_manager.pg_mesh.llm_template[0]:
+            my_modal_name = "language_model"
+        elif (
+            self.decoder_shard_configs is not None
+            and my_modal_template in stage_manager.pg_mesh.decoder_templates.keys()
+        ):
+            my_modal_name = next(
+                modal_name
+                for modal_name, shard_config in self.decoder_shard_configs.items()
+                if shard_config.pipeline_template == my_modal_template
+            )
+            my_modal_name = f"{my_modal_name}_decoder"
+
+        assert (
+            my_modal_name is not None
+        ), f"Cannot find a modal module that rank {dist.get_rank()} owns."
+        return my_modal_name
 
     def forward(
         self,
@@ -404,6 +420,79 @@ class MultimodalParallelModule(ModelWrapper, AMPModelMixin):
     ):
         module: MultimodalModel = self.module
         module.set_modality_token_ids(token_ids, new_num_tokens)
+
+
+def _update_optimizer_param_groups(
+    optimizer,
+    rank: int,
+    source_ownership,
+    target_ownership,
+    param_snapshot: dict,
+    model: nn.Module,
+) -> None:
+    """Reconcile ``optimizer.param_groups`` with parameter ownership changes.
+
+    After :meth:`ReconfigurationExecutor.execute` runs:
+
+    * **Ranks that lose ownership** (owner → placeholder): remove the stale
+      parameter from every inner param group so the optimizer no longer
+      iterates over gradient-free orphans.
+    * **Ranks that gain ownership** (placeholder → owner): add the freshly
+      created ``nn.Parameter`` to the first inner param group.  This step is
+      skipped for AMP optimizers (``HybridParallelAMPOptimizer``) because
+      adding a working param to the master-param-keyed groups requires creating
+      an fp32 master copy; the optimizer state entry is still written by
+      :meth:`redistribute_optimizer_states`.
+
+    Args:
+        optimizer: ColossalAI ``OptimizerWrapper`` (or plain ``Optimizer``).
+        rank: Current process rank.
+        source_ownership: Ownership map before redistribution.
+        target_ownership: Ownership map after redistribution.
+        param_snapshot: ``{name: nn.Parameter}`` captured before execute().
+        model: The ``MultimodalParallelModule`` whose parameters were updated.
+    """
+    from cornstarch.reconfiguration.utils import get_param_by_name as _gpbn
+
+    def _owned_names(ownership, r):
+        if r not in ownership:
+            return set()
+        own = ownership[r]
+        return {n for n in own.layer_names if not own.is_placeholder.get(n, False)}
+
+    source_owners = _owned_names(source_ownership, rank)
+    target_owners = _owned_names(target_ownership, rank)
+    newly_owned = target_owners - source_owners
+    newly_lost = source_owners - target_owners
+
+    if not newly_owned and not newly_lost:
+        return
+
+    # Detect AMP optimizer (master-param-keyed state).
+    try:
+        is_amp = optimizer.get_master_to_working_map() is not None
+    except AttributeError:
+        is_amp = False
+
+    inner_groups = optimizer.optim.param_groups
+
+    # Remove newly-lost parameters from every inner param group.
+    if newly_lost:
+        lost_ids: set = {
+            id(param_snapshot[n]) for n in newly_lost if n in param_snapshot
+        }
+        for group in inner_groups:
+            group["params"] = [p for p in group["params"] if id(p) not in lost_ids]
+
+    # Add newly-owned parameters to the first inner param group (non-AMP only).
+    if newly_owned and not is_amp and inner_groups:
+        new_params = []
+        for name in sorted(newly_owned):
+            try:
+                new_params.append(_gpbn(model, name))
+            except KeyError:
+                pass
+        inner_groups[0]["params"].extend(new_params)
 
 
 class MultimodalParallelPlugin(HybridParallelPlugin):
@@ -690,6 +779,22 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         executor = ReconfigurationExecutor(model)
         executor.execute(source_ownership, target_ownership)
 
+        # Phase 4.5: Reconcile optimizer.param_groups with the ownership
+        # changes that execute() just made.  Newly-owned parameters (whose
+        # nn.Parameter objects were just created by set_param_by_name) must be
+        # added to the optimizer so gradient updates flow through them.
+        # Newly-lost parameters (now TensorPlaceholders) are removed to avoid
+        # iterating gradient-free orphans in optimizer.step().
+        if optimizer is not None:
+            _update_optimizer_param_groups(
+                optimizer,
+                dist.get_rank(),
+                source_ownership,
+                target_ownership,
+                param_snapshot,
+                model,
+            )
+
         # Phase 5: Redistribute optimizer states (same pattern).
         if optimizer is not None:
             executor.redistribute_optimizer_states(
@@ -721,6 +826,63 @@ class MultimodalParallelPlugin(HybridParallelPlugin):
         model.tp_group = self.tp_group
         model.sp_group = self.sp_group
         model.stage_manager = self.stage_manager
+
+        # Fix B: Refresh the shard-config copies stored on the model wrapper.
+        # These are independent dataclass instances created during configure();
+        # update pipeline_template, stage_manager, and process-group fields so
+        # they reflect the new topology.  _resolve_my_modal_name() (below)
+        # reads pipeline_template, so this must happen before Fix A.
+        if model.encoder_shard_configs is not None:
+            updated_enc_cfgs = {}
+            for modal_name, sc in model.encoder_shard_configs.items():
+                new_enc_plugin = self.encoder_plugins[modal_name]
+                updated_enc_cfgs[modal_name] = replace(
+                    sc,
+                    pipeline_template=new_enc_plugin.pipeline_template,
+                    pipeline_stage_manager=self.stage_manager,
+                    tensor_parallel_process_group=self.tp_group,
+                    sequence_parallel_process_group=self.sp_group,
+                )
+            model.encoder_shard_configs = updated_enc_cfgs
+
+        if model.llm_shard_config is not None:
+            model.llm_shard_config = replace(
+                model.llm_shard_config,
+                pipeline_template=self.language_model_plugin.pipeline_template,
+                pipeline_stage_manager=self.stage_manager,
+                tensor_parallel_process_group=self.tp_group,
+                sequence_parallel_process_group=self.sp_group,
+            )
+
+        if model.decoder_shard_configs is not None:
+            updated_dec_cfgs = {}
+            for modal_name, sc in model.decoder_shard_configs.items():
+                updated_dec_cfgs[modal_name] = replace(
+                    sc,
+                    pipeline_stage_manager=self.stage_manager,
+                    tensor_parallel_process_group=self.tp_group,
+                    sequence_parallel_process_group=self.sp_group,
+                )
+            model.decoder_shard_configs = updated_dec_cfgs
+
+        # Fix A: Recompute which modal sub-module this rank owns.  The cached
+        # my_modal_name from construction may be stale if reconfiguration moved
+        # ranks between encoder / LLM / decoder modals.
+        model.my_modal_name = model._resolve_my_modal_name()
+
+        # Fix C: Update the process_group (and num_partitions for Linear1D_Row)
+        # cached inside every TP-sharded linear layer.  After a TP-degree change
+        # the old group object may have been destroyed by Phase 8; these attrs
+        # must point to the freshly created group.
+        from colossalai.shardformer.layer import Linear1D_Col, Linear1D_Row
+
+        new_tp = model.tp_group
+        for m in model.module.modules():
+            if isinstance(m, Linear1D_Col):
+                m.process_group = new_tp
+            if isinstance(m, Linear1D_Row):  # covers Linear1D_Row_ReduceScatter too
+                m.process_group = new_tp
+                m.num_partitions = dist.get_world_size(new_tp)
 
         # Update optimizer's process group references.
         if optimizer is not None:

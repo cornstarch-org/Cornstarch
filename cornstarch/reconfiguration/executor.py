@@ -345,10 +345,21 @@ class ReconfigurationExecutor:
     ) -> None:
         """Redistribute optimizer states to match the new parameter ownership.
 
-        Mirrors :meth:`execute` but operates on the optimizer's internal state
-        tensors (e.g. ``exp_avg``, ``exp_avg_sq``).  Each state tensor for a
-        parameter is moved with the same piece-based all-to-all pattern as the
-        parameter itself.
+        Every rank participates in every collective call regardless of whether
+        it currently holds a given parameter.  This avoids the deadlock that
+        occurs in pipeline-parallel configurations when placeholder ranks skip
+        ``dist.all_to_all`` while owner ranks call it.
+
+        Two additional cases handled compared to the original implementation:
+
+        * **Placeholder → owner** (rank gains a parameter): a new state-dict
+          entry is created and keyed by the freshly-created ``nn.Parameter``
+          (from :func:`set_param_by_name`).  For AMP optimizers that maintain
+          separate master parameters the entry is keyed by the working parameter
+          which is sufficient for all standard state-update operations.
+
+        * **Owner → placeholder** (rank loses a parameter): the stale state
+          entry is removed so it no longer consumes memory.
         """
         if optimizer is None:
             return
@@ -358,6 +369,7 @@ class ReconfigurationExecutor:
         except AttributeError:
             master_to_working = None
 
+        # Map working-param id → (master_param, state dict)
         wid_to_state: Dict[int, tuple] = {}
         for master_p, state in optimizer.optim.state.items():
             if master_to_working is not None:
@@ -367,6 +379,8 @@ class ReconfigurationExecutor:
                 key = id(master_p)
             wid_to_state[key] = (master_p, state)
 
+        # param_snapshot holds the parameter objects as they were *before*
+        # execute() ran so optimizer state lookups by identity still work.
         if param_snapshot is not None:
             name_to_working: Dict[str, nn.Parameter] = param_snapshot
         else:
@@ -375,51 +389,147 @@ class ReconfigurationExecutor:
         all_params = get_all_param_names(source_ownership, target_ownership)
 
         for param_name in sorted(all_params):
-            working_param = name_to_working.get(param_name)
-            if working_param is None:
-                continue
-            entry = wid_to_state.get(id(working_param))
-            if entry is None:
-                continue
-            _, state = entry
-
             is_target_owner = self._is_held_in_target(
                 param_name, self.rank, target_ownership
             )
+
+            # Retrieve local state (may be None for placeholder ranks).
+            working_param = name_to_working.get(param_name)
+            local_master_param = None
+            local_state: Optional[Dict] = None
+            if working_param is not None:
+                entry = wid_to_state.get(id(working_param))
+                if entry is not None:
+                    local_master_param, local_state = entry
+
+            # --- Step 1: ALL ranks agree on state keys AND their value types ---
+            # Combining name + type in one all_gather_object guarantees that
+            # every rank enters the same branches in Step 2, keeping every
+            # subsequent collective (all_gather_object / all_to_all) symmetric.
+            # 'tensor' = torch.Tensor,  'scalar' = non-tensor Python value.
+            local_key_info: Dict[str, str] = {}
+            if local_state is not None:
+                for k, v in local_state.items():
+                    local_key_info[k] = "tensor" if isinstance(v, torch.Tensor) else "scalar"
+            all_key_info_list = [None] * self.world_size
+            if dist.is_initialized():
+                dist.all_gather_object(all_key_info_list, local_key_info)
+            else:
+                all_key_info_list[self.rank] = local_key_info
+
+            canonical_key_info: Dict[str, str] = {}
+            for kinfo in all_key_info_list:
+                if kinfo:
+                    canonical_key_info = kinfo
+                    break
+
+            if not canonical_key_info:
+                # No rank holds optimizer state for this parameter.
+                continue
+
+            # --- Step 2: Redistribute each state value (all ranks participate) ---
             new_state: Dict = {}
-            for state_key, state_val in state.items():
-                if not isinstance(state_val, torch.Tensor):
-                    new_state[state_key] = state_val
-                    continue
-                redistributed = self._redistribute_state_tensor(
-                    param_name, state_val, source_ownership, target_ownership
+            for state_key, key_kind in canonical_key_info.items():
+                local_val = (
+                    local_state.get(state_key) if local_state is not None else None
                 )
-                # Only adopt the redistributed tensor if this rank is a target
-                # owner.  Non-owner ranks still participate in the all_to_all
-                # collective (required) but must not corrupt their stale state.
-                new_state[state_key] = redistributed if is_target_owner else state_val
-            state.clear()
-            state.update(new_state)
+
+                if key_kind == "scalar":
+                    # Non-tensor scalar (e.g. integer step counter in old PyTorch).
+                    # ALL ranks call all_gather_object so the collective is symmetric.
+                    scalar_list = [None] * self.world_size
+                    if dist.is_initialized():
+                        dist.all_gather_object(scalar_list, local_val)
+                    else:
+                        scalar_list[self.rank] = local_val
+                    canonical_val = next((v for v in scalar_list if v is not None), None)
+                    new_state[state_key] = canonical_val
+                    continue
+
+                # Tensor state: every rank calls _redistribute_state_tensor so
+                # that the underlying collective is symmetric.
+                # Non-holding ranks pass None; _redistribute_state_tensor handles
+                # the zero-tensor participation transparently.
+                redistributed = self._redistribute_state_tensor(
+                    param_name, local_val, source_ownership, target_ownership
+                )
+
+                if redistributed is not None:
+                    new_state[state_key] = redistributed
+                elif local_val is not None:
+                    # This rank received nothing (not a target owner) but had a
+                    # local value; keep it as a placeholder until cleaned up below.
+                    new_state[state_key] = local_val
+
+            # --- Step 3: Persist redistributed state for target owners only ---
+            if not is_target_owner:
+                # Remove stale state entries for parameters this rank no longer owns.
+                if local_master_param is not None and local_master_param in optimizer.optim.state:
+                    del optimizer.optim.state[local_master_param]
+                continue
+
+            if local_master_param is not None:
+                # Rank was already an owner; update existing entry in-place.
+                existing_state = optimizer.optim.state[local_master_param]
+                existing_state.clear()
+                existing_state.update(new_state)
+            else:
+                # Rank is a newly-acquired owner.  set_param_by_name created a
+                # fresh nn.Parameter; use it as the state key.  For AMP
+                # optimizers a proper master param would be needed, but the
+                # working param key is sufficient for all practical state ops.
+                try:
+                    new_param = get_param_by_name(self.model, param_name)
+                    optimizer.optim.state[new_param] = new_state
+                except KeyError:
+                    pass
 
     def _redistribute_state_tensor(
         self,
         param_name: str,
-        state_tensor: torch.Tensor,
+        state_tensor: Optional[torch.Tensor],
         source_ownership: Dict[int, LayerOwnership],
         target_ownership: Dict[int, LayerOwnership],
-    ) -> torch.Tensor:
+    ) -> Optional[torch.Tensor]:
         """Redistribute a single optimizer state tensor.
 
-        Uses the same piece-based logic as :meth:`_redistribute_param` since
-        optimizer state tensors are sharded identically to their parameters.
+        ``state_tensor`` may be ``None`` when this rank does not currently hold
+        the parameter (placeholder rank).  All ranks must call this method for
+        the same ``param_name`` so that the underlying ``dist.all_to_all``
+        collective is called by every participant.
+
+        0-dim tensors (e.g. the ``step`` counter in Adam) are not sharded along
+        any parameter axis.  They are collected from all ranks via
+        ``all_gather_object`` and the first non-None value is returned.
+
+        Returns the redistributed tensor for target-owner ranks, or ``None``
+        for non-owner ranks (caller should ignore the return value in that case).
         """
         pieces = self._get_transfer_pieces(
             param_name, source_ownership, target_ownership
         )
 
-        tensor_shape = state_tensor.shape
-        tensor_dtype = state_tensor.dtype
-        target_device = state_tensor.device
+        # Use _gather_metadata so every rank agrees on shape / dtype / device,
+        # even when state_tensor is None on this rank.
+        canonical_shape, canonical_dtype, target_device = self._gather_metadata(
+            state_tensor, param_name=param_name
+        )
+        if canonical_shape is None:
+            return None
+
+        # 0-dim tensors (e.g. Adam's step counter) are global scalars, not
+        # parameter shards.  Collect from all ranks and return the canonical value.
+        if len(canonical_shape) == 0:
+            scalar_val = state_tensor.item() if state_tensor is not None else None
+            scalar_list = [None] * self.world_size
+            if dist.is_initialized():
+                dist.all_gather_object(scalar_list, scalar_val)
+            else:
+                scalar_list[self.rank] = scalar_val
+            canonical_val = next((v for v in scalar_list if v is not None), None)
+            if canonical_val is None:
+                return None
+            return torch.tensor(canonical_val, dtype=canonical_dtype, device=target_device)
 
         is_tp_sharded = bool(pieces) and pieces[0].shard_dim is not None
         shard_dim = pieces[0].shard_dim if pieces else None
@@ -427,11 +537,11 @@ class ReconfigurationExecutor:
         if is_tp_sharded:
             piece = pieces[0]
             piece_size = piece.src_local_end - piece.src_local_start
-            xfer_shape = list(tensor_shape)
+            xfer_shape = list(canonical_shape)
             xfer_shape[shard_dim] = piece_size
             xfer_shape = torch.Size(xfer_shape)
         else:
-            xfer_shape = tensor_shape
+            xfer_shape = canonical_shape
 
         my_sends: Dict[int, TransferPiece] = {}
         my_recvs: Dict[int, TransferPiece] = {}
@@ -443,22 +553,22 @@ class ReconfigurationExecutor:
 
         input_tensor_list = []
         for dst_rank in range(self.world_size):
-            if dst_rank in my_sends:
+            if dst_rank in my_sends and state_tensor is not None:
                 tp = my_sends[dst_rank]
                 if tp.src_local_start is None:
                     chunk = state_tensor.data.contiguous()
                 else:
-                    idx = [slice(None)] * len(tensor_shape)
+                    idx = [slice(None)] * len(canonical_shape)
                     idx[shard_dim] = slice(tp.src_local_start, tp.src_local_end)
                     chunk = state_tensor.data[tuple(idx)].contiguous()
                 input_tensor_list.append(chunk)
             else:
                 input_tensor_list.append(
-                    torch.zeros(xfer_shape, dtype=tensor_dtype, device=target_device)
+                    torch.zeros(xfer_shape, dtype=canonical_dtype, device=target_device)
                 )
 
         output_tensor_list = [
-            torch.zeros(xfer_shape, dtype=tensor_dtype, device=target_device)
+            torch.zeros(xfer_shape, dtype=canonical_dtype, device=target_device)
             for _ in range(self.world_size)
         ]
 
@@ -469,7 +579,7 @@ class ReconfigurationExecutor:
                 output_tensor_list[i].copy_(t)
 
         if not my_recvs:
-            return torch.zeros(tensor_shape, dtype=tensor_dtype, device=target_device)
+            return None
 
         if not is_tp_sharded:
             src_rank, _ = next(iter(my_recvs.items()))
@@ -479,9 +589,9 @@ class ReconfigurationExecutor:
         # Assemble TP shard pieces.
         my_tgt_range = target_ownership[self.rank].shard_range.get(param_name)
         tgt_shard_size = my_tgt_range[1] - my_tgt_range[0]
-        tgt_shape = list(tensor_shape)
+        tgt_shape = list(canonical_shape)
         tgt_shape[shard_dim] = tgt_shard_size
-        assembled = torch.zeros(tgt_shape, dtype=tensor_dtype, device=target_device)
+        assembled = torch.zeros(tgt_shape, dtype=canonical_dtype, device=target_device)
         for src_rank, tp in my_recvs.items():
             piece = output_tensor_list[src_rank]
             if piece.device != target_device:
@@ -500,46 +610,52 @@ class ReconfigurationExecutor:
         local_tensor: Optional[torch.Tensor],
         param_name: str = "",
     ) -> Tuple[Optional[torch.Size], Optional[torch.dtype], str]:
-        """All-gather tensor shape / dtype so every rank has consistent info.
+        """All-gather tensor shape / dtype / device so every rank has consistent info.
 
-        ``target_device`` is resolved from whichever tensor is available on
-        this rank — either the source tensor or whatever copy of the parameter
-        still lives in the model.  We never blindly fall back to the current
-        CUDA device; if no tensor is accessible, we default to CPU.
+        Uses a single ``all_gather_object`` call (combining shape, dtype, and
+        device) so that non-holding ranks can build zero tensors on the correct
+        device for the all_to_all collective.  The canonical device is the first
+        non-CPU device found across all ranks; this prevents non-holding ranks
+        from accidentally creating CPU tensors that would break NCCL collectives.
         """
-        local_shape = list(local_tensor.shape) if local_tensor is not None else None
-        local_dtype = local_tensor.dtype if local_tensor is not None else None
-
-        # Determine the device from the local tensor (preferred) or from
-        # whatever copy of the param still resides in the model.
         if local_tensor is not None:
-            target_device = local_tensor.device
+            local_shape: Optional[list] = list(local_tensor.shape)
+            local_dtype: Optional[torch.dtype] = local_tensor.dtype
+            local_device: Optional[str] = str(local_tensor.device)
         else:
+            local_shape = None
+            local_dtype = None
             try:
                 _p = get_param_by_name(self.model, param_name)
-                target_device = _p.device
+                local_device = str(_p.device)
             except (KeyError, Exception):
-                target_device = "cpu"
+                local_device = None
 
         if not dist.is_initialized():
             if local_shape is None:
-                return None, None, target_device
-            return torch.Size(local_shape), local_dtype, target_device
+                return None, None, local_device or "cpu"
+            return torch.Size(local_shape), local_dtype, local_device or "cpu"
 
-        shape_list = [None] * self.world_size
-        dtype_list = [None] * self.world_size
-        dist.all_gather_object(shape_list, local_shape)
-        dist.all_gather_object(dtype_list, local_dtype)
+        info_list = [None] * self.world_size
+        dist.all_gather_object(
+            info_list,
+            {"shape": local_shape, "dtype": local_dtype, "device": local_device},
+        )
 
-        canonical_shape = None
-        canonical_dtype = None
-        for s, d in zip(shape_list, dtype_list):
-            if s is not None and d is not None:
-                canonical_shape = torch.Size(s)
-                canonical_dtype = d
-                break
+        canonical_shape: Optional[torch.Size] = None
+        canonical_dtype: Optional[torch.dtype] = None
+        canonical_device: str = local_device or "cpu"
+        for info in info_list:
+            if info is None:
+                continue
+            if canonical_shape is None and info.get("shape") is not None:
+                canonical_shape = torch.Size(info["shape"])
+                canonical_dtype = info["dtype"]
+            dev = info.get("device")
+            if dev is not None and "cpu" not in dev and "cpu" in canonical_device:
+                canonical_device = dev
 
-        return canonical_shape, canonical_dtype, target_device
+        return canonical_shape, canonical_dtype, canonical_device
 
     def _is_held_in_source(
         self,
