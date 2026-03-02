@@ -227,8 +227,11 @@ class LlamaModelForwards:
             flash_attn_kwargs["max_length_q"] = packed_seq_max_seqlen
             flash_attn_kwargs["max_length_k"] = packed_seq_max_seqlen
             attn_mask = None
-        elif packed_seq_indices is not None:
-            # Non-first PP stage: hidden_states and position_embeddings are already packed.
+        elif packed_seq_indices is not None and sp_mode is None:
+            # Non-first PP stage with non-SP packed sequences: hidden_states and
+            # position_embeddings are already packed.  ring_attn stages must NOT
+            # enter this branch; their packed-seq metadata is carried in
+            # ring_attn_kwargs (key "cu_seqlens_q", no underscore) below.
             flash_attn_kwargs["cu_seq_lens_q"] = packed_seq_cu_seqlens
             flash_attn_kwargs["cu_seq_lens_k"] = packed_seq_cu_seqlens
             flash_attn_kwargs["max_length_q"] = packed_seq_max_seqlen
