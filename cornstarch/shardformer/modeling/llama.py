@@ -156,6 +156,7 @@ class LlamaModelForwards:
 
         # ring_attn packing state (populated in the split_input block below)
         ring_local_idx: Optional[torch.Tensor] = None
+        packed_seq_indices_b: Optional[torch.Tensor] = None
 
         if packed_seq_indices is not None and not (
             stage_manager is None or stage_manager.is_first_stage()
@@ -319,8 +320,10 @@ class LlamaModelForwards:
             )
             cu_seqlens_k_global[1:] = k_lens.cumsum(0).int()
 
-            # Store for PP propagation (packed_seq_cu_seqlens carries cu_seqlens_q)
+            # Store for PP propagation (packed_seq_cu_seqlens carries cu_seqlens_q).
+            # packed_seq_indices_b carries idx_b so the last PP stage can pack labels.
             packed_seq_indices = idx_a  # placeholder for PP is_first_stage detection
+            packed_seq_indices_b = idx_b
             packed_seq_cu_seqlens = cu_seqlens_q
             packed_seq_shape = (B, local_len)
 
@@ -399,6 +402,7 @@ class LlamaModelForwards:
                 outputs["all_self_attentions"] = all_self_attentions
             if packed_seq_indices is not None:
                 outputs["packed_seq_indices"] = packed_seq_indices
+                outputs["packed_seq_indices_b"] = packed_seq_indices_b
                 outputs["packed_seq_cu_seqlens"] = packed_seq_cu_seqlens
                 outputs["packed_seq_max_seqlen"] = packed_seq_max_seqlen
                 outputs["packed_seq_shape"] = packed_seq_shape
@@ -444,6 +448,7 @@ class LlamaModelForwards:
         all_self_attentions: Optional[Tuple[torch.Tensor]] = (),
         shard_config: ShardConfig = None,
         packed_seq_indices: Optional[torch.Tensor] = None,
+        packed_seq_indices_b: Optional[torch.Tensor] = None,
         packed_seq_cu_seqlens: Optional[torch.Tensor] = None,
         packed_seq_max_seqlen: Optional[int] = None,
         packed_seq_shape: Optional[Tuple[int, int]] = None,
@@ -577,6 +582,7 @@ class LlamaModelForwards:
         # For PP last stage, packed_seq params arrive in the outputs dict.
         if isinstance(outputs, dict):
             packed_seq_indices = outputs.get("packed_seq_indices", packed_seq_indices)
+            packed_seq_indices_b = outputs.get("packed_seq_indices_b", packed_seq_indices_b)
             packed_seq_shape = outputs.get("packed_seq_shape", packed_seq_shape)
 
         hidden_states = outputs[0]
@@ -600,6 +606,59 @@ class LlamaModelForwards:
                 )  # (B, ring_chunk_b_size)
                 packed_labels_a = shift_a.reshape(B * ring_chunk_a_size)[ring_idx_a]
                 packed_labels_b = shift_b.reshape(B * ring_chunk_b_size)[ring_idx_b]
+                packed_labels = torch.cat([packed_labels_a, packed_labels_b])
+
+                if (
+                    shard_config.enable_tensor_parallelism
+                    and shard_config.parallel_output
+                ):
+                    loss = cross_entropy_1d(
+                        packed_logits,
+                        packed_labels,
+                        process_group=shard_config.tensor_parallel_process_group,
+                        vocab_size=self.lm_head.out_features,
+                        dtype=self.model.dtype,
+                        mode="sum",
+                    )
+                    num_nonzero = (packed_labels != -100).sum()
+                    loss = (loss / num_nonzero).squeeze()
+                else:
+                    from torch.nn import CrossEntropyLoss
+
+                    loss = CrossEntropyLoss(ignore_index=-100)(
+                        packed_logits, packed_labels
+                    )
+
+            logits = packed_logits
+        elif sp_mode == "ring_attn" and packed_seq_indices is not None:
+            # Last PP stage with ring_attn: the first stage already partitioned the
+            # sequence, but ring_attn_packed was not set here.  Re-derive the zigzag
+            # indices from labels (which arrive as the original full-length tensor on
+            # every PP stage) and pack labels the same way the first stage does.
+            packed_logits = self.lm_head(hidden_states).float()
+            if labels is not None:
+                _sp_group = shard_config.sequence_parallel_process_group
+                _sp_rank = dist.get_rank(_sp_group)
+                _sp_size = shard_config.sequence_parallel_size
+                _orig_sl = labels.shape[1]
+                _local_idx = _zigzag_local_indices(
+                    _sp_rank, _sp_size, _orig_sl, labels.device
+                )
+                _total_c = 2 * _sp_size
+                _chunk_a = (_orig_sl // _total_c) + (
+                    1 if _sp_rank < (_orig_sl % _total_c) else 0
+                )
+                B, local_len = packed_seq_shape
+                _chunk_b = local_len - _chunk_a
+                local_labels = labels[:, _local_idx]  # (B, local_len)
+                shift_a = F.pad(
+                    local_labels[:, 1:_chunk_a].contiguous(), (0, 1), value=-100
+                )  # (B, _chunk_a)
+                shift_b = F.pad(
+                    local_labels[:, _chunk_a + 1 :].contiguous(), (0, 1), value=-100
+                )  # (B, _chunk_b)
+                packed_labels_a = shift_a.reshape(B * _chunk_a)[packed_seq_indices]
+                packed_labels_b = shift_b.reshape(B * _chunk_b)[packed_seq_indices_b]
                 packed_labels = torch.cat([packed_labels_a, packed_labels_b])
 
                 if (
