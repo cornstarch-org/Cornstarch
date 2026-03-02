@@ -337,13 +337,17 @@ class LlamaModelForwards:
             ring_attn_kwargs["max_seqlen_k"] = int(valid_lens.max().item())
             attn_mask = None
         elif sp_mode == "ring_attn" and packed_seq_indices is not None:
-            # Non-first PP stage: ring_attn_kwargs were propagated from prior stage.
+            # Non-first PP stage: ring_attn metadata was propagated from the first
+            # stage via outputs.update(kwargs) and arrives here in flash_attn_kwargs.
+            # cu_seqlens_k_global is the (2B+1) int32 tensor built on the first stage;
+            # max_seqlen_k is the scalar max valid length.  Both must be popped from
+            # flash_attn_kwargs so they don't bleed into the layer-loop kwargs.
             ring_attn_kwargs = {
                 "cu_seqlens_q": packed_seq_cu_seqlens,
-                "cu_seqlens_k_global": packed_seq_shape,  # repurposed field, see below
+                "cu_seqlens_k_global": flash_attn_kwargs.pop("cu_seqlens_k_global"),
                 "q_seq_offsets": flash_attn_kwargs.pop("q_seq_offsets", None),
                 "max_seqlen_q": packed_seq_max_seqlen,
-                "max_seqlen_k": flash_attn_kwargs.pop("max_seqlen_k_ring", 0),
+                "max_seqlen_k": flash_attn_kwargs.pop("max_seqlen_k", 0),
             }
             attn_mask = None
 
