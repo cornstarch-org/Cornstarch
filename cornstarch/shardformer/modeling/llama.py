@@ -53,20 +53,22 @@ def _zigzag_local_indices(
     chunk i and chunk 2*sp_size-1-i, concatenated in that order.
     """
     total_chunks = 2 * sp_size
-    base  = seq_len // total_chunks
-    extra = seq_len %  total_chunks   # first `extra` chunks have size base+1
+    base = seq_len // total_chunks
+    extra = seq_len % total_chunks  # first `extra` chunks have size base+1
 
     def _chunk_range(c: int) -> tuple[int, int]:
         start = c * base + min(c, extra)
-        size  = base + (1 if c < extra else 0)
+        size = base + (1 if c < extra else 0)
         return start, start + size
 
     lo_a, hi_a = _chunk_range(sp_rank)
     lo_b, hi_b = _chunk_range(2 * sp_size - 1 - sp_rank)
-    return torch.cat([
-        torch.arange(lo_a, hi_a, device=device),
-        torch.arange(lo_b, hi_b, device=device),
-    ])
+    return torch.cat(
+        [
+            torch.arange(lo_a, hi_a, device=device),
+            torch.arange(lo_b, hi_b, device=device),
+        ]
+    )
 
 
 class LlamaModelForwards:
@@ -184,8 +186,8 @@ class LlamaModelForwards:
                 ring_local_idx = _zigzag_local_indices(
                     sp_rank, sp_size, seq_len, hidden_states.device
                 )
-                hidden_states = hidden_states[:, ring_local_idx]   # (B, 2*chunk, H)
-                position_ids  = ring_local_idx.unsqueeze(0)        # (1, 2*chunk)
+                hidden_states = hidden_states[:, ring_local_idx]  # (B, 2*chunk, H)
+                position_ids = ring_local_idx.unsqueeze(0)  # (1, 2*chunk)
             elif sp_mode == "all_to_all":
                 hidden_states = split_forward_gather_backward(
                     hidden_states, 1, sp_group, 1 / sp_size
@@ -247,14 +249,14 @@ class LlamaModelForwards:
         ):
             assert ring_local_idx is not None
             B, local_len = hidden_states.shape[:2]
-            hidden_dim   = hidden_states.shape[-1]
+            hidden_dim = hidden_states.shape[-1]
 
             # Compute chunk_a_size / chunk_b_size using the same uneven-split
             # arithmetic as _zigzag_local_indices.
-            orig_seq_len  = attention_mask.shape[1]
+            orig_seq_len = attention_mask.shape[1]
             _total_chunks = 2 * sp_size
-            _base   = orig_seq_len // _total_chunks
-            _extra  = orig_seq_len %  _total_chunks
+            _base = orig_seq_len // _total_chunks
+            _extra = orig_seq_len % _total_chunks
             chunk_a_size = _base + (1 if sp_rank < _extra else 0)
             chunk_b_size = local_len - chunk_a_size
 
@@ -262,10 +264,14 @@ class LlamaModelForwards:
             lo_b = int(ring_local_idx[chunk_a_size].item())
 
             # Separate local hidden_states and masks for each chunk
-            chunk_a_hs = hidden_states[:, :chunk_a_size]   # (B, chunk_a_size, H)
-            chunk_b_hs = hidden_states[:, chunk_a_size:]   # (B, chunk_b_size, H)
-            mask_a = attention_mask[:, ring_local_idx[:chunk_a_size]]  # (B, chunk_a_size)
-            mask_b = attention_mask[:, ring_local_idx[chunk_a_size:]]  # (B, chunk_b_size)
+            chunk_a_hs = hidden_states[:, :chunk_a_size]  # (B, chunk_a_size, H)
+            chunk_b_hs = hidden_states[:, chunk_a_size:]  # (B, chunk_b_size, H)
+            mask_a = attention_mask[
+                :, ring_local_idx[:chunk_a_size]
+            ]  # (B, chunk_a_size)
+            mask_b = attention_mask[
+                :, ring_local_idx[chunk_a_size:]
+            ]  # (B, chunk_b_size)
 
             idx_a, cu_seqlens_a, max_seqlen_a = _get_unpad_data(mask_a)
             idx_b, cu_seqlens_b, max_seqlen_b = _get_unpad_data(mask_b)
@@ -280,7 +286,7 @@ class LlamaModelForwards:
             hidden_states = torch.cat([packed_a, packed_b], dim=0)
 
             # Pack position embeddings the same way
-            cos_full, sin_full = position_embeddings   # (1 or B, local_len, head_dim)
+            cos_full, sin_full = position_embeddings  # (1 or B, local_len, head_dim)
             cos_full = cos_full.expand(B, local_len, -1)
             sin_full = sin_full.expand(B, local_len, -1)
             cos_a = cos_full[:, :chunk_a_size].reshape(B * chunk_a_size, -1)[idx_a]
@@ -294,41 +300,44 @@ class LlamaModelForwards:
 
             # cu_seqlens_q: 2B+1 entries
             # [0, valid_a_0, ..., total_a, total_a+valid_b_0, ..., total_a+total_b]
-            cu_seqlens_q = torch.cat([cu_seqlens_a, cu_seqlens_a[-1] + cu_seqlens_b[1:]])
+            cu_seqlens_q = torch.cat(
+                [cu_seqlens_a, cu_seqlens_a[-1] + cu_seqlens_b[1:]]
+            )
             packed_seq_max_seqlen = max(int(max_seqlen_a), int(max_seqlen_b))
 
             # q_seq_offsets: (2B,) — all chunk_a offsets, then all chunk_b offsets
-            valid_lens   = attention_mask.sum(dim=1).long()   # (B,)
-            q_offsets_a  = valid_lens.clamp(max=lo_a).int()   # (B,)
-            q_offsets_b  = valid_lens.clamp(max=lo_b).int()   # (B,)
-            q_seq_offsets = torch.cat([q_offsets_a, q_offsets_b])   # (2B,)
+            valid_lens = attention_mask.sum(dim=1).long()  # (B,)
+            q_offsets_a = valid_lens.clamp(max=lo_a).int()  # (B,)
+            q_offsets_b = valid_lens.clamp(max=lo_b).int()  # (B,)
+            q_seq_offsets = torch.cat([q_offsets_a, q_offsets_b])  # (2B,)
 
             # cu_seqlens_k_global: 2B+1 entries matching cu_seqlens_q ordering
             # (same-sample K length for both chunk_a and chunk_b sub-sequences)
-            k_lens = torch.cat([valid_lens, valid_lens])   # (2B,)
-            cu_seqlens_k_global = torch.zeros(2 * B + 1, dtype=torch.int32,
-                                              device=hidden_states.device)
+            k_lens = torch.cat([valid_lens, valid_lens])  # (2B,)
+            cu_seqlens_k_global = torch.zeros(
+                2 * B + 1, dtype=torch.int32, device=hidden_states.device
+            )
             cu_seqlens_k_global[1:] = k_lens.cumsum(0).int()
 
             # Store for PP propagation (packed_seq_cu_seqlens carries cu_seqlens_q)
-            packed_seq_indices    = idx_a   # placeholder for PP is_first_stage detection
+            packed_seq_indices = idx_a  # placeholder for PP is_first_stage detection
             packed_seq_cu_seqlens = cu_seqlens_q
-            packed_seq_shape      = (B, local_len)
+            packed_seq_shape = (B, local_len)
 
-            ring_attn_kwargs["cu_seqlens_q"]        = cu_seqlens_q
+            ring_attn_kwargs["cu_seqlens_q"] = cu_seqlens_q
             ring_attn_kwargs["cu_seqlens_k_global"] = cu_seqlens_k_global
-            ring_attn_kwargs["q_seq_offsets"]       = q_seq_offsets
-            ring_attn_kwargs["max_seqlen_q"]        = packed_seq_max_seqlen
-            ring_attn_kwargs["max_seqlen_k"]        = int(valid_lens.max().item())
+            ring_attn_kwargs["q_seq_offsets"] = q_seq_offsets
+            ring_attn_kwargs["max_seqlen_q"] = packed_seq_max_seqlen
+            ring_attn_kwargs["max_seqlen_k"] = int(valid_lens.max().item())
             attn_mask = None
         elif sp_mode == "ring_attn" and packed_seq_indices is not None:
             # Non-first PP stage: ring_attn_kwargs were propagated from prior stage.
             ring_attn_kwargs = {
-                "cu_seqlens_q":        packed_seq_cu_seqlens,
+                "cu_seqlens_q": packed_seq_cu_seqlens,
                 "cu_seqlens_k_global": packed_seq_shape,  # repurposed field, see below
-                "q_seq_offsets":       flash_attn_kwargs.pop("q_seq_offsets", None),
-                "max_seqlen_q":        packed_seq_max_seqlen,
-                "max_seqlen_k":        flash_attn_kwargs.pop("max_seqlen_k_ring", 0),
+                "q_seq_offsets": flash_attn_kwargs.pop("q_seq_offsets", None),
+                "max_seqlen_q": packed_seq_max_seqlen,
+                "max_seqlen_k": flash_attn_kwargs.pop("max_seqlen_k_ring", 0),
             }
             attn_mask = None
 
@@ -503,24 +512,33 @@ class LlamaModelForwards:
         ):
             ring_attn_packed = True
             _sp_group = shard_config.sequence_parallel_process_group
-            _sp_rank  = dist.get_rank(_sp_group)
-            _sp_size  = shard_config.sequence_parallel_size
-            _orig_sl  = attention_mask.shape[1]
-            _local_idx = _zigzag_local_indices(_sp_rank, _sp_size, _orig_sl, attention_mask.device)
-            _total_c   = 2 * _sp_size
-            ring_chunk_a_size = (_orig_sl // _total_c) + (1 if _sp_rank < (_orig_sl % _total_c) else 0)
+            _sp_rank = dist.get_rank(_sp_group)
+            _sp_size = shard_config.sequence_parallel_size
+            _orig_sl = attention_mask.shape[1]
+            _local_idx = _zigzag_local_indices(
+                _sp_rank, _sp_size, _orig_sl, attention_mask.device
+            )
+            _total_c = 2 * _sp_size
+            ring_chunk_a_size = (_orig_sl // _total_c) + (
+                1 if _sp_rank < (_orig_sl % _total_c) else 0
+            )
             ring_chunk_b_size = int(_local_idx.shape[0]) - ring_chunk_a_size
             _mask_a = attention_mask[:, _local_idx[:ring_chunk_a_size]]
             _mask_b = attention_mask[:, _local_idx[ring_chunk_a_size:]]
             ring_idx_a, _, _ = _get_unpad_data(_mask_a)
             ring_idx_b, _, _ = _get_unpad_data(_mask_b)
 
-        if sp_mode == "ring_attn" and shard_config.parallel_output:
+        if (
+            sp_mode == "ring_attn"
+            and shard_config.parallel_output
+            and (stage_manager is None or stage_manager.is_first_stage())
+        ):
             # Split labels with zigzag partitioning, same as hidden_states.
-            assert stage_manager is None or stage_manager.is_first_stage()
+            # Only the first stage has the original labels; other stages receive
+            # hidden_states as input and do not process labels here.
             sp_group = shard_config.sequence_parallel_process_group
-            sp_rank  = dist.get_rank(sp_group)
-            sp_size  = shard_config.sequence_parallel_size
+            sp_rank = dist.get_rank(sp_group)
+            sp_size = shard_config.sequence_parallel_size
             local_idx = _zigzag_local_indices(
                 sp_rank, sp_size, labels.shape[1], labels.device
             )
@@ -578,7 +596,7 @@ class LlamaModelForwards:
                     labels[:, 1:ring_chunk_a_size].contiguous(), (0, 1), value=-100
                 )  # (B, ring_chunk_a_size)
                 shift_b = F.pad(
-                    labels[:, ring_chunk_a_size + 1:].contiguous(), (0, 1), value=-100
+                    labels[:, ring_chunk_a_size + 1 :].contiguous(), (0, 1), value=-100
                 )  # (B, ring_chunk_b_size)
                 packed_labels_a = shift_a.reshape(B * ring_chunk_a_size)[ring_idx_a]
                 packed_labels_b = shift_b.reshape(B * ring_chunk_b_size)[ring_idx_b]
@@ -761,11 +779,11 @@ class LlamaAttentionForwards:
                 "ring_attn context parallelism requires flash_attention_2. "
                 f"Got {self.config._attn_implementation}"
             )
-            cu_seqlens_q        = kwargs["cu_seqlens_q"]
+            cu_seqlens_q = kwargs["cu_seqlens_q"]
             cu_seqlens_k_global = kwargs["cu_seqlens_k_global"]
-            q_seq_offsets       = kwargs["q_seq_offsets"]
-            max_seqlen_q        = kwargs["max_seqlen_q"]
-            max_seqlen_k        = kwargs["max_seqlen_k"]
+            q_seq_offsets = kwargs["q_seq_offsets"]
+            max_seqlen_q = kwargs["max_seqlen_q"]
+            max_seqlen_k = kwargs["max_seqlen_k"]
 
             # hidden_states is (total_tokens, hidden_dim); reshape projections directly.
             q_varlen = query_states.view(-1, self.num_heads, self.head_dim)
@@ -780,7 +798,9 @@ class LlamaAttentionForwards:
 
             attn_output, _ = context_parallel_varlen_ring_attention_forward(
                 self,
-                q_varlen, k_varlen, v_varlen,
+                q_varlen,
+                k_varlen,
+                v_varlen,
                 sp_group=sp_group,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k_global=cu_seqlens_k_global,
