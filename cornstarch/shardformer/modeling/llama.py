@@ -92,9 +92,15 @@ class LlamaModelForwards:
         shard_config: ShardConfig = None,
         force_sp_gather: bool = True,  # Set to false only when computing cross entropy
         packed_seq_indices: Optional[torch.Tensor] = None,
+        packed_seq_indices_b: Optional[torch.Tensor] = None,
         packed_seq_cu_seqlens: Optional[torch.Tensor] = None,
         packed_seq_max_seqlen: Optional[int] = None,
         packed_seq_shape: Optional[Tuple[int, int]] = None,
+        # ring_attn PP-propagation fields (generated on first stage, forwarded explicitly
+        # so they survive the multimodal plugin's signature-based argument filter)
+        packed_seq_cu_seqlens_k_global: Optional[torch.Tensor] = None,
+        packed_seq_q_seq_offsets: Optional[torch.Tensor] = None,
+        packed_seq_max_seqlen_k: Optional[int] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
@@ -323,31 +329,34 @@ class LlamaModelForwards:
             )
             cu_seqlens_k_global[1:] = k_lens.cumsum(0).int()
 
-            # Store for PP propagation (packed_seq_cu_seqlens carries cu_seqlens_q).
-            # packed_seq_indices_b carries idx_b so the last PP stage can pack labels.
+            # Store for PP propagation.  Explicit packed_seq_* fields travel as
+            # named function parameters (surviving the multimodal plugin's signature
+            # filter).  ring_attn_kwargs carries only the per-layer attention keys.
             packed_seq_indices = idx_a  # placeholder for PP is_first_stage detection
             packed_seq_indices_b = idx_b
             packed_seq_cu_seqlens = cu_seqlens_q
+            # packed_seq_max_seqlen already set above (line ~310)
             packed_seq_shape = (B, local_len)
+            packed_seq_cu_seqlens_k_global = cu_seqlens_k_global
+            packed_seq_q_seq_offsets = q_seq_offsets
+            packed_seq_max_seqlen_k = int(valid_lens.max().item())
 
             ring_attn_kwargs["cu_seqlens_q"] = cu_seqlens_q
             ring_attn_kwargs["cu_seqlens_k_global"] = cu_seqlens_k_global
             ring_attn_kwargs["q_seq_offsets"] = q_seq_offsets
             ring_attn_kwargs["max_seqlen_q"] = packed_seq_max_seqlen
-            ring_attn_kwargs["max_seqlen_k"] = int(valid_lens.max().item())
+            ring_attn_kwargs["max_seqlen_k"] = packed_seq_max_seqlen_k
             attn_mask = None
         elif sp_mode == "ring_attn" and packed_seq_indices is not None:
             # Non-first PP stage: ring_attn metadata was propagated from the first
-            # stage via outputs.update(kwargs) and arrives here in flash_attn_kwargs.
-            # cu_seqlens_k_global is the (2B+1) int32 tensor built on the first stage;
-            # max_seqlen_k is the scalar max valid length.  Both must be popped from
-            # flash_attn_kwargs so they don't bleed into the layer-loop kwargs.
+            # stage as explicit packed_seq_* parameters (so they survive the
+            # multimodal plugin's signature-based argument filter).
             ring_attn_kwargs = {
                 "cu_seqlens_q": packed_seq_cu_seqlens,
-                "cu_seqlens_k_global": flash_attn_kwargs.pop("cu_seqlens_k_global"),
-                "q_seq_offsets": flash_attn_kwargs.pop("q_seq_offsets", None),
+                "cu_seqlens_k_global": packed_seq_cu_seqlens_k_global,
+                "q_seq_offsets": packed_seq_q_seq_offsets,
                 "max_seqlen_q": packed_seq_max_seqlen,
-                "max_seqlen_k": flash_attn_kwargs.pop("max_seqlen_k", 0),
+                "max_seqlen_k": packed_seq_max_seqlen_k or 0,
             }
             attn_mask = None
 
@@ -413,6 +422,11 @@ class LlamaModelForwards:
                 outputs["packed_seq_cu_seqlens"] = packed_seq_cu_seqlens
                 outputs["packed_seq_max_seqlen"] = packed_seq_max_seqlen
                 outputs["packed_seq_shape"] = packed_seq_shape
+                # ring_attn PP-propagation: explicit fields so the multimodal
+                # plugin's signature filter keeps them for the next stage.
+                outputs["packed_seq_cu_seqlens_k_global"] = packed_seq_cu_seqlens_k_global
+                outputs["packed_seq_q_seq_offsets"] = packed_seq_q_seq_offsets
+                outputs["packed_seq_max_seqlen_k"] = packed_seq_max_seqlen_k
             outputs.update(kwargs)
             return outputs
 
@@ -459,6 +473,9 @@ class LlamaModelForwards:
         packed_seq_cu_seqlens: Optional[torch.Tensor] = None,
         packed_seq_max_seqlen: Optional[int] = None,
         packed_seq_shape: Optional[Tuple[int, int]] = None,
+        packed_seq_cu_seqlens_k_global: Optional[torch.Tensor] = None,
+        packed_seq_q_seq_offsets: Optional[torch.Tensor] = None,
+        packed_seq_max_seqlen_k: Optional[int] = None,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
@@ -576,9 +593,13 @@ class LlamaModelForwards:
             shard_config=shard_config,
             force_sp_gather=False,
             packed_seq_indices=packed_seq_indices,
+            packed_seq_indices_b=packed_seq_indices_b,
             packed_seq_cu_seqlens=packed_seq_cu_seqlens,
             packed_seq_max_seqlen=packed_seq_max_seqlen,
             packed_seq_shape=packed_seq_shape,
+            packed_seq_cu_seqlens_k_global=packed_seq_cu_seqlens_k_global,
+            packed_seq_q_seq_offsets=packed_seq_q_seq_offsets,
+            packed_seq_max_seqlen_k=packed_seq_max_seqlen_k,
             **kwargs,
         )
         past_key_values = None
@@ -591,6 +612,15 @@ class LlamaModelForwards:
             packed_seq_indices = outputs.get("packed_seq_indices", packed_seq_indices)
             packed_seq_indices_b = outputs.get("packed_seq_indices_b", packed_seq_indices_b)
             packed_seq_shape = outputs.get("packed_seq_shape", packed_seq_shape)
+            packed_seq_cu_seqlens_k_global = outputs.get(
+                "packed_seq_cu_seqlens_k_global", packed_seq_cu_seqlens_k_global
+            )
+            packed_seq_q_seq_offsets = outputs.get(
+                "packed_seq_q_seq_offsets", packed_seq_q_seq_offsets
+            )
+            packed_seq_max_seqlen_k = outputs.get(
+                "packed_seq_max_seqlen_k", packed_seq_max_seqlen_k
+            )
 
         hidden_states = outputs[0]
 
