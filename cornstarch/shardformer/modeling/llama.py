@@ -160,9 +160,10 @@ class LlamaModelForwards:
         sp_group = shard_config.sequence_parallel_process_group
         sp_size = shard_config.sequence_parallel_size
 
-        # ring_attn packing state (populated in the split_input block below)
+        # ring_local_idx is populated in the split_input block below (first stage only).
+        # packed_seq_indices_b must NOT be reset here; it is a function parameter that
+        # carries the value forwarded from the first pipeline stage on later stages.
         ring_local_idx: Optional[torch.Tensor] = None
-        packed_seq_indices_b: Optional[torch.Tensor] = None
 
         if packed_seq_indices is not None and not (
             stage_manager is None or stage_manager.is_first_stage()
