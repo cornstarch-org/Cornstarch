@@ -686,17 +686,27 @@ class LlamaModelForwards:
                 _chunk_a = (_orig_sl // _total_c) + (
                     1 if _sp_rank < (_orig_sl % _total_c) else 0
                 )
-                B, local_len = packed_seq_shape
-                _chunk_b = local_len - _chunk_a
-                local_labels = labels[:, _local_idx]  # (B, local_len)
+                # Use labels.shape[0] as the batch size for local label slicing;
+                # packed_seq_shape[0] (set on the first PP stage) can differ from
+                # labels.shape[0] on the last PP stage in multimodal + PP pipelines
+                # where the 1F1B schedule delivers labels for a different number of
+                # samples than the first stage processed.
+                # packed_seq_indices was computed for the first packed_seq_shape[0]
+                # samples and holds flat indices within [0, B_first * _chunk_a).
+                # reshape(-1) exposes the full flattened labels so those indices
+                # remain valid and select the correct tokens even when labels has
+                # additional rows.
+                _local_len = _local_idx.shape[0]
+                _chunk_b = _local_len - _chunk_a
+                local_labels = labels[:, _local_idx]
                 shift_a = F.pad(
                     local_labels[:, 1:_chunk_a].contiguous(), (0, 1), value=-100
-                )  # (B, _chunk_a)
+                )
                 shift_b = F.pad(
                     local_labels[:, _chunk_a + 1 :].contiguous(), (0, 1), value=-100
-                )  # (B, _chunk_b)
-                packed_labels_a = shift_a.reshape(B * _chunk_a)[packed_seq_indices]
-                packed_labels_b = shift_b.reshape(B * _chunk_b)[packed_seq_indices_b]
+                )
+                packed_labels_a = shift_a.reshape(-1)[packed_seq_indices]
+                packed_labels_b = shift_b.reshape(-1)[packed_seq_indices_b]
                 packed_labels = torch.cat([packed_labels_a, packed_labels_b])
 
                 if (
@@ -727,13 +737,19 @@ class LlamaModelForwards:
             packed_logits = self.lm_head(hidden_states).float()  # (total_tokens, vocab)
 
             if labels is not None:
-                batch_size, seq_len = packed_seq_shape
                 # Build shift_labels in the full padded space, then index with the same
                 # packed_seq_indices used for hidden_states.
+                # packed_seq_indices was computed on the first PP stage for
+                # packed_seq_shape[0] samples and holds flat indices within
+                # [0, batch_size * seq_len).  On the last PP stage labels can
+                # have more rows than packed_seq_shape[0] (e.g. the multimodal
+                # 1F1B pipeline delivers labels for several micro-batches at
+                # once).  reshape(-1) flattens whatever labels shape arrives so
+                # the existing indices remain valid and select the correct tokens.
                 shift_labels_padded = F.pad(
                     labels[:, 1:].contiguous(), (0, 1), value=-100
-                )  # (batch, seq)
-                packed_labels = shift_labels_padded.view(batch_size * seq_len)[
+                )
+                packed_labels = shift_labels_padded.reshape(-1)[
                     packed_seq_indices
                 ]  # (total_tokens,)
 
