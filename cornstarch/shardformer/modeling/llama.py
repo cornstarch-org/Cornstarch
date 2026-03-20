@@ -749,6 +749,18 @@ class LlamaModelForwards:
                 shift_labels_padded = F.pad(
                     labels[:, 1:].contiguous(), (0, 1), value=-100
                 )
+                _max_idx = packed_seq_indices.max().item()
+                _numel = shift_labels_padded.numel()
+                if _max_idx >= _numel:
+                    import torch.distributed as _dist
+                    _rank = _dist.get_rank() if _dist.is_initialized() else 0
+                    raise RuntimeError(
+                        f"[rank {_rank}] packed_seq_indices OOB at llama.py:752  "
+                        f"max_idx={_max_idx}  labels.shape={labels.shape}  "
+                        f"shift_labels_padded.shape={shift_labels_padded.shape}  "
+                        f"packed_seq_shape={packed_seq_shape}  "
+                        f"packed_seq_indices.shape={packed_seq_indices.shape}"
+                    )
                 packed_labels = shift_labels_padded.reshape(-1)[
                     packed_seq_indices
                 ]  # (total_tokens,)
