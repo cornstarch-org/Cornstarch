@@ -739,27 +739,25 @@ class LlamaModelForwards:
             if labels is not None:
                 # Build shift_labels in the full padded space, then index with the same
                 # packed_seq_indices used for hidden_states.
-                # packed_seq_indices was computed on the first PP stage for
-                # packed_seq_shape[0] samples and holds flat indices within
-                # [0, batch_size * seq_len).  On the last PP stage labels can
-                # have more rows than packed_seq_shape[0] (e.g. the multimodal
-                # 1F1B pipeline delivers labels for several micro-batches at
-                # once).  reshape(-1) flattens whatever labels shape arrives so
-                # the existing indices remain valid and select the correct tokens.
+                # packed_seq_shape was computed on the first LLM PP stage from
+                # the attention_mask it received.  In MANDu's deferral schedule
+                # the first stage can be processing a UL slot (ul + deferred
+                # samples combined, e.g. B=2) while the last stage is at an OL
+                # slot and loaded labels for only 1 sample.  The flat indices in
+                # packed_seq_indices therefore range over B_first * seq_len
+                # elements, but labels only covers B_last * seq_len < that.
+                # Fix: pad the flat label tensor to packed_seq_shape[0] *
+                # packed_seq_shape[1] elements; extra positions are -100 and
+                # are ignored by the cross-entropy loss.
                 shift_labels_padded = F.pad(
                     labels[:, 1:].contiguous(), (0, 1), value=-100
                 )
-                _max_idx = packed_seq_indices.max().item()
-                _numel = shift_labels_padded.numel()
-                if _max_idx >= _numel:
-                    import torch.distributed as _dist
-                    _rank = _dist.get_rank() if _dist.is_initialized() else 0
-                    raise RuntimeError(
-                        f"[rank {_rank}] packed_seq_indices OOB at llama.py:752  "
-                        f"max_idx={_max_idx}  labels.shape={labels.shape}  "
-                        f"shift_labels_padded.shape={shift_labels_padded.shape}  "
-                        f"packed_seq_shape={packed_seq_shape}  "
-                        f"packed_seq_indices.shape={packed_seq_indices.shape}"
+                expected_numel = packed_seq_shape[0] * packed_seq_shape[1]
+                if shift_labels_padded.numel() < expected_numel:
+                    shift_labels_padded = F.pad(
+                        shift_labels_padded.reshape(-1),
+                        (0, expected_numel - shift_labels_padded.numel()),
+                        value=-100,
                     )
                 packed_labels = shift_labels_padded.reshape(-1)[
                     packed_seq_indices
