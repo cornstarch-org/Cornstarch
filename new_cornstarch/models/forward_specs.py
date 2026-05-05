@@ -7,6 +7,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 from transformers.modeling_outputs import BaseModelOutput
 
+from new_cornstarch.models.layer_compile import run_repeated_layer
 from new_cornstarch.models.layer_offload import (
     activation_checkpoint_recompute_active,
     create_repeated_layer_offload_runtime,
@@ -154,9 +155,11 @@ def _run_direct_layers(
             layer_idx: int = layer_idx,
             layer: nn.Module = layer,
         ) -> torch.Tensor:
-            layer_output = layer(
+            layer_output = run_repeated_layer(
+                layer,
                 layer_input,
-                **spec.get_layer_kwargs(model, layer_idx, context, **loop_kwargs),
+                spec.get_layer_kwargs(model, layer_idx, context, **loop_kwargs),
+                getattr(model, "layer_compile_config", None),
             )
             return spec.process_layer_output(
                 model, layer_idx, layer_output, context, **loop_kwargs

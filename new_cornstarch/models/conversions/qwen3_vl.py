@@ -199,6 +199,7 @@ def convert_qwen3_vl_vision_config(
     config: Qwen3VLVisionConfig,
     attn_implementation: str | None = None,
     layer_offload_config=None,
+    layer_compile_config=None,
 ) -> CornstarchVisionEncoder:
     """Convert a Qwen3-VL vision config into a Cornstarch vision encoder."""
     with torch.device("meta"):
@@ -231,4 +232,5 @@ def convert_qwen3_vl_vision_config(
         ),
         attn_implementation=attn_implementation,
         layer_offload_config=layer_offload_config,
+        layer_compile_config=layer_compile_config,
     )

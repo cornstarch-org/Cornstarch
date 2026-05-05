@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
+from new_cornstarch.models.layer_compile import run_functional_repeated_layer
+
 
 @dataclass(frozen=True)
 class RepeatedLayerOffloadConfig:
@@ -421,7 +423,14 @@ class _OffloadedRepeatedLayer(torch.autograd.Function):
         )
         layer_kwargs = _move_to_device(request.layer_kwargs, request.manager.execution_device)
 
-        layer_output = device_layer(input_device, **layer_kwargs)
+        layer_output = run_functional_repeated_layer(
+            request.manager.layers[request.layer_idx],
+            _get_or_create_meta_layer_template(request.manager.layers[request.layer_idx]),
+            device_layer,
+            input_device,
+            layer_kwargs,
+            getattr(request.model, "layer_compile_config", None),
+        )
         processed = request.spec.process_layer_output(
             request.model,
             request.layer_idx,
@@ -451,7 +460,14 @@ class _OffloadedRepeatedLayer(torch.autograd.Function):
         )
 
         with torch.enable_grad():
-            layer_output = device_layer(input_device, **layer_kwargs)
+            layer_output = run_functional_repeated_layer(
+                request.manager.layers[request.layer_idx],
+                _get_or_create_meta_layer_template(request.manager.layers[request.layer_idx]),
+                device_layer,
+                input_device,
+                layer_kwargs,
+                getattr(request.model, "layer_compile_config", None),
+            )
             processed = request.spec.process_layer_output(
                 request.model,
                 request.layer_idx,

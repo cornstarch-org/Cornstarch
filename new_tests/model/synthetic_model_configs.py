@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutput
 
-from new_cornstarch.models import RepeatedLayerOffloadConfig
+from new_cornstarch.models import RepeatedLayerCompileConfig, RepeatedLayerOffloadConfig
 from new_cornstarch.models.forward_specs import TransformerForwardSpec, run_transformer_forward
 
 
@@ -35,10 +35,14 @@ class SyntheticModel(nn.Module):
         self,
         layers: nn.ModuleList,
         layer_offload_config: RepeatedLayerOffloadConfig | None = None,
+        layer_compile_config: RepeatedLayerCompileConfig | None = None,
     ) -> None:
         super().__init__()
         self.layers = layers
         self.layer_offload_config = layer_offload_config
+        self.layer_compile_config = layer_compile_config or RepeatedLayerCompileConfig(
+            enabled=False
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> BaseModelOutput:
         return run_transformer_forward(

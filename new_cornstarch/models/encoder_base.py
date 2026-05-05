@@ -11,6 +11,7 @@ from new_cornstarch.models.forward_specs import (
     TransformerForwardSpec,
     run_transformer_forward,
 )
+from new_cornstarch.models.layer_compile import RepeatedLayerCompileConfig
 from new_cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from new_cornstarch.models.model_base import CornstarchModelBase
 
@@ -43,6 +44,7 @@ class CornstarchEncoderBase(CornstarchModelBase):
         forward_spec: TransformerForwardSpec,
         attn_implementation: str | None = None,
         layer_offload_config: RepeatedLayerOffloadConfig | None = None,
+        layer_compile_config: RepeatedLayerCompileConfig | None = None,
     ):
         """Register encoder sections, forward spec, and HF state mapping.
 
@@ -57,6 +59,7 @@ class CornstarchEncoderBase(CornstarchModelBase):
             hf_model_factory=hf_model_factory,
             attn_implementation=attn_implementation,
             layer_offload_config=layer_offload_config,
+            layer_compile_config=layer_compile_config,
         )
         self.pre_encoder = nn.ModuleDict(pre_encoder)
         self.encoder_layers = nn.ModuleList(encoder_layers)

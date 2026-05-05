@@ -12,6 +12,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from new_cornstarch.models.kernel_provider import get_hf_kernel
 from new_cornstarch.models.lazy_init import InitializationPlan
+from new_cornstarch.models.layer_compile import RepeatedLayerCompileConfig
 from new_cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from new_cornstarch.models.state_mapping import StateDictPrefixMap
 
@@ -50,6 +51,7 @@ class CornstarchModelBase(nn.Module):
         attn_implementation: str | None = None,
         init_plan: InitializationPlan | None = None,
         layer_offload_config: RepeatedLayerOffloadConfig | None = None,
+        layer_compile_config: RepeatedLayerCompileConfig | None = None,
     ):
         """Attach config, lazy initialization policy, and HF key translation.
 
@@ -64,6 +66,7 @@ class CornstarchModelBase(nn.Module):
         self.config = hf_config
         self.attn_implementation = attn_implementation
         self.layer_offload_config = layer_offload_config
+        self.layer_compile_config = layer_compile_config or RepeatedLayerCompileConfig()
         self.gradient_checkpointing = True
         self._attention_kernel = None
         self._init_plan = init_plan or InitializationPlan.empty()

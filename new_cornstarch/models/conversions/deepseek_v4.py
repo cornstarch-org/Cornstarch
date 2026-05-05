@@ -117,6 +117,7 @@ def convert_deepseek_v4_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
     layer_offload_config=None,
+    layer_compile_config=None,
 ) -> CornstarchLanguageModel:
     """Convert a DeepSeek-V4 config into a meta-initialized language model."""
     with torch.device("meta"):
@@ -145,4 +146,5 @@ def convert_deepseek_v4_config(
         forward_spec=DeepseekV4LanguageForwardSpec(),
         attn_implementation=attn_implementation,
         layer_offload_config=layer_offload_config,
+        layer_compile_config=layer_compile_config,
     )

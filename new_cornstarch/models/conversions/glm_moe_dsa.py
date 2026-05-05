@@ -82,6 +82,7 @@ def convert_glm_moe_dsa_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
     layer_offload_config=None,
+    layer_compile_config=None,
 ) -> CornstarchLanguageModel:
     """Convert a GLM MoE DSA config into a meta-initialized language model."""
     with torch.device("meta"):
@@ -105,4 +106,5 @@ def convert_glm_moe_dsa_config(
         forward_spec=GlmMoeDsaLanguageForwardSpec(),
         attn_implementation=attn_implementation,
         layer_offload_config=layer_offload_config,
+        layer_compile_config=layer_compile_config,
     )

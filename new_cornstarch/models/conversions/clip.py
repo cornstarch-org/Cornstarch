@@ -52,6 +52,7 @@ def convert_clip_vision_config(
     config: CLIPVisionConfig,
     attn_implementation: str | None = None,
     layer_offload_config=None,
+    layer_compile_config=None,
 ) -> CornstarchVisionEncoder:
     """Convert a CLIP vision config into a meta-initialized Cornstarch encoder."""
     with torch.device("meta"):
@@ -74,4 +75,5 @@ def convert_clip_vision_config(
         forward_spec=ClipVisionForwardSpec(),
         attn_implementation=attn_implementation,
         layer_offload_config=layer_offload_config,
+        layer_compile_config=layer_compile_config,
     )

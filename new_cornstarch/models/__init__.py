@@ -10,6 +10,7 @@ from new_cornstarch.models.hf_conversion import (
     to_hf_state_dict,
 )
 from new_cornstarch.models.language_model import CornstarchLanguageModel
+from new_cornstarch.models.layer_compile import RepeatedLayerCompileConfig
 from new_cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from new_cornstarch.models.multimodal import (
     CornstarchEncoderToLanguageProjectorConfig,
@@ -33,6 +34,7 @@ __all__ = [
     "CornstarchProjector",
     "CornstarchVisionEncoder",
     "ExecutionFuture",
+    "RepeatedLayerCompileConfig",
     "RepeatedLayerOffloadConfig",
     "from_hf_config",
     "from_pretrained_config",

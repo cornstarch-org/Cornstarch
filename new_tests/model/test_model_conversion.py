@@ -23,7 +23,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 from transformers.models.siglip2.modeling_siglip2 import Siglip2VisionModel
 from transformers.models.whisper.modeling_whisper import WhisperModel
 
-from new_cornstarch.models import from_hf_config
+from new_cornstarch.models import RepeatedLayerCompileConfig, from_hf_config
 from new_tests.model.model_configs import (
     clip_vision_config,
     deepseek_v3_config,
@@ -358,7 +358,11 @@ def _assert_integrity(
     torch.manual_seed(0)
     device = _materialize_device()
     hf_model = hf_factory(config).to(device=device, dtype=torch.bfloat16).eval()
-    cornstarch_model = from_hf_config(config, attn_implementation=ATTN_IMPLEMENTATION)
+    cornstarch_model = from_hf_config(
+        config,
+        attn_implementation=ATTN_IMPLEMENTATION,
+        layer_compile_config=RepeatedLayerCompileConfig(enabled=False),
+    )
     missing, unexpected = cornstarch_model.load_hf_state_dict(hf_model.state_dict())
     assert missing == []
     assert unexpected == []

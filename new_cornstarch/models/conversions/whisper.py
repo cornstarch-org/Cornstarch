@@ -132,6 +132,7 @@ def convert_whisper_config(
     config: WhisperConfig,
     attn_implementation: str | None = None,
     layer_offload_config=None,
+    layer_compile_config=None,
 ) -> CornstarchAudioEncoder:
     """Convert a Whisper config into a meta-initialized Cornstarch audio encoder."""
     with torch.device("meta"):
@@ -160,4 +161,5 @@ def convert_whisper_config(
         forward_spec=WhisperSeq2SeqForwardSpec(),
         attn_implementation=attn_implementation,
         layer_offload_config=layer_offload_config,
+        layer_compile_config=layer_compile_config,
     )

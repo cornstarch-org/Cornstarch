@@ -113,6 +113,7 @@ def convert_nemotron_h_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
     layer_offload_config=None,
+    layer_compile_config=None,
 ) -> CornstarchLanguageModel:
     """Convert a Nemotron-H config into a meta-initialized hybrid language model."""
     with torch.device("meta"):
@@ -132,4 +133,5 @@ def convert_nemotron_h_config(
         forward_spec=NemotronHLanguageForwardSpec(),
         attn_implementation=attn_implementation,
         layer_offload_config=layer_offload_config,
+        layer_compile_config=layer_compile_config,
     )

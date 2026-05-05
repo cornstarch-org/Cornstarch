@@ -8,6 +8,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from new_cornstarch.models.encoder_base import CornstarchEncoderBase
 from new_cornstarch.models.forward_specs import TransformerForwardSpec
+from new_cornstarch.models.layer_compile import RepeatedLayerCompileConfig
 from new_cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 
 
@@ -33,6 +34,7 @@ class CornstarchAudioEncoder(CornstarchEncoderBase):
         forward_spec: TransformerForwardSpec,
         attn_implementation: str | None = None,
         layer_offload_config: RepeatedLayerOffloadConfig | None = None,
+        layer_compile_config: RepeatedLayerCompileConfig | None = None,
     ):
         """Initialize the shared encoder sections with audio-specific modules."""
         super().__init__(
@@ -45,4 +47,5 @@ class CornstarchAudioEncoder(CornstarchEncoderBase):
             forward_spec=forward_spec,
             attn_implementation=attn_implementation,
             layer_offload_config=layer_offload_config,
+            layer_compile_config=layer_compile_config,
         )

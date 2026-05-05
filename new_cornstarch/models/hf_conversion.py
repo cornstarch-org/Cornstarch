@@ -25,6 +25,7 @@ from new_cornstarch.models.conversions.siglip2 import convert_siglip2_vision_con
 from new_cornstarch.models.conversions.whisper import convert_whisper_config
 from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionConfig
 from transformers.models.siglip2.configuration_siglip2 import Siglip2VisionConfig
+from new_cornstarch.models.layer_compile import RepeatedLayerCompileConfig
 from new_cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from new_cornstarch.models.model_base import CornstarchModelBase
 
@@ -34,6 +35,7 @@ def from_hf_config(
     model_kind: str | None = None,
     attn_implementation: str | None = None,
     layer_offload_config: RepeatedLayerOffloadConfig | None = None,
+    layer_compile_config: RepeatedLayerCompileConfig | None = None,
     trust_remote_code: bool = False,
 ) -> CornstarchModelBase:
     """Create the matching Cornstarch model for a Hugging Face config.
@@ -44,41 +46,41 @@ def from_hf_config(
     del trust_remote_code
     model_type = getattr(config, "model_type", None)
     if model_type == "clip_vision_model":
-        return convert_clip_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_clip_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if isinstance(config, Siglip2VisionConfig) or model_type == "siglip2_vision_model":
-        return convert_siglip2_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_siglip2_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if isinstance(config, Qwen3VLVisionConfig) or model_type == "qwen3_vl_vision":
-        return convert_qwen3_vl_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_qwen3_vl_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "gemma4_vision":
-        return convert_gemma4_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_gemma4_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_kind == "vision":
-        return convert_clip_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_clip_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "whisper":
-        return convert_whisper_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_whisper_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "gemma4_audio":
-        return convert_gemma4_audio_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_gemma4_audio_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_kind == "audio":
-        return convert_whisper_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_whisper_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "llama":
-        return convert_llama_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_llama_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "qwen3_5_text":
-        return convert_qwen3_5_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_qwen3_5_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "qwen3_5_moe_text":
-        return convert_qwen3_5_moe_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_qwen3_5_moe_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "deepseek_v3":
-        return convert_deepseek_v3_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_deepseek_v3_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "deepseek_v4":
-        return convert_deepseek_v4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_deepseek_v4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "gemma4_text":
-        return convert_gemma4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_gemma4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "glm_moe_dsa":
-        return convert_glm_moe_dsa_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_glm_moe_dsa_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "llama4_text":
-        return convert_llama4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_llama4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_type == "nemotron_h":
-        return convert_nemotron_h_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_nemotron_h_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     if model_kind == "language":
-        return convert_llama_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+        return convert_llama_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
     raise ValueError(
         f"Unsupported model architecture for Cornstarch conversion: {model_type}"
     )
@@ -89,6 +91,7 @@ def from_pretrained_config(
     model_kind: str | None = None,
     attn_implementation: str | None = None,
     layer_offload_config: RepeatedLayerOffloadConfig | None = None,
+    layer_compile_config: RepeatedLayerCompileConfig | None = None,
     trust_remote_code: bool = False,
     **kwargs,
 ) -> CornstarchModelBase:
@@ -101,6 +104,7 @@ def from_pretrained_config(
         model_kind=model_kind,
         attn_implementation=attn_implementation,
         layer_offload_config=layer_offload_config,
+        layer_compile_config=layer_compile_config,
         trust_remote_code=trust_remote_code,
     )
 
