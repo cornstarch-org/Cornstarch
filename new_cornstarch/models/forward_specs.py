@@ -16,7 +16,6 @@ from transformers.modeling_outputs import (
     MoeCausalLMOutputWithPast,
     Seq2SeqModelOutput,
 )
-from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import load_balancing_loss_func
 from transformers.models.qwen3_vl.modeling_qwen3_vl import BaseModelOutputWithDeepstackFeatures
 from transformers.models.whisper.modeling_whisper import _compute_mask_indices
 
@@ -108,9 +107,6 @@ def _filtered_layer_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "max_length_q",
         "max_length_k",
         "num_items_in_batch",
-        "output_attentions",
-        "output_hidden_states",
-        "output_router_logits",
     }
     return {key: value for key, value in kwargs.items() if key in allowed}
 
@@ -289,31 +285,15 @@ class QwenMoeLanguageForwardSpec(CausalLanguageForwardSpec):
     def build_output(
         self, model: nn.Module, hidden_states: torch.Tensor, context: LayerContext, **kwargs: Any
     ) -> MoeCausalLMOutputWithPast:
-        output_router_logits = kwargs.get("output_router_logits")
-        if output_router_logits is None:
-            output_router_logits = getattr(model.config, "output_router_logits", False)
-
         output = super().build_output(model, hidden_states, context, **kwargs)
-        aux_loss = None
-        router_logits = None
-        if output_router_logits:
-            aux_loss = load_balancing_loss_func(
-                router_logits,
-                getattr(model.config, "num_experts", None),
-                getattr(model.config, "num_experts_per_tok", 2),
-                kwargs.get("attention_mask"),
-            )
-            if output.loss is not None:
-                output.loss = output.loss + getattr(model.config, "router_aux_loss_coef", 0.0) * aux_loss
-
         return MoeCausalLMOutputWithPast(
             loss=output.loss,
-            aux_loss=aux_loss,
+            aux_loss=None,
             logits=output.logits,
             past_key_values=output.past_key_values,
             hidden_states=output.hidden_states,
             attentions=output.attentions,
-            router_logits=router_logits,
+            router_logits=None,
         )
 
 
