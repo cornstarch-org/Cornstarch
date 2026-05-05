@@ -10,14 +10,28 @@ from new_cornstarch.models.hf_conversion import (
     to_hf_state_dict,
 )
 from new_cornstarch.models.language_model import CornstarchLanguageModel
+from new_cornstarch.models.multimodal import (
+    CornstarchEncoderToLanguageProjectorConfig,
+    CornstarchExecutionPlan,
+    CornstarchModalityEncoder,
+    CornstarchMultimodalConfig,
+    CornstarchProjector,
+    ExecutionFuture,
+)
 from new_cornstarch.models.vision_encoder import CornstarchVisionEncoder
 
 __all__ = [
     "CornstarchAudioEncoder",
     "CornstarchConfig",
     "CornstarchEncoderBase",
+    "CornstarchEncoderToLanguageProjectorConfig",
+    "CornstarchExecutionPlan",
     "CornstarchLanguageModel",
+    "CornstarchModalityEncoder",
+    "CornstarchMultimodalConfig",
+    "CornstarchProjector",
     "CornstarchVisionEncoder",
+    "ExecutionFuture",
     "from_hf_config",
     "from_pretrained_config",
     "load_hf_state_dict",
