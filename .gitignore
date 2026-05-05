@@ -22,3 +22,5 @@ runs
 # wandb
 wandb/*
 logs/*
+
+*code-workspace
