@@ -6,6 +6,7 @@ import torch
 from transformers import PretrainedConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
+from new_cornstarch.models.forward_specs import CausalLanguageForwardSpec
 from new_cornstarch.models.language_model import CornstarchLanguageModel
 
 
@@ -32,6 +33,6 @@ def convert_llama_config(
             ("lm_head.", "post_decoder.lm_head."),
         ),
         hf_model_factory=LlamaForCausalLM,
-        forward_impl=hf_model.forward,
+        forward_spec=CausalLanguageForwardSpec(),
         attn_implementation=attn_implementation,
     )

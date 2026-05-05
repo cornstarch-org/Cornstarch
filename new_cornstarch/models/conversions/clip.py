@@ -6,6 +6,7 @@ import torch
 from transformers.models.clip.configuration_clip import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPVisionModel
 
+from new_cornstarch.models.forward_specs import ClipVisionForwardSpec
 from new_cornstarch.models.vision_encoder import CornstarchVisionEncoder
 
 
@@ -31,6 +32,6 @@ def convert_clip_vision_config(
             ("post_layernorm.", "post_encoder.post_layernorm."),
         ),
         hf_model_factory=CLIPVisionModel,
-        forward_impl=hf_model.forward,
+        forward_spec=ClipVisionForwardSpec(),
         attn_implementation=attn_implementation,
     )

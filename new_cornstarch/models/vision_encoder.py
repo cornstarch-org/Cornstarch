@@ -7,6 +7,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig, PreTrainedModel
 
 from new_cornstarch.models.encoder_base import CornstarchEncoderBase
+from new_cornstarch.models.forward_specs import TransformerForwardSpec
 
 
 class CornstarchVisionEncoder(CornstarchEncoderBase):
@@ -20,7 +21,7 @@ class CornstarchVisionEncoder(CornstarchEncoderBase):
         post_encoder: Mapping[str, nn.Module],
         hf_to_cornstarch_prefixes: tuple[tuple[str, str], ...],
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
-        forward_impl: Callable[..., object] | None = None,
+        forward_spec: TransformerForwardSpec,
         attn_implementation: str | None = None,
     ):
         """Initialize the shared encoder sections with vision-specific modules."""
@@ -31,6 +32,6 @@ class CornstarchVisionEncoder(CornstarchEncoderBase):
             post_encoder=post_encoder,
             hf_to_cornstarch_prefixes=hf_to_cornstarch_prefixes,
             hf_model_factory=hf_model_factory,
-            forward_impl=forward_impl,
+            forward_spec=forward_spec,
             attn_implementation=attn_implementation,
         )

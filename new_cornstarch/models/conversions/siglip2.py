@@ -6,6 +6,7 @@ import torch
 from transformers.models.siglip2.configuration_siglip2 import Siglip2VisionConfig
 from transformers.models.siglip2.modeling_siglip2 import Siglip2VisionModel
 
+from new_cornstarch.models.forward_specs import Siglip2VisionForwardSpec
 from new_cornstarch.models.vision_encoder import CornstarchVisionEncoder
 
 
@@ -31,6 +32,6 @@ def convert_siglip2_vision_config(
             ("head.", "post_encoder.head."),
         ),
         hf_model_factory=Siglip2VisionModel,
-        forward_impl=hf_model.forward,
+        forward_spec=Siglip2VisionForwardSpec(),
         attn_implementation=attn_implementation,
     )

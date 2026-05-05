@@ -6,6 +6,7 @@ import torch
 from transformers.models.whisper.configuration_whisper import WhisperConfig
 from transformers.models.whisper.modeling_whisper import WhisperModel
 
+from new_cornstarch.models.forward_specs import WhisperSeq2SeqForwardSpec
 from new_cornstarch.models.audio_encoder import CornstarchAudioEncoder
 
 
@@ -37,6 +38,6 @@ def convert_whisper_config(
             ("decoder.", "post_encoder.decoder."),
         ),
         hf_model_factory=WhisperModel,
-        forward_impl=hf_model.forward,
+        forward_spec=WhisperSeq2SeqForwardSpec(),
         attn_implementation=attn_implementation,
     )

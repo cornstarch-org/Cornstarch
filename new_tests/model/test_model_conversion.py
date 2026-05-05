@@ -56,6 +56,7 @@ def _assert_cornstarch_owned_structure(
 ) -> None:
     """Assert Cornstarch owns the module tree while preserving HF export keys."""
     assert not hasattr(cornstarch_model, "hf_model")
+    assert not hasattr(cornstarch_model, "_forward_owner")
     assert set(cornstarch_model.state_dict().keys()) != set(hf_state_dict.keys())
 
 
@@ -131,7 +132,7 @@ def _move_inputs(inputs: dict[str, object], device: torch.device) -> dict[str, o
 def _language_inputs(config: PretrainedConfig) -> dict[str, object]:
     """Build deterministic token inputs for causal language models."""
     input_ids = torch.arange(6, dtype=torch.long).unsqueeze(0) % config.vocab_size
-    return {"input_ids": input_ids, "use_cache": False}
+    return {"input_ids": input_ids, "labels": input_ids.clone(), "use_cache": False}
 
 
 def _clip_inputs(config: PretrainedConfig) -> dict[str, object]:
@@ -273,6 +274,9 @@ def _assert_integrity(
         expected = hf_model(**inputs)
         actual = cornstarch_model(**inputs)
     _assert_outputs_close(expected, actual)
+    if "labels" in inputs:
+        assert getattr(actual, "loss", None) is not None
+        assert getattr(expected, "loss", None) is not None
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,7 @@ import torch
 from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionConfig
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
+from new_cornstarch.models.forward_specs import Qwen3VLVisionForwardSpec
 from new_cornstarch.models.vision_encoder import CornstarchVisionEncoder
 
 
@@ -37,6 +38,10 @@ def convert_qwen3_vl_vision_config(
             ("deepstack_merger_list.", "post_encoder.deepstack_merger_list."),
         ),
         hf_model_factory=Qwen3VLVisionModel,
-        forward_impl=hf_model.forward,
+        forward_spec=Qwen3VLVisionForwardSpec(
+            num_grid_per_side=hf_model.num_grid_per_side,
+            spatial_merge_size=hf_model.spatial_merge_size,
+            deepstack_visual_indexes=tuple(hf_model.deepstack_visual_indexes),
+        ),
         attn_implementation=attn_implementation,
     )

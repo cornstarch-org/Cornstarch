@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig, PreTrainedModel
 
+from new_cornstarch.models.forward_specs import (
+    TransformerForwardSpec,
+    run_transformer_forward,
+)
 from new_cornstarch.models.model_base import CornstarchModelBase
 
 
@@ -21,7 +25,7 @@ class CornstarchEncoderBase(CornstarchModelBase):
         post_encoder: Mapping[str, nn.Module],
         hf_to_cornstarch_prefixes: tuple[tuple[str, str], ...],
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
-        forward_impl: Callable[..., object] | None = None,
+        forward_spec: TransformerForwardSpec,
         attn_implementation: str | None = None,
     ):
         """Register shared encoder sections and HF state mapping."""
@@ -29,12 +33,21 @@ class CornstarchEncoderBase(CornstarchModelBase):
             hf_config,
             hf_to_cornstarch_prefixes=hf_to_cornstarch_prefixes,
             hf_model_factory=hf_model_factory,
-            forward_impl=forward_impl,
             attn_implementation=attn_implementation,
         )
         self.pre_encoder = nn.ModuleDict(pre_encoder)
         self.encoder_layers = nn.ModuleList(encoder_layers)
         self.post_encoder = nn.ModuleDict(post_encoder)
+        self.forward_spec = forward_spec
+
+    def forward(self, **kwargs: Any) -> Any:
+        """Run the Cornstarch-owned encoder forward loop."""
+        return run_transformer_forward(
+            self,
+            self.encoder_layers,
+            self.forward_spec,
+            kwargs,
+        )
 
     def offload_layers_to_cpu(self, layer_indices: Iterable[int] | None = None) -> None:
         """Move selected encoder layers to CPU after they have been materialized."""

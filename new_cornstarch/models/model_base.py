@@ -23,7 +23,6 @@ class CornstarchModelBase(nn.Module):
         hf_config: PretrainedConfig,
         hf_to_cornstarch_prefixes: tuple[tuple[str, str], ...],
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
-        forward_impl: Callable[..., Any] | None = None,
         attn_implementation: str | None = None,
         init_plan: InitializationPlan | None = None,
     ):
@@ -36,8 +35,6 @@ class CornstarchModelBase(nn.Module):
         self._init_plan = init_plan or InitializationPlan.empty()
         self._state_mapper = StateDictPrefixMap(hf_to_cornstarch_prefixes)
         self._hf_model_factory = hf_model_factory
-        self._forward_impl = forward_impl
-        object.__setattr__(self, "_forward_owner", getattr(forward_impl, "__self__", None))
 
     @property
     def attention_kernel(self) -> Any:
@@ -75,16 +72,17 @@ class CornstarchModelBase(nn.Module):
         if self._init_plan.mode == "checkpoint":
             state_dict = self._load_checkpoint_state_dict(device)
             self.load_state_dict(state_dict, strict=True, assign=True)
+            self._copy_deterministic_meta_buffers(device)
         elif self._init_plan.mode == "random":
+            self._copy_deterministic_meta_buffers(device)
             self._materialize_empty(device)
             self._random_initialize()
         elif self._init_plan.mode == "empty":
+            self._copy_deterministic_meta_buffers(device)
             self._materialize_empty(device)
         else:
             raise ValueError(f"Unknown initialization plan: {self._init_plan.mode}")
 
-        if self._forward_impl is not None:
-            self._refresh_forward_owner(device)
         return self
 
     def load_hf_state_dict(
@@ -142,16 +140,11 @@ class CornstarchModelBase(nn.Module):
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Run model-specific forward logic implemented by subclasses."""
-        if self._forward_impl is None:
-            raise NotImplementedError(f"{type(self).__name__} does not implement forward().")
-        return self._forward_impl(*args, **kwargs)
+        raise NotImplementedError(f"{type(self).__name__} does not implement forward().")
 
     def train(self, mode: bool = True) -> CornstarchModelBase:
-        """Keep converter-provided forward owners in sync with module mode."""
+        """Set the training mode for Cornstarch-owned modules."""
         super().train(mode)
-        forward_owner = getattr(self, "_forward_owner", None)
-        if isinstance(forward_owner, nn.Module):
-            forward_owner.train(mode)
         return self
 
     @staticmethod
@@ -196,17 +189,20 @@ class CornstarchModelBase(nn.Module):
         state_dict = load_file(str(self._init_plan.checkpoint_path), device=str(device))
         return self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
 
-    def _refresh_forward_owner(self, device: torch.device) -> None:
-        """Rebuild the converter forward owner around Cornstarch-owned modules."""
+    def _copy_deterministic_meta_buffers(self, device: torch.device) -> None:
+        """Materialize deterministic helper buffers that are not in checkpoints."""
+        if not any(buffer.is_meta for buffer in self.buffers()):
+            return
+
         dtype = next(
             (tensor.dtype for tensor in self.parameters() if tensor.is_floating_point()),
             None,
         )
-        forward_owner = self._hf_model_factory(copy.deepcopy(self.hf_config))
+        hf_model = self._hf_model_factory(copy.deepcopy(self.hf_config))
         if dtype is None:
-            forward_owner.to(device=device)
+            hf_model.to(device=device)
         else:
-            forward_owner.to(device=device, dtype=dtype)
+            hf_model.to(device=device, dtype=dtype)
 
         for hf_prefix, cornstarch_prefix in self._state_mapper.pairs:
             hf_module_path = hf_prefix.rstrip(".")
@@ -214,7 +210,7 @@ class CornstarchModelBase(nn.Module):
             if not hf_module_path or not cornstarch_module_path:
                 continue
             try:
-                hf_module = forward_owner.get_submodule(hf_module_path)
+                hf_module = hf_model.get_submodule(hf_module_path)
                 cornstarch_module = self.get_submodule(cornstarch_module_path)
             except AttributeError:
                 continue
@@ -224,11 +220,6 @@ class CornstarchModelBase(nn.Module):
                 target_path=cornstarch_module_path,
                 device=device,
             )
-            self._set_forward_submodule(forward_owner, hf_module_path, cornstarch_module)
-
-        object.__setattr__(self, "_forward_owner", forward_owner)
-        self._forward_impl = forward_owner.forward
-        forward_owner.train(self.training)
 
     def _copy_meta_buffers(
         self,
@@ -247,13 +238,6 @@ class CornstarchModelBase(nn.Module):
                 dtype=target_buffer.dtype if target_buffer.is_floating_point() else None,
             )
             self._set_tensor(f"{target_path}.{name}", replacement, None)
-
-    @staticmethod
-    def _set_forward_submodule(root: nn.Module, module_path: str, module: nn.Module) -> None:
-        """Install a Cornstarch-owned module into the unregistered forward owner."""
-        parent_path, _, module_name = module_path.rpartition(".")
-        parent = root.get_submodule(parent_path) if parent_path else root
-        setattr(parent, module_name, module)
 
     def _materialize_empty(self, device: torch.device) -> None:
         """Replace meta parameters and buffers with empty tensors on a device."""

@@ -6,6 +6,7 @@ import torch
 from transformers import PretrainedConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
+from new_cornstarch.models.forward_specs import CausalLanguageForwardSpec
 from new_cornstarch.models.language_model import CornstarchLanguageModel
 
 
@@ -32,6 +33,6 @@ def convert_qwen3_5_config(
             ("lm_head.", "post_decoder.lm_head."),
         ),
         hf_model_factory=Qwen3_5ForCausalLM,
-        forward_impl=hf_model.forward,
+        forward_spec=CausalLanguageForwardSpec(),
         attn_implementation=attn_implementation,
     )
