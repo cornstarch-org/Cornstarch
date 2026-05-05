@@ -7,6 +7,8 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4VisionConfig,
 )
 from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
+from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
+from transformers.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 
 
@@ -91,6 +93,54 @@ def glm_moe_dsa_config() -> PretrainedConfig:
         indexer_types=["full", "full"],
         rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
         tie_word_embeddings=False,
+    )
+
+
+def llama4_config() -> PretrainedConfig:
+    """Build the compact synthetic Llama4 text config used in tests."""
+    return Llama4TextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        intermediate_size_mlp=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        num_local_experts=2,
+        num_experts_per_tok=1,
+        moe_layers=[1],
+        no_rope_layers=[1, 0],
+        layer_types=["chunked_attention", "full_attention"],
+        attention_chunk_size=4,
+        tie_word_embeddings=False,
+    )
+
+
+def nemotron_h_config() -> PretrainedConfig:
+    """Build the compact synthetic Nemotron-H config used in tests."""
+    return NemotronHConfig(
+        vocab_size=32,
+        hidden_size=16,
+        layers_block_type=["mamba", "attention", "moe", "mlp"],
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        intermediate_size=32,
+        mlp_hidden_act="silu",
+        use_mamba_kernels=False,
+        ssm_state_size=4,
+        mamba_num_heads=4,
+        mamba_head_dim=4,
+        n_groups=2,
+        conv_kernel=3,
+        chunk_size=4,
+        n_routed_experts=4,
+        n_shared_experts=1,
+        moe_intermediate_size=8,
+        moe_shared_expert_intermediate_size=8,
+        num_experts_per_tok=2,
+        rescale_prenorm_residual=False,
     )
 
 

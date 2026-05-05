@@ -14,6 +14,8 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4VisionModel,
 )
 from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+from transformers.models.llama4.modeling_llama4 import Llama4ForCausalLM
+from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHForCausalLM
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
@@ -28,7 +30,9 @@ from new_tests.model.model_configs import (
     gemma4_config,
     gemma4_vision_config,
     glm_moe_dsa_config,
+    llama4_config,
     llama_config,
+    nemotron_h_config,
     qwen3_5_config,
     qwen3_5_moe_config,
     qwen3_vl_vision_config,
@@ -276,6 +280,20 @@ MODEL_CASES = [
         lambda path: GlmMoeDsaForCausalLM.from_pretrained(path),
         _language_inputs,
         id="glm_moe_dsa",
+    ),
+    pytest.param(
+        llama4_config,
+        lambda cfg: Llama4ForCausalLM(cfg),
+        lambda path: Llama4ForCausalLM.from_pretrained(path),
+        _language_inputs,
+        id="llama4",
+    ),
+    pytest.param(
+        nemotron_h_config,
+        lambda cfg: NemotronHForCausalLM(cfg),
+        lambda path: NemotronHForCausalLM.from_pretrained(path),
+        _language_inputs,
+        id="nemotron_h",
     ),
     pytest.param(
         clip_vision_config,

@@ -15,6 +15,8 @@ from new_cornstarch.models.conversions.gemma4 import (
 )
 from new_cornstarch.models.conversions.glm_moe_dsa import convert_glm_moe_dsa_config
 from new_cornstarch.models.conversions.llama import convert_llama_config
+from new_cornstarch.models.conversions.llama4 import convert_llama4_config
+from new_cornstarch.models.conversions.nemotron_h import convert_nemotron_h_config
 from new_cornstarch.models.conversions.qwen3_5 import convert_qwen3_5_config
 from new_cornstarch.models.conversions.qwen3_5_moe import convert_qwen3_5_moe_config
 from new_cornstarch.models.conversions.qwen3_vl import convert_qwen3_vl_vision_config
@@ -66,6 +68,10 @@ def from_hf_config(
         return convert_gemma4_config(config, attn_implementation=attn_implementation)
     if model_type == "glm_moe_dsa":
         return convert_glm_moe_dsa_config(config, attn_implementation=attn_implementation)
+    if model_type == "llama4_text":
+        return convert_llama4_config(config, attn_implementation=attn_implementation)
+    if model_type == "nemotron_h":
+        return convert_nemotron_h_config(config, attn_implementation=attn_implementation)
     if model_kind == "language":
         return convert_llama_config(config, attn_implementation=attn_implementation)
     raise ValueError(
@@ -123,6 +129,8 @@ def infer_model_kind(config: PretrainedConfig) -> str:
         "gemma4_text",
         "glm_moe_dsa",
         "llama",
+        "llama4_text",
+        "nemotron_h",
         "qwen3_5_moe_text",
         "qwen3_5_text",
     }:
