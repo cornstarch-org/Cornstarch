@@ -23,7 +23,7 @@ def convert_qwen3_vl_vision_config(
             "pos_embed": hf_model.pos_embed,
             "rotary_pos_emb": hf_model.rotary_pos_emb,
         },
-        repeated_layers=hf_model.blocks,
+        encoder_layers=hf_model.blocks,
         post_encoder={
             "merger": hf_model.merger,
             "deepstack_merger_list": hf_model.deepstack_merger_list,
@@ -32,7 +32,7 @@ def convert_qwen3_vl_vision_config(
             ("patch_embed.", "pre_encoder.patch_embed."),
             ("pos_embed.", "pre_encoder.pos_embed."),
             ("rotary_pos_emb.", "pre_encoder.rotary_pos_emb."),
-            ("blocks.", "repeated_layers."),
+            ("blocks.", "encoder_layers."),
             ("merger.", "post_encoder.merger."),
             ("deepstack_merger_list.", "post_encoder.deepstack_merger_list."),
         ),

@@ -16,7 +16,7 @@ class CornstarchVisionEncoder(CornstarchEncoderBase):
         self,
         config: PretrainedConfig,
         pre_encoder: Mapping[str, nn.Module],
-        repeated_layers: Iterable[nn.Module],
+        encoder_layers: Iterable[nn.Module],
         post_encoder: Mapping[str, nn.Module],
         hf_to_cornstarch_prefixes: tuple[tuple[str, str], ...],
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
@@ -27,7 +27,7 @@ class CornstarchVisionEncoder(CornstarchEncoderBase):
         super().__init__(
             config,
             pre_encoder=pre_encoder,
-            repeated_layers=repeated_layers,
+            encoder_layers=encoder_layers,
             post_encoder=post_encoder,
             hf_to_cornstarch_prefixes=hf_to_cornstarch_prefixes,
             hf_model_factory=hf_model_factory,

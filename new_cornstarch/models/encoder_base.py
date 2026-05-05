@@ -17,7 +17,7 @@ class CornstarchEncoderBase(CornstarchModelBase):
         self,
         hf_config: PretrainedConfig,
         pre_encoder: Mapping[str, nn.Module],
-        repeated_layers: Iterable[nn.Module],
+        encoder_layers: Iterable[nn.Module],
         post_encoder: Mapping[str, nn.Module],
         hf_to_cornstarch_prefixes: tuple[tuple[str, str], ...],
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
@@ -33,13 +33,13 @@ class CornstarchEncoderBase(CornstarchModelBase):
             attn_implementation=attn_implementation,
         )
         self.pre_encoder = nn.ModuleDict(pre_encoder)
-        self.repeated_layers = nn.ModuleList(repeated_layers)
+        self.encoder_layers = nn.ModuleList(encoder_layers)
         self.post_encoder = nn.ModuleDict(post_encoder)
 
     def offload_layers_to_cpu(self, layer_indices: Iterable[int] | None = None) -> None:
         """Move selected encoder layers to CPU after they have been materialized."""
-        self._offload_module_list_to_cpu(self.repeated_layers, layer_indices)
+        self._offload_module_list_to_cpu(self.encoder_layers, layer_indices)
 
     def materialize_layers(self, device: str | torch.device) -> None:
         """Allocate or move encoder layers onto the requested device."""
-        self._materialize_module_list(self.repeated_layers, torch.device(device))
+        self._materialize_module_list(self.encoder_layers, torch.device(device))

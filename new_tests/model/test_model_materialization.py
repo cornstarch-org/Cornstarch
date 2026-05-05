@@ -40,65 +40,73 @@ def _model_config_params() -> list[object]:
     ]
 
 
-def _repeated_layer_tensors(model: torch.nn.Module) -> list[torch.Tensor]:
-    """Collect parameters and buffers from a model's repeated layer stack."""
-    return list(model.repeated_layers.parameters()) + list(model.repeated_layers.buffers())
+def _model_layer_stack(model: torch.nn.Module) -> torch.nn.ModuleList:
+    """Return the architecture-specific transformer layer stack."""
+    if hasattr(model, "decoder_layers"):
+        return model.decoder_layers
+    return model.encoder_layers
 
 
-def _assert_repeated_layers_meta(model: torch.nn.Module) -> None:
-    """Assert every repeated-layer tensor is still on the meta device."""
-    tensors = _repeated_layer_tensors(model)
+def _model_layer_tensors(model: torch.nn.Module) -> list[torch.Tensor]:
+    """Collect parameters and buffers from a model's transformer layer stack."""
+    layer_stack = _model_layer_stack(model)
+    return list(layer_stack.parameters()) + list(layer_stack.buffers())
+
+
+def _assert_model_layers_meta(model: torch.nn.Module) -> None:
+    """Assert every transformer-layer tensor is still on the meta device."""
+    tensors = _model_layer_tensors(model)
     assert tensors
     assert all(tensor.is_meta for tensor in tensors)
 
 
-def _assert_repeated_layers_on_device(
+def _assert_model_layers_on_device(
     model: torch.nn.Module, device: torch.device
 ) -> None:
-    """Assert every repeated-layer tensor has been materialized on a device."""
-    tensors = _repeated_layer_tensors(model)
+    """Assert every transformer-layer tensor has been materialized on a device."""
+    tensors = _model_layer_tensors(model)
     assert tensors
     assert all(not tensor.is_meta for tensor in tensors)
     assert all(tensor.device.type == device.type for tensor in tensors)
 
 
 @pytest.mark.parametrize("config_factory", _model_config_params())
-def test_repeated_layers_are_meta_when_model_is_initialized(
+def test_model_layers_are_meta_when_model_is_initialized(
     config_factory: Callable[[], PretrainedConfig],
 ) -> None:
-    """Verify converted models leave repeated layers meta-initialized."""
+    """Verify converted models leave transformer layers meta-initialized."""
     cornstarch_model = from_hf_config(
         config_factory(), attn_implementation=ATTN_IMPLEMENTATION
     )
 
-    assert isinstance(cornstarch_model.repeated_layers, torch.nn.ModuleList)
-    _assert_repeated_layers_meta(cornstarch_model)
+    assert isinstance(_model_layer_stack(cornstarch_model), torch.nn.ModuleList)
+    _assert_model_layers_meta(cornstarch_model)
 
 
 @pytest.mark.parametrize("config_factory", _model_config_params())
-def test_materialize_layers_stores_repeated_layers_on_cpu(
+def test_materialize_layers_stores_model_layers_on_cpu(
     config_factory: Callable[[], PretrainedConfig],
 ) -> None:
     """Verify layer-only materialization works with plain ModuleList layers."""
     cornstarch_model = from_hf_config(
         config_factory(), attn_implementation=ATTN_IMPLEMENTATION
     )
-    _assert_repeated_layers_meta(cornstarch_model)
+    _assert_model_layers_meta(cornstarch_model)
 
     cpu_device = torch.device("cpu")
     cornstarch_model.materialize_layers(cpu_device)
 
-    _assert_repeated_layers_on_device(cornstarch_model, cpu_device)
+    _assert_model_layers_on_device(cornstarch_model, cpu_device)
 
 
 def test_offload_layers_to_cpu_skips_unmaterialized_layers() -> None:
-    """Verify layer offload preserves still-meta repeated layers."""
+    """Verify layer offload preserves still-meta decoder layers."""
     cornstarch_model = from_hf_config(
         llama_config(), attn_implementation=ATTN_IMPLEMENTATION
     )
-    assert len(cornstarch_model.repeated_layers) > 1
+    assert len(cornstarch_model.decoder_layers) > 1
 
-    materialized_layer = cornstarch_model.repeated_layers[0]
+    materialized_layer = cornstarch_model.decoder_layers[0]
     materialized_layer.to_empty(device=torch.device("cpu"))
 
     cornstarch_model.offload_layers_to_cpu([0])
@@ -107,8 +115,8 @@ def test_offload_layers_to_cpu_skips_unmaterialized_layers() -> None:
         materialized_layer.buffers()
     )
     meta_tensors = (
-        list(cornstarch_model.repeated_layers[1].parameters())
-        + list(cornstarch_model.repeated_layers[1].buffers())
+        list(cornstarch_model.decoder_layers[1].parameters())
+        + list(cornstarch_model.decoder_layers[1].buffers())
     )
     assert materialized_tensors
     assert meta_tensors
@@ -120,16 +128,16 @@ def test_offload_layers_to_cpu_skips_unmaterialized_layers() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for layer materialization")
 @pytest.mark.parametrize("config_factory", _model_config_params())
-def test_materialize_layers_stores_repeated_layers_on_cuda(
+def test_materialize_layers_stores_model_layers_on_cuda(
     config_factory: Callable[[], PretrainedConfig],
 ) -> None:
-    """Verify layer-only materialization moves repeated layers to CUDA."""
+    """Verify layer-only materialization moves transformer layers to CUDA."""
     cornstarch_model = from_hf_config(
         config_factory(), attn_implementation=ATTN_IMPLEMENTATION
     )
-    _assert_repeated_layers_meta(cornstarch_model)
+    _assert_model_layers_meta(cornstarch_model)
 
     cuda_device = torch.device("cuda")
     cornstarch_model.materialize_layers(cuda_device)
 
-    _assert_repeated_layers_on_device(cornstarch_model, cuda_device)
+    _assert_model_layers_on_device(cornstarch_model, cuda_device)

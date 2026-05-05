@@ -23,7 +23,7 @@ def convert_whisper_config(
             "conv2": hf_model.encoder.conv2,
             "embed_positions": hf_model.encoder.embed_positions,
         },
-        repeated_layers=hf_model.encoder.layers,
+        encoder_layers=hf_model.encoder.layers,
         post_encoder={
             "encoder_layer_norm": hf_model.encoder.layer_norm,
             "decoder": hf_model.decoder,
@@ -32,7 +32,7 @@ def convert_whisper_config(
             ("encoder.conv1.", "pre_encoder.conv1."),
             ("encoder.conv2.", "pre_encoder.conv2."),
             ("encoder.embed_positions.", "pre_encoder.embed_positions."),
-            ("encoder.layers.", "repeated_layers."),
+            ("encoder.layers.", "encoder_layers."),
             ("encoder.layer_norm.", "post_encoder.encoder_layer_norm."),
             ("decoder.", "post_encoder.decoder."),
         ),
