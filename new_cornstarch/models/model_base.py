@@ -40,22 +40,6 @@ class CornstarchModelBase(nn.Module):
             self._attention_kernel = get_hf_kernel(self.attn_implementation)
         return self._attention_kernel
 
-    @property
-    def is_meta(self) -> bool:
-        """Return whether every registered tensor still lives on the meta device."""
-        tensors = list(self.parameters()) + list(self.buffers())
-        return bool(tensors) and all(tensor.is_meta for tensor in tensors)
-
-    def assert_meta(self) -> None:
-        """Raise if any parameter or buffer has already been materialized."""
-        non_meta = [
-            name
-            for name, tensor in list(self.named_parameters()) + list(self.named_buffers())
-            if not tensor.is_meta
-        ]
-        if non_meta:
-            raise RuntimeError(f"Expected all model tensors to be meta before materialize(); found {non_meta[:5]}")
-
     def set_empty_init(self) -> None:
         """Configure materialization to allocate tensors without initializing them."""
         self._init_plan = InitializationPlan.empty()
@@ -74,7 +58,7 @@ class CornstarchModelBase(nn.Module):
 
     def materialize(self, device: str | torch.device = "cuda") -> CornstarchModelBase:
         """Materialize a meta model on the requested device using its init plan."""
-        if not self.is_meta:
+        if not self._is_meta():
             return self
 
         device = torch.device(device)
@@ -95,7 +79,7 @@ class CornstarchModelBase(nn.Module):
         self, state_dict: Mapping[str, torch.Tensor], strict: bool = True
     ) -> tuple[list[str], list[str]]:
         """Load or stage Hugging Face-format weights for this wrapped model."""
-        if self.is_meta:
+        if self._is_meta():
             self.set_checkpoint_init(state_dict=state_dict)
             expected = set(self.hf_model.state_dict().keys())
             actual = set(state_dict.keys())
@@ -110,13 +94,13 @@ class CornstarchModelBase(nn.Module):
 
     def to_hf_state_dict(self) -> dict[str, torch.Tensor]:
         """Return the wrapped Hugging Face model's state dict after materialization."""
-        if self.is_meta:
+        if self._is_meta():
             raise RuntimeError("Cannot export an HF state dict before materialize().")
         return dict(self.hf_model.state_dict())
 
     def save_pretrained(self, save_directory: str | Path, **kwargs: Any) -> None:
         """Save the wrapped Hugging Face model with temporary config cleanup."""
-        if self.is_meta:
+        if self._is_meta():
             raise RuntimeError("Cannot save a meta model. Call materialize() first.")
 
         save_directory = Path(save_directory)
@@ -141,6 +125,11 @@ class CornstarchModelBase(nn.Module):
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Delegate inference and training calls to the wrapped Hugging Face model."""
         return self.hf_model(*args, **kwargs)
+
+    def _is_meta(self) -> bool:
+        """Return whether every registered tensor still lives on the meta device."""
+        tensors = list(self.parameters()) + list(self.buffers())
+        return bool(tensors) and all(tensor.is_meta for tensor in tensors)
 
     def _load_checkpoint_state_dict(self, device: torch.device) -> Mapping[str, torch.Tensor]:
         """Load staged checkpoint tensors onto the materialization device."""

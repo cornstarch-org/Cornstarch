@@ -35,6 +35,12 @@ def _assert_state_dict_equal(
         assert torch.equal(expected_tensor.cpu(), actual[key].cpu()), key
 
 
+def _model_is_meta(model: torch.nn.Module) -> bool:
+    """Return whether every model tensor is still on the meta device."""
+    tensors = list(model.parameters()) + list(model.buffers())
+    return bool(tensors) and all(tensor.is_meta for tensor in tensors)
+
+
 def _roundtrip(
     config: PretrainedConfig,
     hf_factory: Callable[[PretrainedConfig], PreTrainedModel],
@@ -53,7 +59,7 @@ def _roundtrip(
     assert unexpected == []
 
     cornstarch_model.materialize(_materialize_device())
-    assert not cornstarch_model.is_meta
+    assert not _model_is_meta(cornstarch_model)
     _assert_state_dict_equal(hf_model.state_dict(), cornstarch_model.to_hf_state_dict())
 
     cornstarch_model.save_pretrained(tmp_path)
