@@ -13,7 +13,20 @@ from new_cornstarch.models.multimodal.configuration import (
 
 
 class CornstarchProjector(nn.Module):
-    """Project modality encoder features into a language model hidden size."""
+    """Project encoder hidden states into the language model feature space.
+
+    Modality encoders produce features in their own hidden size, but multimodal
+    language models consume embeddings in the language hidden size. This module
+    owns that boundary. It supports simple linear projection, a two-layer MLP,
+    and a Q-former-backed projection while presenting the same forward contract
+    to ``CornstarchModalityEncoder`` and the execution plan.
+
+    The projector config is explicit about input and output widths so shape
+    mismatches are caught when composing modules, not during token merging. The
+    forward method returns a Hugging Face ``BaseModelOutput`` with
+    ``last_hidden_state`` set to the projected features, matching the convention
+    used by encoders and keeping downstream code agnostic to the projector type.
+    """
 
     config: CornstarchEncoderToLanguageProjectorConfig
 
@@ -50,7 +63,20 @@ class CornstarchProjector(nn.Module):
 
 
 class CornstarchQFormerProjector(nn.Module):
-    """Q-former projector backed by Hugging Face BLIP-2 Q-former modules."""
+    """Query-token projector for compressing encoder features before fusion.
+
+    The Q-former path uses learnable query tokens that cross-attend to modality
+    encoder hidden states, then projects the query outputs into language hidden
+    size. It is useful when the modality feature sequence should be summarized
+    into a fixed number of language-sized tokens rather than projected
+    position-by-position.
+
+    This class intentionally remains an implementation detail of
+    ``CornstarchProjector``. Callers select it with
+    ``CornstarchEncoderToLanguageProjectorConfig(projector_type="qformer")`` and
+    still receive the same projected hidden-state contract as the linear and MLP
+    projectors.
+    """
 
     def __init__(self, config: CornstarchEncoderToLanguageProjectorConfig):
         super().__init__()

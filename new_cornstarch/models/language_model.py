@@ -15,7 +15,22 @@ from new_cornstarch.models.model_base import CornstarchModelBase
 
 
 class CornstarchLanguageModel(CornstarchModelBase):
-    """Cornstarch-owned causal language model structure."""
+    """Cornstarch-owned structure for decoder-only language models.
+
+    A converter builds this module by splitting the corresponding Hugging Face
+    model into three visible sections: ``pre_decoder`` for embeddings and other
+    setup modules, ``decoder_layers`` for the repeated transformer blocks, and
+    ``post_decoder`` for normalization, output heads, and similar tail modules.
+    The repeated blocks live in an ``nn.ModuleList`` because layer-level
+    materialization and offload are core Cornstarch operations rather than hidden
+    implementation details.
+
+    The class does not borrow a bound Hugging Face ``forward`` method. Instead,
+    it delegates model-family behavior to a ``TransformerForwardSpec`` while the
+    shared Cornstarch loop owns iteration through ``decoder_layers``. Checkpoint
+    import/export remains Hugging Face-native through the prefix map passed to
+    ``CornstarchModelBase``.
+    """
 
     def __init__(
         self,
@@ -28,7 +43,13 @@ class CornstarchLanguageModel(CornstarchModelBase):
         forward_spec: TransformerForwardSpec,
         attn_implementation: str | None = None,
     ):
-        """Register shared language-model sections and HF state mapping."""
+        """Register decoder sections, forward spec, and HF state mapping.
+
+        The provided modules are usually created under ``torch.device("meta")``
+        by a converter. They should preserve Hugging Face parameter names within
+        each section so the prefix map can translate complete state dicts without
+        per-parameter special cases.
+        """
         super().__init__(
             hf_config,
             hf_to_cornstarch_prefixes=hf_to_cornstarch_prefixes,

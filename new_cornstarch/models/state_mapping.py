@@ -8,7 +8,19 @@ import torch
 
 @dataclass(frozen=True)
 class StateDictPrefixMap:
-    """Translate state-dict keys between Hugging Face and Cornstarch modules."""
+    """Bidirectional prefix translator for Hugging Face-compatible checkpoints.
+
+    Cornstarch changes the visible module layout so repeated layers and
+    pre/post sections can be controlled directly, but persisted weights should
+    still use Hugging Face key names. This mapper is the boundary object between
+    those worlds. Converters provide ordered ``(hf_prefix, cornstarch_prefix)``
+    pairs for each section they move into the Cornstarch layout.
+
+    Prefixes are sorted longest-first during initialization so specific mappings
+    win over broad ones. Keys that do not match any prefix pass through
+    unchanged, which lets converters map only the sections they actually rename
+    while preserving leaf-module parameter names inside each section.
+    """
 
     pairs: tuple[tuple[str, str], ...]
 

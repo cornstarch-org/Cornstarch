@@ -6,7 +6,19 @@ from transformers import PretrainedConfig
 
 
 class CornstarchConfig(PretrainedConfig):
-    """Serializable config for Cornstarch models built from Hugging Face configs."""
+    """Minimal serializable wrapper around a source Hugging Face config.
+
+    Most Cornstarch models are constructed from Hugging Face configs and remain
+    checkpoint-compatible with the corresponding Hugging Face model family. This
+    config stores the original HF config payload, the broad model kind
+    (language, vision, audio, or multimodal), and the attention implementation id
+    that should be preserved when converters rebuild the Cornstarch module.
+
+    The wrapper is deliberately small. Architectural details continue to live in
+    the source HF config so Cornstarch does not fork model-family configuration
+    schemas while it experiments with a different module layout and lazy
+    lifecycle.
+    """
 
     model_type = "cornstarch"
 
@@ -17,7 +29,7 @@ class CornstarchConfig(PretrainedConfig):
         attn_implementation: str | None = None,
         **kwargs: Any,
     ):
-        """Store the source HF config, model kind, and attention implementation."""
+        """Store source config metadata needed to recreate Cornstarch modules."""
         super().__init__(**kwargs)
         self.hf_config = hf_config or {}
         self.model_kind = model_kind

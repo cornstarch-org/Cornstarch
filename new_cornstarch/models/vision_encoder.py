@@ -11,7 +11,15 @@ from new_cornstarch.models.forward_specs import TransformerForwardSpec
 
 
 class CornstarchVisionEncoder(CornstarchEncoderBase):
-    """Cornstarch-owned vision encoder structure, such as CLIP or SigLIP."""
+    """Typed Cornstarch encoder wrapper for vision backbones.
+
+    This class is intentionally thin: CLIP, SigLIP, Qwen-VL, and similar models
+    share the generic encoder lifecycle implemented by ``CornstarchEncoderBase``.
+    The wrapper gives converters and multimodal composition code a clear
+    modality-specific type while preserving the same pre/layers/post structure,
+    meta-device construction behavior, and Hugging Face checkpoint compatibility
+    used by all Cornstarch encoders.
+    """
 
     def __init__(
         self,

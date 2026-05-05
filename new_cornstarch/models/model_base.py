@@ -16,7 +16,28 @@ from new_cornstarch.models.state_mapping import StateDictPrefixMap
 
 
 class CornstarchModelBase(nn.Module):
-    """Base class for Cornstarch-owned models with HF checkpoint mapping."""
+    """Common lifecycle and checkpoint surface for Cornstarch-owned models.
+
+    Cornstarch models are built from Hugging Face configs and often reuse Hugging
+    Face leaf modules, but the root module structure and execution loop are owned
+    by Cornstarch. This base class holds the pieces that are shared across
+    language, vision, and audio wrappers: the source HF config, the optional HF
+    kernel id, the lazy materialization plan, and the prefix map that translates
+    between Hugging Face checkpoint keys and Cornstarch's internal module names.
+
+    Instances are expected to start on the ``meta`` device. Construction records
+    module topology without allocating real storage; ``materialize()`` later
+    turns those meta tensors into concrete tensors using one of three plans:
+    empty allocation, default random initialization, or checkpoint assignment.
+    This keeps large-model construction cheap and makes it possible to load HF
+    state dicts without first creating a full Hugging Face root model.
+
+    The public checkpoint API intentionally speaks Hugging Face formats.
+    ``load_hf_state_dict()``, ``to_hf_state_dict()``, and ``save_pretrained()``
+    translate key names at the boundary so callers can continue to use standard
+    HF state dicts and serialization while Cornstarch keeps a module layout that
+    exposes repeated layers for materialization, offload, and later parallelism.
+    """
 
     def __init__(
         self,
@@ -26,7 +47,14 @@ class CornstarchModelBase(nn.Module):
         attn_implementation: str | None = None,
         init_plan: InitializationPlan | None = None,
     ):
-        """Attach shared config, attention kernel, init plan, and state mapping."""
+        """Attach config, lazy initialization policy, and HF key translation.
+
+        Subclasses pass in the prefix mapping for their visible module layout and
+        a lightweight factory that can recreate the matching Hugging Face model
+        when serialization or deterministic buffer reconstruction needs it. The
+        factory is not stored as a root model; it is only used at those lifecycle
+        boundaries.
+        """
         super().__init__()
         self.hf_config = hf_config
         self.config = hf_config

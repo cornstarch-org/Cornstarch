@@ -11,7 +11,28 @@ LayerContext = dict[str, Any]
 
 
 class TransformerForwardSpec:
-    """Model-family hooks for the shared Cornstarch transformer forward loop."""
+    """Model-family hooks for Cornstarch's shared transformer loop.
+
+    Cornstarch exposes the repeated transformer blocks as an ``nn.ModuleList`` so
+    layers can be materialized, offloaded, or scheduled independently. The common
+    loop in ``run_transformer_forward`` owns iteration over that list, while a
+    forward spec supplies the family-specific details that normally live inside a
+    Hugging Face model ``forward`` method: how inputs become hidden states, what
+    masks or position data each layer needs, how tuple outputs are interpreted,
+    and how the final model output object is assembled.
+
+    Specs should stay small and declarative. They may call Hugging Face helper
+    functions or leaf modules that converters already placed in ``pre_*`` and
+    ``post_*`` sections, but they should not hold a bound Hugging Face root model
+    or hide extra module ownership. This keeps native Cornstarch forwards
+    inspectable and leaves the model structure available for lazy initialization
+    and future distributed execution.
+
+    The base implementation describes a plain encoder-style pass. Subclasses
+    override only the hooks required by their model family, such as causal mask
+    construction for decoder-only language models or pooled-output assembly for
+    vision encoders.
+    """
 
     def embed_inputs(self, model: nn.Module, **kwargs: Any) -> torch.Tensor:
         raise NotImplementedError
@@ -60,7 +81,14 @@ def run_transformer_forward(
     spec: TransformerForwardSpec,
     kwargs: dict[str, Any],
 ) -> Any:
-    """Run the shared Cornstarch-owned transformer layer loop."""
+    """Run repeated transformer layers under a model-family forward spec.
+
+    The loop has one responsibility: execute the Cornstarch-owned layer list in
+    order and delegate model-family choices to ``spec``. It deliberately ignores
+    optional Hugging Face capture flags such as attentions or hidden-state traces
+    unless a spec chooses to implement them, keeping the training path simple and
+    predictable.
+    """
     hidden_states = spec.embed_inputs(model, **kwargs)
     loop_kwargs = dict(kwargs)
     loop_kwargs.pop("hidden_states", None)

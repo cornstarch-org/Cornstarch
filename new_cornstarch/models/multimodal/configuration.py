@@ -7,7 +7,21 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class CornstarchEncoderToLanguageProjectorConfig(PretrainedConfig):
-    """Configuration for projecting modality encoder features into LLM hidden space."""
+    """Serializable contract for mapping encoder features into language space.
+
+    A modality encoder and a language model are usually built from independent
+    Hugging Face configs, so their hidden sizes do not have to match. This config
+    records the projection strategy and the source/target widths needed to make
+    their tensors compatible. It is intentionally scoped to the projector rather
+    than to a whole multimodal wrapper because Cornstarch users compose concrete
+    modules through execution plans.
+
+    ``linear`` and ``mlp`` projectors preserve the input sequence length while
+    changing feature size. ``qformer`` uses learnable query tokens to produce a
+    fixed number of projected tokens that cross-attend to the encoder features.
+    The validation here keeps those architectural choices explicit and catches
+    missing dimensions before modules are instantiated.
+    """
 
     model_type = "cornstarch_projector"
 
@@ -59,7 +73,13 @@ class CornstarchEncoderToLanguageProjectorConfig(PretrainedConfig):
         language_config: PretrainedConfig,
         **kwargs: Any,
     ) -> CornstarchEncoderToLanguageProjectorConfig:
-        """Build a projector config from an encoder config and language-model config."""
+        """Build a projector config from encoder and language model configs.
+
+        This is the preferred constructor when both endpoints are available
+        because it derives ``in_features`` and ``out_features`` from the models
+        being connected. That keeps projection width choices tied to the actual
+        composed modules instead of duplicating hidden sizes by hand.
+        """
         return cls(
             in_features=_hidden_size_from_config(encoder_config, "encoder_config"),
             out_features=_hidden_size_from_config(language_config, "language_config"),
@@ -79,7 +99,19 @@ def _hidden_size_from_config(config: PretrainedConfig, config_name: str) -> int:
 
 
 class CornstarchMultimodalConfig(PretrainedConfig):
-    """Serializable description of a user-composed Cornstarch multimodal model."""
+    """Serializable metadata for a user-composed multimodal Cornstarch setup.
+
+    Cornstarch multimodal execution is plan-based and does not require a single
+    root ``CornstarchMultimodalModel``. This config therefore records the pieces
+    needed to describe a composition without claiming ownership of the concrete
+    modules: the language config, per-modality encoder configs, projector
+    configs, modality placeholder token ids, and optional checkpoint prefixes.
+
+    The config is useful for saving experiment metadata or reconstructing the
+    same module graph later, but preprocessing and tokenization remain external
+    responsibilities. Placement is still driven at runtime by ``input_ids`` and
+    ``modality_token_ids`` in the execution plan.
+    """
 
     model_type = "cornstarch_multimodal"
 

@@ -9,7 +9,20 @@ import torch
 
 @dataclass
 class InitializationPlan:
-    """Describe how a meta-initialized model should become real tensors."""
+    """Deferred tensor allocation policy for a meta-initialized model.
+
+    New Cornstarch modules are normally constructed on the ``meta`` device so
+    converters can assemble very large model topologies without allocating
+    parameter storage. An ``InitializationPlan`` records what should happen later
+    when ``CornstarchModelBase.materialize()`` is called.
+
+    The plan is intentionally data-only. ``empty`` allocates real tensors without
+    filling them, ``random`` asks modules to run their default initialization, and
+    ``checkpoint`` assigns weights from an already-loaded state dict or a
+    safetensors checkpoint path. Keeping this choice separate from construction
+    lets callers stage HF weights before materialization and keeps model classes
+    free of ad hoc loading flags.
+    """
 
     mode: str
     state_dict: Mapping[str, torch.Tensor] | None = None

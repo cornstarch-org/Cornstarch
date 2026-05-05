@@ -15,7 +15,21 @@ from new_cornstarch.models.model_base import CornstarchModelBase
 
 
 class CornstarchEncoderBase(CornstarchModelBase):
-    """Shared Cornstarch-owned encoder structure."""
+    """Shared structure for Cornstarch-owned non-language encoders.
+
+    Vision and audio encoders follow the same high-level layout even when their
+    input preparation differs: a ``pre_encoder`` section builds hidden states, an
+    ``encoder_layers`` ``ModuleList`` owns the repeated transformer blocks, and a
+    ``post_encoder`` section performs normalization, pooling, projection, or
+    other model-family tail work. Keeping this shape consistent lets Cornstarch
+    expose the same materialization and offload controls across modalities.
+
+    Subclasses provide the modality label and converters provide the concrete
+    Hugging Face leaf modules plus a ``TransformerForwardSpec``. The spec owns
+    modality-specific forward details, while this base class preserves the common
+    module topology and Hugging Face checkpoint translation inherited from
+    ``CornstarchModelBase``.
+    """
 
     def __init__(
         self,
@@ -28,7 +42,13 @@ class CornstarchEncoderBase(CornstarchModelBase):
         forward_spec: TransformerForwardSpec,
         attn_implementation: str | None = None,
     ):
-        """Register shared encoder sections and HF state mapping."""
+        """Register encoder sections, forward spec, and HF state mapping.
+
+        The section dictionaries are intentionally explicit instead of hiding
+        modules behind a root Hugging Face wrapper. Future scheduling and memory
+        policies can reason about each repeated block directly through
+        ``encoder_layers``.
+        """
         super().__init__(
             hf_config,
             hf_to_cornstarch_prefixes=hf_to_cornstarch_prefixes,

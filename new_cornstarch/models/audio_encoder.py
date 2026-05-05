@@ -11,7 +11,15 @@ from new_cornstarch.models.forward_specs import TransformerForwardSpec
 
 
 class CornstarchAudioEncoder(CornstarchEncoderBase):
-    """Cornstarch-owned audio encoder structure, such as Whisper."""
+    """Typed Cornstarch encoder wrapper for audio backbones.
+
+    Audio models such as Whisper use the same visible encoder layout as vision
+    models: input preparation modules, repeated encoder layers, and post-encoder
+    output modules. This subclass mainly communicates modality intent to
+    converters and multimodal plans while inheriting lazy materialization,
+    layer-level memory controls, and Hugging Face state-dict mapping from
+    ``CornstarchEncoderBase``.
+    """
 
     def __init__(
         self,

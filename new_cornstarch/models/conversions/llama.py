@@ -26,7 +26,22 @@ def _validate_input_choice(input_ids: torch.Tensor | None, inputs_embeds: torch.
 
 
 class CausalLanguageForwardSpec(TransformerForwardSpec):
-    """Native forward spec for Llama/Qwen/DeepSeek-style decoder-only models."""
+    """Native decoder-only forward behavior shared by causal language families.
+
+    Llama, Qwen, DeepSeek, and related models all follow the same Cornstarch
+    structure: token embeddings and rotary helpers live in ``pre_decoder``,
+    transformer blocks live in ``decoder_layers``, and normalization plus the
+    LM head live in ``post_decoder``. This spec supplies the family behavior that
+    the shared Cornstarch loop needs to run that structure without borrowing a
+    bound Hugging Face root-model ``forward`` method.
+
+    The spec builds input embeddings, causal masks, position ids, and rotary
+    position embeddings before layer execution; forwards only the generic layer
+    kwargs supported by the reused Hugging Face leaf blocks; applies the final
+    decoder norm; and returns a ``CausalLMOutputWithPast`` with logits and
+    optional training loss. Optional capture outputs remain intentionally unset
+    unless Cornstarch adds explicit support for them.
+    """
 
     output_cls = CausalLMOutputWithPast
 
