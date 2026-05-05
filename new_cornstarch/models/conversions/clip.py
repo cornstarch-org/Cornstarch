@@ -27,9 +27,10 @@ def convert_clip_vision_config(
         hf_to_cornstarch_prefixes=(
             ("embeddings.", "pre_encoder.embeddings."),
             ("pre_layrnorm.", "pre_encoder.pre_layrnorm."),
-            ("encoder.layers.", "repeated_layers.layers."),
+            ("encoder.layers.", "repeated_layers."),
             ("post_layernorm.", "post_encoder.post_layernorm."),
         ),
         hf_model_factory=CLIPVisionModel,
+        forward_impl=hf_model.forward,
         attn_implementation=attn_implementation,
     )

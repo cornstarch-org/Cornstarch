@@ -20,6 +20,7 @@ class CornstarchAudioEncoder(CornstarchEncoderBase):
         post_encoder: Mapping[str, nn.Module],
         hf_to_cornstarch_prefixes: tuple[tuple[str, str], ...],
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
+        forward_impl: Callable[..., object] | None = None,
         attn_implementation: str | None = None,
     ):
         """Initialize the shared encoder sections with audio-specific modules."""
@@ -30,5 +31,6 @@ class CornstarchAudioEncoder(CornstarchEncoderBase):
             post_encoder=post_encoder,
             hf_to_cornstarch_prefixes=hf_to_cornstarch_prefixes,
             hf_model_factory=hf_model_factory,
+            forward_impl=forward_impl,
             attn_implementation=attn_implementation,
         )

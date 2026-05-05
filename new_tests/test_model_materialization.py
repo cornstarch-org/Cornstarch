@@ -4,62 +4,31 @@ from collections.abc import Callable
 
 import pytest
 import torch
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
 from new_cornstarch.models import from_hf_config
+from new_tests.model_configs import (
+    clip_vision_config,
+    deepseek_v3_config,
+    llama_config,
+    qwen3_5_config,
+    qwen3_vl_vision_config,
+    siglip2_vision_config,
+    whisper_config,
+)
 
 
 ATTN_IMPLEMENTATION = "kernels-community/flash-attn3"
 
 
-def _llama_config() -> PretrainedConfig:
-    """Load the tiny Llama config used for materialization coverage."""
-    return AutoConfig.from_pretrained("hf-internal-testing/tiny-random-LlamaForCausalLM")
-
-
-def _qwen3_5_config() -> PretrainedConfig:
-    """Load the tiny Qwen3.5 text config used for materialization coverage."""
-    return AutoConfig.from_pretrained("trl-internal-testing/tiny-Qwen3_5ForConditionalGeneration").text_config
-
-
-def _deepseek_v3_config() -> PretrainedConfig:
-    """Load the tiny DeepSeek-V3 config used for materialization coverage."""
-    return AutoConfig.from_pretrained("trl-internal-testing/tiny-DeepseekV3ForCausalLM")
-
-
-def _clip_vision_config() -> PretrainedConfig:
-    """Load the tiny CLIP vision config used for materialization coverage."""
-    return AutoConfig.from_pretrained("hf-internal-testing/tiny-random-CLIPModel").vision_config
-
-
-def _siglip2_vision_config() -> PretrainedConfig:
-    """Build a reduced SigLIP2 vision config for lightweight materialization tests."""
-    config = AutoConfig.from_pretrained("google/siglip2-base-patch16-naflex").vision_config
-    config.hidden_size = 32
-    config.intermediate_size = 64
-    config.num_hidden_layers = 2
-    config.num_attention_heads = 4
-    return config
-
-
-def _qwen3_vl_vision_config() -> PretrainedConfig:
-    """Load the tiny Qwen3-VL vision config used for materialization coverage."""
-    return AutoConfig.from_pretrained("tiny-random/qwen3-vl").vision_config
-
-
-def _whisper_config() -> PretrainedConfig:
-    """Load the tiny Whisper config used for materialization coverage."""
-    return AutoConfig.from_pretrained("hf-internal-testing/tiny-random-WhisperModel")
-
-
 MODEL_CONFIG_FACTORIES: list[tuple[str, Callable[[], PretrainedConfig]]] = [
-    ("llama", _llama_config),
-    ("qwen3_5", _qwen3_5_config),
-    ("deepseek_v3", _deepseek_v3_config),
-    ("clip_vision", _clip_vision_config),
-    ("siglip2_vision", _siglip2_vision_config),
-    ("qwen3_vl_vision", _qwen3_vl_vision_config),
-    ("whisper", _whisper_config),
+    ("llama", llama_config),
+    ("qwen3_5", qwen3_5_config),
+    ("deepseek_v3", deepseek_v3_config),
+    ("clip_vision", clip_vision_config),
+    ("siglip2_vision", siglip2_vision_config),
+    ("qwen3_vl_vision", qwen3_vl_vision_config),
+    ("whisper", whisper_config),
 ]
 
 
@@ -102,7 +71,51 @@ def test_repeated_layers_are_meta_when_model_is_initialized(
         config_factory(), attn_implementation=ATTN_IMPLEMENTATION
     )
 
+    assert isinstance(cornstarch_model.repeated_layers, torch.nn.ModuleList)
     _assert_repeated_layers_meta(cornstarch_model)
+
+
+@pytest.mark.parametrize("config_factory", _model_config_params())
+def test_materialize_layers_stores_repeated_layers_on_cpu(
+    config_factory: Callable[[], PretrainedConfig],
+) -> None:
+    """Verify layer-only materialization works with plain ModuleList layers."""
+    cornstarch_model = from_hf_config(
+        config_factory(), attn_implementation=ATTN_IMPLEMENTATION
+    )
+    _assert_repeated_layers_meta(cornstarch_model)
+
+    cpu_device = torch.device("cpu")
+    cornstarch_model.materialize_layers(cpu_device)
+
+    _assert_repeated_layers_on_device(cornstarch_model, cpu_device)
+
+
+def test_offload_layers_to_cpu_skips_unmaterialized_layers() -> None:
+    """Verify layer offload preserves still-meta repeated layers."""
+    cornstarch_model = from_hf_config(
+        llama_config(), attn_implementation=ATTN_IMPLEMENTATION
+    )
+    assert len(cornstarch_model.repeated_layers) > 1
+
+    materialized_layer = cornstarch_model.repeated_layers[0]
+    materialized_layer.to_empty(device=torch.device("cpu"))
+
+    cornstarch_model.offload_layers_to_cpu([0])
+
+    materialized_tensors = list(materialized_layer.parameters()) + list(
+        materialized_layer.buffers()
+    )
+    meta_tensors = (
+        list(cornstarch_model.repeated_layers[1].parameters())
+        + list(cornstarch_model.repeated_layers[1].buffers())
+    )
+    assert materialized_tensors
+    assert meta_tensors
+    assert all(
+        not tensor.is_meta and tensor.device.type == "cpu" for tensor in materialized_tensors
+    )
+    assert all(tensor.is_meta for tensor in meta_tensors)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for layer materialization")

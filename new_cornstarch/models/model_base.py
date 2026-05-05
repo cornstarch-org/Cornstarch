@@ -23,6 +23,7 @@ class CornstarchModelBase(nn.Module):
         hf_config: PretrainedConfig,
         hf_to_cornstarch_prefixes: tuple[tuple[str, str], ...],
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
+        forward_impl: Callable[..., Any] | None = None,
         attn_implementation: str | None = None,
         init_plan: InitializationPlan | None = None,
     ):
@@ -35,6 +36,8 @@ class CornstarchModelBase(nn.Module):
         self._init_plan = init_plan or InitializationPlan.empty()
         self._state_mapper = StateDictPrefixMap(hf_to_cornstarch_prefixes)
         self._hf_model_factory = hf_model_factory
+        self._forward_impl = forward_impl
+        object.__setattr__(self, "_forward_owner", getattr(forward_impl, "__self__", None))
 
     @property
     def attention_kernel(self) -> Any:
@@ -80,6 +83,8 @@ class CornstarchModelBase(nn.Module):
         else:
             raise ValueError(f"Unknown initialization plan: {self._init_plan.mode}")
 
+        if self._forward_impl is not None:
+            self._refresh_forward_owner(device)
         return self
 
     def load_hf_state_dict(
@@ -137,7 +142,38 @@ class CornstarchModelBase(nn.Module):
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Run model-specific forward logic implemented by subclasses."""
-        raise NotImplementedError(f"{type(self).__name__} does not implement forward().")
+        if self._forward_impl is None:
+            raise NotImplementedError(f"{type(self).__name__} does not implement forward().")
+        return self._forward_impl(*args, **kwargs)
+
+    def train(self, mode: bool = True) -> CornstarchModelBase:
+        """Keep converter-provided forward owners in sync with module mode."""
+        super().train(mode)
+        forward_owner = getattr(self, "_forward_owner", None)
+        if isinstance(forward_owner, nn.Module):
+            forward_owner.train(mode)
+        return self
+
+    @staticmethod
+    def _offload_module_list_to_cpu(
+        layers: nn.ModuleList, layer_indices: Iterable[int] | None = None
+    ) -> None:
+        """Move selected materialized layers to CPU without touching meta layers."""
+        indices = range(len(layers)) if layer_indices is None else layer_indices
+        for index in indices:
+            layer = layers[index]
+            if not any(param.is_meta for param in layer.parameters(recurse=True)):
+                layer.to("cpu")
+
+    @staticmethod
+    def _materialize_module_list(layers: nn.ModuleList, device: torch.device) -> None:
+        """Allocate or move repeated layers onto the requested device."""
+        for layer in layers:
+            tensors = list(layer.parameters(recurse=True)) + list(layer.buffers(recurse=True))
+            if any(tensor.is_meta for tensor in tensors):
+                layer.to_empty(device=device)
+            else:
+                layer.to(device)
 
     def _is_meta(self) -> bool:
         """Return whether every registered tensor still lives on the meta device."""
@@ -159,6 +195,65 @@ class CornstarchModelBase(nn.Module):
             raise RuntimeError("Checkpoint initialization requires a state_dict or checkpoint_path.")
         state_dict = load_file(str(self._init_plan.checkpoint_path), device=str(device))
         return self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
+
+    def _refresh_forward_owner(self, device: torch.device) -> None:
+        """Rebuild the converter forward owner around Cornstarch-owned modules."""
+        dtype = next(
+            (tensor.dtype for tensor in self.parameters() if tensor.is_floating_point()),
+            None,
+        )
+        forward_owner = self._hf_model_factory(copy.deepcopy(self.hf_config))
+        if dtype is None:
+            forward_owner.to(device=device)
+        else:
+            forward_owner.to(device=device, dtype=dtype)
+
+        for hf_prefix, cornstarch_prefix in self._state_mapper.pairs:
+            hf_module_path = hf_prefix.rstrip(".")
+            cornstarch_module_path = cornstarch_prefix.rstrip(".")
+            if not hf_module_path or not cornstarch_module_path:
+                continue
+            try:
+                hf_module = forward_owner.get_submodule(hf_module_path)
+                cornstarch_module = self.get_submodule(cornstarch_module_path)
+            except AttributeError:
+                continue
+            self._copy_meta_buffers(
+                source_module=hf_module,
+                target_module=cornstarch_module,
+                target_path=cornstarch_module_path,
+                device=device,
+            )
+            self._set_forward_submodule(forward_owner, hf_module_path, cornstarch_module)
+
+        object.__setattr__(self, "_forward_owner", forward_owner)
+        self._forward_impl = forward_owner.forward
+        forward_owner.train(self.training)
+
+    def _copy_meta_buffers(
+        self,
+        source_module: nn.Module,
+        target_module: nn.Module,
+        target_path: str,
+        device: torch.device,
+    ) -> None:
+        """Copy deterministic non-checkpoint buffers from a concrete HF module."""
+        for name, target_buffer in target_module.named_buffers(recurse=True):
+            if not target_buffer.is_meta:
+                continue
+            source_buffer = source_module.get_buffer(name)
+            replacement = source_buffer.to(
+                device=device,
+                dtype=target_buffer.dtype if target_buffer.is_floating_point() else None,
+            )
+            self._set_tensor(f"{target_path}.{name}", replacement, None)
+
+    @staticmethod
+    def _set_forward_submodule(root: nn.Module, module_path: str, module: nn.Module) -> None:
+        """Install a Cornstarch-owned module into the unregistered forward owner."""
+        parent_path, _, module_name = module_path.rpartition(".")
+        parent = root.get_submodule(parent_path) if parent_path else root
+        setattr(parent, module_name, module)
 
     def _materialize_empty(self, device: torch.device) -> None:
         """Replace meta parameters and buffers with empty tensors on a device."""

@@ -32,10 +32,11 @@ def convert_qwen3_vl_vision_config(
             ("patch_embed.", "pre_encoder.patch_embed."),
             ("pos_embed.", "pre_encoder.pos_embed."),
             ("rotary_pos_emb.", "pre_encoder.rotary_pos_emb."),
-            ("blocks.", "repeated_layers.layers."),
+            ("blocks.", "repeated_layers."),
             ("merger.", "post_encoder.merger."),
             ("deepstack_merger_list.", "post_encoder.deepstack_merger_list."),
         ),
         hf_model_factory=Qwen3VLVisionModel,
+        forward_impl=hf_model.forward,
         attn_implementation=attn_implementation,
     )

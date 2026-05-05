@@ -10,7 +10,6 @@ from new_cornstarch.models.hf_conversion import (
     to_hf_state_dict,
 )
 from new_cornstarch.models.language_model import CornstarchLanguageModel
-from new_cornstarch.models.repeated_layer import RepeatedLayerStack
 from new_cornstarch.models.vision_encoder import CornstarchVisionEncoder
 
 __all__ = [
@@ -19,7 +18,6 @@ __all__ = [
     "CornstarchEncoderBase",
     "CornstarchLanguageModel",
     "CornstarchVisionEncoder",
-    "RepeatedLayerStack",
     "from_hf_config",
     "from_pretrained_config",
     "load_hf_state_dict",

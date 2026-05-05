@@ -18,15 +18,20 @@ def convert_llama_config(
         hf_model = LlamaForCausalLM(copy.deepcopy(config))
     return CornstarchLanguageModel(
         config,
-        pre_decoder={"embed_tokens": hf_model.model.embed_tokens},
+        pre_decoder={
+            "embed_tokens": hf_model.model.embed_tokens,
+            "rotary_emb": hf_model.model.rotary_emb,
+        },
         repeated_layers=hf_model.model.layers,
         post_decoder={"norm": hf_model.model.norm, "lm_head": hf_model.lm_head},
         hf_to_cornstarch_prefixes=(
             ("model.embed_tokens.", "pre_decoder.embed_tokens."),
-            ("model.layers.", "repeated_layers.layers."),
+            ("model.rotary_emb.", "pre_decoder.rotary_emb."),
+            ("model.layers.", "repeated_layers."),
             ("model.norm.", "post_decoder.norm."),
             ("lm_head.", "post_decoder.lm_head."),
         ),
         hf_model_factory=LlamaForCausalLM,
+        forward_impl=hf_model.forward,
         attn_implementation=attn_implementation,
     )

@@ -32,10 +32,11 @@ def convert_whisper_config(
             ("encoder.conv1.", "pre_encoder.conv1."),
             ("encoder.conv2.", "pre_encoder.conv2."),
             ("encoder.embed_positions.", "pre_encoder.embed_positions."),
-            ("encoder.layers.", "repeated_layers.layers."),
+            ("encoder.layers.", "repeated_layers."),
             ("encoder.layer_norm.", "post_encoder.encoder_layer_norm."),
             ("decoder.", "post_encoder.decoder."),
         ),
         hf_model_factory=WhisperModel,
+        forward_impl=hf_model.forward,
         attn_implementation=attn_implementation,
     )

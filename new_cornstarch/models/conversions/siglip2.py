@@ -26,10 +26,11 @@ def convert_siglip2_vision_config(
         },
         hf_to_cornstarch_prefixes=(
             ("embeddings.", "pre_encoder.embeddings."),
-            ("encoder.layers.", "repeated_layers.layers."),
+            ("encoder.layers.", "repeated_layers."),
             ("post_layernorm.", "post_encoder.post_layernorm."),
             ("head.", "post_encoder.head."),
         ),
         hf_model_factory=Siglip2VisionModel,
+        forward_impl=hf_model.forward,
         attn_implementation=attn_implementation,
     )
