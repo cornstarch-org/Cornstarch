@@ -13,6 +13,7 @@ def convert_qwen3_vl_vision_config(
     config: Qwen3VLVisionConfig,
     attn_implementation: str | None = None,
 ) -> CornstarchVisionEncoder:
+    """Convert a Qwen3-VL vision config into a Cornstarch vision encoder."""
     with torch.device("meta"):
         hf_model = Qwen3VLVisionModel(copy.deepcopy(config))
     return CornstarchVisionEncoder(

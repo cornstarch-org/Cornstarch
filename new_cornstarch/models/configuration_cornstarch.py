@@ -6,6 +6,8 @@ from transformers import PretrainedConfig
 
 
 class CornstarchConfig(PretrainedConfig):
+    """Serializable config for Cornstarch-wrapped Hugging Face models."""
+
     model_type = "cornstarch"
 
     def __init__(
@@ -15,6 +17,7 @@ class CornstarchConfig(PretrainedConfig):
         attn_implementation: str | None = None,
         **kwargs: Any,
     ):
+        """Store the wrapped HF config, model kind, and attention implementation."""
         super().__init__(**kwargs)
         self.hf_config = hf_config or {}
         self.model_kind = model_kind

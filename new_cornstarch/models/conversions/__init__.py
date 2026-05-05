@@ -1,3 +1,5 @@
+"""Conversion helpers for supported Hugging Face model families."""
+
 from new_cornstarch.models.conversions.clip import convert_clip_vision_config
 from new_cornstarch.models.conversions.deepseek_v3 import convert_deepseek_v3_config
 from new_cornstarch.models.conversions.llama import convert_llama_config

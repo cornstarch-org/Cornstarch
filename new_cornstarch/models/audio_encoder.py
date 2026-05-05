@@ -9,6 +9,8 @@ from new_cornstarch.models.encoder_base import CornstarchEncoderBase
 
 
 class CornstarchAudioEncoder(CornstarchEncoderBase):
+    """Cornstarch wrapper for audio encoders such as Whisper."""
+
     def __init__(
         self,
         hf_model: nn.Module,
@@ -16,6 +18,7 @@ class CornstarchAudioEncoder(CornstarchEncoderBase):
         repeated_layers: Iterable[nn.Module],
         attn_implementation: str | None = None,
     ):
+        """Initialize the shared encoder wrapper with audio encoder layers."""
         super().__init__(
             hf_model,
             config,

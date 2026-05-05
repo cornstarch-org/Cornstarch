@@ -1,3 +1,5 @@
+"""Public model wrapper and Hugging Face conversion APIs."""
+
 from new_cornstarch.models.audio_encoder import CornstarchAudioEncoder
 from new_cornstarch.models.configuration_cornstarch import CornstarchConfig
 from new_cornstarch.models.encoder_base import CornstarchEncoderBase

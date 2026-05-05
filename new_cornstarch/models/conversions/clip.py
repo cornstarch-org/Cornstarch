@@ -13,6 +13,7 @@ def convert_clip_vision_config(
     config: CLIPVisionConfig,
     attn_implementation: str | None = None,
 ) -> CornstarchVisionEncoder:
+    """Convert a CLIP vision config into a meta-initialized Cornstarch encoder."""
     with torch.device("meta"):
         hf_model = CLIPVisionModel(copy.deepcopy(config))
     return CornstarchVisionEncoder(

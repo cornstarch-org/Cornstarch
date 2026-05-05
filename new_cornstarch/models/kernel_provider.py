@@ -6,6 +6,7 @@ from typing import Any
 
 @lru_cache(maxsize=None)
 def get_hf_kernel(kernel_id: str, version: int | None = None) -> Any:
+    """Resolve and cache a Hugging Face kernel by repository id and version."""
     try:
         from kernels import get_kernel
     except ImportError as exc:

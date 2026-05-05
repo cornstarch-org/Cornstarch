@@ -25,6 +25,12 @@ def from_hf_config(
     attn_implementation: str | None = None,
     trust_remote_code: bool = False,
 ) -> CornstarchModelBase:
+    """Create the matching Cornstarch wrapper for a Hugging Face config.
+
+    The conversion keeps the Hugging Face module structure intact while building
+    it on the meta device, so callers can choose how and when weights are
+    materialized.
+    """
     del trust_remote_code
     model_type = getattr(config, "model_type", None)
     if model_kind == "vision" or model_type == "clip_vision_model":
@@ -55,6 +61,7 @@ def from_pretrained_config(
     trust_remote_code: bool = False,
     **kwargs,
 ) -> CornstarchModelBase:
+    """Load a Hugging Face config and convert it into a Cornstarch model."""
     config = AutoConfig.from_pretrained(
         model_name_or_path, trust_remote_code=trust_remote_code, **kwargs
     )
@@ -71,14 +78,17 @@ def load_hf_state_dict(
     state_dict: Mapping[str, torch.Tensor],
     strict: bool = True,
 ) -> tuple[list[str], list[str]]:
+    """Load Hugging Face-format weights into a Cornstarch model."""
     return model.load_hf_state_dict(state_dict, strict=strict)
 
 
 def to_hf_state_dict(model: CornstarchModelBase) -> dict[str, torch.Tensor]:
+    """Export a materialized Cornstarch model as a Hugging Face state dict."""
     return model.to_hf_state_dict()
 
 
 def infer_model_kind(config: PretrainedConfig) -> str:
+    """Infer whether a supported Hugging Face config is language, vision, or audio."""
     model_type = getattr(config, "model_type", None)
     if model_type in {"clip_vision_model", "siglip2_vision_model", "qwen3_vl_vision"}:
         return "vision"

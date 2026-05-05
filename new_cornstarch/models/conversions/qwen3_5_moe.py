@@ -13,6 +13,7 @@ def convert_qwen3_5_moe_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
 ) -> CornstarchLanguageModel:
+    """Convert a Qwen3.5 MoE text config into a Cornstarch language model."""
     with torch.device("meta"):
         hf_model = Qwen3_5MoeForCausalLM(copy.deepcopy(config))
     return CornstarchLanguageModel(

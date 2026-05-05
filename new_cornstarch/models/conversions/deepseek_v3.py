@@ -13,6 +13,7 @@ def convert_deepseek_v3_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
 ) -> CornstarchLanguageModel:
+    """Convert a DeepSeek-V3 config into a meta-initialized language model."""
     with torch.device("meta"):
         hf_model = DeepseekV3ForCausalLM(copy.deepcopy(config))
     return CornstarchLanguageModel(

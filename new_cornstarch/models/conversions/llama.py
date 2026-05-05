@@ -13,6 +13,7 @@ def convert_llama_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
 ) -> CornstarchLanguageModel:
+    """Convert a Llama config into a meta-initialized Cornstarch language model."""
     with torch.device("meta"):
         hf_model = LlamaForCausalLM(copy.deepcopy(config))
     return CornstarchLanguageModel(

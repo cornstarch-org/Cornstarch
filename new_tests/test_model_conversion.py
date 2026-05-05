@@ -22,12 +22,14 @@ ATTN_IMPLEMENTATION = "kernels-community/flash-attn3"
 
 
 def _materialize_device() -> torch.device:
+    """Choose CUDA when available, otherwise fall back to CPU for tests."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _assert_state_dict_equal(
     expected: dict[str, torch.Tensor], actual: dict[str, torch.Tensor]
 ) -> None:
+    """Assert two state dicts contain identical keys and tensor values."""
     assert sorted(expected.keys()) == sorted(actual.keys())
     for key, expected_tensor in expected.items():
         assert torch.equal(expected_tensor.cpu(), actual[key].cpu()), key
@@ -40,6 +42,7 @@ def _roundtrip(
     hf_loader: Callable[[Path], PreTrainedModel],
     tmp_path: Path,
 ) -> None:
+    """Verify HF weights can load into Cornstarch, save, and reload unchanged."""
     hf_model = hf_factory(config)
     cornstarch_model = cornstarch_factory(config)
 
@@ -60,6 +63,7 @@ def _roundtrip(
 
 @pytest.mark.parametrize("model_name", ["hf-internal-testing/tiny-random-LlamaForCausalLM"])
 def test_language_model_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
+    """Check Llama conversion preserves Hugging Face state dicts and saving."""
     config = AutoConfig.from_pretrained(model_name)
 
     _roundtrip(
@@ -73,6 +77,7 @@ def test_language_model_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("model_name", ["trl-internal-testing/tiny-Qwen3_5ForConditionalGeneration"])
 def test_qwen3_5_language_model_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
+    """Check Qwen3.5 text conversion preserves Hugging Face serialization."""
     config = AutoConfig.from_pretrained(model_name).text_config
 
     _roundtrip(
@@ -85,6 +90,7 @@ def test_qwen3_5_language_model_hf_roundtrip(model_name: str, tmp_path: Path) ->
 
 
 def test_qwen3_5_moe_language_model_hf_roundtrip(tmp_path: Path) -> None:
+    """Check Qwen3.5 MoE conversion using a compact synthetic text config."""
     config = Qwen3_5MoeTextConfig(
         vocab_size=32,
         hidden_size=16,
@@ -115,6 +121,7 @@ def test_qwen3_5_moe_language_model_hf_roundtrip(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("model_name", ["trl-internal-testing/tiny-DeepseekV3ForCausalLM"])
 def test_deepseek_v3_language_model_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
+    """Check DeepSeek-V3 conversion preserves Hugging Face serialization."""
     config = AutoConfig.from_pretrained(model_name)
 
     _roundtrip(
@@ -128,6 +135,7 @@ def test_deepseek_v3_language_model_hf_roundtrip(model_name: str, tmp_path: Path
 
 @pytest.mark.parametrize("model_name", ["hf-internal-testing/tiny-random-CLIPModel"])
 def test_vision_encoder_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
+    """Check CLIP vision conversion preserves Hugging Face serialization."""
     config = AutoConfig.from_pretrained(model_name).vision_config
 
     _roundtrip(
@@ -141,6 +149,7 @@ def test_vision_encoder_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("model_name", ["google/siglip2-base-patch16-naflex"])
 def test_siglip2_vision_encoder_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
+    """Check SigLIP2 vision conversion with a small resized config."""
     config = AutoConfig.from_pretrained(model_name).vision_config
     config.hidden_size = 32
     config.intermediate_size = 64
@@ -158,6 +167,7 @@ def test_siglip2_vision_encoder_hf_roundtrip(model_name: str, tmp_path: Path) ->
 
 @pytest.mark.parametrize("model_name", ["tiny-random/qwen3-vl"])
 def test_qwen3_vl_vision_encoder_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
+    """Check Qwen3-VL vision conversion preserves Hugging Face serialization."""
     config = AutoConfig.from_pretrained(model_name).vision_config
 
     _roundtrip(
@@ -171,6 +181,7 @@ def test_qwen3_vl_vision_encoder_hf_roundtrip(model_name: str, tmp_path: Path) -
 
 @pytest.mark.parametrize("model_name", ["hf-internal-testing/tiny-random-WhisperModel"])
 def test_audio_encoder_hf_roundtrip(model_name: str, tmp_path: Path) -> None:
+    """Check Whisper audio conversion preserves Hugging Face serialization."""
     config = AutoConfig.from_pretrained(model_name)
 
     _roundtrip(

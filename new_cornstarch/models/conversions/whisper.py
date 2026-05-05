@@ -13,6 +13,7 @@ def convert_whisper_config(
     config: WhisperConfig,
     attn_implementation: str | None = None,
 ) -> CornstarchAudioEncoder:
+    """Convert a Whisper config into a meta-initialized Cornstarch audio encoder."""
     with torch.device("meta"):
         hf_model = WhisperModel(copy.deepcopy(config))
     return CornstarchAudioEncoder(

@@ -1,3 +1,5 @@
+"""Pytest configuration for importing the local Cornstarch package."""
+
 import os
 import sys
 

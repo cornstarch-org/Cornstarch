@@ -13,6 +13,7 @@ def convert_qwen3_5_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
 ) -> CornstarchLanguageModel:
+    """Convert a Qwen3.5 text config into a meta-initialized language model."""
     with torch.device("meta"):
         hf_model = Qwen3_5ForCausalLM(copy.deepcopy(config))
     return CornstarchLanguageModel(
