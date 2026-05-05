@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from transformers import AutoConfig, PretrainedConfig
+from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4AudioConfig,
     Gemma4TextConfig,
@@ -147,6 +148,33 @@ def nemotron_h_config() -> PretrainedConfig:
 def deepseek_v3_config() -> PretrainedConfig:
     """Load the tiny DeepSeek-V3 config used by model wrapper tests."""
     return AutoConfig.from_pretrained("trl-internal-testing/tiny-DeepseekV3ForCausalLM")
+
+
+def deepseek_v4_config() -> PretrainedConfig:
+    """Build the compact synthetic DeepSeek-V4 config used in tests."""
+    return DeepseekV4Config(
+        vocab_size=32,
+        hidden_size=16,
+        moe_intermediate_size=8,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=1,
+        head_dim=4,
+        q_lora_rank=4,
+        num_experts_per_tok=2,
+        n_routed_experts=4,
+        n_shared_experts=1,
+        layer_types=["sliding_attention", "compressed_sparse_attention"],
+        mlp_layer_types=["moe", "hash_moe"],
+        partial_rotary_factor=1.0,
+        hc_mult=2,
+        o_groups=2,
+        o_lora_rank=4,
+        index_n_heads=2,
+        index_head_dim=4,
+        index_topk=2,
+        tie_word_embeddings=False,
+    )
 
 
 def clip_vision_config() -> PretrainedConfig:

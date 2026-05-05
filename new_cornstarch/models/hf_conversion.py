@@ -8,6 +8,7 @@ from transformers import AutoConfig, PretrainedConfig
 
 from new_cornstarch.models.conversions.clip import convert_clip_vision_config
 from new_cornstarch.models.conversions.deepseek_v3 import convert_deepseek_v3_config
+from new_cornstarch.models.conversions.deepseek_v4 import convert_deepseek_v4_config
 from new_cornstarch.models.conversions.gemma4 import (
     convert_gemma4_audio_config,
     convert_gemma4_config,
@@ -66,6 +67,8 @@ def from_hf_config(
         return convert_qwen3_5_moe_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
     if model_type == "deepseek_v3":
         return convert_deepseek_v3_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
+    if model_type == "deepseek_v4":
+        return convert_deepseek_v4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
     if model_type == "gemma4_text":
         return convert_gemma4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config)
     if model_type == "glm_moe_dsa":
@@ -130,6 +133,7 @@ def infer_model_kind(config: PretrainedConfig) -> str:
         return "audio"
     if model_type in {
         "deepseek_v3",
+        "deepseek_v4",
         "gemma4_text",
         "glm_moe_dsa",
         "llama",

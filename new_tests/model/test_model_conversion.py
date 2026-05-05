@@ -8,6 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.models.clip.modeling_clip import CLIPVisionModel
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3ForCausalLM
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4AudioModel,
     Gemma4ForCausalLM,
@@ -26,6 +27,7 @@ from new_cornstarch.models import from_hf_config
 from new_tests.model.model_configs import (
     clip_vision_config,
     deepseek_v3_config,
+    deepseek_v4_config,
     gemma4_audio_config,
     gemma4_config,
     gemma4_vision_config,
@@ -266,6 +268,13 @@ MODEL_CASES = [
         lambda path: DeepseekV3ForCausalLM.from_pretrained(path),
         _language_inputs,
         id="deepseek_v3",
+    ),
+    pytest.param(
+        deepseek_v4_config,
+        lambda cfg: DeepseekV4ForCausalLM(cfg),
+        lambda path: DeepseekV4ForCausalLM.from_pretrained(path),
+        _language_inputs,
+        id="deepseek_v4",
     ),
     pytest.param(
         gemma4_config,
