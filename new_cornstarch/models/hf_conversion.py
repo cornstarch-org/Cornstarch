@@ -25,11 +25,10 @@ def from_hf_config(
     attn_implementation: str | None = None,
     trust_remote_code: bool = False,
 ) -> CornstarchModelBase:
-    """Create the matching Cornstarch wrapper for a Hugging Face config.
+    """Create the matching Cornstarch model for a Hugging Face config.
 
-    The conversion keeps the Hugging Face module structure intact while building
-    it on the meta device, so callers can choose how and when weights are
-    materialized.
+    The conversion builds a Cornstarch-owned module structure on the meta
+    device while preserving Hugging Face checkpoint import/export semantics.
     """
     del trust_remote_code
     model_type = getattr(config, "model_type", None)

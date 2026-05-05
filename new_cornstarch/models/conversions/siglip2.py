@@ -17,8 +17,19 @@ def convert_siglip2_vision_config(
     with torch.device("meta"):
         hf_model = Siglip2VisionModel(copy.deepcopy(config))
     return CornstarchVisionEncoder(
-        hf_model,
         config,
+        pre_encoder={"embeddings": hf_model.embeddings},
         repeated_layers=hf_model.encoder.layers,
+        post_encoder={
+            "post_layernorm": hf_model.post_layernorm,
+            "head": hf_model.head,
+        },
+        hf_to_cornstarch_prefixes=(
+            ("embeddings.", "pre_encoder.embeddings."),
+            ("encoder.layers.", "repeated_layers.layers."),
+            ("post_layernorm.", "post_encoder.post_layernorm."),
+            ("head.", "post_encoder.head."),
+        ),
+        hf_model_factory=Siglip2VisionModel,
         attn_implementation=attn_implementation,
     )

@@ -17,8 +17,16 @@ def convert_qwen3_5_config(
     with torch.device("meta"):
         hf_model = Qwen3_5ForCausalLM(copy.deepcopy(config))
     return CornstarchLanguageModel(
-        hf_model,
         config,
+        pre_decoder={"embed_tokens": hf_model.model.embed_tokens},
         repeated_layers=hf_model.model.layers,
+        post_decoder={"norm": hf_model.model.norm, "lm_head": hf_model.lm_head},
+        hf_to_cornstarch_prefixes=(
+            ("model.embed_tokens.", "pre_decoder.embed_tokens."),
+            ("model.layers.", "repeated_layers.layers."),
+            ("model.norm.", "post_decoder.norm."),
+            ("lm_head.", "post_decoder.lm_head."),
+        ),
+        hf_model_factory=Qwen3_5ForCausalLM,
         attn_implementation=attn_implementation,
     )

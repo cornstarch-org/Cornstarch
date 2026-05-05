@@ -1,35 +1,40 @@
 from __future__ import annotations
 
+import copy
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, PreTrainedModel
 
 from new_cornstarch.models.kernel_provider import get_hf_kernel
 from new_cornstarch.models.lazy_init import InitializationPlan
+from new_cornstarch.models.state_mapping import StateDictPrefixMap
 
 
 class CornstarchModelBase(nn.Module):
-    """Base wrapper that adds Cornstarch lifecycle helpers to an HF model."""
+    """Base class for Cornstarch-owned models with HF checkpoint mapping."""
 
     def __init__(
         self,
-        hf_model: nn.Module,
         hf_config: PretrainedConfig,
+        hf_to_cornstarch_prefixes: tuple[tuple[str, str], ...],
+        hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
         attn_implementation: str | None = None,
         init_plan: InitializationPlan | None = None,
     ):
-        """Attach the Hugging Face model, config, attention kernel, and init plan."""
+        """Attach shared config, attention kernel, init plan, and state mapping."""
         super().__init__()
-        self.hf_model = hf_model
         self.hf_config = hf_config
         self.config = hf_config
         self.attn_implementation = attn_implementation
         self._attention_kernel = None
         self._init_plan = init_plan or InitializationPlan.empty()
+        self._state_mapper = StateDictPrefixMap(hf_to_cornstarch_prefixes)
+        self._hf_model_factory = hf_model_factory
 
     @property
     def attention_kernel(self) -> Any:
@@ -54,6 +59,8 @@ class CornstarchModelBase(nn.Module):
         checkpoint_path: str | Path | None = None,
     ) -> None:
         """Configure materialization to assign weights from a state dict or file."""
+        if state_dict is not None:
+            state_dict = self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
         self._init_plan = InitializationPlan.checkpoint(state_dict=state_dict, checkpoint_path=checkpoint_path)
 
     def materialize(self, device: str | torch.device = "cuda") -> CornstarchModelBase:
@@ -64,7 +71,7 @@ class CornstarchModelBase(nn.Module):
         device = torch.device(device)
         if self._init_plan.mode == "checkpoint":
             state_dict = self._load_checkpoint_state_dict(device)
-            self.hf_model.load_state_dict(state_dict, strict=True, assign=True)
+            self.load_state_dict(state_dict, strict=True, assign=True)
         elif self._init_plan.mode == "random":
             self._materialize_empty(device)
             self._random_initialize()
@@ -78,34 +85,40 @@ class CornstarchModelBase(nn.Module):
     def load_hf_state_dict(
         self, state_dict: Mapping[str, torch.Tensor], strict: bool = True
     ) -> tuple[list[str], list[str]]:
-        """Load or stage Hugging Face-format weights for this wrapped model."""
+        """Load or stage Hugging Face-format weights for this Cornstarch model."""
+        mapped_state_dict = self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
         if self._is_meta():
-            self.set_checkpoint_init(state_dict=state_dict)
-            expected = set(self.hf_model.state_dict().keys())
-            actual = set(state_dict.keys())
-            missing = sorted(expected - actual)
-            unexpected = sorted(actual - expected)
+            self._init_plan = InitializationPlan.checkpoint(state_dict=mapped_state_dict)
+            expected = set(self.state_dict().keys())
+            actual = set(mapped_state_dict.keys())
+            missing = self._to_hf_keys(expected - actual)
+            unexpected = self._to_hf_keys(actual - expected)
             if strict and (missing or unexpected):
                 raise RuntimeError(f"State dict mismatch: missing={missing[:5]}, unexpected={unexpected[:5]}")
             return missing, unexpected
 
-        incompatible = self.hf_model.load_state_dict(state_dict, strict=strict)
-        return list(incompatible.missing_keys), list(incompatible.unexpected_keys)
+        incompatible = self.load_state_dict(mapped_state_dict, strict=strict)
+        return self._to_hf_keys(incompatible.missing_keys), self._to_hf_keys(incompatible.unexpected_keys)
 
     def to_hf_state_dict(self) -> dict[str, torch.Tensor]:
-        """Return the wrapped Hugging Face model's state dict after materialization."""
+        """Return this model's tensors in Hugging Face state-dict key space."""
         if self._is_meta():
             raise RuntimeError("Cannot export an HF state dict before materialize().")
-        return dict(self.hf_model.state_dict())
+        return self._state_mapper.cornstarch_to_hf_state_dict(self.state_dict())
 
     def save_pretrained(self, save_directory: str | Path, **kwargs: Any) -> None:
-        """Save the wrapped Hugging Face model with temporary config cleanup."""
+        """Save the model using Hugging Face serialization and key layout."""
         if self._is_meta():
             raise RuntimeError("Cannot save a meta model. Call materialize() first.")
 
         save_directory = Path(save_directory)
         save_directory.mkdir(parents=True, exist_ok=True)
-        generation_config = getattr(self.hf_model, "generation_config", None)
+        hf_model = self._hf_model_factory(copy.deepcopy(self.hf_config))
+        hf_model.load_state_dict(
+            {key: tensor.detach().cpu() for key, tensor in self.to_hf_state_dict().items()},
+            strict=True,
+        )
+        generation_config = getattr(hf_model, "generation_config", None)
         original_pad_token_id = None
         if generation_config is not None:
             original_pad_token_id = generation_config.pad_token_id
@@ -117,19 +130,23 @@ class CornstarchModelBase(nn.Module):
                     generation_config.pad_token_id = 0
 
         try:
-            self.hf_model.save_pretrained(save_directory, **kwargs)
+            hf_model.save_pretrained(save_directory, **kwargs)
         finally:
             if generation_config is not None:
                 generation_config.pad_token_id = original_pad_token_id
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        """Delegate inference and training calls to the wrapped Hugging Face model."""
-        return self.hf_model(*args, **kwargs)
+        """Run model-specific forward logic implemented by subclasses."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement forward().")
 
     def _is_meta(self) -> bool:
         """Return whether every registered tensor still lives on the meta device."""
         tensors = list(self.parameters()) + list(self.buffers())
         return bool(tensors) and all(tensor.is_meta for tensor in tensors)
+
+    def _to_hf_keys(self, keys: Iterable[str]) -> list[str]:
+        """Translate internal key names into sorted Hugging Face key names."""
+        return sorted(self._state_mapper.cornstarch_to_hf_key(key) for key in keys)
 
     def _load_checkpoint_state_dict(self, device: torch.device) -> Mapping[str, torch.Tensor]:
         """Load staged checkpoint tensors onto the materialization device."""
@@ -140,7 +157,8 @@ class CornstarchModelBase(nn.Module):
             }
         if self._init_plan.checkpoint_path is None:
             raise RuntimeError("Checkpoint initialization requires a state_dict or checkpoint_path.")
-        return load_file(str(self._init_plan.checkpoint_path), device=str(device))
+        state_dict = load_file(str(self._init_plan.checkpoint_path), device=str(device))
+        return self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
 
     def _materialize_empty(self, device: torch.device) -> None:
         """Replace meta parameters and buffers with empty tensors on a device."""
@@ -153,12 +171,8 @@ class CornstarchModelBase(nn.Module):
                 self._set_tensor(name, torch.empty(buffer.shape, dtype=buffer.dtype, device=device), None)
 
     def _random_initialize(self) -> None:
-        """Run the best available Hugging Face or PyTorch initialization hook."""
-        if hasattr(self.hf_model, "init_weights"):
-            self.hf_model.init_weights()
-            return
-
-        for module in self.hf_model.modules():
+        """Run the best available PyTorch initialization hooks."""
+        for module in self.modules():
             reset_parameters = getattr(module, "reset_parameters", None)
             if callable(reset_parameters):
                 reset_parameters()

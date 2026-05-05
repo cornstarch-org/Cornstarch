@@ -41,6 +41,21 @@ def _model_is_meta(model: torch.nn.Module) -> bool:
     return bool(tensors) and all(tensor.is_meta for tensor in tensors)
 
 
+def _assert_cornstarch_owned_structure(
+    hf_state_dict: dict[str, torch.Tensor],
+    cornstarch_model: torch.nn.Module,
+) -> None:
+    """Assert Cornstarch owns the module tree while preserving HF export keys."""
+    assert not hasattr(cornstarch_model, "hf_model")
+    assert set(cornstarch_model.state_dict().keys()) != set(hf_state_dict.keys())
+
+
+def _assert_forward_is_deferred(cornstarch_model: torch.nn.Module) -> None:
+    """Document that native forward paths are outside this conversion pass."""
+    with pytest.raises(NotImplementedError):
+        cornstarch_model()
+
+
 def _roundtrip(
     config: PretrainedConfig,
     hf_factory: Callable[[PretrainedConfig], PreTrainedModel],
@@ -53,6 +68,8 @@ def _roundtrip(
     cornstarch_model = cornstarch_factory(config)
 
     assert cornstarch_model.attn_implementation == ATTN_IMPLEMENTATION
+    _assert_cornstarch_owned_structure(hf_model.state_dict(), cornstarch_model)
+    _assert_forward_is_deferred(cornstarch_model)
 
     missing, unexpected = cornstarch_model.load_hf_state_dict(hf_model.state_dict())
     assert missing == []

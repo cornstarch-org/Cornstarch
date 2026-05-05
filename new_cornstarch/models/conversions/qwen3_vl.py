@@ -17,8 +17,25 @@ def convert_qwen3_vl_vision_config(
     with torch.device("meta"):
         hf_model = Qwen3VLVisionModel(copy.deepcopy(config))
     return CornstarchVisionEncoder(
-        hf_model,
         config,
+        pre_encoder={
+            "patch_embed": hf_model.patch_embed,
+            "pos_embed": hf_model.pos_embed,
+            "rotary_pos_emb": hf_model.rotary_pos_emb,
+        },
         repeated_layers=hf_model.blocks,
+        post_encoder={
+            "merger": hf_model.merger,
+            "deepstack_merger_list": hf_model.deepstack_merger_list,
+        },
+        hf_to_cornstarch_prefixes=(
+            ("patch_embed.", "pre_encoder.patch_embed."),
+            ("pos_embed.", "pre_encoder.pos_embed."),
+            ("rotary_pos_emb.", "pre_encoder.rotary_pos_emb."),
+            ("blocks.", "repeated_layers.layers."),
+            ("merger.", "post_encoder.merger."),
+            ("deepstack_merger_list.", "post_encoder.deepstack_merger_list."),
+        ),
+        hf_model_factory=Qwen3VLVisionModel,
         attn_implementation=attn_implementation,
     )

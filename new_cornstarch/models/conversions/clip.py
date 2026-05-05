@@ -17,8 +17,19 @@ def convert_clip_vision_config(
     with torch.device("meta"):
         hf_model = CLIPVisionModel(copy.deepcopy(config))
     return CornstarchVisionEncoder(
-        hf_model,
         config,
+        pre_encoder={
+            "embeddings": hf_model.embeddings,
+            "pre_layrnorm": hf_model.pre_layrnorm,
+        },
         repeated_layers=hf_model.encoder.layers,
+        post_encoder={"post_layernorm": hf_model.post_layernorm},
+        hf_to_cornstarch_prefixes=(
+            ("embeddings.", "pre_encoder.embeddings."),
+            ("pre_layrnorm.", "pre_encoder.pre_layrnorm."),
+            ("encoder.layers.", "repeated_layers.layers."),
+            ("post_layernorm.", "post_encoder.post_layernorm."),
+        ),
+        hf_model_factory=CLIPVisionModel,
         attn_implementation=attn_implementation,
     )
