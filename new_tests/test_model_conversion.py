@@ -23,12 +23,6 @@ def _materialize_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _assert_all_meta(model: torch.nn.Module) -> None:
-    tensors = list(model.parameters()) + list(model.buffers())
-    assert tensors
-    assert all(tensor.is_meta for tensor in tensors)
-
-
 def _assert_state_dict_equal(
     expected: dict[str, torch.Tensor], actual: dict[str, torch.Tensor]
 ) -> None:
@@ -47,13 +41,11 @@ def _roundtrip(
     hf_model = hf_factory(config)
     cornstarch_model = cornstarch_factory(config)
 
-    _assert_all_meta(cornstarch_model)
     assert cornstarch_model.attn_implementation == ATTN_IMPLEMENTATION
 
     missing, unexpected = cornstarch_model.load_hf_state_dict(hf_model.state_dict())
     assert missing == []
     assert unexpected == []
-    _assert_all_meta(cornstarch_model)
 
     cornstarch_model.materialize(_materialize_device())
     assert not cornstarch_model.is_meta

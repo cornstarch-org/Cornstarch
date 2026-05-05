@@ -28,6 +28,10 @@ class RepeatedLayerStack(nn.Module):
                 layer.to("cpu")
 
     def materialize_layers(self, device: str | torch.device) -> None:
+        device = torch.device(device)
         for layer in self.layers:
-            if not any(param.is_meta for param in layer.parameters(recurse=True)):
+            tensors = list(layer.parameters(recurse=True)) + list(layer.buffers(recurse=True))
+            if any(tensor.is_meta for tensor in tensors):
+                layer.to_empty(device=device)
+            else:
                 layer.to(device)
