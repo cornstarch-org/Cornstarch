@@ -114,10 +114,10 @@ def _assert_outputs_close(expected: object, actual: object) -> None:
     for expected_tensor, actual_tensor in zip(expected_tensors, actual_tensors, strict=True):
         assert expected_tensor.shape == actual_tensor.shape
         torch.testing.assert_close(
-            actual_tensor.float().cpu(),
-            expected_tensor.float().cpu(),
-            rtol=3e-2,
-            atol=3e-2,
+            actual_tensor,
+            expected_tensor,
+            rtol=1e-5,
+            atol=1e-5,
         )
 
 
@@ -132,7 +132,7 @@ def _move_inputs(inputs: dict[str, object], device: torch.device) -> dict[str, o
 def _language_inputs(config: PretrainedConfig) -> dict[str, object]:
     """Build deterministic token inputs for causal language models."""
     input_ids = torch.arange(6, dtype=torch.long).unsqueeze(0) % config.vocab_size
-    return {"input_ids": input_ids, "labels": input_ids.clone(), "use_cache": False}
+    return {"input_ids": input_ids, "labels": input_ids.clone()}
 
 
 def _clip_inputs(config: PretrainedConfig) -> dict[str, object]:

@@ -410,6 +410,10 @@ class Qwen3VLVisionForwardSpec(TransformerForwardSpec):
         seq_len, _ = hidden_states.size()
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        position_embeddings = (
+            emb.float().cos().to(dtype=hidden_states.dtype),
+            emb.float().sin().to(dtype=hidden_states.dtype),
+        )
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
@@ -417,7 +421,7 @@ class Qwen3VLVisionForwardSpec(TransformerForwardSpec):
         return {
             "cu_seqlens": F.pad(cu_seqlens, (1, 0), value=0),
             "deepstack_features": [],
-            "position_embeddings": (emb.cos(), emb.sin()),
+            "position_embeddings": position_embeddings,
         }
 
     def get_layer_kwargs(
