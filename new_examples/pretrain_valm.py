@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+from pathlib import Path
 
 import torch
 import tyro
@@ -28,6 +29,9 @@ from common import (
     expand_modality_tokens,
     generate_random_image,
     generate_sine_wave,
+    layer_offload_config,
+    optional_torch_profiler,
+    place_repeated_layers_for_training,
     tokenize_text_batch,
     vision_config_from_pretrained,
 )
@@ -134,6 +138,8 @@ def pretrain(
     vision_encoder_name_or_path: str = "openai/clip-vit-base-patch32",
     audio_encoder_name_or_path: str = "openai/whisper-large-v3",
     llm_name_or_path: str = "meta-llama/Llama-3.2-3B-Instruct",
+    use_layer_offload: bool = False,
+    profile_output_path: Path | None = None,
 ):
     """Randomly initialize a vision-audio-language model with the new API."""
     torch.cuda.set_device(0)
@@ -147,10 +153,23 @@ def pretrain(
     vision_config = vision_config_from_pretrained(vision_encoder_name_or_path)
     audio_config = AutoConfig.from_pretrained(audio_encoder_name_or_path)
     language_config = AutoConfig.from_pretrained(llm_name_or_path)
+    offload_config = layer_offload_config(use_layer_offload, device)
 
-    language_model = from_hf_config(language_config, model_kind="language")
-    vision_encoder = from_hf_config(vision_config, model_kind="vision")
-    audio_encoder = from_hf_config(audio_config, model_kind="audio")
+    language_model = from_hf_config(
+        language_config,
+        model_kind="language",
+        layer_offload_config=offload_config,
+    )
+    vision_encoder = from_hf_config(
+        vision_config,
+        model_kind="vision",
+        layer_offload_config=offload_config,
+    )
+    audio_encoder = from_hf_config(
+        audio_config,
+        model_kind="audio",
+        layer_offload_config=offload_config,
+    )
     vision_module = build_modality_encoder(
         vision_encoder,
         language_model,
@@ -170,6 +189,9 @@ def pretrain(
     audio_encoder.materialize(device).to(dtype=DTYPE)
     vision_module.projector.to(device=device, dtype=DTYPE)
     audio_module.projector.to(device=device, dtype=DTYPE)
+    place_repeated_layers_for_training(language_model, use_layer_offload)
+    place_repeated_layers_for_training(vision_encoder, use_layer_offload)
+    place_repeated_layers_for_training(audio_encoder, use_layer_offload)
     language_model.train()
     vision_module.train()
     audio_module.train()
@@ -221,24 +243,27 @@ def pretrain(
     )
 
     dataloader_iter = iter(dataloader)
-    with tqdm(range(total_steps)) as pbar:
-        for _ in pbar:
-            batch = next(dataloader_iter)
-            outputs = _training_step(
-                language_model=language_model,
-                vision_module=vision_module,
-                audio_module=audio_module,
-                batch=batch,
-                image_token_id=image_token_id,
-                audio_token_id=audio_token_id,
-            )
-            loss = outputs.loss
-            loss.backward()
-            pbar.set_postfix({"loss": loss.item()})
+    with optional_torch_profiler(profile_output_path) as profiler:
+        with tqdm(range(total_steps)) as pbar:
+            for _ in pbar:
+                batch = next(dataloader_iter)
+                outputs = _training_step(
+                    language_model=language_model,
+                    vision_module=vision_module,
+                    audio_module=audio_module,
+                    batch=batch,
+                    image_token_id=image_token_id,
+                    audio_token_id=audio_token_id,
+                )
+                loss = outputs.loss
+                loss.backward()
+                pbar.set_postfix({"loss": loss.item()})
 
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                if profiler is not None:
+                    profiler.step()
 
 
 if __name__ == "__main__":

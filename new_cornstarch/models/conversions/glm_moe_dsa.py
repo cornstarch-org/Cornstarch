@@ -81,6 +81,7 @@ class GlmMoeDsaLanguageForwardSpec(CausalLanguageForwardSpec):
 def convert_glm_moe_dsa_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchLanguageModel:
     """Convert a GLM MoE DSA config into a meta-initialized language model."""
     with torch.device("meta"):
@@ -103,4 +104,5 @@ def convert_glm_moe_dsa_config(
         hf_model_factory=GlmMoeDsaForCausalLM,
         forward_spec=GlmMoeDsaLanguageForwardSpec(),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )

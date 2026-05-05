@@ -8,6 +8,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from new_cornstarch.models.encoder_base import CornstarchEncoderBase
 from new_cornstarch.models.forward_specs import TransformerForwardSpec
+from new_cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 
 
 class CornstarchVisionEncoder(CornstarchEncoderBase):
@@ -31,6 +32,7 @@ class CornstarchVisionEncoder(CornstarchEncoderBase):
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
         forward_spec: TransformerForwardSpec,
         attn_implementation: str | None = None,
+        layer_offload_config: RepeatedLayerOffloadConfig | None = None,
     ):
         """Initialize the shared encoder sections with vision-specific modules."""
         super().__init__(
@@ -42,4 +44,5 @@ class CornstarchVisionEncoder(CornstarchEncoderBase):
             hf_model_factory=hf_model_factory,
             forward_spec=forward_spec,
             attn_implementation=attn_implementation,
+            layer_offload_config=layer_offload_config,
         )

@@ -12,6 +12,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from new_cornstarch.models.kernel_provider import get_hf_kernel
 from new_cornstarch.models.lazy_init import InitializationPlan
+from new_cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from new_cornstarch.models.state_mapping import StateDictPrefixMap
 
 
@@ -46,6 +47,7 @@ class CornstarchModelBase(nn.Module):
         hf_model_factory: Callable[[PretrainedConfig], PreTrainedModel],
         attn_implementation: str | None = None,
         init_plan: InitializationPlan | None = None,
+        layer_offload_config: RepeatedLayerOffloadConfig | None = None,
     ):
         """Attach config, lazy initialization policy, and HF key translation.
 
@@ -59,6 +61,7 @@ class CornstarchModelBase(nn.Module):
         self.hf_config = hf_config
         self.config = hf_config
         self.attn_implementation = attn_implementation
+        self.layer_offload_config = layer_offload_config
         self._attention_kernel = None
         self._init_plan = init_plan or InitializationPlan.empty()
         self._state_mapper = StateDictPrefixMap(hf_to_cornstarch_prefixes)
@@ -72,6 +75,11 @@ class CornstarchModelBase(nn.Module):
         if self._attention_kernel is None:
             self._attention_kernel = get_hf_kernel(self.attn_implementation)
         return self._attention_kernel
+
+    @property
+    def uses_layer_offload(self) -> bool:
+        """Return whether repeated-layer CPU offload is enabled for forwards."""
+        return self.layer_offload_config is not None and self.layer_offload_config.enabled
 
     def set_empty_init(self) -> None:
         """Configure materialization to allocate tensors without initializing them."""

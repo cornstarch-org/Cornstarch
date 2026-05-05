@@ -6,6 +6,11 @@ import torch
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutput
 
+from new_cornstarch.models.layer_offload import (
+    layer_offload_enabled,
+    run_repeated_layers_with_offload,
+)
+
 
 LayerContext = dict[str, Any]
 
@@ -94,16 +99,28 @@ def run_transformer_forward(
     loop_kwargs.pop("hidden_states", None)
     context = spec.prepare_layer_context(model, hidden_states, **loop_kwargs)
 
-    for layer_idx, layer in enumerate(layers):
-        if spec.should_skip_layer(model, layer_idx, context, **loop_kwargs):
-            continue
-        layer_output = layer(
+    layer_offload_config = getattr(model, "layer_offload_config", None)
+    if layer_offload_enabled(layer_offload_config):
+        hidden_states = run_repeated_layers_with_offload(
+            model,
+            layers,
+            spec,
             hidden_states,
-            **spec.get_layer_kwargs(model, layer_idx, context, **loop_kwargs),
+            context,
+            loop_kwargs,
+            layer_offload_config,
         )
-        hidden_states = spec.process_layer_output(
-            model, layer_idx, layer_output, context, **loop_kwargs
-        )
+    else:
+        for layer_idx, layer in enumerate(layers):
+            if spec.should_skip_layer(model, layer_idx, context, **loop_kwargs):
+                continue
+            layer_output = layer(
+                hidden_states,
+                **spec.get_layer_kwargs(model, layer_idx, context, **loop_kwargs),
+            )
+            hidden_states = spec.process_layer_output(
+                model, layer_idx, layer_output, context, **loop_kwargs
+            )
 
     hidden_states = spec.finalize_hidden_states(model, hidden_states, context, **loop_kwargs)
     return spec.build_output(model, hidden_states, context, **loop_kwargs)

@@ -76,6 +76,7 @@ class Llama4LanguageForwardSpec(CausalLanguageForwardSpec):
 def convert_llama4_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchLanguageModel:
     """Convert a Llama4 text config into a meta-initialized language model."""
     with torch.device("meta"):
@@ -98,4 +99,5 @@ def convert_llama4_config(
         hf_model_factory=Llama4ForCausalLM,
         forward_spec=Llama4LanguageForwardSpec(),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )

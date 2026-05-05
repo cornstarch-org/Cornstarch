@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import numpy as np
+from pathlib import Path
+from typing import Iterator
+
 import torch
 from PIL import Image
 from transformers import AutoConfig
@@ -9,6 +13,7 @@ from new_cornstarch.models import (
     CornstarchEncoderToLanguageProjectorConfig,
     CornstarchModalityEncoder,
     CornstarchProjector,
+    RepeatedLayerOffloadConfig,
 )
 
 
@@ -98,3 +103,44 @@ def build_modality_encoder(
         projector,
         modality=modality,
     )
+
+
+def layer_offload_config(
+    use_layer_offload: bool,
+    execution_device: torch.device,
+) -> RepeatedLayerOffloadConfig | None:
+    if not use_layer_offload:
+        return None
+    return RepeatedLayerOffloadConfig(
+        enabled=True,
+        execution_device=execution_device,
+    )
+
+
+def place_repeated_layers_for_training(
+    model,
+    use_layer_offload: bool,
+) -> None:
+    if use_layer_offload:
+        model.offload_layers_to_cpu()
+
+
+@contextmanager
+def optional_torch_profiler(profile_output_path: Path | None) -> Iterator[object | None]:
+    if profile_output_path is None:
+        yield None
+        return
+
+    profile_output_path.parent.mkdir(parents=True, exist_ok=True)
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+    with torch.profiler.profile(
+        activities=activities,
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as profiler:
+        yield profiler
+    profiler.export_chrome_trace(str(profile_output_path))

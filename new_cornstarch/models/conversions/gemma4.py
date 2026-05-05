@@ -333,6 +333,7 @@ class Gemma4AudioForwardSpec(TransformerForwardSpec):
 def convert_gemma4_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchLanguageModel:
     """Convert a Gemma4 text config into a meta-initialized language model."""
     with torch.device("meta"):
@@ -383,12 +384,14 @@ def convert_gemma4_config(
         hf_model_factory=Gemma4ForCausalLM,
         forward_spec=Gemma4LanguageForwardSpec(),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )
 
 
 def convert_gemma4_vision_config(
     config: Gemma4VisionConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchVisionEncoder:
     """Convert a Gemma4 vision config into a Cornstarch vision encoder."""
     with torch.device("meta"):
@@ -410,12 +413,14 @@ def convert_gemma4_vision_config(
         hf_model_factory=Gemma4VisionModel,
         forward_spec=Gemma4VisionForwardSpec(),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )
 
 
 def convert_gemma4_audio_config(
     config: Gemma4AudioConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchAudioEncoder:
     """Convert a Gemma4 audio config into a Cornstarch audio encoder."""
     with torch.device("meta"):
@@ -441,4 +446,5 @@ def convert_gemma4_audio_config(
         hf_model_factory=Gemma4AudioModel,
         forward_spec=Gemma4AudioForwardSpec(),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )

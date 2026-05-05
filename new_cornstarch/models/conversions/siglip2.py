@@ -62,6 +62,7 @@ class Siglip2VisionForwardSpec(TransformerForwardSpec):
 def convert_siglip2_vision_config(
     config: Siglip2VisionConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchVisionEncoder:
     """Convert a SigLIP2 vision config into a Cornstarch vision encoder."""
     with torch.device("meta"):
@@ -83,4 +84,5 @@ def convert_siglip2_vision_config(
         hf_model_factory=Siglip2VisionModel,
         forward_spec=Siglip2VisionForwardSpec(),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )

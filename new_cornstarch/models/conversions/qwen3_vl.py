@@ -198,6 +198,7 @@ class Qwen3VLVisionForwardSpec(TransformerForwardSpec):
 def convert_qwen3_vl_vision_config(
     config: Qwen3VLVisionConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchVisionEncoder:
     """Convert a Qwen3-VL vision config into a Cornstarch vision encoder."""
     with torch.device("meta"):
@@ -229,4 +230,5 @@ def convert_qwen3_vl_vision_config(
             deepstack_visual_indexes=tuple(hf_model.deepstack_visual_indexes),
         ),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )

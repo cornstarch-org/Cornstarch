@@ -13,6 +13,7 @@ from new_cornstarch.models.language_model import CornstarchLanguageModel
 def convert_deepseek_v3_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchLanguageModel:
     """Convert a DeepSeek-V3 config into a meta-initialized language model."""
     with torch.device("meta"):
@@ -35,4 +36,5 @@ def convert_deepseek_v3_config(
         hf_model_factory=DeepseekV3ForCausalLM,
         forward_spec=CausalLanguageForwardSpec(),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )

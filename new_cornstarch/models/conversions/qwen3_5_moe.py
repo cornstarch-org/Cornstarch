@@ -111,6 +111,7 @@ class QwenMoeLanguageForwardSpec(CausalLanguageForwardSpec):
 def convert_qwen3_5_moe_config(
     config: PretrainedConfig,
     attn_implementation: str | None = None,
+    layer_offload_config=None,
 ) -> CornstarchLanguageModel:
     """Convert a Qwen3.5 MoE text config into a Cornstarch language model."""
     with torch.device("meta"):
@@ -133,4 +134,5 @@ def convert_qwen3_5_moe_config(
         hf_model_factory=Qwen3_5MoeForCausalLM,
         forward_spec=QwenMoeLanguageForwardSpec(),
         attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
     )
