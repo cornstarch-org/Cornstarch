@@ -7,7 +7,7 @@ import torch
 from transformers import PretrainedConfig
 
 from new_cornstarch.models import from_hf_config
-from new_tests.model_configs import (
+from new_tests.model.model_configs import (
     clip_vision_config,
     deepseek_v3_config,
     llama_config,

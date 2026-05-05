@@ -15,7 +15,7 @@ from transformers.models.siglip2.modeling_siglip2 import Siglip2VisionModel
 from transformers.models.whisper.modeling_whisper import WhisperModel
 
 from new_cornstarch.models import from_hf_config
-from new_tests.model_configs import (
+from new_tests.model.model_configs import (
     clip_vision_config,
     deepseek_v3_config,
     llama_config,
