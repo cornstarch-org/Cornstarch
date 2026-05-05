@@ -40,6 +40,8 @@ class CornstarchModelBase(nn.Module):
     exposes repeated layers for materialization, offload, and later parallelism.
     """
 
+    supports_gradient_checkpointing = True
+
     def __init__(
         self,
         hf_config: PretrainedConfig,
@@ -62,6 +64,7 @@ class CornstarchModelBase(nn.Module):
         self.config = hf_config
         self.attn_implementation = attn_implementation
         self.layer_offload_config = layer_offload_config
+        self.gradient_checkpointing = True
         self._attention_kernel = None
         self._init_plan = init_plan or InitializationPlan.empty()
         self._state_mapper = StateDictPrefixMap(hf_to_cornstarch_prefixes)
@@ -80,6 +83,21 @@ class CornstarchModelBase(nn.Module):
     def uses_layer_offload(self) -> bool:
         """Return whether repeated-layer CPU offload is enabled for forwards."""
         return self.layer_offload_config is not None and self.layer_offload_config.enabled
+
+    @property
+    def is_gradient_checkpointing(self) -> bool:
+        """Return whether activation checkpointing is enabled on this module."""
+        return self.gradient_checkpointing
+
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs: dict[str, Any] | None = None
+    ) -> None:
+        """Enable HF-compatible activation checkpointing for repeated layers."""
+        self.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Keep the HF API surface while checkpointing remains mandatory."""
+        raise RuntimeError("Cornstarch repeated-layer forwards require activation checkpointing.")
 
     def set_empty_init(self) -> None:
         """Configure materialization to allocate tensors without initializing them."""

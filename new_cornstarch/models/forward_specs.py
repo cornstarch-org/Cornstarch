@@ -4,9 +4,11 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from transformers.modeling_outputs import BaseModelOutput
 
 from new_cornstarch.models.layer_offload import (
+    activation_checkpoint_recompute_active,
     create_repeated_layer_offload_runtime,
     layer_offload_enabled,
     run_repeated_layers_with_offload,
@@ -96,32 +98,61 @@ def run_transformer_forward(
     predictable.
     """
     layer_offload_config = getattr(model, "layer_offload_config", None)
+    hidden_states = spec.embed_inputs(model, **kwargs)
+    loop_kwargs = dict(kwargs)
+    loop_kwargs.pop("hidden_states", None)
+    context = spec.prepare_layer_context(model, hidden_states, **loop_kwargs)
+
     if layer_offload_enabled(layer_offload_config):
         manager = create_repeated_layer_offload_runtime(layers, layer_offload_config)
         try:
             if len(layers) > 0:
                 manager.prefetch(0, direction="forward")
-            hidden_states = spec.embed_inputs(model, **kwargs)
-            loop_kwargs = dict(kwargs)
-            loop_kwargs.pop("hidden_states", None)
-            context = spec.prepare_layer_context(model, hidden_states, **loop_kwargs)
-            hidden_states = run_repeated_layers_with_offload(
+            run_repeated_layers = _build_offloaded_layer_runner(
                 model,
                 layers,
                 spec,
-                hidden_states,
                 context,
                 loop_kwargs,
                 layer_offload_config,
-                manager=manager,
+                manager,
+            )
+            hidden_states = _run_checkpointed_repeated_layers(
+                model,
+                hidden_states,
+                run_repeated_layers,
             )
         finally:
-            manager.free_all()
+            if not activation_checkpoint_recompute_active():
+                manager.free_all()
     else:
-        hidden_states = spec.embed_inputs(model, **kwargs)
-        loop_kwargs = dict(kwargs)
-        loop_kwargs.pop("hidden_states", None)
-        context = spec.prepare_layer_context(model, hidden_states, **loop_kwargs)
+        run_repeated_layers = _build_direct_layer_runner(
+            model,
+            layers,
+            spec,
+            context,
+            loop_kwargs,
+        )
+        hidden_states = _run_checkpointed_repeated_layers(
+            model,
+            hidden_states,
+            run_repeated_layers,
+        )
+
+    hidden_states = spec.finalize_hidden_states(model, hidden_states, context, **loop_kwargs)
+    return spec.build_output(model, hidden_states, context, **loop_kwargs)
+
+
+def _build_direct_layer_runner(
+    model: nn.Module,
+    layers: nn.ModuleList,
+    spec: TransformerForwardSpec,
+    context: LayerContext,
+    loop_kwargs: dict[str, Any],
+) -> Any:
+    """Return the normal repeated-layer function used by checkpointing."""
+
+    def run_layers(hidden_states: torch.Tensor) -> torch.Tensor:
         for layer_idx, layer in enumerate(layers):
             if spec.should_skip_layer(model, layer_idx, context, **loop_kwargs):
                 continue
@@ -132,9 +163,62 @@ def run_transformer_forward(
             hidden_states = spec.process_layer_output(
                 model, layer_idx, layer_output, context, **loop_kwargs
             )
+        return hidden_states
 
-    hidden_states = spec.finalize_hidden_states(model, hidden_states, context, **loop_kwargs)
-    return spec.build_output(model, hidden_states, context, **loop_kwargs)
+    return run_layers
+
+
+def _build_offloaded_layer_runner(
+    model: nn.Module,
+    layers: nn.ModuleList,
+    spec: TransformerForwardSpec,
+    context: LayerContext,
+    loop_kwargs: dict[str, Any],
+    layer_offload_config: Any,
+    manager: Any,
+) -> Any:
+    """Return the repeated-layer function that checkpoint will replay."""
+
+    def run_layers(hidden_states: torch.Tensor) -> torch.Tensor:
+        return run_repeated_layers_with_offload(
+            model,
+            layers,
+            spec,
+            hidden_states,
+            context,
+            loop_kwargs,
+            layer_offload_config,
+            manager=manager,
+        )
+
+    return run_layers
+
+
+def _run_checkpointed_repeated_layers(
+    model: nn.Module,
+    hidden_states: torch.Tensor,
+    run_repeated_layers: Any,
+) -> torch.Tensor:
+    """Run repeated layers under mandatory non-reentrant checkpointing."""
+    if _should_checkpoint_repeated_layers(model, hidden_states):
+        return checkpoint(
+            run_repeated_layers,
+            hidden_states,
+            use_reentrant=False,
+        )
+    return run_repeated_layers(hidden_states)
+
+
+def _should_checkpoint_repeated_layers(
+    model: nn.Module, hidden_states: torch.Tensor
+) -> bool:
+    """Return whether this training pass should checkpoint repeated layers."""
+    return (
+        model.training
+        and torch.is_grad_enabled()
+        and not activation_checkpoint_recompute_active()
+        and hidden_states.requires_grad
+    )
 
 
 def _filtered_layer_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:

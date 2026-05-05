@@ -156,6 +156,7 @@ def test_layer_offload_config_threads_through_model_factory() -> None:
 
     assert model.layer_offload_config is config
     assert model.uses_layer_offload
+    assert model.is_gradient_checkpointing
 
 
 def test_repeated_layer_offload_is_disabled_by_default() -> None:
@@ -165,6 +166,7 @@ def test_repeated_layer_offload_is_disabled_by_default() -> None:
 
     assert model.layer_offload_config is None
     assert not model.uses_layer_offload
+    assert model.is_gradient_checkpointing
 
 
 def test_enabled_layer_offload_rejects_cpu_execution_device() -> None:
@@ -239,18 +241,10 @@ def test_offloaded_backward_prefetches_previous_layer_and_accumulates_cpu_grads(
     offloaded_loss.backward()
     direct_loss.backward()
 
-    assert _event_index(events, "prefetch_backward", 1) < _event_index(
-        events, "run_backward", 2
-    )
-    assert _event_index(events, "prefetch_backward", 1) < _event_index(
-        events, "layer_backward_recompute_enter", 2
-    )
-    assert _event_index(events, "prefetch_backward", 0) < _event_index(
-        events, "run_backward", 1
-    )
-    assert _event_index(events, "prefetch_backward", 0) < _event_index(
-        events, "layer_backward_recompute_enter", 1
-    )
+    for layer_idx in range(3):
+        assert events.count(("flat_parameters_transfer", layer_idx)) == 2
+        assert events.count(("prefetch_backward", layer_idx)) == 0
+        assert ("free_backward", layer_idx) in events
     for offloaded_param, direct_param in zip(
         offloaded_model.parameters(), direct_model.parameters(), strict=True
     ):
@@ -382,6 +376,45 @@ def test_offloaded_optimizer_updates_repeated_layers_on_cpu_with_adam() -> None:
         for before, after in zip(before_step, after_step, strict=True)
     )
     assert all(parameter.device.type == "cpu" for parameter in model.parameters())
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Repeated layer offload executes on CUDA."
+)
+def test_offload_forces_checkpoint_recompute_and_reuses_device_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _collect_offload_events(monkeypatch)
+    offloaded_layers = synthetic_layer_stack(width=8, depth=3)
+    direct_layers = copy.deepcopy(offloaded_layers)
+    offloaded_model = SyntheticModel(
+        offloaded_layers,
+        RepeatedLayerOffloadConfig(enabled=True),
+    )
+    direct_model = SyntheticModel(direct_layers).to("cuda")
+    hidden_states = torch.randn(2, 8, device="cuda", requires_grad=True)
+    direct_hidden_states = hidden_states.detach().clone().requires_grad_(True)
+
+    offloaded_output = offloaded_model(hidden_states).last_hidden_state
+    direct_output = direct_model(direct_hidden_states).last_hidden_state
+    offloaded_loss = offloaded_output.float().square().mean()
+    direct_loss = direct_output.float().square().mean()
+
+    offloaded_loss.backward()
+    direct_loss.backward()
+
+    assert torch.equal(offloaded_loss, direct_loss)
+    assert hidden_states.grad is not None
+    assert torch.equal(hidden_states.grad.cpu(), direct_hidden_states.grad.cpu())
+    for offloaded_param, direct_param in zip(
+        offloaded_model.parameters(), direct_model.parameters(), strict=True
+    ):
+        assert offloaded_param.grad is not None
+        assert torch.equal(offloaded_param.grad, direct_param.grad.cpu())
+    for layer_idx in range(3):
+        assert events.count(("flat_parameters_transfer", layer_idx)) == 2
+        assert events.count(("prefetch_backward", layer_idx)) == 0
+        assert ("free_backward", layer_idx) in events
 
 
 @pytest.mark.skipif(

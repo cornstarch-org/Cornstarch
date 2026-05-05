@@ -66,6 +66,7 @@ def run_repeated_layers_with_offload(
     """
     owns_manager = manager is None
     manager = manager or create_repeated_layer_offload_runtime(layers, config)
+    retain_forward_layers_for_backward = activation_checkpoint_recompute_active()
 
     try:
         for layer_idx, layer in enumerate(layers):
@@ -93,11 +94,12 @@ def run_repeated_layers_with_offload(
                 ),
                 *tuple(layer.parameters(recurse=True)),
             )
-            manager.free(layer_idx, direction="forward")
+            if not retain_forward_layers_for_backward:
+                manager.free(layer_idx, direction="forward")
 
         return _move_to_device(hidden_states, manager.execution_device)
     finally:
-        if owns_manager:
+        if owns_manager and not retain_forward_layers_for_backward:
             manager.free_all()
 
 
@@ -491,6 +493,18 @@ def _previous_executable_layer_index(
         if not spec.should_skip_layer(model, previous_idx, context, **loop_kwargs):
             return previous_idx
     return None
+
+
+def activation_checkpoint_recompute_active() -> bool:
+    """Return whether the current forward is being replayed inside backward.
+
+    PyTorch activation checkpointing rebuilds the forward graph while an
+    autograd graph task is already running. In that path, keeping transient CUDA
+    layer copies until their custom backward nodes run lets backward reuse the
+    parameters from the recompute instead of immediately offloading them and
+    reloading them again.
+    """
+    return torch.is_grad_enabled() and torch._C._current_graph_task_id() != -1
 
 
 def _move_to_device(value: Any, device: torch.device) -> Any:
