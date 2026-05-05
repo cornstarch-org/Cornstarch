@@ -148,3 +148,20 @@ def test_offload_layers_to_cpu_skips_unmaterialized_layers(
         not tensor.is_meta and tensor.device.type == "cpu" for tensor in materialized_tensors
     )
     assert all(tensor.is_meta for tensor in meta_tensors)
+
+
+def test_materialize_handles_duplicate_tied_parameter_names() -> None:
+    """Verify tied Llama embeddings do not leave the LM head on meta."""
+    cornstarch_model = from_hf_config(
+        llama_config(), attn_implementation=ATTN_IMPLEMENTATION
+    )
+    cornstarch_model.set_random_init()
+
+    cornstarch_model.materialize("cpu")
+
+    meta_parameters = [
+        name
+        for name, parameter in cornstarch_model.named_parameters(remove_duplicate=False)
+        if parameter.is_meta
+    ]
+    assert meta_parameters == []

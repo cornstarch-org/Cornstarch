@@ -65,6 +65,9 @@ def test_offloaded_forward_prefetches_next_layer_and_records_cpu_activations() -
         ("activation_cpu", 1),
         ("activation_cpu", 2),
     ]
+    assert _event_index(events, "prefetch_forward", 0) < _event_index(
+        events, "run_forward", 0
+    )
     assert _event_index(events, "prefetch_forward", 1) < _event_index(
         events, "run_forward", 0
     )
@@ -195,3 +198,28 @@ def test_offloaded_layers_use_transient_cuda_copies_and_keep_cpu_masters() -> No
     assert ("prefetch_cuda", 0) in events
     assert ("prefetch_wait", 0) in events
     assert ("free_forward", 0) in events
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Repeated layer offload executes on CUDA."
+)
+def test_model_level_offload_materializes_repeated_layers_on_cpu() -> None:
+    model = from_hf_config(
+        llama_config(),
+        attn_implementation="kernels-community/flash-attn3",
+        layer_offload_config=RepeatedLayerOffloadConfig(enabled=True),
+    )
+    model.set_random_init()
+    model.materialize("cuda")
+
+    for name, parameter in model.pre_decoder.named_parameters(recurse=True):
+        assert parameter.device.type == "cuda", name
+    for name, parameter in model.post_decoder.named_parameters(
+        recurse=True,
+        remove_duplicate=False,
+    ):
+        assert parameter.device.type == "cuda", name
+
+    layer_parameters = list(model.decoder_layers.parameters())
+    assert layer_parameters
+    assert all(parameter.device.type == "cpu" for parameter in layer_parameters)

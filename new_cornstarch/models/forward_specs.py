@@ -7,6 +7,7 @@ from torch import nn
 from transformers.modeling_outputs import BaseModelOutput
 
 from new_cornstarch.models.layer_offload import (
+    create_repeated_layer_offload_runtime,
     layer_offload_enabled,
     run_repeated_layers_with_offload,
 )
@@ -94,23 +95,33 @@ def run_transformer_forward(
     unless a spec chooses to implement them, keeping the training path simple and
     predictable.
     """
-    hidden_states = spec.embed_inputs(model, **kwargs)
-    loop_kwargs = dict(kwargs)
-    loop_kwargs.pop("hidden_states", None)
-    context = spec.prepare_layer_context(model, hidden_states, **loop_kwargs)
-
     layer_offload_config = getattr(model, "layer_offload_config", None)
     if layer_offload_enabled(layer_offload_config):
-        hidden_states = run_repeated_layers_with_offload(
-            model,
-            layers,
-            spec,
-            hidden_states,
-            context,
-            loop_kwargs,
-            layer_offload_config,
-        )
+        manager = create_repeated_layer_offload_runtime(layers, layer_offload_config)
+        try:
+            if len(layers) > 0:
+                manager.prefetch(0, direction="forward")
+            hidden_states = spec.embed_inputs(model, **kwargs)
+            loop_kwargs = dict(kwargs)
+            loop_kwargs.pop("hidden_states", None)
+            context = spec.prepare_layer_context(model, hidden_states, **loop_kwargs)
+            hidden_states = run_repeated_layers_with_offload(
+                model,
+                layers,
+                spec,
+                hidden_states,
+                context,
+                loop_kwargs,
+                layer_offload_config,
+                manager=manager,
+            )
+        finally:
+            manager.free_all()
     else:
+        hidden_states = spec.embed_inputs(model, **kwargs)
+        loop_kwargs = dict(kwargs)
+        loop_kwargs.pop("hidden_states", None)
+        context = spec.prepare_layer_context(model, hidden_states, **loop_kwargs)
         for layer_idx, layer in enumerate(layers):
             if spec.should_skip_layer(model, layer_idx, context, **loop_kwargs):
                 continue

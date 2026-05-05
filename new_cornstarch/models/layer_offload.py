@@ -62,6 +62,7 @@ def run_repeated_layers_with_offload(
     context: dict[str, Any],
     loop_kwargs: dict[str, Any],
     config: RepeatedLayerOffloadConfig,
+    manager: _RepeatedLayerOffloadRuntime | None = None,
 ) -> torch.Tensor:
     """Run a repeated layer stack with CPU masters and transient device copies.
 
@@ -71,7 +72,8 @@ def run_repeated_layers_with_offload(
     device-copy lifetime, and the custom autograd boundary that recomputes each
     layer during backward.
     """
-    manager = _RepeatedLayerOffloadRuntime(layers, config)
+    owns_manager = manager is None
+    manager = manager or create_repeated_layer_offload_runtime(layers, config)
 
     try:
         for layer_idx, layer in enumerate(layers):
@@ -105,7 +107,15 @@ def run_repeated_layers_with_offload(
 
         return _move_to_device(hidden_states, manager.execution_device)
     finally:
-        manager.free_all()
+        if owns_manager:
+            manager.free_all()
+
+
+def create_repeated_layer_offload_runtime(
+    layers: nn.ModuleList, config: RepeatedLayerOffloadConfig
+) -> _RepeatedLayerOffloadRuntime:
+    """Create a runtime manager so callers can prefetch before layer iteration."""
+    return _RepeatedLayerOffloadRuntime(layers, config)
 
 
 class _RepeatedLayerOffloadRuntime:

@@ -187,7 +187,7 @@ class CornstarchModelBase(nn.Module):
     def _offload_module_list_to_cpu(
         layers: nn.ModuleList, layer_indices: Iterable[int] | None = None
     ) -> None:
-        """Move selected materialized layers to CPU without touching meta layers."""
+        """Move selected repeated layers to CPU without touching non-layer modules."""
         indices = range(len(layers)) if layer_indices is None else layer_indices
         for index in indices:
             layer = layers[index]
@@ -213,17 +213,51 @@ class CornstarchModelBase(nn.Module):
         """Translate internal key names into sorted Hugging Face key names."""
         return sorted(self._state_mapper.cornstarch_to_hf_key(key) for key in keys)
 
+    def _is_offloaded_repeated_layer_tensor(self, name: str) -> bool:
+        """Return whether a tensor belongs to a CPU-master repeated layer."""
+        if not self.uses_layer_offload:
+            return False
+        return any(
+            name == module_name or name.startswith(f"{module_name}.")
+            for module_name in self._repeated_layer_module_names()
+        )
+
+    def _materialization_device_for_tensor(
+        self, name: str, requested_device: torch.device
+    ) -> torch.device:
+        """Choose the allocation device for a tensor during materialization."""
+        if self._is_offloaded_repeated_layer_tensor(name):
+            assert self.layer_offload_config is not None
+            return self.layer_offload_config.cpu_torch_device
+        return requested_device
+
+    def _repeated_layer_module_names(self) -> tuple[str, ...]:
+        """Return root module names that contain independently scheduled layers."""
+        return ()
+
     def _load_checkpoint_state_dict(self, device: torch.device) -> Mapping[str, torch.Tensor]:
         """Load staged checkpoint tensors onto the materialization device."""
         if self._init_plan.state_dict is not None:
             return {
-                key: tensor.to(device=device, non_blocking=True)
+                key: tensor.to(
+                    device=self._materialization_device_for_tensor(key, device),
+                    non_blocking=True,
+                )
                 for key, tensor in self._init_plan.state_dict.items()
             }
         if self._init_plan.checkpoint_path is None:
             raise RuntimeError("Checkpoint initialization requires a state_dict or checkpoint_path.")
-        state_dict = load_file(str(self._init_plan.checkpoint_path), device=str(device))
-        return self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
+        checkpoint_device = "cpu" if self.uses_layer_offload else str(device)
+        state_dict = self._state_mapper.hf_to_cornstarch_state_dict(
+            load_file(str(self._init_plan.checkpoint_path), device=checkpoint_device)
+        )
+        return {
+            key: tensor.to(
+                device=self._materialization_device_for_tensor(key, device),
+                non_blocking=True,
+            )
+            for key, tensor in state_dict.items()
+        }
 
     def _copy_deterministic_meta_buffers(self, device: torch.device) -> None:
         """Materialize deterministic helper buffers that are not in checkpoints."""
@@ -269,21 +303,24 @@ class CornstarchModelBase(nn.Module):
             if not target_buffer.is_meta:
                 continue
             source_buffer = source_module.get_buffer(name)
+            full_name = f"{target_path}.{name}"
             replacement = source_buffer.to(
-                device=device,
+                device=self._materialization_device_for_tensor(full_name, device),
                 dtype=target_buffer.dtype if target_buffer.is_floating_point() else None,
             )
-            self._set_tensor(f"{target_path}.{name}", replacement, None)
+            self._set_tensor(full_name, replacement, None)
 
     def _materialize_empty(self, device: torch.device) -> None:
         """Replace meta parameters and buffers with empty tensors on a device."""
-        for name, parameter in list(self.named_parameters()):
+        for name, parameter in list(self.named_parameters(remove_duplicate=False)):
             if parameter.is_meta:
-                self._set_tensor(name, torch.empty(parameter.shape, dtype=parameter.dtype, device=device), parameter.requires_grad)
+                target_device = self._materialization_device_for_tensor(name, device)
+                self._set_tensor(name, torch.empty(parameter.shape, dtype=parameter.dtype, device=target_device), parameter.requires_grad)
 
-        for name, buffer in list(self.named_buffers()):
+        for name, buffer in list(self.named_buffers(remove_duplicate=False)):
             if buffer.is_meta:
-                self._set_tensor(name, torch.empty(buffer.shape, dtype=buffer.dtype, device=device), None)
+                target_device = self._materialization_device_for_tensor(name, device)
+                self._set_tensor(name, torch.empty(buffer.shape, dtype=buffer.dtype, device=target_device), None)
 
     def _random_initialize(self) -> None:
         """Run the best available PyTorch initialization hooks."""

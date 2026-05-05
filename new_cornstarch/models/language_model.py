@@ -79,4 +79,11 @@ class CornstarchLanguageModel(CornstarchModelBase):
 
     def materialize_layers(self, device: str | torch.device) -> None:
         """Allocate or move decoder layers onto the requested device."""
+        if self.uses_layer_offload:
+            assert self.layer_offload_config is not None
+            device = self.layer_offload_config.cpu_torch_device
         self._materialize_module_list(self.decoder_layers, torch.device(device))
+
+    def _repeated_layer_module_names(self) -> tuple[str, ...]:
+        """Return module names whose tensors are CPU masters under layer offload."""
+        return ("decoder_layers",)
