@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 
 @dataclass(frozen=True)
@@ -80,19 +81,35 @@ def run_repeated_layers_with_offload(
             layer_kwargs = spec.get_layer_kwargs(
                 model, layer_idx, context, **loop_kwargs
             )
-            hidden_states = _OffloadedRepeatedLayer.apply(
-                hidden_states,
-                _LayerExecutionRequest(
+            def run_layer(
+                layer_input: torch.Tensor,
+                layer: nn.Module = layer,
+                layer_idx: int = layer_idx,
+                next_layer_idx: int | None = next_layer_idx,
+                layer_kwargs: dict[str, Any] = layer_kwargs,
+            ) -> torch.Tensor:
+                request = _LayerExecutionRequest(
                     model=model,
                     spec=spec,
                     layer_idx=layer_idx,
-                    next_layer_idx=next_layer_idx,
+                    next_layer_idx=None
+                    if activation_checkpoint_recompute_active()
+                    else next_layer_idx,
                     layer_kwargs=layer_kwargs,
                     context=context,
                     loop_kwargs=loop_kwargs,
                     manager=manager,
-                ),
-                *tuple(layer.parameters(recurse=True)),
+                )
+                return _OffloadedRepeatedLayer.apply(
+                    layer_input,
+                    request,
+                    *tuple(layer.parameters(recurse=True)),
+                )
+
+            hidden_states = _run_checkpointed_offloaded_layer(
+                model,
+                hidden_states,
+                run_layer,
             )
             if not retain_forward_layers_for_backward:
                 manager.free(layer_idx, direction="forward")
@@ -108,6 +125,26 @@ def create_repeated_layer_offload_runtime(
 ) -> _RepeatedLayerOffloadRuntime:
     """Create a runtime manager so callers can prefetch before layer iteration."""
     return _RepeatedLayerOffloadRuntime(layers, config)
+
+
+def _run_checkpointed_offloaded_layer(
+    model: nn.Module,
+    hidden_states: torch.Tensor,
+    run_layer: Any,
+) -> torch.Tensor:
+    """Run one offloaded layer under mandatory non-reentrant checkpointing."""
+    if (
+        model.training
+        and torch.is_grad_enabled()
+        and not activation_checkpoint_recompute_active()
+        and hidden_states.requires_grad
+    ):
+        return checkpoint(
+            run_layer,
+            hidden_states,
+            use_reentrant=False,
+        )
+    return run_layer(hidden_states)
 
 
 class _RepeatedLayerOffloadRuntime:
@@ -374,7 +411,10 @@ class _OffloadedRepeatedLayer(torch.autograd.Function):
         ctx.save_for_backward(input_cpu)
 
         device_layer = request.manager.take(request.layer_idx, direction="forward")
-        if request.next_layer_idx is not None:
+        if (
+            request.next_layer_idx is not None
+            and not activation_checkpoint_recompute_active()
+        ):
             request.manager.prefetch(request.next_layer_idx, direction="forward")
         input_device = _move_tensor_flat_to_device(
             hidden_states.detach(), request.manager.execution_device
@@ -396,16 +436,6 @@ class _OffloadedRepeatedLayer(torch.autograd.Function):
         request: _LayerExecutionRequest = ctx.request
         (input_cpu,) = ctx.saved_tensors
         device_layer = request.manager.take(request.layer_idx, direction="backward")
-        prev_layer_idx = _previous_executable_layer_index(
-            request.model,
-            request.manager.layers,
-            request.spec,
-            request.layer_idx,
-            request.context,
-            request.loop_kwargs,
-        )
-        if prev_layer_idx is not None:
-            request.manager.prefetch(prev_layer_idx, direction="backward")
         input_ready_event = getattr(ctx, "input_cpu_ready_event", None)
         if input_ready_event is not None:
             torch.cuda.current_stream(request.manager.execution_device).wait_event(
@@ -478,20 +508,6 @@ def _next_executable_layer_index(
     for next_idx in range(layer_idx + 1, len(layers)):
         if not spec.should_skip_layer(model, next_idx, context, **loop_kwargs):
             return next_idx
-    return None
-
-
-def _previous_executable_layer_index(
-    model: nn.Module,
-    layers: nn.ModuleList,
-    spec: Any,
-    layer_idx: int,
-    context: dict[str, Any],
-    loop_kwargs: dict[str, Any],
-) -> int | None:
-    for previous_idx in range(layer_idx - 1, -1, -1):
-        if not spec.should_skip_layer(model, previous_idx, context, **loop_kwargs):
-            return previous_idx
     return None
 
 
