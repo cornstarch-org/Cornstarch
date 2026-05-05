@@ -6,7 +6,7 @@ import torch
 from transformers import PretrainedConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
-from new_cornstarch.models.forward_specs import CausalLanguageForwardSpec
+from new_cornstarch.models.conversions.llama import CausalLanguageForwardSpec
 from new_cornstarch.models.language_model import CornstarchLanguageModel
 
 

@@ -6,7 +6,7 @@ import torch
 from transformers import PretrainedConfig
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 
-from new_cornstarch.models.forward_specs import CausalLanguageForwardSpec
+from new_cornstarch.models.conversions.llama import CausalLanguageForwardSpec
 from new_cornstarch.models.language_model import CornstarchLanguageModel
 
 
