@@ -8,6 +8,12 @@ from transformers import AutoConfig, PretrainedConfig
 
 from new_cornstarch.models.conversions.clip import convert_clip_vision_config
 from new_cornstarch.models.conversions.deepseek_v3 import convert_deepseek_v3_config
+from new_cornstarch.models.conversions.gemma4 import (
+    convert_gemma4_audio_config,
+    convert_gemma4_config,
+    convert_gemma4_vision_config,
+)
+from new_cornstarch.models.conversions.glm_moe_dsa import convert_glm_moe_dsa_config
 from new_cornstarch.models.conversions.llama import convert_llama_config
 from new_cornstarch.models.conversions.qwen3_5 import convert_qwen3_5_config
 from new_cornstarch.models.conversions.qwen3_5_moe import convert_qwen3_5_moe_config
@@ -32,15 +38,23 @@ def from_hf_config(
     """
     del trust_remote_code
     model_type = getattr(config, "model_type", None)
-    if model_kind == "vision" or model_type == "clip_vision_model":
+    if model_type == "clip_vision_model":
         return convert_clip_vision_config(config, attn_implementation=attn_implementation)
     if isinstance(config, Siglip2VisionConfig) or model_type == "siglip2_vision_model":
         return convert_siglip2_vision_config(config, attn_implementation=attn_implementation)
     if isinstance(config, Qwen3VLVisionConfig) or model_type == "qwen3_vl_vision":
         return convert_qwen3_vl_vision_config(config, attn_implementation=attn_implementation)
-    if model_kind == "audio" or model_type == "whisper":
+    if model_type == "gemma4_vision":
+        return convert_gemma4_vision_config(config, attn_implementation=attn_implementation)
+    if model_kind == "vision":
+        return convert_clip_vision_config(config, attn_implementation=attn_implementation)
+    if model_type == "whisper":
         return convert_whisper_config(config, attn_implementation=attn_implementation)
-    if model_kind == "language" or model_type == "llama":
+    if model_type == "gemma4_audio":
+        return convert_gemma4_audio_config(config, attn_implementation=attn_implementation)
+    if model_kind == "audio":
+        return convert_whisper_config(config, attn_implementation=attn_implementation)
+    if model_type == "llama":
         return convert_llama_config(config, attn_implementation=attn_implementation)
     if model_type == "qwen3_5_text":
         return convert_qwen3_5_config(config, attn_implementation=attn_implementation)
@@ -48,6 +62,12 @@ def from_hf_config(
         return convert_qwen3_5_moe_config(config, attn_implementation=attn_implementation)
     if model_type == "deepseek_v3":
         return convert_deepseek_v3_config(config, attn_implementation=attn_implementation)
+    if model_type == "gemma4_text":
+        return convert_gemma4_config(config, attn_implementation=attn_implementation)
+    if model_type == "glm_moe_dsa":
+        return convert_glm_moe_dsa_config(config, attn_implementation=attn_implementation)
+    if model_kind == "language":
+        return convert_llama_config(config, attn_implementation=attn_implementation)
     raise ValueError(
         f"Unsupported model architecture for Cornstarch conversion: {model_type}"
     )
@@ -89,11 +109,23 @@ def to_hf_state_dict(model: CornstarchModelBase) -> dict[str, torch.Tensor]:
 def infer_model_kind(config: PretrainedConfig) -> str:
     """Infer whether a supported Hugging Face config is language, vision, or audio."""
     model_type = getattr(config, "model_type", None)
-    if model_type in {"clip_vision_model", "siglip2_vision_model", "qwen3_vl_vision"}:
+    if model_type in {
+        "clip_vision_model",
+        "gemma4_vision",
+        "qwen3_vl_vision",
+        "siglip2_vision_model",
+    }:
         return "vision"
-    if model_type == "whisper":
+    if model_type in {"gemma4_audio", "whisper"}:
         return "audio"
-    if model_type in {"llama", "qwen3_5_text", "qwen3_5_moe_text", "deepseek_v3"}:
+    if model_type in {
+        "deepseek_v3",
+        "gemma4_text",
+        "glm_moe_dsa",
+        "llama",
+        "qwen3_5_moe_text",
+        "qwen3_5_text",
+    }:
         return "language"
     raise ValueError(
         f"Unsupported model architecture for Cornstarch conversion: {model_type}"

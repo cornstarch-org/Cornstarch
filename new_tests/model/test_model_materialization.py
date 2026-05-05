@@ -10,6 +10,10 @@ from new_cornstarch.models import from_hf_config
 from new_tests.model.model_configs import (
     clip_vision_config,
     deepseek_v3_config,
+    gemma4_audio_config,
+    gemma4_config,
+    gemma4_vision_config,
+    glm_moe_dsa_config,
     llama_config,
     qwen3_5_config,
     qwen3_vl_vision_config,
@@ -25,10 +29,14 @@ MODEL_CONFIG_FACTORIES: list[tuple[str, Callable[[], PretrainedConfig]]] = [
     ("llama", llama_config),
     ("qwen3_5", qwen3_5_config),
     ("deepseek_v3", deepseek_v3_config),
+    ("gemma4", gemma4_config),
+    ("glm_moe_dsa", glm_moe_dsa_config),
     ("clip_vision", clip_vision_config),
     ("siglip2_vision", siglip2_vision_config),
     ("qwen3_vl_vision", qwen3_vl_vision_config),
+    ("gemma4_vision", gemma4_vision_config),
     ("whisper", whisper_config),
+    ("gemma4_audio", gemma4_audio_config),
 ]
 
 

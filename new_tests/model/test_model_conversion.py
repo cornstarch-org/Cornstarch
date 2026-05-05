@@ -8,6 +8,12 @@ import torch
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.models.clip.modeling_clip import CLIPVisionModel
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3ForCausalLM
+from transformers.models.gemma4.modeling_gemma4 import (
+    Gemma4AudioModel,
+    Gemma4ForCausalLM,
+    Gemma4VisionModel,
+)
+from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
@@ -18,6 +24,10 @@ from new_cornstarch.models import from_hf_config
 from new_tests.model.model_configs import (
     clip_vision_config,
     deepseek_v3_config,
+    gemma4_audio_config,
+    gemma4_config,
+    gemma4_vision_config,
+    glm_moe_dsa_config,
     llama_config,
     qwen3_5_config,
     qwen3_5_moe_config,
@@ -179,6 +189,24 @@ def _qwen3_vl_inputs(config: PretrainedConfig) -> dict[str, object]:
     }
 
 
+def _gemma4_vision_inputs(config: PretrainedConfig) -> dict[str, object]:
+    """Build patchified BF16 inputs for Gemma4 vision encoders."""
+    num_patches = 4
+    patch_width = 3 * config.patch_size * config.patch_size
+    return {
+        "pixel_values": torch.randn(
+            1,
+            num_patches,
+            patch_width,
+            dtype=torch.bfloat16,
+        ),
+        "pixel_position_ids": torch.tensor(
+            [[[0, 0], [1, 0], [0, 1], [1, 1]]],
+            dtype=torch.long,
+        ),
+    }
+
+
 def _whisper_inputs(config: PretrainedConfig) -> dict[str, object]:
     """Build BF16 audio features for Whisper encoder-decoder models."""
     decoder_start_token_id = config.decoder_start_token_id or config.bos_token_id or 0
@@ -191,6 +219,18 @@ def _whisper_inputs(config: PretrainedConfig) -> dict[str, object]:
         ),
         "decoder_input_ids": torch.tensor([[decoder_start_token_id]], dtype=torch.long),
         "use_cache": False,
+    }
+
+
+def _gemma4_audio_inputs(config: PretrainedConfig) -> dict[str, object]:
+    """Build BF16 audio frame inputs for Gemma4 audio encoders."""
+    return {
+        "input_features": torch.randn(
+            1,
+            8,
+            config.subsampling_conv_channels[0],
+            dtype=torch.bfloat16,
+        )
     }
 
 
@@ -224,6 +264,20 @@ MODEL_CASES = [
         id="deepseek_v3",
     ),
     pytest.param(
+        gemma4_config,
+        lambda cfg: Gemma4ForCausalLM(cfg),
+        lambda path: Gemma4ForCausalLM.from_pretrained(path),
+        _language_inputs,
+        id="gemma4",
+    ),
+    pytest.param(
+        glm_moe_dsa_config,
+        lambda cfg: GlmMoeDsaForCausalLM(cfg),
+        lambda path: GlmMoeDsaForCausalLM.from_pretrained(path),
+        _language_inputs,
+        id="glm_moe_dsa",
+    ),
+    pytest.param(
         clip_vision_config,
         lambda cfg: CLIPVisionModel(cfg),
         lambda path: CLIPVisionModel.from_pretrained(path),
@@ -245,11 +299,25 @@ MODEL_CASES = [
         id="qwen3_vl",
     ),
     pytest.param(
+        gemma4_vision_config,
+        lambda cfg: Gemma4VisionModel(cfg),
+        lambda path: Gemma4VisionModel.from_pretrained(path),
+        _gemma4_vision_inputs,
+        id="gemma4_vision",
+    ),
+    pytest.param(
         whisper_config,
         lambda cfg: WhisperModel(cfg),
         lambda path: WhisperModel.from_pretrained(path),
         _whisper_inputs,
         id="whisper",
+    ),
+    pytest.param(
+        gemma4_audio_config,
+        lambda cfg: Gemma4AudioModel(cfg),
+        lambda path: Gemma4AudioModel.from_pretrained(path),
+        _gemma4_audio_inputs,
+        id="gemma4_audio",
     ),
 ]
 
