@@ -56,6 +56,38 @@ class CornstarchProjector(nn.Module):
         else:
             raise ValueError(f"Unsupported projector_type: {config.projector_type}")
 
+    def materialize(self, device: str | torch.device = "cuda") -> CornstarchProjector:
+        """Allocate meta projector tensors on a device and initialize them.
+
+        Projectors are commonly generated while composing still-meta modality
+        and language modules. This mirrors the Cornstarch model lifecycle for
+        that smaller owned module: construction can remain allocation-free, and
+        ``CornstarchModalityEncoder.materialize()`` later turns the projection
+        parameters into regular randomly initialized tensors.
+        """
+        device = torch.device(device)
+        tensors = list(self.parameters()) + list(self.buffers())
+        if tensors and any(tensor.is_meta for tensor in tensors):
+            self.to_empty(device=device)
+            self.reset_parameters()
+        else:
+            self.to(device)
+        return self
+
+    def reset_parameters(self) -> None:
+        """Run default initialization for projector submodules."""
+        reset_projection = getattr(self.projection, "reset_parameters", None)
+        if callable(reset_projection):
+            reset_projection()
+            return
+
+        for module in self.projection.modules():
+            if module is self.projection:
+                continue
+            reset_parameters = getattr(module, "reset_parameters", None)
+            if callable(reset_parameters):
+                reset_parameters()
+
     def forward(self, hidden_states: torch.Tensor) -> BaseModelOutput:
         """Return projected features in a standard model-output container."""
         projected = self.projection(hidden_states)
@@ -103,6 +135,16 @@ class CornstarchQFormerProjector(nn.Module):
         nn.init.normal_(self.query_tokens, mean=0.0, std=0.02)
         self.qformer = Blip2QFormerModel(qformer_config)
         self.out_proj = nn.Linear(config.qformer_hidden_size, config.out_features)
+
+    def reset_parameters(self) -> None:
+        """Initialize query tokens and reset owned projection layers."""
+        nn.init.normal_(self.query_tokens, mean=0.0, std=0.02)
+        reset_parameters = getattr(self.out_proj, "reset_parameters", None)
+        if callable(reset_parameters):
+            reset_parameters()
+        post_init = getattr(self.qformer, "post_init", None)
+        if callable(post_init):
+            post_init()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.ndim == 2:

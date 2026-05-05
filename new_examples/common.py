@@ -3,16 +3,20 @@ from __future__ import annotations
 from contextlib import contextmanager
 import numpy as np
 from pathlib import Path
+import sys
 from typing import Iterator
 
 import torch
 from PIL import Image
 from transformers import AutoConfig
 
+# Temporary while the experimental package lives at the repository root.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from new_cornstarch.models import (
-    CornstarchEncoderToLanguageProjectorConfig,
     CornstarchModalityEncoder,
-    CornstarchProjector,
     RepeatedLayerOffloadConfig,
 )
 
@@ -91,17 +95,11 @@ def build_modality_encoder(
     modality: str,
     projector_type: str = "linear",
 ) -> CornstarchModalityEncoder:
-    projector = CornstarchProjector(
-        CornstarchEncoderToLanguageProjectorConfig.from_encoder_and_language_configs(
-            encoder.config,
-            language_model.config,
-            projector_type=projector_type,
-        )
-    )
-    return CornstarchModalityEncoder(
+    return CornstarchModalityEncoder.from_encoder_and_language_model(
         encoder,
-        projector,
+        language_model,
         modality=modality,
+        projector_type=projector_type,
     )
 
 
@@ -117,14 +115,6 @@ def layer_offload_config(
     )
 
 
-def place_repeated_layers_for_training(
-    model,
-    use_layer_offload: bool,
-) -> None:
-    if use_layer_offload:
-        model.offload_layers_to_cpu()
-
-
 @contextmanager
 def optional_torch_profiler(profile_output_path: Path | None) -> Iterator[object | None]:
     if profile_output_path is None:
@@ -138,9 +128,7 @@ def optional_torch_profiler(profile_output_path: Path | None) -> Iterator[object
 
     with torch.profiler.profile(
         activities=activities,
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
+        record_shapes=True
     ) as profiler:
         yield profiler
     profiler.export_chrome_trace(str(profile_output_path))

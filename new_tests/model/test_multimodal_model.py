@@ -359,22 +359,13 @@ def test_execution_plan_rejects_count_mismatch() -> None:
 def test_execution_plan_vlm() -> None:
     language_model = _materialized_language_model()
     vision_encoder = from_hf_config(clip_vision_config(), model_kind="vision")
-    projector = CornstarchProjector(
-        CornstarchEncoderToLanguageProjectorConfig.from_encoder_and_language_configs(
-            vision_encoder.config,
-            language_model.config,
-            projector_type="linear",
-        )
-    )
-    vision_module = CornstarchModalityEncoder(
+    vision_module = CornstarchModalityEncoder.from_encoder_and_language_model(
         vision_encoder,
-        projector,
+        language_model,
         modality="vision",
     )
-    vision_encoder.set_random_init()
-    vision_encoder.materialize(DEVICE)
-    vision_encoder.to(dtype=DTYPE)
-    vision_module.projector.to(device=DEVICE, dtype=DTYPE)
+    vision_module.set_random_init()
+    vision_module.materialize(DEVICE).to(dtype=DTYPE)
     token_id = language_model.config.vocab_size + 1
     image_size = int(vision_encoder.config.image_size)
     pixel_values = _randn(1, 3, image_size, image_size)

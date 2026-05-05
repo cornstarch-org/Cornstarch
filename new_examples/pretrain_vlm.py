@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
+import sys
 
 import torch
 import tyro
@@ -16,6 +17,13 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
+# Temporary while the examples and experimental package live outside cornstarch.
+EXAMPLE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = EXAMPLE_DIR.parent
+for path in (EXAMPLE_DIR, REPO_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
 from common import (
     DTYPE,
     IMAGE_TOKEN,
@@ -26,20 +34,20 @@ from common import (
     generate_random_image,
     layer_offload_config,
     optional_torch_profiler,
-    place_repeated_layers_for_training,
     tokenize_text_batch,
     vision_config_from_pretrained,
 )
 from new_cornstarch.models import (
     CornstarchExecutionPlan,
     from_hf_config,
+    RepeatedLayerCompileConfig,
 )
 
 
 class FakeDataset(Dataset):
     def __init__(self, image_size: tuple[int, int]):
         self.image = generate_random_image(image_size)
-        self.text = IMAGE_TOKEN + " text" * 256
+        self.text = IMAGE_TOKEN + " text" * 2048
 
     def __len__(self) -> int:
         return 65536
@@ -98,6 +106,7 @@ def pretrain(
     llm_name_or_path: str = "meta-llama/Llama-3.2-1B-Instruct",
     use_layer_offload: bool = False,
     profile_output_path: Path | None = None,
+    max_train_steps: int = 10,
 ):
     """Randomly initialize a VLM and pretrain it through the new Cornstarch API."""
     torch.cuda.set_device(0)
@@ -107,16 +116,19 @@ def pretrain(
     vision_config = vision_config_from_pretrained(vision_encoder_name_or_path)
     language_config = AutoConfig.from_pretrained(llm_name_or_path)
     offload_config = layer_offload_config(use_layer_offload, device)
+    compile_config = RepeatedLayerCompileConfig(enabled=False)
 
     language_model = from_hf_config(
         language_config,
         model_kind="language",
         layer_offload_config=offload_config,
+        layer_compile_config=compile_config,
     )
     vision_encoder = from_hf_config(
         vision_config,
         model_kind="vision",
         layer_offload_config=offload_config,
+        layer_compile_config=compile_config,
     )
     vision_module = build_modality_encoder(
         vision_encoder,
@@ -125,12 +137,9 @@ def pretrain(
     )
 
     language_model.set_random_init()
-    vision_encoder.set_random_init()
+    vision_module.set_random_init()
     language_model.materialize(device).to(dtype=DTYPE)
-    vision_encoder.materialize(device).to(dtype=DTYPE)
-    vision_module.projector.to(device=device, dtype=DTYPE)
-    place_repeated_layers_for_training(language_model, use_layer_offload)
-    place_repeated_layers_for_training(vision_encoder, use_layer_offload)
+    vision_module.materialize(device).to(dtype=DTYPE)
     language_model.train()
     vision_module.train()
 
@@ -159,7 +168,7 @@ def pretrain(
     )
     optimizer.zero_grad()
 
-    total_steps = len(dataloader)
+    total_steps = min(len(dataloader), max_train_steps)
     num_warmup_steps = int(total_steps * 0.1)
     lr_scheduler: LambdaLR = get_linear_schedule_with_warmup(
         optimizer,

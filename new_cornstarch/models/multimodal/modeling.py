@@ -49,6 +49,33 @@ class CornstarchModalityEncoder(nn.Module):
         self.projector = projector
         self.modality = modality
 
+    @classmethod
+    def from_encoder_and_language_model(
+        cls,
+        encoder: CornstarchEncoderBase,
+        language_model: nn.Module,
+        modality: str | None = None,
+        projector_type: str = "linear",
+        **projector_kwargs: Any,
+    ) -> CornstarchModalityEncoder:
+        """Compose a modality encoder from still-lazy endpoint modules.
+
+        The source encoder and target language model only need to expose their
+        configs; neither has to be materialized. The generated projector is built
+        on the ``meta`` device so the whole modality unit preserves Cornstarch's
+        lazy construction invariant until ``materialize()`` is called.
+        """
+        with torch.device("meta"):
+            projector = CornstarchProjector(
+                CornstarchEncoderToLanguageProjectorConfig.from_encoder_and_language_configs(
+                    encoder.config,
+                    language_model.config,
+                    projector_type=projector_type,
+                    **projector_kwargs,
+                )
+            )
+        return cls(encoder, projector, modality=modality)
+
     @property
     def config(self) -> tuple[PretrainedConfig, CornstarchEncoderToLanguageProjectorConfig]:
         """Return the paired encoder and projector configs.
@@ -58,6 +85,20 @@ class CornstarchModalityEncoder(nn.Module):
         the modality encoder config and the projection config independently.
         """
         return self.encoder.config, self.projector.config
+
+    def set_empty_init(self) -> None:
+        """Configure the wrapped encoder for uninitialized materialization."""
+        self.encoder.set_empty_init()
+
+    def set_random_init(self) -> None:
+        """Configure the wrapped encoder for default random initialization."""
+        self.encoder.set_random_init()
+
+    def materialize(self, device: str | torch.device = "cuda") -> CornstarchModalityEncoder:
+        """Materialize the grouped encoder and projector as one lifecycle unit."""
+        self.encoder.materialize(device)
+        self.projector.materialize(device)
+        return self
 
     def forward(self, **kwargs: Any) -> Any:
         """Run the encoder and return projected language-sized modality features.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
+import sys
 
 import torch
 import tyro
@@ -17,6 +18,13 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
+# Temporary while the examples and experimental package live outside cornstarch.
+EXAMPLE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = EXAMPLE_DIR.parent
+for path in (EXAMPLE_DIR, REPO_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
 from common import (
     AUDIO_TOKEN,
     DEFAULT_AUDIO_SAMPLE_RATE,
@@ -31,7 +39,6 @@ from common import (
     generate_sine_wave,
     layer_offload_config,
     optional_torch_profiler,
-    place_repeated_layers_for_training,
     tokenize_text_batch,
     vision_config_from_pretrained,
 )
@@ -140,6 +147,7 @@ def pretrain(
     llm_name_or_path: str = "meta-llama/Llama-3.2-3B-Instruct",
     use_layer_offload: bool = False,
     profile_output_path: Path | None = None,
+    max_train_steps: int = 10,
 ):
     """Randomly initialize a vision-audio-language model with the new API."""
     torch.cuda.set_device(0)
@@ -182,16 +190,11 @@ def pretrain(
     )
 
     language_model.set_random_init()
-    vision_encoder.set_random_init()
-    audio_encoder.set_random_init()
+    vision_module.set_random_init()
+    audio_module.set_random_init()
     language_model.materialize(device).to(dtype=DTYPE)
-    vision_encoder.materialize(device).to(dtype=DTYPE)
-    audio_encoder.materialize(device).to(dtype=DTYPE)
-    vision_module.projector.to(device=device, dtype=DTYPE)
-    audio_module.projector.to(device=device, dtype=DTYPE)
-    place_repeated_layers_for_training(language_model, use_layer_offload)
-    place_repeated_layers_for_training(vision_encoder, use_layer_offload)
-    place_repeated_layers_for_training(audio_encoder, use_layer_offload)
+    vision_module.materialize(device).to(dtype=DTYPE)
+    audio_module.materialize(device).to(dtype=DTYPE)
     language_model.train()
     vision_module.train()
     audio_module.train()
@@ -234,7 +237,7 @@ def pretrain(
     )
     optimizer.zero_grad()
 
-    total_steps = len(dataloader)
+    total_steps = min(len(dataloader), max_train_steps)
     num_warmup_steps = int(total_steps * 0.1)
     lr_scheduler: LambdaLR = get_linear_schedule_with_warmup(
         optimizer,
