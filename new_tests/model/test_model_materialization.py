@@ -40,6 +40,21 @@ def _model_config_params() -> list[object]:
     ]
 
 
+def _materialize_device_params() -> list[object]:
+    """Create pytest parameters for devices that can materialize layer tensors."""
+    return [
+        pytest.param(torch.device("cpu"), id="cpu"),
+        pytest.param(
+            torch.device("cuda"),
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(),
+                reason="CUDA is required for layer materialization",
+            ),
+            id="cuda",
+        ),
+    ]
+
+
 def _model_layer_stack(model: torch.nn.Module) -> torch.nn.ModuleList:
     """Return the architecture-specific transformer layer stack."""
     if hasattr(model, "decoder_layers"):
@@ -60,16 +75,6 @@ def _assert_model_layers_meta(model: torch.nn.Module) -> None:
     assert all(tensor.is_meta for tensor in tensors)
 
 
-def _assert_model_layers_on_device(
-    model: torch.nn.Module, device: torch.device
-) -> None:
-    """Assert every transformer-layer tensor has been materialized on a device."""
-    tensors = _model_layer_tensors(model)
-    assert tensors
-    assert all(not tensor.is_meta for tensor in tensors)
-    assert all(tensor.device.type == device.type for tensor in tensors)
-
-
 @pytest.mark.parametrize("config_factory", _model_config_params())
 def test_model_layers_are_meta_when_model_is_initialized(
     config_factory: Callable[[], PretrainedConfig],
@@ -84,8 +89,10 @@ def test_model_layers_are_meta_when_model_is_initialized(
 
 
 @pytest.mark.parametrize("config_factory", _model_config_params())
-def test_materialize_layers_stores_model_layers_on_cpu(
+@pytest.mark.parametrize("device", _materialize_device_params())
+def test_materialize_layers_stores_model_layers_on_device(
     config_factory: Callable[[], PretrainedConfig],
+    device: torch.device,
 ) -> None:
     """Verify layer-only materialization works with plain ModuleList layers."""
     cornstarch_model = from_hf_config(
@@ -93,13 +100,18 @@ def test_materialize_layers_stores_model_layers_on_cpu(
     )
     _assert_model_layers_meta(cornstarch_model)
 
-    cpu_device = torch.device("cpu")
-    cornstarch_model.materialize_layers(cpu_device)
+    cornstarch_model.materialize_layers(device)
 
-    _assert_model_layers_on_device(cornstarch_model, cpu_device)
+    tensors = _model_layer_tensors(cornstarch_model)
+    assert tensors
+    assert all(not tensor.is_meta for tensor in tensors)
+    assert all(tensor.device.type == device.type for tensor in tensors)
 
 
-def test_offload_layers_to_cpu_skips_unmaterialized_layers() -> None:
+@pytest.mark.parametrize("materialized_device", _materialize_device_params())
+def test_offload_layers_to_cpu_skips_unmaterialized_layers(
+    materialized_device: torch.device,
+) -> None:
     """Verify layer offload preserves still-meta decoder layers."""
     cornstarch_model = from_hf_config(
         llama_config(), attn_implementation=ATTN_IMPLEMENTATION
@@ -107,7 +119,7 @@ def test_offload_layers_to_cpu_skips_unmaterialized_layers() -> None:
     assert len(cornstarch_model.decoder_layers) > 1
 
     materialized_layer = cornstarch_model.decoder_layers[0]
-    materialized_layer.to_empty(device=torch.device("cpu"))
+    materialized_layer.to_empty(device=materialized_device)
 
     cornstarch_model.offload_layers_to_cpu([0])
 
@@ -124,20 +136,3 @@ def test_offload_layers_to_cpu_skips_unmaterialized_layers() -> None:
         not tensor.is_meta and tensor.device.type == "cpu" for tensor in materialized_tensors
     )
     assert all(tensor.is_meta for tensor in meta_tensors)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for layer materialization")
-@pytest.mark.parametrize("config_factory", _model_config_params())
-def test_materialize_layers_stores_model_layers_on_cuda(
-    config_factory: Callable[[], PretrainedConfig],
-) -> None:
-    """Verify layer-only materialization moves transformer layers to CUDA."""
-    cornstarch_model = from_hf_config(
-        config_factory(), attn_implementation=ATTN_IMPLEMENTATION
-    )
-    _assert_model_layers_meta(cornstarch_model)
-
-    cuda_device = torch.device("cuda")
-    cornstarch_model.materialize_layers(cuda_device)
-
-    _assert_model_layers_on_device(cornstarch_model, cuda_device)
