@@ -124,32 +124,45 @@ class _RepeatedLayerOffloadRuntime:
             raise RuntimeError("Repeated layer CPU offload requires a CPU master device.")
         if not torch.cuda.is_available():
             raise RuntimeError("Repeated layer CPU offload requires CUDA for execution_device='cuda'.")
-        self._device_layers: dict[int, nn.Module] = {}
+        self._prefetch_stream = torch.cuda.Stream(device=self.execution_device)
+        self._device_layers: dict[int, _PrefetchedLayer] = {}
 
     def prefetch(self, layer_idx: int, direction: str) -> nn.Module:
         """Create or return a transient execution-device copy for a layer."""
         if layer_idx in self._device_layers:
-            return self._device_layers[layer_idx]
+            return self._device_layers[layer_idx].module
 
         cpu_layer = self.layers[layer_idx]
         self._ensure_cpu_master(cpu_layer)
         device_layer = copy.deepcopy(cpu_layer)
         device_layer.train(cpu_layer.training)
-        device_layer.to(self.execution_device)
-        self._device_layers[layer_idx] = device_layer
+
+        with torch.cuda.stream(self._prefetch_stream):
+            device_layer.to_empty(device=self.execution_device)
+            staging_tensors = self._copy_module_tensors_to_device(
+                cpu_layer, device_layer
+            )
+            ready_event = torch.cuda.Event()
+            ready_event.record(self._prefetch_stream)
+
+        self._device_layers[layer_idx] = _PrefetchedLayer(
+            module=device_layer,
+            ready_event=ready_event,
+            staging_tensors=tuple(staging_tensors),
+        )
         self._record(f"prefetch_{direction}", layer_idx)
+        self._record("prefetch_cuda", layer_idx)
         return device_layer
 
     def take(self, layer_idx: int, direction: str) -> nn.Module:
         """Return an execution copy, creating it if it was not prefetched."""
-        return self.prefetch(layer_idx, direction=direction)
+        self.prefetch(layer_idx, direction=direction)
+        return self._wait_for_prefetched_layer(layer_idx)
 
     def free(self, layer_idx: int, direction: str) -> None:
         """Release a transient execution-device copy for a layer."""
         if self._device_layers.pop(layer_idx, None) is not None:
             self._record(f"free_{direction}", layer_idx)
-            if self.execution_device.type == "cuda":
-                torch.cuda.empty_cache()
 
     def free_all(self) -> None:
         """Release every transient layer copy owned by this runtime."""
@@ -167,9 +180,50 @@ class _RepeatedLayerOffloadRuntime:
         if any(tensor.device != self.cpu_device for tensor in tensors):
             layer.to(self.cpu_device)
 
+    def _wait_for_prefetched_layer(self, layer_idx: int) -> nn.Module:
+        prefetched_layer = self._device_layers[layer_idx]
+        torch.cuda.current_stream(self.execution_device).wait_event(
+            prefetched_layer.ready_event
+        )
+        self._record("prefetch_wait", layer_idx)
+        return prefetched_layer.module
+
+    def _copy_module_tensors_to_device(
+        self, cpu_layer: nn.Module, device_layer: nn.Module
+    ) -> list[torch.Tensor]:
+        staging_tensors = []
+        with torch.no_grad():
+            cpu_parameters = dict(cpu_layer.named_parameters(recurse=True))
+            for name, device_parameter in device_layer.named_parameters(recurse=True):
+                source_tensor = _as_pinned_cpu_tensor(cpu_parameters[name])
+                staging_tensors.append(source_tensor)
+                device_parameter.copy_(
+                    source_tensor,
+                    non_blocking=True,
+                )
+
+            cpu_buffers = dict(cpu_layer.named_buffers(recurse=True))
+            for name, device_buffer in device_layer.named_buffers(recurse=True):
+                source_tensor = _as_pinned_cpu_tensor(cpu_buffers[name])
+                staging_tensors.append(source_tensor)
+                device_buffer.copy_(
+                    source_tensor,
+                    non_blocking=True,
+                )
+        return staging_tensors
+
     def _record(self, event: str, layer_idx: int) -> None:
         if self.config.event_callback is not None:
             self.config.event_callback(event, layer_idx)
+
+
+@dataclass(frozen=True)
+class _PrefetchedLayer:
+    """Transient GPU module copy plus the event that marks copy completion."""
+
+    module: nn.Module
+    ready_event: torch.cuda.Event
+    staging_tensors: tuple[torch.Tensor, ...]
 
 
 @dataclass(frozen=True)
@@ -342,3 +396,10 @@ def _move_to_device(value: Any, device: torch.device) -> Any:
     if isinstance(value, dict):
         return {key: _move_to_device(item, device) for key, item in value.items()}
     return value
+
+
+def _as_pinned_cpu_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    tensor = tensor.detach()
+    if tensor.device.type == "cpu" and not tensor.is_pinned():
+        return tensor.pin_memory()
+    return tensor

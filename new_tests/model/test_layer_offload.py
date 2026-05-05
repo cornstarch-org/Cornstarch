@@ -173,15 +173,25 @@ def test_offloaded_execution_matches_direct_execution_after_optimizer_step() -> 
     not torch.cuda.is_available(), reason="Repeated layer offload executes on CUDA."
 )
 def test_offloaded_layers_use_transient_cuda_copies_and_keep_cpu_masters() -> None:
+    events: list[tuple[str, int]] = []
     model = SyntheticModel(
         synthetic_layer_stack(),
-        RepeatedLayerOffloadConfig(enabled=True, execution_device="cuda"),
+        RepeatedLayerOffloadConfig(
+            enabled=True,
+            execution_device="cuda",
+            event_callback=lambda event, layer_idx: events.append((event, layer_idx)),
+        ),
     )
     hidden_states = torch.randn(2, 4, device="cuda", requires_grad=True)
 
-    loss = model(hidden_states).last_hidden_state.sum()
+    output = model(hidden_states).last_hidden_state
+    loss = output.sum()
     loss.backward()
 
+    assert output.device.type == "cuda"
     assert model.layers[0].proj.weight.device.type == "cpu"
     assert model.layers[0].proj.weight.grad is not None
     assert model.layers[0].proj.weight.grad.device.type == "cpu"
+    assert ("prefetch_cuda", 0) in events
+    assert ("prefetch_wait", 0) in events
+    assert ("free_forward", 0) in events
