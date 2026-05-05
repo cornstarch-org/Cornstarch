@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+import numpy as np
+import torch
+from PIL import Image
+from transformers import AutoConfig
+
+from new_cornstarch.models import (
+    CornstarchEncoderToLanguageProjectorConfig,
+    CornstarchModalityEncoder,
+    CornstarchProjector,
+)
+
+
+IMAGE_TOKEN = "<image>"
+AUDIO_TOKEN = "<audio>"
+DEFAULT_AUDIO_SAMPLE_RATE = 16000
+DTYPE = torch.bfloat16
+
+
+def generate_random_image(image_size: tuple[int, int]) -> Image.Image:
+    height, width = image_size
+    image = np.random.randint(0, 256, size=(height, width, 3), dtype=np.uint8)
+    return Image.fromarray(image)
+
+
+def generate_sine_wave(
+    sample_rate: int,
+    duration: float,
+    frequency: float = 440.0,
+) -> np.ndarray:
+    num_samples = int(sample_rate * duration)
+    time_steps = np.linspace(0, duration, num_samples, endpoint=False)
+    audio_signal = np.sin(2 * np.pi * frequency * time_steps)
+    return audio_signal.astype(np.float32)
+
+
+def decoder_start_token_id(audio_config) -> int:
+    return int(
+        getattr(audio_config, "decoder_start_token_id", None)
+        or getattr(audio_config, "bos_token_id", None)
+        or 0
+    )
+
+
+def vision_config_from_pretrained(model_name_or_path: str):
+    config = AutoConfig.from_pretrained(model_name_or_path)
+    return getattr(config, "vision_config", config)
+
+
+def clip_vision_sequence_length(vision_config) -> int:
+    return (int(vision_config.image_size) // int(vision_config.patch_size)) ** 2 + 1
+
+
+def expand_modality_tokens(text: str, token_counts: dict[str, int]) -> str:
+    for token, count in token_counts.items():
+        text = text.replace(token, " ".join([token] * count))
+    return text
+
+
+def configure_special_tokens(tokenizer, tokens: list[str]) -> dict[str, int]:
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.add_special_tokens({"additional_special_tokens": tokens})
+    return {token: int(tokenizer.convert_tokens_to_ids(token)) for token in tokens}
+
+
+def tokenize_text_batch(
+    texts: list[str],
+    tokenizer,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    language_inputs = tokenizer(texts, padding=True, return_tensors="pt")
+    labels = language_inputs["input_ids"].clone()
+    if tokenizer.pad_token_id is not None:
+        labels = labels.masked_fill(labels == tokenizer.pad_token_id, -100)
+
+    return {
+        "input_ids": language_inputs["input_ids"].to(device=device),
+        "labels": labels.to(device=device),
+    }
+
+
+def build_modality_encoder(
+    encoder,
+    language_model,
+    modality: str,
+    projector_type: str = "linear",
+) -> CornstarchModalityEncoder:
+    projector = CornstarchProjector(
+        CornstarchEncoderToLanguageProjectorConfig.from_encoder_and_language_configs(
+            encoder.config,
+            language_model.config,
+            projector_type=projector_type,
+        )
+    )
+    return CornstarchModalityEncoder(
+        encoder,
+        projector,
+        modality=modality,
+    )
