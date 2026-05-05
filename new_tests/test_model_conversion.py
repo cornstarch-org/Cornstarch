@@ -8,6 +8,8 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.models.clip.modeling_clip import CLIPVisionModel
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3ForCausalLM
+from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 from transformers.models.siglip2.modeling_siglip2 import Siglip2VisionModel
@@ -78,6 +80,35 @@ def test_qwen3_5_language_model_hf_roundtrip(model_name: str, tmp_path: Path) ->
         hf_factory=lambda cfg: Qwen3_5ForCausalLM(cfg),
         cornstarch_factory=lambda cfg: from_hf_config(cfg, attn_implementation=ATTN_IMPLEMENTATION),
         hf_loader=lambda path: Qwen3_5ForCausalLM.from_pretrained(path),
+        tmp_path=tmp_path,
+    )
+
+
+def test_qwen3_5_moe_language_model_hf_roundtrip(tmp_path: Path) -> None:
+    config = Qwen3_5MoeTextConfig(
+        vocab_size=32,
+        hidden_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        linear_key_head_dim=4,
+        linear_value_head_dim=4,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        moe_intermediate_size=8,
+        shared_expert_intermediate_size=8,
+        num_experts=4,
+        num_experts_per_tok=2,
+        layer_types=["full_attention", "linear_attention"],
+        tie_word_embeddings=False,
+    )
+
+    _roundtrip(
+        config=config,
+        hf_factory=lambda cfg: Qwen3_5MoeForCausalLM(cfg),
+        cornstarch_factory=lambda cfg: from_hf_config(cfg, attn_implementation=ATTN_IMPLEMENTATION),
+        hf_loader=lambda path: Qwen3_5MoeForCausalLM.from_pretrained(path),
         tmp_path=tmp_path,
     )
 

@@ -10,6 +10,7 @@ from new_cornstarch.models.conversions.clip import convert_clip_vision_config
 from new_cornstarch.models.conversions.deepseek_v3 import convert_deepseek_v3_config
 from new_cornstarch.models.conversions.llama import convert_llama_config
 from new_cornstarch.models.conversions.qwen3_5 import convert_qwen3_5_config
+from new_cornstarch.models.conversions.qwen3_5_moe import convert_qwen3_5_moe_config
 from new_cornstarch.models.conversions.qwen3_vl import convert_qwen3_vl_vision_config
 from new_cornstarch.models.conversions.siglip2 import convert_siglip2_vision_config
 from new_cornstarch.models.conversions.whisper import convert_whisper_config
@@ -38,6 +39,8 @@ def from_hf_config(
         return convert_llama_config(config, attn_implementation=attn_implementation)
     if model_type == "qwen3_5_text":
         return convert_qwen3_5_config(config, attn_implementation=attn_implementation)
+    if model_type == "qwen3_5_moe_text":
+        return convert_qwen3_5_moe_config(config, attn_implementation=attn_implementation)
     if model_type == "deepseek_v3":
         return convert_deepseek_v3_config(config, attn_implementation=attn_implementation)
     raise ValueError(
@@ -81,7 +84,7 @@ def infer_model_kind(config: PretrainedConfig) -> str:
         return "vision"
     if model_type == "whisper":
         return "audio"
-    if model_type in {"llama", "qwen3_5_text", "deepseek_v3"}:
+    if model_type in {"llama", "qwen3_5_text", "qwen3_5_moe_text", "deepseek_v3"}:
         return "language"
     raise ValueError(
         f"Unsupported model architecture for Cornstarch conversion: {model_type}"
