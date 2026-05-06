@@ -1,127 +1,166 @@
+from __future__ import annotations
+
 import functools
 from pathlib import Path
-from typing import Literal, Optional
 
 import torch
 import tyro
-from commons import (
-    collate_fn,
-    collate_fn_llava_pretrain,
-    model_names,
-    vision_encoder_classes,
-)
-from datasets import load_dataset
-from fake_dataset import FakeDataset
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
     AutoImageProcessor,
-    AutoModelForCausalLM,
     AutoTokenizer,
     get_linear_schedule_with_warmup,
 )
 
-from cornstarch.models.multimodal_language_model import (
-    ModalEncoderModule,
-    MultimodalModel,
-    MultimodalProcessor,
+from common import (
+    DTYPE,
+    IMAGE_TOKEN,
+    build_modality_encoder,
+    clip_vision_sequence_length,
+    configure_special_tokens,
+    expand_modality_tokens,
+    generate_random_image,
+    layer_offload_config,
+    optional_torch_profiler,
+    tokenize_text_batch,
+    vision_config_from_pretrained,
+)
+from cornstarch.models import (
+    CornstarchExecutionPlan,
+    from_hf_config,
+    RepeatedLayerCompileConfig,
 )
 
 
-def pretrain(
-    vision_encoder_name: Literal["clip", "siglip", "pixtral", "qwen2_vision"],
-    llm_name_or_path: str,
-    llava_dataset_file_path: Optional[Path] = None,
+class FakeDataset(Dataset):
+    def __init__(self, image_size: tuple[int, int]):
+        self.image = generate_random_image(image_size)
+        self.text = IMAGE_TOKEN + " text" * 2048
+
+    def __len__(self) -> int:
+        return 65536
+
+    def __getitem__(self, index: int) -> dict:
+        del index
+        return {"image": self.image, "text": self.text}
+
+
+def _collate_vlm(
+    batches: list[dict],
+    image_processor,
+    tokenizer,
+    image_sequence_length: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    images = [batch["image"] for batch in batches]
+    texts = [
+        expand_modality_tokens(batch["text"], {IMAGE_TOKEN: image_sequence_length})
+        for batch in batches
+    ]
+
+    vision_inputs = image_processor(images=images, return_tensors="pt")
+    language_inputs = tokenize_text_batch(texts, tokenizer, device)
+
+    return {
+        "pixel_values": vision_inputs["pixel_values"].to(device=device, dtype=DTYPE),
+        **language_inputs,
+    }
+
+
+def _training_step(
+    language_model,
+    vision_module,
+    batch: dict[str, torch.Tensor],
+    image_token_id: int,
 ):
-    """
-    Randomly initialize the model and pretrain it on the LLaVA-Pretrain dataset.
-    """
+    plan = CornstarchExecutionPlan()
+    vision_outputs = plan.run_modality_encoder(
+        module=vision_module,
+        pixel_values=batch["pixel_values"],
+    )
+    merged = plan.merge_modality_encoder_outputs(
+        language_model=language_model,
+        input_ids=batch["input_ids"],
+        labels=batch["labels"],
+        modality_token_ids={"vision": image_token_id},
+        encoder_outputs={"vision": vision_outputs},
+    )
+    language_outputs = plan.run_language_model(module=language_model, inputs=merged)
+    return language_outputs.execute()
+
+
+def pretrain(
+    vision_encoder_name_or_path: str = "openai/clip-vit-base-patch32",
+    llm_name_or_path: str = "meta-llama/Llama-3.2-1B-Instruct",
+    use_layer_offload: bool = False,
+    profile_output_path: Path | None = None,
+    max_train_steps: int = 10,
+):
+    """Randomly initialize a VLM and pretrain it through the new Cornstarch API."""
     torch.cuda.set_device(0)
+    device = torch.device("cuda")
+    print(f"Pretraining a VLM with {vision_encoder_name_or_path} + {llm_name_or_path}.")
 
-    vision_encoder_path = model_names[vision_encoder_name]
-    print(f"Pretraining a VLM with {vision_encoder_path} + {llm_name_or_path}.")
+    vision_config = vision_config_from_pretrained(vision_encoder_name_or_path)
+    language_config = AutoConfig.from_pretrained(llm_name_or_path)
+    offload_config = layer_offload_config(use_layer_offload, device)
+    compile_config = RepeatedLayerCompileConfig(enabled=False)
 
-    # Create a model
-    with torch.device("meta"):
-        vision_config = AutoConfig.from_pretrained(vision_encoder_path)
-        vision_encoder = vision_encoder_classes[vision_encoder_name](
-            vision_config.vision_config
-        )
-
-        llm_config = AutoConfig.from_pretrained(llm_name_or_path)
-        language_model = AutoModelForCausalLM.from_config(llm_config)
-
-        if vision_encoder_name == "qwen2_vision":
-            # Qwen2 vision encoder is not designed as a standalone model,
-            # but used in Qwen2VL, which has a preprocessing procedure for the input.
-            # pixel_values -> hidden_states, image_grid_thw -> grid_thw
-            vision_encoder = ModalEncoderModule(
-                model=vision_encoder,
-                additional_args=["pixel_values", "image_grid_thw"],
-                preprocess_callback=lambda inputs: {
-                    "hidden_states": inputs["pixel_values"],
-                    "grid_thw": inputs["image_grid_thw"],
-                },
-            )
-        else:
-            vision_encoder = ModalEncoderModule(vision_encoder)
-
-        model = MultimodalModel(
-            encoders={"vision": vision_encoder},
-            language_model=language_model,
-        ).to(dtype=torch.bfloat16)
-
-    model.gradient_checkpointing_enable()
-    model.train()
-
-    # materialize the model
-    model.to_empty(device="cuda")
-
-    # Create a processor
-    image_processor = AutoImageProcessor.from_pretrained(vision_encoder_path)
-    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path, use_fast=True)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    processor = MultimodalProcessor(
-        encoder_processors={"vision": image_processor},
-        llm_tokenizer=tokenizer,
-        model=model,
-        # by default, vision encoder uses "<vision>" as its special token,
-        # while Llava pretrain dataset of fake dataset includes "<image>".
-        # So, we need to specify the token for the vision encoder.
-        predefined_tokens={"vision": "<image>"},
+    language_model = from_hf_config(
+        language_config,
+        model_kind="language",
+        layer_offload_config=offload_config,
+        layer_compile_config=compile_config,
+    )
+    vision_encoder = from_hf_config(
+        vision_config,
+        model_kind="vision",
+        layer_offload_config=offload_config,
+        layer_compile_config=compile_config,
+    )
+    vision_module = build_modality_encoder(
+        vision_encoder,
+        language_model,
+        modality="vision",
     )
 
-    if llava_dataset_file_path:
-        dataset = load_dataset("json", data_files=llava_dataset_file_path.as_posix())[
-            "train"
-        ]
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=4,
-            shuffle=True,
-            drop_last=True,
-            collate_fn=functools.partial(
-                collate_fn_llava_pretrain,
-                processor=processor,
-                dataset_dir=llava_dataset_file_path.parent,
-            ),
-        )
-    else:
-        print("No dataset is provided. Using a fake data iterator.")
-        dataset = FakeDataset(image_size=(720, 480))
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=4,
-            collate_fn=functools.partial(collate_fn, processor=processor),
-        )
-    optimizer = Adam([p for p in model.parameters() if p.requires_grad])
+    language_model.set_random_init()
+    vision_module.set_random_init()
+    language_model.materialize(device).to(dtype=DTYPE)
+    vision_module.materialize(device).to(dtype=DTYPE)
+    language_model.train()
+    vision_module.train()
+
+    image_processor = AutoImageProcessor.from_pretrained(vision_encoder_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path, use_fast=True)
+    token_ids = configure_special_tokens(tokenizer, [IMAGE_TOKEN])
+    image_token_id = token_ids[IMAGE_TOKEN]
+    image_sequence_length = clip_vision_sequence_length(vision_encoder.config)
+
+    dataset = FakeDataset(image_size=(720, 480))
+    dataloader = DataLoader(
+        dataset=dataset,
+        batch_size=4,
+        collate_fn=functools.partial(
+            _collate_vlm,
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            image_sequence_length=image_sequence_length,
+            device=device,
+        ),
+    )
+
+    optimizer = Adam(
+        param for param in list(language_model.parameters()) + list(vision_module.parameters())
+        if param.requires_grad
+    )
     optimizer.zero_grad()
 
-    total_steps = len(dataloader)
+    total_steps = min(len(dataloader), max_train_steps)
     num_warmup_steps = int(total_steps * 0.1)
     lr_scheduler: LambdaLR = get_linear_schedule_with_warmup(
         optimizer,
@@ -130,20 +169,25 @@ def pretrain(
     )
 
     dataloader_iter = iter(dataloader)
-    with tqdm(
-        range(total_steps),
-    ) as pbar:
-        for item in pbar:
-            inputs = next(dataloader_iter)
-            outputs = model(**inputs)
-            loss = outputs.loss
-            loss.backward()
+    with optional_torch_profiler(profile_output_path) as profiler:
+        with tqdm(range(total_steps)) as pbar:
+            for _ in pbar:
+                batch = next(dataloader_iter)
+                outputs = _training_step(
+                    language_model=language_model,
+                    vision_module=vision_module,
+                    batch=batch,
+                    image_token_id=image_token_id,
+                )
+                loss = outputs.loss
+                loss.backward()
+                pbar.set_postfix({"loss": loss.item()})
 
-            pbar.set_postfix({"loss": loss.item()})
-
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                if profiler is not None:
+                    profiler.step()
 
 
 if __name__ == "__main__":

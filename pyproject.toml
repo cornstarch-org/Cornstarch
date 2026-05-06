@@ -89,5 +89,5 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cornstarch*", "new_cornstarch*"]
-exclude = ["examples", "tests", "new_tests"]
+include = ["cornstarch*"]
+exclude = ["cornstarch_old*", "examples*", "examples_old*", "tests*", "tests_oild*"]

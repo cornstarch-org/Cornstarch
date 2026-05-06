@@ -1,162 +1,205 @@
-import functools
+from __future__ import annotations
 
-import numpy as np
-from PIL import Image
+import functools
+from pathlib import Path
+
 import torch
-from torch.utils.data import Dataset, DataLoader
+import tyro
+from torch.optim import Adam
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
     AutoFeatureExtractor,
     AutoImageProcessor,
-    AutoModelForCausalLM,
     AutoTokenizer,
-)
-from transformers.models.siglip.modeling_siglip import (
-    SiglipVisionConfig,
-    SiglipVisionModel,
-)
-from transformers.models.whisper.modeling_whisper import WhisperConfig, WhisperEncoder
-
-from cornstarch.models.multimodal_language_model import (
-    ModalEncoderModule,
-    MultimodalModel,
-    MultimodalProcessor,
+    get_linear_schedule_with_warmup,
 )
 
-
-def generate_sine_wave(
-    sample_rate: int, duration: float, frequency: float = 440.0
-) -> np.ndarray:
-    """
-    Parameters:
-        sample_rate (int): Sampling rate in Hz.
-        duration (float): Duration of the sine wave in seconds.
-        frequency (float): Frequency of the sine wave in Hz. Default is 440.0 Hz.
-
-    Returns:
-        np.ndarray: NumPy array containing the audio signal (float values between -1.0 and 1.0).
-    """
-    # Calculate the total number of samples
-    num_samples = int(sample_rate * duration)
-    # Create a time array from 0 to duration (excluded) with num_samples points
-    t = np.linspace(0, duration, num_samples, endpoint=False)
-    # Generate sine wave values for each time point
-    audio_signal = np.sin(2 * np.pi * frequency * t)
-    return audio_signal.astype(np.float32)  # use 32-bit float for consistency
-
-
-def generate_random_image(resolution: tuple[int, int]) -> np.ndarray:
-    """
-    Generate a random RGB image.
-
-    Parameters:
-        resolution (tuple): A tuple of two integers (width, height).
-
-    Returns:
-        np.ndarray: A random image with shape (height, width, 3) and dtype uint8.
-    """
-    # Unpack resolution assuming it's given as (width, height)
-    width, height = resolution
-    # Create an array with random integers in [0, 255] for 3 color channels (RGB)
-    image = np.random.randint(0, 256, size=(height, width, 3), dtype=np.uint8)
-    return image
+from common import (
+    AUDIO_TOKEN,
+    DEFAULT_AUDIO_SAMPLE_RATE,
+    DTYPE,
+    IMAGE_TOKEN,
+    build_modality_encoder,
+    clip_vision_sequence_length,
+    configure_special_tokens,
+    decoder_start_token_id,
+    expand_modality_tokens,
+    generate_random_image,
+    generate_sine_wave,
+    layer_offload_config,
+    optional_torch_profiler,
+    tokenize_text_batch,
+    vision_config_from_pretrained,
+)
+from cornstarch.models import (
+    CornstarchExecutionPlan,
+    from_hf_config,
+)
 
 
 class FakeDataset(Dataset):
     def __init__(
-        self, image_size: tuple[int, int] = (720, 480), audio_duration: float = 10.0
+        self,
+        image_size: tuple[int, int] = (720, 480),
+        audio_duration: float = 10.0,
     ):
         self.image = generate_random_image(image_size)
-        self.audio = generate_sine_wave(16000, audio_duration, 440.0)
+        self.audio = generate_sine_wave(DEFAULT_AUDIO_SAMPLE_RATE, audio_duration, 440.0)
+        self.text = IMAGE_TOKEN + AUDIO_TOKEN + " text" * 256
 
-        # later tokens will be appended after processing it
-        self.text = "<image><audio>" + " text" * 256
-
-    def __len__(self):
+    def __len__(self) -> int:
         return 65536
 
     def __getitem__(self, index: int) -> dict:
+        del index
         return {"image": self.image, "audio": self.audio, "text": self.text}
 
 
-def collate_fn(batches: list[dict], processor: MultimodalProcessor, seqlen: int = 1024):
-    images = []
-    texts = []
-    audios = []
-
-    token = processor.llm_tokenizer.pad_token
-    for batch in batches:
-        images.append(batch["image"])
-        texts.append(token * 256 + "<image>" + token * 256 + "<audio>" + token * 512)
-        audios.append(batch["audio"])
-
-    inputs = processor(
-        encoder_inputs={
-            "vision": {"images": images},
-            "audio": {"raw_speech": audios, "sampling_rate": 16000},
-        },
-        llm_inputs={"text": texts, "padding": True},
-        return_tensors="pt",
-    ).to(dtype=torch.bfloat16, device="cuda")
-
-    inputs["labels"] = inputs["input_ids"].clone()
-    for value in inputs.values():
-        value.requires_grad_(value.is_floating_point())
-
-    return inputs.data
-
-
-def pretrain():
-    """
-    Training example for Siglip and Whisper
-    """
-    torch.cuda.set_device(0)
-
-    vision_encoder_path = "google/siglip-so400m-patch14-384"
-    audio_encoder_path = "openai/whisper-large-v3"
-    llm_name_or_path = "meta-llama/Llama-3.2-3B-Instruct"
-
-    with torch.device("meta"):
-        vision_config = SiglipVisionConfig.from_pretrained(vision_encoder_path)
-        vision_encoder = SiglipVisionModel(vision_config)
-
-        audio_config = WhisperConfig.from_pretrained(audio_encoder_path)
-        audio_encoder = WhisperEncoder(audio_config)
-
-        llm_config = AutoConfig.from_pretrained(llm_name_or_path)
-        language_model = AutoModelForCausalLM.from_config(llm_config)
-
-        model = MultimodalModel(
-            encoders={
-                "vision": ModalEncoderModule(vision_encoder),
-                "audio": ModalEncoderModule(audio_encoder),
+def _collate_valm(
+    batches: list[dict],
+    image_processor,
+    audio_processor,
+    tokenizer,
+    image_sequence_length: int,
+    audio_sequence_length: int,
+    audio_decoder_start_token_id: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    images = [batch["image"] for batch in batches]
+    audios = [batch["audio"] for batch in batches]
+    texts = [
+        expand_modality_tokens(
+            batch["text"],
+            {
+                IMAGE_TOKEN: image_sequence_length,
+                AUDIO_TOKEN: audio_sequence_length,
             },
-            language_model=language_model,
-        ).to(dtype=torch.bfloat16)
+        )
+        for batch in batches
+    ]
 
-    model.gradient_checkpointing_enable()
-    model.train()
-
-    model.to_empty(device="cuda")
-
-    image_processor = AutoImageProcessor.from_pretrained(vision_encoder_path)
-    audio_processor = AutoFeatureExtractor.from_pretrained(audio_encoder_path)
-    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    processor = MultimodalProcessor(
-        encoder_processors={
-            "vision": image_processor,
-            "audio": audio_processor,
-        },
-        llm_tokenizer=tokenizer,
-        model=model,
-        predefined_tokens={
-            "vision": "<image>",
-            "audio": "<audio>",
-        },
+    vision_inputs = image_processor(images=images, return_tensors="pt")
+    audio_inputs = audio_processor(
+        audios,
+        sampling_rate=DEFAULT_AUDIO_SAMPLE_RATE,
+        return_tensors="pt",
+        padding="max_length",
     )
+    language_inputs = tokenize_text_batch(texts, tokenizer, device)
+
+    return {
+        "pixel_values": vision_inputs["pixel_values"].to(device=device, dtype=DTYPE),
+        "input_features": audio_inputs["input_features"].to(device=device, dtype=DTYPE),
+        "decoder_input_ids": torch.full(
+            (len(batches), audio_sequence_length),
+            audio_decoder_start_token_id,
+            device=device,
+            dtype=torch.long,
+        ),
+        **language_inputs,
+    }
+
+
+def _training_step(
+    language_model,
+    vision_module,
+    audio_module,
+    batch: dict[str, torch.Tensor],
+    image_token_id: int,
+    audio_token_id: int,
+):
+    plan = CornstarchExecutionPlan()
+    vision_outputs = plan.run_modality_encoder(
+        module=vision_module,
+        pixel_values=batch["pixel_values"],
+    )
+    audio_outputs = plan.run_modality_encoder(
+        module=audio_module,
+        input_features=batch["input_features"],
+        decoder_input_ids=batch["decoder_input_ids"],
+        use_cache=False,
+    )
+    merged = plan.merge_modality_encoder_outputs(
+        language_model=language_model,
+        input_ids=batch["input_ids"],
+        labels=batch["labels"],
+        modality_token_ids={"vision": image_token_id, "audio": audio_token_id},
+        encoder_outputs={"vision": vision_outputs, "audio": audio_outputs},
+    )
+    language_outputs = plan.run_language_model(module=language_model, inputs=merged)
+    return language_outputs.execute()
+
+
+def pretrain(
+    vision_encoder_name_or_path: str = "openai/clip-vit-base-patch32",
+    audio_encoder_name_or_path: str = "openai/whisper-large-v3",
+    llm_name_or_path: str = "meta-llama/Llama-3.2-3B-Instruct",
+    use_layer_offload: bool = False,
+    profile_output_path: Path | None = None,
+    max_train_steps: int = 10,
+):
+    """Randomly initialize a vision-audio-language model with the new API."""
+    torch.cuda.set_device(0)
+    device = torch.device("cuda")
+    print(
+        "Pretraining a VALM with "
+        f"{vision_encoder_name_or_path} + {audio_encoder_name_or_path} "
+        f"+ {llm_name_or_path}."
+    )
+
+    vision_config = vision_config_from_pretrained(vision_encoder_name_or_path)
+    audio_config = AutoConfig.from_pretrained(audio_encoder_name_or_path)
+    language_config = AutoConfig.from_pretrained(llm_name_or_path)
+    offload_config = layer_offload_config(use_layer_offload, device)
+
+    language_model = from_hf_config(
+        language_config,
+        model_kind="language",
+        layer_offload_config=offload_config,
+    )
+    vision_encoder = from_hf_config(
+        vision_config,
+        model_kind="vision",
+        layer_offload_config=offload_config,
+    )
+    audio_encoder = from_hf_config(
+        audio_config,
+        model_kind="audio",
+        layer_offload_config=offload_config,
+    )
+    vision_module = build_modality_encoder(
+        vision_encoder,
+        language_model,
+        modality="vision",
+    )
+    audio_module = build_modality_encoder(
+        audio_encoder,
+        language_model,
+        modality="audio",
+    )
+
+    language_model.set_random_init()
+    vision_module.set_random_init()
+    audio_module.set_random_init()
+    language_model.materialize(device).to(dtype=DTYPE)
+    vision_module.materialize(device).to(dtype=DTYPE)
+    audio_module.materialize(device).to(dtype=DTYPE)
+    language_model.train()
+    vision_module.train()
+    audio_module.train()
+
+    image_processor = AutoImageProcessor.from_pretrained(vision_encoder_name_or_path)
+    audio_processor = AutoFeatureExtractor.from_pretrained(audio_encoder_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path, use_fast=True)
+    token_ids = configure_special_tokens(tokenizer, [IMAGE_TOKEN, AUDIO_TOKEN])
+    image_token_id = token_ids[IMAGE_TOKEN]
+    audio_token_id = token_ids[AUDIO_TOKEN]
+    image_sequence_length = clip_vision_sequence_length(vision_encoder.config)
+    audio_sequence_length = 1
+    audio_decoder_start_token_id = decoder_start_token_id(audio_encoder.config)
 
     dataset = FakeDataset(image_size=(720, 480), audio_duration=10.0)
     dataloader = DataLoader(
@@ -164,19 +207,59 @@ def pretrain():
         batch_size=2,
         shuffle=False,
         drop_last=False,
-        collate_fn=functools.partial(collate_fn, processor=processor),
+        collate_fn=functools.partial(
+            _collate_valm,
+            image_processor=image_processor,
+            audio_processor=audio_processor,
+            tokenizer=tokenizer,
+            image_sequence_length=image_sequence_length,
+            audio_sequence_length=audio_sequence_length,
+            audio_decoder_start_token_id=audio_decoder_start_token_id,
+            device=device,
+        ),
+    )
+    optimizer = Adam(
+        param
+        for param in (
+            list(language_model.parameters())
+            + list(vision_module.parameters())
+            + list(audio_module.parameters())
+        )
+        if param.requires_grad
+    )
+    optimizer.zero_grad()
+
+    total_steps = min(len(dataloader), max_train_steps)
+    num_warmup_steps = int(total_steps * 0.1)
+    lr_scheduler: LambdaLR = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=total_steps,
     )
 
-    total_steps = len(dataloader)
     dataloader_iter = iter(dataloader)
+    with optional_torch_profiler(profile_output_path) as profiler:
+        with tqdm(range(total_steps)) as pbar:
+            for _ in pbar:
+                batch = next(dataloader_iter)
+                outputs = _training_step(
+                    language_model=language_model,
+                    vision_module=vision_module,
+                    audio_module=audio_module,
+                    batch=batch,
+                    image_token_id=image_token_id,
+                    audio_token_id=audio_token_id,
+                )
+                loss = outputs.loss
+                loss.backward()
+                pbar.set_postfix({"loss": loss.item()})
 
-    with tqdm(range(total_steps)) as pbar:
-        for item in pbar:
-            inputs = next(dataloader_iter)
-            outputs = model(**inputs)
-            loss = outputs.loss
-            loss.backward()
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                if profiler is not None:
+                    profiler.step()
 
 
 if __name__ == "__main__":
-    pretrain()
+    tyro.cli(pretrain)
