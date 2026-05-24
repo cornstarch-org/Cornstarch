@@ -119,7 +119,12 @@ def run_transformer_forward(
                 layer_offload_config,
                 manager=manager,
             )
-        finally:
+        except BaseException:
+            # Always release transient CUDA copies on failure, even during
+            # activation-checkpoint recompute where normal cleanup is deferred.
+            manager.free_all()
+            raise
+        else:
             if not activation_checkpoint_recompute_active():
                 manager.free_all()
     else:
