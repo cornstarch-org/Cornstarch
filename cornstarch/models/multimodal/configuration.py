@@ -92,8 +92,12 @@ def _hidden_size_from_config(config: PretrainedConfig, config_name: str) -> int:
     if hidden_size is None:
         hidden_size = getattr(config, "d_model", None)
     if hidden_size is None:
+        config_type = type(config).__name__
         raise ValueError(
-            f"{config_name} must define hidden_size or d_model to build a projector config."
+            f"{config_name} ({config_type}) does not define 'hidden_size' or "
+            f"'d_model'. Cannot infer projector in_features/out_features. "
+            f"Pass in_features or out_features explicitly to "
+            f"CornstarchEncoderToLanguageProjectorConfig()."
         )
     return int(hidden_size)
 
