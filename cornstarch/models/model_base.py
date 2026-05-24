@@ -152,6 +152,13 @@ class CornstarchModelBase(nn.Module):
         """Load or stage Hugging Face-format weights for this Cornstarch model."""
         mapped_state_dict = self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
         if self._is_meta():
+            if self._init_plan.mode != "empty":
+                warnings.warn(
+                    f"load_hf_state_dict() is replacing an existing "
+                    f"{self._init_plan.mode!r} InitializationPlan with a new "
+                    f"checkpoint plan. The previous plan will be discarded.",
+                    stacklevel=2,
+                )
             self._init_plan = InitializationPlan.checkpoint(state_dict=mapped_state_dict)
             expected = set(self.state_dict().keys())
             actual = set(mapped_state_dict.keys())
