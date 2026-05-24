@@ -7,6 +7,9 @@ from typing import Mapping
 import torch
 
 
+_VALID_MODES = frozenset({"empty", "random", "checkpoint"})
+
+
 @dataclass
 class InitializationPlan:
     """Deferred tensor allocation policy for a meta-initialized model.
@@ -27,6 +30,18 @@ class InitializationPlan:
     mode: str
     state_dict: Mapping[str, torch.Tensor] | None = None
     checkpoint_path: str | Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in _VALID_MODES:
+            raise ValueError(
+                f"Unknown InitializationPlan mode {self.mode!r}. "
+                f"Valid modes are: {sorted(_VALID_MODES)}"
+            )
+        if self.mode == "checkpoint" and self.state_dict is not None and self.checkpoint_path is not None:
+            raise ValueError(
+                "InitializationPlan.checkpoint() accepts either state_dict or "
+                "checkpoint_path, not both."
+            )
 
     @classmethod
     def empty(cls) -> InitializationPlan:
