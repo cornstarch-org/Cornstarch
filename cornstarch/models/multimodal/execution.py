@@ -168,7 +168,15 @@ class CornstarchExecutionPlan:
         inputs: Any = ExecutionFuture("merged_language_inputs"),
         name: str | None = None,
     ) -> ExecutionFuture:
-        """Add a language model execution node and return its future output handle."""
+        """Add a language model execution node and return its future output handle.
+
+        ``inputs`` defaults to the future named ``"merged_language_inputs"``,
+        which is the output name that :meth:`merge_modality_encoder_outputs`
+        produces when called with its own default ``name``. If you call
+        ``merge_modality_encoder_outputs`` with a custom ``name`` argument you
+        must also pass the returned future explicitly as ``inputs`` here;
+        otherwise execution will fail with a missing-input error.
+        """
         return self._add_node(
             ExecutionNode(
                 name=name or "language_outputs",
@@ -178,8 +186,17 @@ class CornstarchExecutionPlan:
         )
 
     def validate(self) -> None:
-        """Validate graph shape and model references."""
+        """Validate graph shape and model references.
+
+        Raises ``ValueError`` if the graph contains a cycle, duplicate node
+        names, or a ``run_language_model`` node whose default input future
+        (``"merged_language_inputs"``) does not match any node in the plan.
+        The last check catches the common mistake of calling
+        ``merge_modality_encoder_outputs`` with a custom ``name`` while leaving
+        ``run_language_model`` with its default ``inputs``.
+        """
         self._topological_nodes()
+        self._validate_default_language_inputs()
 
     def execute(
         self,
@@ -227,6 +244,25 @@ class CornstarchExecutionPlan:
                 lines.append(f"  {dep_id} -> {node_id};")
         lines.append("}")
         return "\n".join(lines)
+
+    def _validate_default_language_inputs(self) -> None:
+        """Detect run_language_model nodes using a default future that no node produces."""
+        _DEFAULT_MERGED = "merged_language_inputs"
+        produced = {node.name for node in self._nodes}
+        for node in self._nodes:
+            if node.kind != "run_language_model":
+                continue
+            inputs_value = node.params.get("inputs")
+            if not isinstance(inputs_value, ExecutionFuture):
+                continue
+            if inputs_value.name == _DEFAULT_MERGED and _DEFAULT_MERGED not in produced:
+                raise ValueError(
+                    f"Node {node.name!r} uses the default inputs future "
+                    f"{_DEFAULT_MERGED!r}, but no node in the plan produces that name. "
+                    f"If you called merge_modality_encoder_outputs() with a custom name, "
+                    f"pass the returned future explicitly as the inputs= argument to "
+                    f"run_language_model()."
+                )
 
     def _add_node(self, node: ExecutionNode) -> ExecutionFuture:
         if any(existing.name == node.name for existing in self._nodes):
