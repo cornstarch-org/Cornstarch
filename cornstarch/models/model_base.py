@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import logging
+import warnings
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -9,6 +11,8 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file
 from transformers import PretrainedConfig, PreTrainedModel
+
+_logger = logging.getLogger(__name__)
 
 from cornstarch.models.kernel_provider import get_hf_kernel
 from cornstarch.models.lazy_init import InitializationPlan
@@ -302,8 +306,25 @@ class CornstarchModelBase(nn.Module):
                 continue
             try:
                 hf_module = hf_model.get_submodule(hf_module_path)
+            except AttributeError:
+                warnings.warn(
+                    f"HF model does not have a submodule at {hf_module_path!r} "
+                    f"(mapped from Cornstarch prefix {cornstarch_module_path!r}). "
+                    f"Deterministic buffers for this prefix will not be copied; "
+                    f"those buffers will remain as zero tensors after materialization.",
+                    stacklevel=2,
+                )
+                continue
+            try:
                 cornstarch_module = self.get_submodule(cornstarch_module_path)
             except AttributeError:
+                warnings.warn(
+                    f"Cornstarch model does not have a submodule at "
+                    f"{cornstarch_module_path!r} (mapped from HF prefix "
+                    f"{hf_module_path!r}). Deterministic buffers for this prefix "
+                    f"will not be copied.",
+                    stacklevel=2,
+                )
                 continue
             self._copy_meta_buffers(
                 source_module=hf_module,
