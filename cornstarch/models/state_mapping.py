@@ -60,8 +60,14 @@ class StateDictPrefixMap:
         for source, target in pairs:
             if source == "":
                 return f"{target}{key}"
-            if key == source.rstrip("."):
+            source_stripped = source.rstrip(".")
+            if key == source_stripped:
                 return target.rstrip(".")
-            if key.startswith(source):
-                return f"{target}{key[len(source):]}"
+            # Require a dot boundary after the prefix so that a source like
+            # "model.layers" does not accidentally match "model.layers_other.weight".
+            source_prefix = f"{source_stripped}."
+            if key.startswith(source_prefix):
+                target_stripped = target.rstrip(".")
+                suffix = key[len(source_prefix):]
+                return f"{target_stripped}.{suffix}" if target_stripped else suffix
         return key
