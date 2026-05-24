@@ -535,8 +535,19 @@ def activation_checkpoint_recompute_active() -> bool:
     layer copies until their custom backward nodes run lets backward reuse the
     parameters from the recompute instead of immediately offloading them and
     reloading them again.
+
+    This detection relies on the internal ``torch._C._current_graph_task_id``
+    API, which is also used by PyTorch's own checkpoint machinery. If a future
+    PyTorch release removes that symbol, the function falls back to ``False``
+    (conservative: cleanup happens eagerly and backward recompute reloads layers
+    from CPU instead of reusing the live copies — correct but slower).
     """
-    return torch.is_grad_enabled() and torch._C._current_graph_task_id() != -1
+    if not torch.is_grad_enabled():
+        return False
+    try:
+        return torch._C._current_graph_task_id() != -1
+    except AttributeError:
+        return False
 
 
 def _move_to_device(value: Any, device: torch.device) -> Any:
