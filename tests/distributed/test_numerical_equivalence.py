@@ -15,7 +15,13 @@ not rely on sharded checkpoint load, which is intentionally out of scope.
 
 All tests use the gloo backend so they run on CPU.  Context parallelism's
 all-gather flash-attention kernel is CUDA-only, so its numerical-equivalence
-test is guarded to require >=2 visible CUDA devices and otherwise skips.
+test runs the collectives on gloo (CPU, bridged via ``gloo_utils``) while the
+flash-attention compute happens on the shared GPU.  Two gloo ranks share a
+single ``cuda:0``, so the CP test runs on a one-GPU box (it only needs CUDA to
+be available, not >=2 devices).  CP equivalence is asserted at the
+attention-function level against a *non-causal* full-sequence SDPA reference,
+because the CP kernel hardcodes ``causal=False`` (see ``tasks/backlog.md`` for
+the deferred causal-LM CP equivalence).
 """
 from __future__ import annotations
 
@@ -25,6 +31,11 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.nn.functional import scaled_dot_product_attention as sdpa
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+)
 
 from tests.distributed.distributed_base import GlooDistributedTestBase
 from tests.model.model_configs import llama_config, qwen3_5_moe_config
@@ -252,51 +263,184 @@ class TestDataParallelEquivalence(GlooDistributedTestBase):
         torch.testing.assert_close(dp_grad, ref_grad, atol=ATOL, rtol=RTOL)
 
 
+# CP flash-attn accumulates over an all-gathered K/V sequence in a different
+# order than a single full-sequence SDPA matmul, so both forward and backward
+# parity hold at 5e-3 — looser than the project-wide 1e-3 target but matching
+# the legacy single-GPU CP flash-attn test (tests_old/.../test_context_parallel.py).
+CP_ATOL = 5e-3
+CP_RTOL = 5e-3
+
+
+def _serialize_cp_stream() -> None:
+    """Pin the CP kernel's overlap stream to the current stream.
+
+    The kernel overlaps its all-gather / reduce-scatter on a dedicated side CUDA
+    stream and only re-syncs at the very end of backward.  Under the gloo CPU
+    bridge that runs these collectives, the per-head ``dkv`` buffer (a
+    ``torch.empty``) is cloned on the default stream before the side stream's
+    reduce-scatter copy lands, so the clone races and reads uninitialized memory
+    (intermittent NaN / corrupted dk).  Forcing the kernel onto the current
+    stream serializes the collectives with the compute, which removes the race
+    without changing the kernel's math (the side stream is purely a perf
+    optimization).  This makes the single-GPU test deterministic and lets
+    backward parity hold at the same 5e-3 as forward.
+    """
+    from cornstarch.distributed.context_parallel.attention import (
+        ContextParallelFlashAttention,
+    )
+
+    ContextParallelFlashAttention._stream = torch.cuda.current_stream()
+
+
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.device_count() >= 2,
-    "context-parallel attention uses CUDA flash-attn and needs >=2 GPUs",
+    torch.cuda.is_available(),
+    "context-parallel attention uses CUDA flash-attn (gloo bridges the "
+    "collectives, so a single GPU shared by 2 ranks is enough)",
 )
+@instantiate_parametrized_tests
 class TestContextParallelEquivalence(GlooDistributedTestBase):
+    """Single-GPU CP attention parity vs a non-causal full-sequence SDPA.
+
+    Two gloo ranks share ``cuda:0``.  Each rank holds a sequence-dim chunk of
+    Q/K/V; ``ContextParallelFlashAttention`` all-gathers K/V (over gloo, on CPU)
+    and runs flash-attention on the GPU.  The rank's output and Q/K/V gradients
+    must match the corresponding chunk of the full-sequence reference.
+    """
+
     @property
     def world_size(self) -> int:
         return 2
 
-    def test_cp_matches_single(self):  # pragma: no cover - needs >=2 GPUs
-        from cornstarch.distributed.context_parallel import apply_context_parallel
-        from cornstarch.distributed.context_parallel.splitters import (
-            UniformContextParallelSplitter,
+    @parametrize("batch_size", [1, 2], name_fn=lambda x: f"bs={x}")
+    @parametrize("seq_len", [128, 256, 1024], name_fn=lambda x: f"seq={x}")
+    def test_cp_attention_matches_single(self, batch_size: int, seq_len: int):
+        from cornstarch.distributed.context_parallel.attention import (
+            ContextParallelFlashAttention,
         )
 
-        mesh = ModalProcessGroupMesh(
-            device_type="cuda", global_ranks=[0, 1],
-            dp_size=1, cp_size=2, tp_size=1, num_pp_stages=1,
+        _serialize_cp_stream()
+
+        nheads, dim = 8, 64  # dim=64 / heads=8 are flash-attn-supported shapes
+        assert seq_len % self.world_size == 0
+
+        # Full-sequence Q/K/V, identical on every rank (seed reset in _run).
+        query, key, value = torch.unbind(
+            torch.randn(
+                (3, batch_size, seq_len, nheads, dim),
+                device="cuda",
+                dtype=DTYPE,
+            ).normal_(mean=0, std=0.5),
         )
-        device = f"cuda:{torch.cuda.current_device()}"
+        for t in (query, key, value):
+            t.requires_grad_()
 
-        ref = _ref_params(_build_llm())
-        ref_model = _build_llm().to(device)
-        batch = _batch()
-        batch = {k: v.to(device) for k, v in batch.items()}
-        ref_loss = _loss(ref_model, batch)
+        # Reference: non-causal SDPA over the full sequence. SDPA wants
+        # (b, h, s, d); the CP kernel uses (b, s, h, d).
+        ref_out = sdpa(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            is_causal=False,
+        ).transpose(1, 2)
 
-        model = _build_llm()
-        apply_context_parallel(model, mesh.cp_group)
-        _copy_full_into(model, ref)
-        model.to(device)
+        local_q = (
+            torch.chunk(query, self.world_size, dim=1)[self.rank]
+            .requires_grad_()
+            .contiguous()
+        )
+        local_k = (
+            torch.chunk(key, self.world_size, dim=1)[self.rank]
+            .requires_grad_()
+            .contiguous()
+        )
+        local_v = (
+            torch.chunk(value, self.world_size, dim=1)[self.rank]
+            .requires_grad_()
+            .contiguous()
+        )
 
-        splitter = UniformContextParallelSplitter()
-        mask = torch.ones_like(batch["input_ids"], dtype=torch.float32)
-        splitter.compute_offsets(mask, mesh.cp_group)
-        local = {
-            "input_ids": splitter.split(batch["input_ids"], mesh.cp_group),
-            "labels": splitter.split(batch["labels"], mesh.cp_group),
-        }
-        cp_loss = _loss(model, local)
-        # Per-rank CP loss is over the local shard; gather and average.
-        losses = [torch.zeros_like(cp_loss) for _ in range(self.world_size)]
-        dist.all_gather(losses, cp_loss.detach())
+        # WORLD group as the CP group: avoids a DeviceMesh(device_type="cuda")
+        # under the gloo backend (cuda-device-type + gloo-backend mismatch).
+        cp_out = ContextParallelFlashAttention.apply(
+            local_q, local_k, local_v, dist.GroupMember.WORLD
+        )
+
         torch.testing.assert_close(
-            torch.stack(losses).mean(), ref_loss, atol=ATOL, rtol=RTOL
+            torch.chunk(ref_out, self.world_size, dim=1)[self.rank],
+            cp_out,
+            atol=CP_ATOL,
+            rtol=CP_RTOL,
+        )
+
+        # Backward parity: each rank's dq/dk/dv match its chunk of the ref grads.
+        dout = torch.randn_like(ref_out).normal_(mean=0, std=0.5)
+        ref_dq, ref_dk, ref_dv = torch.autograd.grad(
+            ref_out, [query, key, value], dout
+        )
+
+        cp_dout = torch.chunk(dout, self.world_size, dim=1)[self.rank].contiguous()
+        cp_dq, cp_dk, cp_dv = torch.autograd.grad(
+            cp_out, [local_q, local_k, local_v], cp_dout
+        )
+
+        torch.testing.assert_close(
+            torch.chunk(ref_dq, self.world_size, dim=1)[self.rank].contiguous(),
+            cp_dq,
+            atol=CP_ATOL,
+            rtol=CP_RTOL,
+        )
+        torch.testing.assert_close(
+            torch.chunk(ref_dk, self.world_size, dim=1)[self.rank].contiguous(),
+            cp_dk,
+            atol=CP_ATOL,
+            rtol=CP_RTOL,
+        )
+        torch.testing.assert_close(
+            torch.chunk(ref_dv, self.world_size, dim=1)[self.rank].contiguous(),
+            cp_dv,
+            atol=CP_ATOL,
+            rtol=CP_RTOL,
+        )
+
+    def test_cp_attention_hf_dispatch_wrapper(self):
+        """Cover the HF dispatch entry point (the (b, h, s, d) transpose path)."""
+        from cornstarch.distributed.context_parallel.attention import (
+            context_parallel_flash_attention,
+        )
+
+        _serialize_cp_stream()
+
+        batch_size, nheads, seq_len, dim = 2, 8, 256, 64
+        assert seq_len % self.world_size == 0
+
+        # HF layout is (b, h, s, d); the wrapper transposes to (b, s, h, d).
+        query, key, value = torch.unbind(
+            torch.randn(
+                (3, batch_size, nheads, seq_len, dim),
+                device="cuda",
+                dtype=DTYPE,
+            ).normal_(mean=0, std=0.5),
+        )
+
+        ref_out = sdpa(query, key, value, is_causal=False)
+
+        local_q = torch.chunk(query, self.world_size, dim=2)[self.rank].contiguous()
+        local_k = torch.chunk(key, self.world_size, dim=2)[self.rank].contiguous()
+        local_v = torch.chunk(value, self.world_size, dim=2)[self.rank].contiguous()
+
+        cp_out, _ = context_parallel_flash_attention(
+            module=None,
+            query=local_q,
+            key=local_k,
+            value=local_v,
+            cp_group=dist.GroupMember.WORLD,
+        )
+
+        torch.testing.assert_close(
+            torch.chunk(ref_out, self.world_size, dim=2)[self.rank],
+            cp_out,
+            atol=CP_ATOL,
+            rtol=CP_RTOL,
         )
 
 
