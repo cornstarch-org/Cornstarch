@@ -37,3 +37,34 @@ interface lands.
   layers is unsupported; `test_parallelism_integration` uses an all-full-
   attention MoE config for EP+PP, and `test_expert_parallel_qwen` covers
   linear-attention EP without PP.
+
+## B4 — Causal-LM context-parallel numerical equivalence
+- **Deferred from:** T003-CP-EQUIVALENCE.
+- **Reason:** the CP all-gather flash-attention kernel
+  (`cornstarch/distributed/context_parallel/attention.py`) hardcodes
+  `causal=False` (`_flash_attn_forward(..., causal=False)`) and splits the
+  sequence uniformly, so it cannot reproduce a causal language model under CP.
+  T003 therefore tests CP equivalence only at the **attention-function level**
+  against a non-causal full-sequence SDPA reference
+  (`tests/distributed/test_numerical_equivalence.py::TestContextParallelEquivalence`).
+- **Scope to resume:** add causal masking to the CP kernel and a load-balanced
+  causal split (zigzag / makespan-style assignment so each rank gets a balanced
+  share of the triangular work), then assert a full causal-LM forward+backward
+  CP equivalence vs the single-GPU reference.
+
+## B5 — CP kernel backward side-stream race (latent kernel bug)
+- **Found during:** T003-CP-EQUIVALENCE.
+- **Symptom:** in `ContextParallelFlashAttention.backward`, the per-head-group
+  `dkv` (a `torch.empty`) is `.clone()`d on the default stream immediately after
+  an `async_op=True` `reduce_scatter` enqueued on the side stream, while the only
+  `wait_stream(side_stream)` happens *after* the loop. The clone can read the
+  buffer before the side-stream copy lands → intermittent corrupted `dk` /
+  occasional NaN. It surfaced under the gloo CPU-bridged single-GPU test;
+  whether it also bites real NCCL multi-GPU runs is unconfirmed.
+- **T003 workaround (test-only):** the equivalence test pins the kernel's overlap
+  stream to the current stream (`_serialize_cp_stream`) so the collectives run
+  serially with compute. This removes the race without changing kernel math and
+  lets forward+backward parity hold at 5e-3.
+- **Scope to resume:** fix the ordering in the kernel itself — `wait_stream` (or
+  per-iteration event sync) before each `dkv.clone()`, or write reduce-scatter
+  output into a non-`empty` buffer — then drop the test workaround.
