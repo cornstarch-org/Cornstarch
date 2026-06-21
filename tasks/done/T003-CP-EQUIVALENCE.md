@@ -1,3 +1,6 @@
+## Status: DONE — PR https://github.com/cornstarch-org/Cornstarch/pull/70
+## (base: feat/T002-parallelism; T003 builds on T002's CP kernel + test file)
+
 ## Task ID: T003-CP-EQUIVALENCE
 ## Type: IMPLEMENTATION (single-GPU CP numerical-equivalence test; tests must be green)
 ## Goal: replace the skipped (>=2 GPU) context-parallel numerical-equivalence test
