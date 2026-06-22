@@ -6,12 +6,12 @@ language model tensor + pipeline parallel, all replicated once (dp=1)::
     torchrun --nproc_per_node=4 examples/distributed/pretrain_vlm.py \
         --vision-tp 2 --llm-tp 2 --llm-pp 1
 
-This reads top-to-bottom like the non-distributed ``examples/pretrain_vlm.py``:
-build the modality encoder with ``build_modality_encoder``, set its init plan,
-build the execution plan, and run an explicit training loop.  The only
-distributed-specific lines are ``init_distributed()``, the per-modality
-``plan.parallelize`` + ``plan.materialize``, ``ctx.prepare_dataloader``,
-``ctx.create_schedule`` + ``schedule.step``, and ``ctx.sync_gradients``.
+This reads top-to-bottom like the non-distributed ``examples/pretrain_vlm.py`` —
+the training loop is intentionally identical.  The only distributed-specific
+calls are pushed into ``_training_step`` (the schedule's ``step`` does forward +
+criterion + backward, and ``ctx.sync_gradients`` all-reduces DP gradients).
+Building the models differs only in the per-modality ``plan.parallelize`` +
+``plan.materialize`` and ``ctx.prepare_dataloader``.
 
 Each modality is described independently: ``plan.parallelize`` is called once
 per modality with its own ``ParallelConfig`` (vision can be TP-only while the
@@ -25,7 +25,8 @@ import tyro
 
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoConfig
+from tqdm import tqdm
+from transformers import AutoConfig, get_linear_schedule_with_warmup
 
 from common import DTYPE, causal_lm_criterion, init_distributed
 
@@ -62,7 +63,22 @@ class FakeVLMDataset(Dataset):
         return {"input_ids": ids, "labels": ids.clone(), "pixel_values": pixel_values}
 
 
-def main(
+def _training_step(schedule, ctx, batch, criterion, optimizer):
+    """Run one schedule-driven training step and sync gradients across DP ranks.
+
+    ``schedule.step`` runs forward + criterion + backward (or the 1F1B
+    microbatch loop under PP); ``ctx.sync_gradients`` all-reduces the DP
+    gradients before the optimizer step.  Hiding both parallelism-specific calls
+    here keeps the training loop identical to the non-distributed
+    ``examples/pretrain_vlm.py``.  Returns the schedule result whose ``"loss"``
+    is the step loss (``None`` on non-last pipeline stages).
+    """
+    result = schedule.step(batch, criterion, optimizer, return_loss=True)
+    ctx.sync_gradients()
+    return result
+
+
+def pretrain(
     vision_name_or_path: str = "openai/clip-vit-base-patch32",
     llm_name_or_path: str = "hf-internal-testing/tiny-random-LlamaForCausalLM",
     vision_tp: int = 1,
@@ -118,7 +134,7 @@ def main(
     dataset = FakeVLMDataset(
         language_model.hf_config.vocab_size, seq_len, num_image_tokens, image_size
     )
-    loader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
 
     def build_plan():
         exec_plan = CornstarchExecutionPlan()
@@ -149,18 +165,28 @@ def main(
     optimizer = torch.optim.Adam(params, lr=lr)
     optimizer.zero_grad()
 
-    step = 0
-    for batch in loader:
-        if step >= steps:
-            break
-        result = schedule.step(batch, causal_lm_criterion, optimizer, return_loss=True)
-        ctx.sync_gradients()
-        optimizer.step()
-        optimizer.zero_grad()
-        if result["loss"] is not None and rank == 0:
-            print(f"step {step}: loss {result['loss'].item():.4f}")
-        step += 1
+    num_warmup_steps = int(steps * 0.1)
+    lr_scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=steps,
+    )
+
+    dataloader_iter = iter(dataloader)
+    with tqdm(range(steps), disable=rank != 0) as pbar:
+        for _ in pbar:
+            batch = next(dataloader_iter)
+            outputs = _training_step(
+                schedule, ctx, batch, causal_lm_criterion, optimizer
+            )
+            loss = outputs["loss"]
+            if loss is not None:
+                pbar.set_postfix({"loss": loss.item()})
+
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    tyro.cli(pretrain)
