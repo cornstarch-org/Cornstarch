@@ -271,3 +271,6 @@ Remaining (write a BLOCK per CLAUDE.md if it turns out ambiguous during impl):
 ## HUMAN COMMENTS
 - (PR base branch? T005 merged into `feat/T002-parallelism`; confirm whether
   T006 should also target `feat/T002-parallelism`.)
+
+## PR
+https://github.com/cornstarch-org/Cornstarch/pull/75 (base: feat/T002-parallelism; left open for human review)
