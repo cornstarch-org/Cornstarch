@@ -217,6 +217,12 @@ class ContextParallelFlashAttention(torch.autograd.Function):
                 deterministic=False,
             )
 
+            # _flash_attn_backward wrote dgkv on the default stream; the side
+            # stream must observe those writes before it reduce-scatters them,
+            # otherwise the reduce-scatter reads a partially-written dgkv ->
+            # corrupted dk/dv.  (The forward has no analogue: _allgather_kv reads
+            # the already-materialized inputs k/v, not a default-stream product.)
+            stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 dist.reduce_scatter(
                     dkv[0],
@@ -230,11 +236,24 @@ class ContextParallelFlashAttention(torch.autograd.Function):
                     group=cp_group,
                     async_op=True,
                 )
+                # Record completion of this group's reduce-scatter on the side
+                # stream, mirroring the forward's per-head-group event pattern in
+                # _allgather_kv.  The default-stream clones below must wait on this
+                # event, otherwise dkv (a torch.empty written by the side stream)
+                # is cloned before the reduce-scatter copy lands -> reads
+                # uninitialized/partial memory (intermittent NaN / corrupted dk/dv).
+                evt = torch.cuda.Event()
+                evt.record(stream)
 
+            # Block the default stream on this group's reduce-scatter before
+            # cloning dkv.  The side stream can still run the next group's
+            # collective ahead, preserving the comm/compute overlap.
+            torch.cuda.current_stream().wait_event(evt)
             dqs.append(dq.clone())
             dks.append(dkv[0].clone())
             dvs.append(dkv[1].clone())
 
+        # Backstop: ensure all side-stream work is observed before returning.
         torch.cuda.current_stream().wait_stream(stream)
 
         return (
