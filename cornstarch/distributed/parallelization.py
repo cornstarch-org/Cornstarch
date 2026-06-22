@@ -31,6 +31,8 @@ from cornstarch.distributed.expert_parallel import apply_expert_parallel
 from cornstarch.distributed.parallel_config import ParallelConfig
 from cornstarch.distributed.pipeline_parallel import apply_pipeline_parallel
 from cornstarch.distributed.pipeline_parallel.schedule import (
+    CompiledSchedule,
+    MeshLayout,
     NonPipelineParallelSchedule,
     OneForwardOneBackwardSchedule,
     TrainingSchedule,
@@ -65,6 +67,7 @@ class ParallelContext:
         modules: list[CornstarchModelBase],
         configs: list[ParallelConfig],
         meshes: dict[int, ModalProcessGroupMesh],
+        layouts: dict[int, MeshLayout],
         dp_size: int,
         dp_rank: int,
         dp_group: Optional[dist.ProcessGroup],
@@ -73,6 +76,7 @@ class ParallelContext:
         self._modules = modules
         self._configs = configs
         self._meshes = meshes
+        self._layouts = layouts
         self._dp_size = dp_size
         self._dp_rank = dp_rank
         self._dp_group = dp_group
@@ -184,11 +188,35 @@ class ParallelContext:
     ) -> TrainingSchedule:
         """Return a training schedule for the given execution plan.
 
-        If any registered modality uses pipeline parallelism, returns a
-        ``OneForwardOneBackwardSchedule`` driven by that modality's mesh;
-        otherwise returns a ``NonPipelineParallelSchedule`` that runs the full
-        DAG on every rank.
+        Schedule construction is cheap (DAG inspection + a rank-local program, no
+        collectives), so the caller is free to rebuild it per step — recovering
+        the per-batch flexibility the non-distributed plan already has.
+
+        Selection:
+
+        - **Multiple modalities on disjoint ranks** -> :class:`CompiledSchedule`,
+          which runs each node only on its owning mesh and compiles the cross-mesh
+          transfers that move a node's output to the ranks that consume it.  This
+          is what lets a VLM train with the vision encoder and the language model
+          on separate ranks (and lets a modality idle on a batch that omits it).
+        - **A single modality with pipeline parallelism** ->
+          :class:`OneForwardOneBackwardSchedule` (1F1B) driven by that mesh.
+        - **A single modality without pipeline parallelism** ->
+          :class:`NonPipelineParallelSchedule`, which runs the whole DAG locally.
         """
+        ranksets = {
+            self._layouts[id(module)].rankset
+            for module in self._modules
+            if id(module) in self._layouts
+        }
+        if len(ranksets) > 1:
+            return CompiledSchedule(
+                plan,
+                output_future,
+                {id(module): self._layouts[id(module)] for module in self._modules},
+                self._dp_size,
+            )
+
         for module in self._modules:
             mesh = self._meshes.get(id(module))
             if mesh is not None and mesh.num_stages > 1:
@@ -322,6 +350,7 @@ class ParallelizationPlan:
 
         modality_sizes = [cfg.ranks_per_replica for cfg in self._configs]
         meshes: dict[int, ModalProcessGroupMesh] = {}
+        layouts: dict[int, MeshLayout] = {}
 
         for mod_idx, (module, config) in enumerate(
             zip(self._modules, self._configs)
@@ -335,6 +364,18 @@ class ParallelizationPlan:
                 modality_ranks.extend(
                     global_ranks[base : base + modality_size]
                 )
+
+            # Record every modality's rank layout on every rank (pure
+            # arithmetic, no collectives) so the cross-mesh schedule can pair
+            # producer and consumer ranks for meshes this rank is not part of.
+            layouts[id(module)] = MeshLayout(
+                global_ranks=tuple(modality_ranks),
+                dp_size=dp_size,
+                num_pp_stages=config.pipeline_parallel_size,
+                cp_size=config.context_parallel_size,
+                tp_size=config.tensor_parallel_size,
+                ep_size=config.expert_parallel_size,
+            )
 
             if my_rank not in modality_ranks:
                 continue
@@ -381,6 +422,7 @@ class ParallelizationPlan:
             modules=self._modules,
             configs=self._configs,
             meshes=meshes,
+            layouts=layouts,
             dp_size=dp_size_final,
             dp_rank=dp_rank,
             dp_group=dp_group,

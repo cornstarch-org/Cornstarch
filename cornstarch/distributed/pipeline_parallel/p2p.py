@@ -29,6 +29,73 @@ def _deserialize(data: torch.Tensor, size: int) -> Any:
     return c10d._tensor_to_object(data.cpu(), size, group=dist.GroupMember.WORLD)
 
 
+def _build_p2p_ops(
+    send_tensor: torch.Tensor | None,
+    send_ranks: list[int],
+    recv_tensors: list[torch.Tensor],
+    recv_ranks: list[int],
+    send_first: bool,
+) -> list[dist.P2POp]:
+    """Build an ordered list of P2POps respecting ``send_first`` ordering."""
+    send_ops = []
+    if send_tensor is not None:
+        send_ops = [dist.P2POp(dist.isend, send_tensor, r) for r in send_ranks]
+    recv_ops = [
+        dist.P2POp(dist.irecv, recv_tensors[i], r) for i, r in enumerate(recv_ranks)
+    ]
+    if send_first:
+        return send_ops + recv_ops
+    return recv_ops + send_ops
+
+
+def exchange_objects(
+    send_obj: Any | None,
+    send_ranks: list[int],
+    recv_ranks: list[int],
+    device: torch.device,
+    send_first: bool = True,
+) -> list[Any]:
+    """Send ``send_obj`` to ``send_ranks`` and receive one object per ``recv_ranks``.
+
+    A backend-agnostic, mesh-free counterpart to
+    :meth:`PipelineP2PCommunication._exchange`: the peer ranks are passed
+    explicitly as **global** ranks rather than derived from a mesh, so this is
+    the transport used for cross-mesh execution-plan edges (a node on one
+    modality's mesh feeding a node on another's).  The same two-phase protocol
+    (size header, then payload) and the same ``send_first`` deadlock-avoidance
+    ordering are used as the pipeline-stage path.  Returns the received objects in
+    ``recv_ranks`` order (empty when ``recv_ranks`` is empty).
+    """
+    send_data: torch.Tensor | None = None
+    send_size: torch.Tensor | None = None
+    if send_obj is not None and send_ranks:
+        send_data, send_size = _serialize(send_obj, device)
+
+    # Phase 1 — exchange sizes.
+    recv_sizes = [
+        torch.zeros(1, dtype=torch.long, device=device) for _ in recv_ranks
+    ]
+    ops = _build_p2p_ops(send_size, send_ranks, recv_sizes, recv_ranks, send_first)
+    if ops:
+        for req in dist.batch_isend_irecv(ops):
+            req.wait()
+
+    # Phase 2 — exchange data.
+    recv_bufs = [
+        torch.empty(recv_sizes[i].item(), dtype=torch.uint8, device=device)
+        for i in range(len(recv_ranks))
+    ]
+    ops = _build_p2p_ops(send_data, send_ranks, recv_bufs, recv_ranks, send_first)
+    if ops:
+        for req in dist.batch_isend_irecv(ops):
+            req.wait()
+
+    return [
+        _deserialize(recv_bufs[i], recv_sizes[i].item())
+        for i in range(len(recv_ranks))
+    ]
+
+
 class PipelineP2PCommunication:
     """Backend-agnostic PP point-to-point communication.
 
@@ -45,26 +112,6 @@ class PipelineP2PCommunication:
             else "cpu"
         )
 
-    def _build_ops(
-        self,
-        send_tensor: torch.Tensor | None,
-        send_ranks: list[int],
-        recv_tensors: list[torch.Tensor],
-        recv_ranks: list[int],
-        send_first: bool,
-    ) -> list[dist.P2POp]:
-        """Build an ordered list of P2POps respecting ``send_first`` ordering."""
-        send_ops = []
-        if send_tensor is not None:
-            send_ops = [dist.P2POp(dist.isend, send_tensor, r) for r in send_ranks]
-        recv_ops = [
-            dist.P2POp(dist.irecv, recv_tensors[i], r)
-            for i, r in enumerate(recv_ranks)
-        ]
-        if send_first:
-            return send_ops + recv_ops
-        return recv_ops + send_ops
-
     def _exchange(
         self,
         send_obj: Any | None,
@@ -73,34 +120,9 @@ class PipelineP2PCommunication:
         send_first: bool = True,
     ) -> list[Any]:
         """Send ``send_obj`` to ``send_ranks`` and receive from ``recv_ranks``."""
-        send_data: torch.Tensor | None = None
-        send_size: torch.Tensor | None = None
-        if send_obj is not None and send_ranks:
-            send_data, send_size = _serialize(send_obj, self._device)
-
-        # Phase 1 — exchange sizes.
-        recv_sizes = [
-            torch.zeros(1, dtype=torch.long, device=self._device) for _ in recv_ranks
-        ]
-        ops = self._build_ops(send_size, send_ranks, recv_sizes, recv_ranks, send_first)
-        if ops:
-            for req in dist.batch_isend_irecv(ops):
-                req.wait()
-
-        # Phase 2 — exchange data.
-        recv_bufs = [
-            torch.empty(recv_sizes[i].item(), dtype=torch.uint8, device=self._device)
-            for i in range(len(recv_ranks))
-        ]
-        ops = self._build_ops(send_data, send_ranks, recv_bufs, recv_ranks, send_first)
-        if ops:
-            for req in dist.batch_isend_irecv(ops):
-                req.wait()
-
-        return [
-            _deserialize(recv_bufs[i], recv_sizes[i].item())
-            for i in range(len(recv_ranks))
-        ]
+        return exchange_objects(
+            send_obj, send_ranks, recv_ranks, self._device, send_first
+        )
 
     # ------------------------------------------------------------------
     # Public interface

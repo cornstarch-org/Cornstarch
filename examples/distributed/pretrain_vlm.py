@@ -36,11 +36,9 @@ from cornstarch.distributed import (
     ParallelConfig,
     ParallelContext,
     ParallelizationPlan,
-    TrainingSchedule,
 )
 from cornstarch.models import (
     CornstarchExecutionPlan,
-    ExecutionFuture,
     build_modality_encoder,
     from_hf_config,
 )
@@ -78,21 +76,46 @@ class FakeVLMDataset(Dataset):
 
 
 def _training_step(
-    schedule: TrainingSchedule,
+    language_model: Any,
+    modality_encoder: Any,
     ctx: ParallelContext,
     batch: dict[str, torch.Tensor],
     criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
     optimizer: torch.optim.Optimizer,
 ) -> dict[str, Any]:
-    """Run one schedule-driven training step and sync gradients across DP ranks.
+    """Build the plan for this batch, run one schedule step, and sync gradients.
 
-    ``schedule.step`` runs forward + criterion + backward (or the 1F1B
-    microbatch loop under PP); ``ctx.sync_gradients`` all-reduces the DP
-    gradients before the optimizer step.  Hiding both parallelism-specific calls
-    here keeps the training loop identical to the non-distributed
-    ``examples/pretrain_vlm.py``.  Returns the schedule result whose ``"loss"``
-    is the step loss (``None`` on non-last pipeline stages).
+    The execution plan is rebuilt **every step** — the three plan-construction
+    lines below are byte-identical to the non-distributed
+    ``examples/pretrain_vlm.py``; only the ``schedule.step`` tail differs from its
+    ``output_future.execute()``.  Because the plan is rebuilt per batch, a step
+    whose ``batch`` omits ``pixel_values`` would simply drop the
+    ``run_modality_encoder("vision")`` node, and the vision encoder's ranks idle
+    for that step while the language-model ranks still train — the per-batch
+    flexibility the non-distributed plan already has.  (See
+    ``tests/distributed/test_multimodal_distributed.py`` for that flexibility
+    case on disjoint ranks.)
+
+    ``ctx.create_schedule`` returns a ``CompiledSchedule`` here because the vision
+    encoder and the language model live on **disjoint** ranks: it runs each node
+    only on its owning mesh and compiles the cross-mesh transfer that moves the
+    projected vision features to the language-model ranks that consume them.
     """
+    plan = CornstarchExecutionPlan()
+    vision_outputs = plan.run_modality_encoder(
+        module=modality_encoder,
+        pixel_values=batch["pixel_values"],
+    )
+    merged = plan.merge_modality_encoder_outputs(
+        language_model=language_model,
+        input_ids=batch["input_ids"],
+        labels=batch["labels"],
+        modality_token_ids={"vision": IMAGE_TOKEN_ID},
+        encoder_outputs={"vision": vision_outputs},
+    )
+    output_future = plan.run_language_model(module=language_model, inputs=merged)
+
+    schedule = ctx.create_schedule(plan, output_future)
     result = schedule.step(batch, criterion, optimizer, return_loss=True)
     ctx.sync_gradients()
     return result
@@ -156,31 +179,6 @@ def pretrain(
     )
     dataloader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
 
-    def build_plan() -> tuple[CornstarchExecutionPlan, ExecutionFuture]:
-        exec_plan = CornstarchExecutionPlan()
-        vision_outputs = exec_plan.run_modality_encoder(
-            module=modality_encoder, pixel_values=ExecutionFuture("pixel_values")
-        )
-        merged = exec_plan.merge_modality_encoder_outputs(
-            language_model=language_model,
-            input_ids=ExecutionFuture("input_ids"),
-            labels=ExecutionFuture("labels"),
-            modality_token_ids={"vision": IMAGE_TOKEN_ID},
-            encoder_outputs={"vision": vision_outputs},
-        )
-        output_future = exec_plan.run_language_model(
-            module=language_model, inputs=merged
-        )
-        return exec_plan, output_future
-
-    exec_plan, output_future = build_plan()
-    schedule = ctx.create_schedule(
-        exec_plan,
-        output_future,
-        num_microbatches=num_microbatches if llm_pp > 1 else 1,
-        microbatch_size=batch_size // num_microbatches if llm_pp > 1 else 1,
-    )
-
     params = list(language_model.parameters()) + list(modality_encoder.parameters())
     optimizer = torch.optim.Adam(params, lr=lr)
     optimizer.zero_grad()
@@ -197,7 +195,12 @@ def pretrain(
         for _ in pbar:
             batch = next(dataloader_iter)
             outputs = _training_step(
-                schedule, ctx, batch, causal_lm_criterion, optimizer
+                language_model,
+                modality_encoder,
+                ctx,
+                batch,
+                causal_lm_criterion,
+                optimizer,
             )
             loss = outputs["loss"]
             if loss is not None:

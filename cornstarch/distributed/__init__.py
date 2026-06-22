@@ -54,6 +54,8 @@ from cornstarch.distributed.parallelization import (
 )
 from cornstarch.distributed.pipeline_parallel import apply_pipeline_parallel
 from cornstarch.distributed.pipeline_parallel.schedule import (
+    CompiledSchedule,
+    MeshLayout,
     NonPipelineParallelSchedule,
     OneForwardOneBackwardSchedule,
     TrainingSchedule,
@@ -81,6 +83,8 @@ __all__ = [
     "TrainingSchedule",
     "NonPipelineParallelSchedule",
     "OneForwardOneBackwardSchedule",
+    "CompiledSchedule",
+    "MeshLayout",
     # expert parallel
     "apply_expert_parallel",
     # data parallel
