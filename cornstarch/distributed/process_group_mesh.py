@@ -60,8 +60,15 @@ class ModalProcessGroupMesh:
 
         ``global_ranks`` must contain exactly ``dp_size × num_pp_stages ×
         cp_size × tp_size × ep_size`` entries in replica-major / EP-minor order.
-        All ranks that belong to this modality must call this constructor with
-        the same arguments.
+
+        **Building a ``DeviceMesh`` calls ``new_group``, which is a collective
+        over the whole world** — every rank must construct every modality's mesh
+        in the same order, even ranks that do not belong to it, or process-group
+        creation deadlocks. So this constructor must be called on *all* ranks for
+        each modality. A rank that is not in ``global_ranks`` still builds the
+        ``DeviceMesh`` (participating in the collective as a non-member) but is
+        marked ``is_member == False`` and has no pipeline stage; callers keep and
+        use only the meshes they are members of.
         """
         expected = dp_size * num_pp_stages * cp_size * tp_size * ep_size
         if len(global_ranks) != expected:
@@ -78,6 +85,7 @@ class ModalProcessGroupMesh:
         self._num_stages = num_pp_stages
         self._global_ranks = global_ranks
         self._my_rank = dist.get_rank()
+        self._is_member = self._my_rank in global_ranks
 
         mesh_tensor = torch.tensor(global_ranks, dtype=torch.int).reshape(
             dp_size, num_pp_stages, cp_size, tp_size, ep_size
@@ -89,9 +97,13 @@ class ModalProcessGroupMesh:
         )
 
         # Derive this rank's PP stage from its position in the flat layout.
-        flat_pos = global_ranks.index(self._my_rank)
-        inner = cp_size * tp_size * ep_size
-        self._stage = (flat_pos % (num_pp_stages * inner)) // inner
+        # Non-members have no stage (they only participated in group creation).
+        if self._is_member:
+            flat_pos = global_ranks.index(self._my_rank)
+            inner = cp_size * tp_size * ep_size
+            self._stage = (flat_pos % (num_pp_stages * inner)) // inner
+        else:
+            self._stage = -1
 
     # ------------------------------------------------------------------
     # Per-dimension accessors
@@ -175,6 +187,12 @@ class ModalProcessGroupMesh:
     # ------------------------------------------------------------------
     # Pipeline stage semantics
     # ------------------------------------------------------------------
+
+    @property
+    def is_member(self) -> bool:
+        """Whether the current rank belongs to this mesh (vs a non-member that
+        only participated in the collective process-group creation)."""
+        return self._is_member
 
     @property
     def stage(self) -> int:

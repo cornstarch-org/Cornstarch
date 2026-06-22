@@ -344,7 +344,6 @@ class ParallelizationPlan:
             else list(range(dist.get_world_size()))
         )
         world_size = len(global_ranks)
-        my_rank = dist.get_rank()
 
         if not self._configs:
             raise ValueError("No modules registered with parallelize().")
@@ -380,9 +379,11 @@ class ParallelizationPlan:
                 ep_size=config.expert_parallel_size,
             )
 
-            if my_rank not in modality_ranks:
-                continue
-
+            # Build the mesh on EVERY rank, not just members: a ``DeviceMesh``
+            # calls ``new_group`` (a world collective), so all ranks must
+            # construct every modality's mesh in the same order or process-group
+            # creation deadlocks. Non-members build it as a no-op and discard it;
+            # only members keep and use it.
             mesh = ModalProcessGroupMesh(
                 device_type=device.type,
                 global_ranks=modality_ranks,
@@ -392,6 +393,8 @@ class ParallelizationPlan:
                 num_pp_stages=config.num_pp_stages,
                 ep_size=config.expert_parallel_size,
             )
+            if not mesh.is_member:
+                continue
             meshes[id(module)] = mesh
 
             # The model-side parallelisms (TP/CP/PP/EP) walk a Cornstarch model's
