@@ -6,7 +6,7 @@ Run with torchrun, e.g. 8 GPUs as DP=2, PP=2, TP=2::
         --tp 2 --pp 2 --dp 2
 
 Everything parallelism-specific is expressed declaratively: one ``ParallelConfig``
-describes the LM's degrees, ``plan.distribute`` applies TP/PP (and EP for MoE)
+describes the LM's degrees, ``plan.materialize`` applies TP/PP (and EP for MoE)
 and materializes, and the returned ``ctx`` folds the DP sampler into the
 dataloader, builds the schedule, and exposes ``sync_gradients``.  There is no
 rank math, no ordering rule, and no grad-sync wiring in this script.
@@ -59,7 +59,7 @@ def main(
             data_parallel_size=dp,
         ),
     )
-    ctx = plan.distribute(device, dtype=DTYPE)
+    ctx = plan.materialize(device, dtype=DTYPE)
 
     dataset = FakeTextDataset(vocab_size, seq_len)
     loader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)

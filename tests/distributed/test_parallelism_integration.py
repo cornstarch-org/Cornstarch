@@ -1,7 +1,7 @@
 """End-to-end integration tests for the Option C ``ParallelizationPlan`` surface.
 
 Each combination builds a tiny model, drives it through the *declarative*
-surface (``ParallelizationPlan.parallelize`` -> ``.distribute`` ->
+surface (``ParallelizationPlan.parallelize`` -> ``.materialize`` ->
 ``ParallelContext.create_schedule`` / ``.sync_gradients``), runs one
 forward+backward step, and asserts the loss is finite and gradients exist.
 
@@ -114,7 +114,7 @@ def _run_combo(test: GlooDistributedTestBase, combo, moe: bool) -> None:
             expert_parallel_size=ep,
         ),
     )
-    ctx = plan.distribute("cpu", dtype=torch.float32)
+    ctx = plan.materialize("cpu", dtype=torch.float32)
 
     batch_size = max(4, pp * 2)
     torch.manual_seed(100 + dist.get_rank())

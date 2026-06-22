@@ -28,7 +28,7 @@ class ParallelConfig:
     - ``expert_parallel_size`` (``ep``): MoE experts sharded across these ranks.
 
     All process groups and ``DeviceMesh`` handles are constructed internally by
-    ``ParallelizationPlan.distribute()`` — callers never create or pass them
+    ``ParallelizationPlan.materialize()`` — callers never create or pass them
     directly.  When ``context_parallel_size > 1`` a splitter must be provided so
     the dataloader knows how to partition sequences across CP ranks.
     """

@@ -3,7 +3,7 @@
 This is the ergonomic layer that most users touch.  They describe each
 modality's parallel degrees with a :class:`ParallelConfig`, register the
 modules with :meth:`ParallelizationPlan.parallelize`, then call
-:meth:`ParallelizationPlan.distribute` once.  ``distribute`` returns a
+:meth:`ParallelizationPlan.materialize` once.  ``materialize`` returns a
 :class:`ParallelContext` that folds the data-side parallelisms (DP sampler +
 CP sequence split) into ``prepare_dataloader``, builds the training schedule,
 and exposes gradient synchronization — so the training loop stays plain
@@ -50,7 +50,7 @@ _DEFAULT_CP_SPLIT_KEYS = ("input_ids", "labels", "attention_mask", "position_ids
 
 
 class ParallelContext:
-    """Runtime handle returned by :meth:`ParallelizationPlan.distribute`.
+    """Runtime handle returned by :meth:`ParallelizationPlan.materialize`.
 
     Holds the per-modality meshes, the data-parallel sampler coordinates, the
     configured CP splitters, and the cross-modality gradient synchronizer.  Use
@@ -239,7 +239,7 @@ class ParallelizationPlan:
             context_parallel_splitter=UniformContextParallelSplitter(),
         ))
 
-        ctx = plan.distribute(device, dtype=torch.bfloat16)
+        ctx = plan.materialize(device, dtype=torch.bfloat16)
         loader = ctx.prepare_dataloader(dataset, batch_size=16, collate_fn=collate)
         schedule = ctx.create_schedule(exec_plan, output_future,
                                        num_microbatches=8, microbatch_size=2)
@@ -262,7 +262,7 @@ class ParallelizationPlan:
         self._modules.append(module)
         self._configs.append(config)
 
-    def distribute(
+    def materialize(
         self,
         device: str | torch.device = "cuda",
         dtype: torch.dtype | None = None,

@@ -9,7 +9,7 @@ language model tensor + pipeline parallel, all replicated once (dp=1)::
 The point of Option C for multimodal models: each modality is described
 independently.  ``plan.parallelize`` is called once per modality with its own
 ``ParallelConfig`` (vision can be TP-only while the LLM is TP+PP), and
-``plan.distribute`` resolves the per-modality + DP-offset rank math, builds each
+``plan.materialize`` resolves the per-modality + DP-offset rank math, builds each
 modality's mesh, applies the model-side parallelisms, and materializes — no
 hand-written rank arithmetic in this script.
 
@@ -88,7 +88,7 @@ def main(
     language_model.set_random_init()
 
     # Per-modality declarative configs — vision and the LLM are parallelized
-    # independently; distribute() handles the cross-modality rank assignment.
+    # independently; materialize() handles the cross-modality rank assignment.
     plan = ParallelizationPlan(global_ranks=list(range(world_size)))
     plan.parallelize(
         vision_encoder,
@@ -102,7 +102,7 @@ def main(
             data_parallel_size=dp,
         ),
     )
-    ctx = plan.distribute(device, dtype=DTYPE)
+    ctx = plan.materialize(device, dtype=DTYPE)
 
     # Bridge the (already parallelized + materialized) vision encoder to the LLM
     # with a projector, then materialize the projector to match.
