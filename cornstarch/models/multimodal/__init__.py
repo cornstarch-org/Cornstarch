@@ -5,7 +5,10 @@ from cornstarch.models.multimodal.configuration import (
     CornstarchMultimodalConfig,
 )
 from cornstarch.models.multimodal.execution import CornstarchExecutionPlan, ExecutionFuture
-from cornstarch.models.multimodal.modeling import CornstarchModalityEncoder
+from cornstarch.models.multimodal.modeling import (
+    CornstarchModalityEncoder,
+    build_modality_encoder,
+)
 from cornstarch.models.multimodal.projector import CornstarchProjector
 
 __all__ = [
@@ -15,4 +18,5 @@ __all__ = [
     "CornstarchMultimodalConfig",
     "CornstarchProjector",
     "ExecutionFuture",
+    "build_modality_encoder",
 ]

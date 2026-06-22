@@ -10,9 +10,9 @@ from cornstarch.models import from_hf_config
 from cornstarch.models.multimodal import (
     CornstarchEncoderToLanguageProjectorConfig,
     CornstarchExecutionPlan,
-    CornstarchModalityEncoder,
     CornstarchProjector,
     ExecutionFuture,
+    build_modality_encoder,
 )
 from tests.model.model_configs import clip_vision_config, llama_config
 
@@ -359,7 +359,7 @@ def test_execution_plan_rejects_count_mismatch() -> None:
 def test_execution_plan_vlm() -> None:
     language_model = _materialized_language_model()
     vision_encoder = from_hf_config(clip_vision_config(), model_kind="vision")
-    vision_module = CornstarchModalityEncoder.from_encoder_and_language_model(
+    vision_module = build_modality_encoder(
         vision_encoder,
         language_model,
         modality="vision",

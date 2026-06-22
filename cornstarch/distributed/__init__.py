@@ -31,7 +31,7 @@ tests call these directly; everything else is built on them.
 
 **Layer 2 — declarative per-modality plan (surface).**  Most users only touch
 this: describe each modality with a ``ParallelConfig``, register it on a
-``ParallelizationPlan``, and call ``.distribute()`` to get a ``ParallelContext``
+``ParallelizationPlan``, and call ``.materialize()`` to get a ``ParallelContext``
 that folds DP/CP into ``prepare_dataloader``, builds the schedule, and exposes
 ``sync_gradients``.
 """

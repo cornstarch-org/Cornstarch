@@ -3,7 +3,7 @@
 This is the ergonomic layer that most users touch.  They describe each
 modality's parallel degrees with a :class:`ParallelConfig`, register the
 modules with :meth:`ParallelizationPlan.parallelize`, then call
-:meth:`ParallelizationPlan.distribute` once.  ``distribute`` returns a
+:meth:`ParallelizationPlan.materialize` once.  ``materialize`` returns a
 :class:`ParallelContext` that folds the data-side parallelisms (DP sampler +
 CP sequence split) into ``prepare_dataloader``, builds the training schedule,
 and exposes gradient synchronization — so the training loop stays plain
@@ -38,6 +38,7 @@ from cornstarch.distributed.pipeline_parallel.schedule import (
 from cornstarch.distributed.process_group_mesh import ModalProcessGroupMesh
 from cornstarch.distributed.tensor_parallel import apply_tensor_parallel
 from cornstarch.models.model_base import CornstarchModelBase
+from cornstarch.models.multimodal.modeling import CornstarchModalityEncoder
 
 if TYPE_CHECKING:
     from cornstarch.models.multimodal.execution import (
@@ -50,7 +51,7 @@ _DEFAULT_CP_SPLIT_KEYS = ("input_ids", "labels", "attention_mask", "position_ids
 
 
 class ParallelContext:
-    """Runtime handle returned by :meth:`ParallelizationPlan.distribute`.
+    """Runtime handle returned by :meth:`ParallelizationPlan.materialize`.
 
     Holds the per-modality meshes, the data-parallel sampler coordinates, the
     configured CP splitters, and the cross-modality gradient synchronizer.  Use
@@ -239,7 +240,7 @@ class ParallelizationPlan:
             context_parallel_splitter=UniformContextParallelSplitter(),
         ))
 
-        ctx = plan.distribute(device, dtype=torch.bfloat16)
+        ctx = plan.materialize(device, dtype=torch.bfloat16)
         loader = ctx.prepare_dataloader(dataset, batch_size=16, collate_fn=collate)
         schedule = ctx.create_schedule(exec_plan, output_future,
                                        num_microbatches=8, microbatch_size=2)
@@ -256,13 +257,29 @@ class ParallelizationPlan:
         )
 
     def parallelize(
-        self, module: CornstarchModelBase, config: ParallelConfig
+        self,
+        module: CornstarchModelBase | CornstarchModalityEncoder,
+        config: ParallelConfig,
     ) -> None:
-        """Record a module-to-config binding for later distribution."""
+        """Record a module-to-config binding for later distribution.
+
+        Only Cornstarch models and ``CornstarchModalityEncoder`` units are
+        accepted. A bare Hugging Face encoder (or any other module) is rejected:
+        it has no projector lifecycle and no ``_section_names()`` for the
+        ``apply_*`` helpers to walk. Wrap such an encoder with
+        ``build_modality_encoder(encoder, language_model, modality=...)`` first.
+        """
+        if not isinstance(module, (CornstarchModelBase, CornstarchModalityEncoder)):
+            raise TypeError(
+                f"parallelize() requires a CornstarchModelBase or "
+                f"CornstarchModalityEncoder, got {type(module).__name__}. Wrap a "
+                f"raw Hugging Face encoder with build_modality_encoder(encoder, "
+                f"language_model, modality=...) before parallelizing it."
+            )
         self._modules.append(module)
         self._configs.append(config)
 
-    def distribute(
+    def materialize(
         self,
         device: str | torch.device = "cuda",
         dtype: torch.dtype | None = None,
@@ -333,17 +350,28 @@ class ParallelizationPlan:
             )
             meshes[id(module)] = mesh
 
+            # The model-side parallelisms (TP/CP/PP/EP) walk a Cornstarch model's
+            # `_section_names()`/`hf_config`. For a modality encoder that lives on
+            # its inner `.encoder`; the projector stays replicated (no registered
+            # TP family) and CP/PP/EP do not apply to it. `materialize` is still
+            # called on the modality encoder so the projector follows along.
+            apply_target = (
+                module.encoder
+                if isinstance(module, CornstarchModalityEncoder)
+                else module
+            )
+
             if config.tensor_parallel_size > 1:
-                apply_tensor_parallel(module, mesh.tp_mesh)
+                apply_tensor_parallel(apply_target, mesh.tp_mesh)
             if config.context_parallel_size > 1:
-                apply_context_parallel(module, mesh.cp_group)
+                apply_context_parallel(apply_target, mesh.cp_group)
             if config.pipeline_parallel_size > 1:
-                apply_pipeline_parallel(module, mesh)
+                apply_pipeline_parallel(apply_target, mesh)
 
             module.materialize(device, dtype=dtype)
 
             if config.expert_parallel_size > 1:
-                apply_expert_parallel(module, mesh.ep_group)
+                apply_expert_parallel(apply_target, mesh.ep_group)
 
         dp_size_final, dp_rank, dp_group, grad_sync = self._build_dp_handles(
             meshes

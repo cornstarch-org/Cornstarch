@@ -118,11 +118,23 @@ class CornstarchModelBase(nn.Module):
         self,
         state_dict: Mapping[str, torch.Tensor] | None = None,
         checkpoint_path: str | Path | None = None,
+        model_name_or_path: str | None = None,
     ) -> None:
-        """Configure materialization to assign weights from a state dict or file."""
+        """Configure materialization to assign weights from checkpoint sources.
+
+        Exactly one source is used: a pre-loaded Hugging Face ``state_dict``, a
+        local safetensors ``checkpoint_path``, or a Hugging Face Hub
+        ``model_name_or_path`` whose ``*.safetensors`` shards are downloaded and
+        merged at ``materialize()`` time. The same materialize path serves a
+        plain model and a TP/PP-sharded (DTensor) one.
+        """
         if state_dict is not None:
             state_dict = self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
-        self._init_plan = InitializationPlan.checkpoint(state_dict=state_dict, checkpoint_path=checkpoint_path)
+        self._init_plan = InitializationPlan.checkpoint(
+            state_dict=state_dict,
+            checkpoint_path=checkpoint_path,
+            model_name_or_path=model_name_or_path,
+        )
 
     def materialize(
         self,
@@ -142,7 +154,7 @@ class CornstarchModelBase(nn.Module):
         device = torch.device(device)
         if self._init_plan.mode == "checkpoint":
             state_dict = self._load_checkpoint_state_dict(device, dtype)
-            self.load_state_dict(state_dict, strict=True, assign=True)
+            self._load_checkpoint_into_model(state_dict, device, dtype)
             self._copy_deterministic_meta_buffers(device)
         elif self._init_plan.mode == "random":
             self._copy_deterministic_meta_buffers(device)
@@ -295,7 +307,16 @@ class CornstarchModelBase(nn.Module):
     def _load_checkpoint_state_dict(
         self, device: torch.device, dtype: torch.dtype | None = None
     ) -> Mapping[str, torch.Tensor]:
-        """Load staged checkpoint tensors onto the materialization device."""
+        """Load staged checkpoint tensors onto the materialization device.
+
+        Resolves the configured checkpoint source (a pre-mapped ``state_dict``, a
+        local safetensors ``checkpoint_path``, or a Hugging Face Hub
+        ``model_name_or_path``), translates Hugging Face keys to Cornstarch keys,
+        and moves the tensors onto the materialization device (in ``dtype`` for
+        floating-point tensors). The returned state dict holds *full* (non-DTensor)
+        tensors; sharding for parallelized models happens in
+        ``_load_checkpoint_into_model``.
+        """
         if self._init_plan.state_dict is not None:
             return {
                 key: tensor.to(
@@ -305,12 +326,21 @@ class CornstarchModelBase(nn.Module):
                 )
                 for key, tensor in self._init_plan.state_dict.items()
             }
-        if self._init_plan.checkpoint_path is None:
-            raise RuntimeError("Checkpoint initialization requires a state_dict or checkpoint_path.")
-        checkpoint_device = "cpu" if self.uses_layer_offload else str(device)
-        state_dict = self._state_mapper.hf_to_cornstarch_state_dict(
-            load_file(str(self._init_plan.checkpoint_path), device=checkpoint_device)
-        )
+
+        if self._init_plan.model_name_or_path is not None:
+            raw = self._download_and_load_safetensors(
+                self._init_plan.model_name_or_path, device
+            )
+        elif self._init_plan.checkpoint_path is not None:
+            checkpoint_device = "cpu" if self.uses_layer_offload else str(device)
+            raw = load_file(str(self._init_plan.checkpoint_path), device=checkpoint_device)
+        else:
+            raise RuntimeError(
+                "Checkpoint initialization requires a state_dict, checkpoint_path, "
+                "or model_name_or_path."
+            )
+
+        state_dict = self._state_mapper.hf_to_cornstarch_state_dict(raw)
         return {
             key: tensor.to(
                 device=self._materialization_device_for_tensor(key, device),
@@ -319,6 +349,97 @@ class CornstarchModelBase(nn.Module):
             )
             for key, tensor in state_dict.items()
         }
+
+    @staticmethod
+    def _download_and_load_safetensors(
+        model_name_or_path: str, device: torch.device
+    ) -> dict[str, torch.Tensor]:
+        """Download and merge all ``*.safetensors`` shards from the HF Hub.
+
+        Lists the repository's safetensors siblings, downloads each shard, and
+        merges them into a single Hugging Face-keyed state dict on the
+        materialization device (CPU when the requested device is ``meta``).
+        """
+        from huggingface_hub import HfApi, hf_hub_download
+
+        api = HfApi()
+        siblings = api.model_info(model_name_or_path).siblings or []
+        safetensor_files = sorted(
+            sibling.rfilename
+            for sibling in siblings
+            if sibling.rfilename.endswith(".safetensors")
+        )
+        if not safetensor_files:
+            raise FileNotFoundError(
+                f"No .safetensors files found in '{model_name_or_path}'."
+            )
+
+        load_device = "cpu" if device.type == "meta" else str(device)
+        merged: dict[str, torch.Tensor] = {}
+        for filename in safetensor_files:
+            local_path = hf_hub_download(model_name_or_path, filename)
+            merged.update(load_file(local_path, device=load_device))
+        return merged
+
+    def _load_checkpoint_into_model(
+        self,
+        state_dict: Mapping[str, torch.Tensor],
+        device: torch.device,
+        dtype: torch.dtype | None,
+    ) -> None:
+        """Assign checkpoint tensors into this model, sharding DTensor params.
+
+        For a plain (non-parallelized) model this is a strict ``assign``-load.
+        For a tensor-parallel model, ``apply_tensor_parallel`` has recorded
+        DTensor sharding specs on the meta parameters; a strict ``assign``-load of
+        a *full* tensor would drop that wrapping and leave every rank with the
+        whole weight. Instead each DTensor-owning module is materialized first via
+        ``to_empty`` (which preserves the sharding spec), then the
+        correctly-sharded slice of each full checkpoint tensor is copied in with
+        ``distribute_tensor``. The remaining plain params (and any persistent
+        buffers carried in the checkpoint) are ``assign``-loaded; non-persistent
+        deterministic buffers are intentionally left meta so the caller's
+        ``_copy_deterministic_meta_buffers`` can fill them just as on the plain
+        path.
+        """
+        from torch.distributed.tensor import DTensor, distribute_tensor
+
+        params = dict(self.named_parameters(remove_duplicate=False))
+        # Preserve named_parameters() order: distribute_tensor() runs a collective
+        # and every rank must issue the calls in the same order.
+        dtensor_keys = [
+            name for name, param in params.items()
+            if isinstance(param.data, DTensor)
+        ]
+        if not dtensor_keys:
+            self.load_state_dict(state_dict, strict=True, assign=True)
+            return
+
+        dtensor_key_set = set(dtensor_keys)
+        with torch.no_grad():
+            # Materialize each DTensor-owning module so to_empty keeps its
+            # sharding spec, then copy this rank's distribute_tensor() slice in.
+            for key in dtensor_keys:
+                module_path = key.rpartition(".")[0]
+                module = self.get_submodule(module_path) if module_path else self
+                module.to_empty(
+                    device=self._materialization_device_for_tensor(module_path, device)
+                )
+                if dtype is not None:
+                    module.to(dtype=dtype)
+            for key in dtensor_keys:
+                target = params[key]
+                sharded = distribute_tensor(
+                    state_dict[key], target.data.device_mesh, target.data.placements
+                )
+                target.data.copy_(sharded)
+
+        # Assign the remaining plain params and persistent buffers; the DTensor
+        # keys were just handled and the deterministic buffers stay meta.
+        remaining = {
+            key: value for key, value in state_dict.items() if key not in dtensor_key_set
+        }
+        self.load_state_dict(remaining, strict=False, assign=True)
 
     def _copy_deterministic_meta_buffers(self, device: torch.device) -> None:
         """Materialize deterministic helper buffers that are not in checkpoints."""
