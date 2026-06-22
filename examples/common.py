@@ -9,10 +9,8 @@ import torch
 from PIL import Image
 from transformers import AutoConfig
 
-from cornstarch.models import (
-    CornstarchModalityEncoder,
-    RepeatedLayerOffloadConfig,
-)
+from cornstarch.models import RepeatedLayerOffloadConfig
+from cornstarch.models import build_modality_encoder as build_modality_encoder
 
 
 IMAGE_TOKEN = "<image>"
@@ -81,20 +79,6 @@ def tokenize_text_batch(
         "input_ids": language_inputs["input_ids"].to(device=device),
         "labels": labels.to(device=device),
     }
-
-
-def build_modality_encoder(
-    encoder,
-    language_model,
-    modality: str,
-    projector_type: str = "linear",
-) -> CornstarchModalityEncoder:
-    return CornstarchModalityEncoder.from_encoder_and_language_model(
-        encoder,
-        language_model,
-        modality=modality,
-        projector_type=projector_type,
-    )
 
 
 def layer_offload_config(
