@@ -341,27 +341,6 @@ CP_ATOL = 5e-3
 CP_RTOL = 5e-3
 
 
-def _serialize_cp_stream() -> None:
-    """Pin the CP kernel's overlap stream to the current stream.
-
-    The kernel overlaps its all-gather / reduce-scatter on a dedicated side CUDA
-    stream and only re-syncs at the very end of backward.  Under the gloo CPU
-    bridge that runs these collectives, the per-head ``dkv`` buffer (a
-    ``torch.empty``) is cloned on the default stream before the side stream's
-    reduce-scatter copy lands, so the clone races and reads uninitialized memory
-    (intermittent NaN / corrupted dk).  Forcing the kernel onto the current
-    stream serializes the collectives with the compute, which removes the race
-    without changing the kernel's math (the side stream is purely a perf
-    optimization).  This makes the single-GPU test deterministic and lets
-    backward parity hold at the same 5e-3 as forward.
-    """
-    from cornstarch.distributed.context_parallel.attention import (
-        ContextParallelFlashAttention,
-    )
-
-    ContextParallelFlashAttention._stream = torch.cuda.current_stream()
-
-
 @unittest.skipUnless(
     torch.cuda.is_available(),
     "context-parallel attention uses CUDA flash-attn (gloo bridges the "
@@ -387,8 +366,6 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         from cornstarch.distributed.context_parallel.attention import (
             ContextParallelFlashAttention,
         )
-
-        _serialize_cp_stream()
 
         nheads, dim = 8, 64  # dim=64 / heads=8 are flash-attn-supported shapes
         assert seq_len % self.world_size == 0
@@ -477,8 +454,6 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         from cornstarch.distributed.context_parallel.attention import (
             context_parallel_flash_attention,
         )
-
-        _serialize_cp_stream()
 
         batch_size, nheads, seq_len, dim = 2, 8, 256, 64
         assert seq_len % self.world_size == 0
