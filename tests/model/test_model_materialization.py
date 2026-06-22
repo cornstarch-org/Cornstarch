@@ -152,6 +152,56 @@ def test_offload_layers_to_cpu_skips_unmaterialized_layers(
     assert all(tensor.is_meta for tensor in meta_tensors)
 
 
+def _reference_hf_state_dict() -> dict[str, torch.Tensor]:
+    """Materialize a tiny Llama and return its Hugging Face-keyed weights."""
+    reference = from_hf_config(llama_config(), attn_implementation=ATTN_IMPLEMENTATION)
+    reference.set_random_init()
+    reference.materialize("cpu")
+    return {key: tensor.detach().clone() for key, tensor in reference.to_hf_state_dict().items()}
+
+
+def test_set_checkpoint_init_from_state_dict_round_trips() -> None:
+    """A staged HF state dict materializes into matching Cornstarch weights."""
+    hf_state_dict = _reference_hf_state_dict()
+
+    model = from_hf_config(llama_config(), attn_implementation=ATTN_IMPLEMENTATION)
+    model.set_checkpoint_init(state_dict=hf_state_dict)
+    model.materialize("cpu")
+
+    materialized = model.to_hf_state_dict()
+    assert set(materialized) == set(hf_state_dict)
+    for key, expected in hf_state_dict.items():
+        torch.testing.assert_close(materialized[key], expected)
+
+
+def test_set_checkpoint_init_from_hub_id_round_trips(monkeypatch) -> None:
+    """``model_name_or_path`` downloads + merges safetensors, then materializes.
+
+    The real Hub download is monkeypatched so ``pytest tests`` stays offline; the
+    code path under test (HF-to-Cornstarch mapping + device/dtype move + load) is
+    identical to a genuine Hub materialization.
+    """
+    hf_state_dict = _reference_hf_state_dict()
+
+    def _fake_download(model_name_or_path, device):
+        assert model_name_or_path == "fake/tiny-llama"
+        return {key: tensor.clone() for key, tensor in hf_state_dict.items()}
+
+    monkeypatch.setattr(
+        "cornstarch.models.model_base.CornstarchModelBase._download_and_load_safetensors",
+        staticmethod(_fake_download),
+    )
+
+    model = from_hf_config(llama_config(), attn_implementation=ATTN_IMPLEMENTATION)
+    model.set_checkpoint_init(model_name_or_path="fake/tiny-llama")
+    model.materialize("cpu")
+
+    materialized = model.to_hf_state_dict()
+    assert set(materialized) == set(hf_state_dict)
+    for key, expected in hf_state_dict.items():
+        torch.testing.assert_close(materialized[key], expected)
+
+
 def test_materialize_handles_duplicate_tied_parameter_names() -> None:
     """Verify tied Llama embeddings do not leave the LM head on meta."""
     cornstarch_model = from_hf_config(

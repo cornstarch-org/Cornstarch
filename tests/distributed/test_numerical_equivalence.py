@@ -133,6 +133,66 @@ class TestTensorParallelEquivalence(GlooDistributedTestBase):
         torch.testing.assert_close(embed_grad, ref_embed_grad, atol=ATOL, rtol=RTOL)
 
 
+class TestTensorParallelCheckpointInit(GlooDistributedTestBase):
+    """Checkpoint init on a TP model shards weights correctly per rank.
+
+    Drives the real materialize path: a meta model records DTensor specs via
+    ``apply_tensor_parallel``, then ``set_checkpoint_init`` with a *full*
+    (non-sharded) reference state dict materializes each rank's correctly-sharded
+    slice — exactly ``distribute_tensor(full)`` — and reproduces the non-parallel
+    loss.
+    """
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def test_checkpoint_init_shards_weights(self):
+        mesh = ModalProcessGroupMesh(
+            device_type="cpu", global_ranks=[0, 1],
+            dp_size=1, cp_size=1, tp_size=2, num_pp_stages=1,
+        )
+
+        # Non-parallel reference: full weights + loss/grad.
+        ref_model = _build_llm()
+        batch = _batch()
+        ref_loss = _loss(ref_model, batch)
+        ref_loss.backward()
+        ref_embed_grad = ref_model.pre_decoder["embed_tokens"].weight.grad.clone()
+        ref_params = _ref_params(ref_model)
+        ref_hf_state_dict = ref_model.to_hf_state_dict()
+
+        # Fresh meta model -> record DTensor specs -> checkpoint init -> materialize.
+        torch.manual_seed(0)
+        config = llama_config()
+        config.vocab_size = VOCAB
+        config.tie_word_embeddings = False
+        model = from_hf_config(config, model_kind="language", attn_implementation="eager")
+        apply_tensor_parallel(model, mesh.tp_mesh)
+        model.set_checkpoint_init(state_dict=ref_hf_state_dict)
+        model.materialize("cpu", dtype=DTYPE)
+        model.train()
+
+        # Every DTensor param holds this rank's distribute_tensor() slice; plain
+        # params hold the full reference tensor.
+        for name, p in model.named_parameters():
+            full = ref_params[name]
+            if isinstance(p.data, DTensor):
+                expected = distribute_tensor(full, p.data.device_mesh, p.data.placements)
+                torch.testing.assert_close(
+                    p.data.to_local(), expected.to_local(), atol=ATOL, rtol=RTOL
+                )
+            else:
+                torch.testing.assert_close(p.data, full, atol=ATOL, rtol=RTOL)
+
+        # Loss/grad parity against the non-parallel reference.
+        tp_loss = _loss(model, batch)
+        torch.testing.assert_close(tp_loss, ref_loss, atol=ATOL, rtol=RTOL)
+        tp_loss.backward()
+        embed_grad = model.pre_decoder["embed_tokens"].weight.grad
+        torch.testing.assert_close(embed_grad, ref_embed_grad, atol=ATOL, rtol=RTOL)
+
+
 class TestPipelineParallelEquivalence(GlooDistributedTestBase):
     @property
     def world_size(self) -> int:
