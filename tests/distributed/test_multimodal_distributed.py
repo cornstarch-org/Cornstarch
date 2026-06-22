@@ -131,11 +131,11 @@ class TestCrossMeshVLMStep(GlooDistributedTestBase):
         plan = ParallelizationPlan(global_ranks=list(range(self.world_size)))
         plan.parallelize(
             modality_encoder,
-            ParallelConfig(tensor_parallel_size=1, data_parallel_size=1),
+            ParallelConfig(tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1),
         )
         plan.parallelize(
             language_model,
-            ParallelConfig(tensor_parallel_size=1, data_parallel_size=1),
+            ParallelConfig(tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1),
         )
         ctx = plan.materialize("cpu", dtype=torch.float32)
         language_model.train()
@@ -186,11 +186,11 @@ class TestCrossMeshVLMTensorParallel(GlooDistributedTestBase):
         plan = ParallelizationPlan(global_ranks=list(range(self.world_size)))
         plan.parallelize(
             modality_encoder,
-            ParallelConfig(tensor_parallel_size=1, data_parallel_size=1),
+            ParallelConfig(tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1),
         )
         plan.parallelize(
             language_model,
-            ParallelConfig(tensor_parallel_size=2, data_parallel_size=1),
+            ParallelConfig(tensor_parallel_size=2, pipeline_parallel_size=1, data_parallel_size=1),
         )
         ctx = plan.materialize("cpu", dtype=torch.float32)
         language_model.train()
@@ -227,11 +227,11 @@ class TestCrossMeshFlexibility(GlooDistributedTestBase):
         plan = ParallelizationPlan(global_ranks=list(range(self.world_size)))
         plan.parallelize(
             modality_encoder,
-            ParallelConfig(tensor_parallel_size=1, data_parallel_size=1),
+            ParallelConfig(tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1),
         )
         plan.parallelize(
             language_model,
-            ParallelConfig(tensor_parallel_size=1, data_parallel_size=1),
+            ParallelConfig(tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1),
         )
         ctx = plan.materialize("cpu", dtype=torch.float32)
         language_model.train()

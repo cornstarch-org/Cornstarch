@@ -21,7 +21,15 @@ class ParallelConfig:
     Degrees
     -------
     - ``tensor_parallel_size`` (``tp``): DTensor column/row weight sharding.
-    - ``pipeline_parallel_size`` (``pp``): number of pipeline stages.
+    - ``pipeline_parallel_size`` (``pp``): the user's **pipeline-parallelism
+      intent**, not just a degree. ``None`` (the default) means this module is
+      **not** a pipeline stage, so it is **co-located** with the other registered
+      modules on a shared rank range (each rank runs every modality). A positive
+      integer ``k`` means the module occupies ``k`` pipeline stages and is
+      **disaggregated** onto its own rank range. All registered modules must agree
+      (all ``None`` ⇒ no pipeline parallelism; all positive ⇒ pipeline
+      parallelism); a mix is rejected by ``materialize()``. Cornstarch never
+      infers a stage count — the user states it.
     - ``context_parallel_size`` (``cp``): sequence is split across these ranks
       (data-side); requires a ``context_parallel_splitter``.
     - ``data_parallel_size`` (``dp``): replicas trained on different data shards.
@@ -34,7 +42,7 @@ class ParallelConfig:
     """
 
     tensor_parallel_size: int = 1
-    pipeline_parallel_size: int = 1
+    pipeline_parallel_size: int | None = None
     context_parallel_size: int = 1
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
@@ -43,13 +51,16 @@ class ParallelConfig:
     def __post_init__(self) -> None:
         for name in (
             "tensor_parallel_size",
-            "pipeline_parallel_size",
             "context_parallel_size",
             "data_parallel_size",
             "expert_parallel_size",
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1.")
+        # ``pipeline_parallel_size`` is ``None`` (co-locate, no PP) or a positive
+        # stage count (disaggregate); it is never < 1.
+        if self.pipeline_parallel_size is not None and self.pipeline_parallel_size < 1:
+            raise ValueError("pipeline_parallel_size must be None or >= 1.")
         if self.context_parallel_size > 1 and self.context_parallel_splitter is None:
             raise ValueError(
                 "context_parallel_splitter must be provided when "
@@ -57,10 +68,20 @@ class ParallelConfig:
             )
 
     @property
+    def uses_pipeline_parallel(self) -> bool:
+        """Whether this module is a pipeline stage (``pipeline_parallel_size`` set)."""
+        return self.pipeline_parallel_size is not None
+
+    @property
+    def num_pp_stages(self) -> int:
+        """Pipeline stage count for rank math (``None`` ⇒ 1, i.e. not pipelined)."""
+        return self.pipeline_parallel_size if self.pipeline_parallel_size is not None else 1
+
+    @property
     def ranks_per_replica(self) -> int:
         """Ranks one data-parallel replica of this modality consumes."""
         return (
-            self.pipeline_parallel_size
+            self.num_pp_stages
             * self.context_parallel_size
             * self.tensor_parallel_size
             * self.expert_parallel_size

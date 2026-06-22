@@ -72,6 +72,7 @@ class ParallelContext:
         dp_rank: int,
         dp_group: Optional[dist.ProcessGroup],
         gradient_synchronizer: Optional[GradientSynchronizer],
+        uses_pipeline_parallel: bool = False,
     ) -> None:
         self._modules = modules
         self._configs = configs
@@ -81,10 +82,21 @@ class ParallelContext:
         self._dp_rank = dp_rank
         self._dp_group = dp_group
         self._gradient_synchronizer = gradient_synchronizer
+        self._uses_pipeline_parallel = uses_pipeline_parallel
 
     # ------------------------------------------------------------------
     # Accessors
     # ------------------------------------------------------------------
+
+    @property
+    def uses_pipeline_parallel(self) -> bool:
+        """Whether modules are disaggregated into pipeline stages (vs co-located).
+
+        True iff every registered ``ParallelConfig.pipeline_parallel_size`` is a
+        positive int. When False, all modules are co-located on shared ranks and
+        the training loop runs the plan directly (no schedule).
+        """
+        return self._uses_pipeline_parallel
 
     @property
     def dp_size(self) -> int:
@@ -330,40 +342,27 @@ class ParallelizationPlan:
         world_size = len(global_ranks)
         my_rank = dist.get_rank()
 
-        ranks_per_replica = sum(cfg.ranks_per_replica for cfg in self._configs)
-        if ranks_per_replica == 0:
+        if not self._configs:
             raise ValueError("No modules registered with parallelize().")
-        if world_size % ranks_per_replica != 0:
-            raise ValueError(
-                f"world_size ({world_size}) is not divisible by the sum of "
-                f"per-modality ranks_per_replica ({ranks_per_replica})."
-            )
-        dp_size = world_size // ranks_per_replica
+
+        pipelined, dp_size, module_ranks = self._assign_ranks(
+            global_ranks, world_size
+        )
 
         for cfg in self._configs:
             if cfg.data_parallel_size != dp_size:
                 raise ValueError(
                     f"ParallelConfig.data_parallel_size={cfg.data_parallel_size} "
-                    f"does not match the computed dp_size={dp_size} "
-                    f"(world_size / sum(ranks_per_replica))."
+                    f"does not match the computed dp_size={dp_size}."
                 )
 
-        modality_sizes = [cfg.ranks_per_replica for cfg in self._configs]
         meshes: dict[int, ModalProcessGroupMesh] = {}
         layouts: dict[int, MeshLayout] = {}
 
         for mod_idx, (module, config) in enumerate(
             zip(self._modules, self._configs)
         ):
-            modality_size = modality_sizes[mod_idx]
-            modality_offset = sum(modality_sizes[:mod_idx])
-
-            modality_ranks: list[int] = []
-            for replica in range(dp_size):
-                base = replica * ranks_per_replica + modality_offset
-                modality_ranks.extend(
-                    global_ranks[base : base + modality_size]
-                )
+            modality_ranks = module_ranks[mod_idx]
 
             # Record every modality's rank layout on every rank (pure
             # arithmetic, no collectives) so the cross-mesh schedule can pair
@@ -371,7 +370,7 @@ class ParallelizationPlan:
             layouts[id(module)] = MeshLayout(
                 global_ranks=tuple(modality_ranks),
                 dp_size=dp_size,
-                num_pp_stages=config.pipeline_parallel_size,
+                num_pp_stages=config.num_pp_stages,
                 cp_size=config.context_parallel_size,
                 tp_size=config.tensor_parallel_size,
                 ep_size=config.expert_parallel_size,
@@ -386,7 +385,7 @@ class ParallelizationPlan:
                 dp_size=dp_size,
                 cp_size=config.context_parallel_size,
                 tp_size=config.tensor_parallel_size,
-                num_pp_stages=config.pipeline_parallel_size,
+                num_pp_stages=config.num_pp_stages,
                 ep_size=config.expert_parallel_size,
             )
             meshes[id(module)] = mesh
@@ -406,7 +405,7 @@ class ParallelizationPlan:
                 apply_tensor_parallel(apply_target, mesh.tp_mesh)
             if config.context_parallel_size > 1:
                 apply_context_parallel(apply_target, mesh.cp_group)
-            if config.pipeline_parallel_size > 1:
+            if config.num_pp_stages > 1:
                 apply_pipeline_parallel(apply_target, mesh)
 
             module.materialize(device, dtype=dtype)
@@ -427,7 +426,84 @@ class ParallelizationPlan:
             dp_rank=dp_rank,
             dp_group=dp_group,
             gradient_synchronizer=grad_sync,
+            uses_pipeline_parallel=pipelined,
         )
+
+    def _assign_ranks(
+        self, global_ranks: list[int], world_size: int
+    ) -> tuple[bool, int, list[list[int]]]:
+        """Classify the PP intent and assign each module its global ranks.
+
+        Returns ``(pipelined, dp_size, module_ranks)`` where ``module_ranks[i]``
+        is the replica-major rank list for module ``i``.
+
+        - **All** ``pipeline_parallel_size is None`` → not pipelined: every module
+          is **co-located** on the *same* replica rank range (each rank runs every
+          modality). Requires equal ``ranks_per_replica`` across modules.
+        - **All** positive ints → pipelined: modules are **disaggregated** onto
+          disjoint rank ranges (``sum(ranks_per_replica)`` per replica), as before.
+        - A mix is rejected.
+        """
+        pp_flags = [cfg.uses_pipeline_parallel for cfg in self._configs]
+        if all(pp_flags):
+            pipelined = True
+        elif not any(pp_flags):
+            pipelined = False
+        else:
+            named = ", ".join(
+                f"{type(m).__name__}(pipeline_parallel_size="
+                f"{c.pipeline_parallel_size})"
+                for m, c in zip(self._modules, self._configs)
+            )
+            raise ValueError(
+                "All registered modules must agree on pipeline parallelism: "
+                "either every ParallelConfig.pipeline_parallel_size is None "
+                "(co-located, no pipeline parallelism) or every one is a positive "
+                f"int (disaggregated, pipeline parallelism). Got a mix: {named}."
+            )
+
+        if pipelined:
+            ranks_per_replica = sum(cfg.ranks_per_replica for cfg in self._configs)
+            if world_size % ranks_per_replica != 0:
+                raise ValueError(
+                    f"world_size ({world_size}) is not divisible by the sum of "
+                    f"per-modality ranks_per_replica ({ranks_per_replica})."
+                )
+            dp_size = world_size // ranks_per_replica
+            sizes = [cfg.ranks_per_replica for cfg in self._configs]
+            module_ranks: list[list[int]] = []
+            for mod_idx in range(len(self._configs)):
+                size = sizes[mod_idx]
+                offset = sum(sizes[:mod_idx])
+                ranks: list[int] = []
+                for replica in range(dp_size):
+                    base = replica * ranks_per_replica + offset
+                    ranks.extend(global_ranks[base : base + size])
+                module_ranks.append(ranks)
+            return pipelined, dp_size, module_ranks
+
+        # Co-located: all modules share one replica rank range.
+        distinct = {cfg.ranks_per_replica for cfg in self._configs}
+        if len(distinct) != 1:
+            named = ", ".join(
+                f"{type(m).__name__}={c.ranks_per_replica}"
+                for m, c in zip(self._modules, self._configs)
+            )
+            raise ValueError(
+                "Co-located modules (pipeline_parallel_size=None) must have equal "
+                f"ranks_per_replica (tp*cp*ep); got {named}. Use equal tp/cp/ep, "
+                "or set a positive pipeline_parallel_size to disaggregate them."
+            )
+        ranks_per_replica = distinct.pop()
+        if world_size % ranks_per_replica != 0:
+            raise ValueError(
+                f"world_size ({world_size}) is not divisible by the shared "
+                f"co-located ranks_per_replica ({ranks_per_replica})."
+            )
+        dp_size = world_size // ranks_per_replica
+        # Every module spans the full replica layout (all ranks).
+        module_ranks = [list(global_ranks) for _ in self._configs]
+        return pipelined, dp_size, module_ranks
 
     def _build_dp_handles(
         self, meshes: dict[int, ModalProcessGroupMesh]
