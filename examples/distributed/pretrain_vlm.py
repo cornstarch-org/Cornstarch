@@ -6,33 +6,34 @@ language model tensor + pipeline parallel, all replicated once (dp=1)::
     torchrun --nproc_per_node=4 examples/distributed/pretrain_vlm.py \
         --vision-tp 2 --llm-tp 2 --llm-pp 1
 
-The point of Option C for multimodal models: each modality is described
-independently.  ``plan.parallelize`` is called once per modality with its own
-``ParallelConfig`` (vision can be TP-only while the LLM is TP+PP), and
-``plan.materialize`` resolves the per-modality + DP-offset rank math, builds each
-modality's mesh, applies the model-side parallelisms, and materializes — no
-hand-written rank arithmetic in this script.
+This reads top-to-bottom like the non-distributed ``examples/pretrain_vlm.py``:
+build the modality encoder with ``build_modality_encoder``, set its init plan,
+build the execution plan, and run an explicit training loop.  The only
+distributed-specific lines are ``init_distributed()``, the per-modality
+``plan.parallelize`` + ``plan.materialize``, ``ctx.prepare_dataloader``,
+``ctx.create_schedule`` + ``schedule.step``, and ``ctx.sync_gradients``.
 
-This example parallelizes the inner ``CornstarchVisionEncoder`` and
-``CornstarchLanguageModel`` (both ``CornstarchModelBase``); the projector that
-bridges them is then built and materialized around the parallelized encoder.
+Each modality is described independently: ``plan.parallelize`` is called once
+per modality with its own ``ParallelConfig`` (vision can be TP-only while the
+LLM is TP+PP), and ``plan.materialize`` resolves the per-modality + DP-offset
+rank math and materializes both models.  The projector follows its encoder
+automatically — there is no standalone projector setup in this script.
 """
 from __future__ import annotations
 
 import tyro
 
 import torch
-import torch.distributed as dist
 from torch.utils.data import Dataset
 from transformers import AutoConfig
 
-from common import DTYPE, causal_lm_criterion, init_distributed, train_loop
+from common import DTYPE, causal_lm_criterion, init_distributed
 
 from cornstarch.distributed import ParallelConfig, ParallelizationPlan
 from cornstarch.models import (
     CornstarchExecutionPlan,
-    CornstarchModalityEncoder,
     ExecutionFuture,
+    build_modality_encoder,
     from_hf_config,
 )
 
@@ -84,14 +85,19 @@ def main(
 
     vision_encoder = from_hf_config(vision_config, model_kind="vision")
     language_model = from_hf_config(llm_config, model_kind="language")
-    vision_encoder.set_random_init()
+    modality_encoder = build_modality_encoder(
+        vision_encoder, language_model, modality="vision"
+    )
+
     language_model.set_random_init()
+    modality_encoder.set_random_init()
 
     # Per-modality declarative configs — vision and the LLM are parallelized
-    # independently; materialize() handles the cross-modality rank assignment.
+    # independently; materialize() handles the cross-modality rank assignment and
+    # materializes each modality encoder's projector alongside its encoder.
     plan = ParallelizationPlan(global_ranks=list(range(world_size)))
     plan.parallelize(
-        vision_encoder,
+        modality_encoder,
         ParallelConfig(tensor_parallel_size=vision_tp, data_parallel_size=dp),
     )
     plan.parallelize(
@@ -103,14 +109,8 @@ def main(
         ),
     )
     ctx = plan.materialize(device, dtype=DTYPE)
-
-    # Bridge the (already parallelized + materialized) vision encoder to the LLM
-    # with a projector, then materialize the projector to match.
-    modality_encoder = CornstarchModalityEncoder.from_encoder_and_language_model(
-        vision_encoder, language_model, modality="vision", projector_type="linear"
-    )
-    modality_encoder.projector.set_random_init()
-    modality_encoder.projector.materialize(device).to(dtype=DTYPE)
+    language_model.train()
+    modality_encoder.train()
 
     patches_per_side = int(vision_config.image_size) // int(vision_config.patch_size)
     num_image_tokens = patches_per_side * patches_per_side + 1  # + CLS token
@@ -121,18 +121,21 @@ def main(
     loader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
 
     def build_plan():
-        plan_exec = CornstarchExecutionPlan()
-        vision_outputs = plan_exec.run_modality_encoder(
+        exec_plan = CornstarchExecutionPlan()
+        vision_outputs = exec_plan.run_modality_encoder(
             module=modality_encoder, pixel_values=ExecutionFuture("pixel_values")
         )
-        merged = plan_exec.merge_modality_encoder_outputs(
+        merged = exec_plan.merge_modality_encoder_outputs(
             language_model=language_model,
             input_ids=ExecutionFuture("input_ids"),
             labels=ExecutionFuture("labels"),
             modality_token_ids={"vision": IMAGE_TOKEN_ID},
             encoder_outputs={"vision": vision_outputs},
         )
-        return plan_exec, plan_exec.run_language_model(module=language_model, inputs=merged)
+        output_future = exec_plan.run_language_model(
+            module=language_model, inputs=merged
+        )
+        return exec_plan, output_future
 
     exec_plan, output_future = build_plan()
     schedule = ctx.create_schedule(
@@ -144,7 +147,19 @@ def main(
 
     params = list(language_model.parameters()) + list(modality_encoder.parameters())
     optimizer = torch.optim.Adam(params, lr=lr)
-    train_loop(ctx, schedule, loader, optimizer, causal_lm_criterion, steps)
+    optimizer.zero_grad()
+
+    step = 0
+    for batch in loader:
+        if step >= steps:
+            break
+        result = schedule.step(batch, causal_lm_criterion, optimizer, return_loss=True)
+        ctx.sync_gradients()
+        optimizer.step()
+        optimizer.zero_grad()
+        if result["loss"] is not None and rank == 0:
+            print(f"step {step}: loss {result['loss'].item():.4f}")
+        step += 1
 
 
 if __name__ == "__main__":
