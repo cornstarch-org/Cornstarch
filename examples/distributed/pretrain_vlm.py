@@ -157,7 +157,15 @@ def pretrain(
     plan = ParallelizationPlan(global_ranks=list(range(world_size)))
     plan.parallelize(
         modality_encoder,
-        ParallelConfig(tensor_parallel_size=vision_tp, data_parallel_size=dp),
+        # pipeline_parallel_size=1 marks the encoder as its own pipeline stage so
+        # it is disaggregated onto its own ranks (one stage), feeding the language
+        # model — every registered module must agree on pipeline parallelism, so
+        # this is positive whenever the language model's is.
+        ParallelConfig(
+            tensor_parallel_size=vision_tp,
+            pipeline_parallel_size=1,
+            data_parallel_size=dp,
+        ),
     )
     plan.parallelize(
         language_model,
