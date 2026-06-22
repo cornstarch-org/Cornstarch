@@ -39,6 +39,7 @@ from cornstarch.distributed import (
 )
 from cornstarch.models import (
     CornstarchExecutionPlan,
+    ExecutionFuture,
     build_modality_encoder,
     from_hf_config,
 )
@@ -75,22 +76,22 @@ class FakeVLMDataset(Dataset):
         return {"input_ids": ids, "labels": ids.clone(), "pixel_values": pixel_values}
 
 
-def _build_plan(language_model: Any, modality_encoder: Any, mb: dict):
-    """Build the (parallelism-agnostic) plan for one VLM microbatch.
+def _build_plan(language_model: Any, modality_encoder: Any):
+    """Build the (parallelism-agnostic) VLM plan.
 
     The three plan-construction lines match the non-distributed
-    ``examples/pretrain_vlm.py``; ``mb`` is one microbatch from the user's
-    ``collate_fn`` list.
+    ``examples/pretrain_vlm.py``; inputs are futures so the same plan serves both
+    the local per-microbatch run and the schedule (which feeds each microbatch).
     """
     plan = CornstarchExecutionPlan()
     vision_outputs = plan.run_modality_encoder(
         module=modality_encoder,
-        pixel_values=mb["pixel_values"],
+        pixel_values=ExecutionFuture("pixel_values"),
     )
     merged = plan.merge_modality_encoder_outputs(
         language_model=language_model,
-        input_ids=mb["input_ids"],
-        labels=mb["labels"],
+        input_ids=ExecutionFuture("input_ids"),
+        labels=ExecutionFuture("labels"),
         modality_token_ids={"vision": IMAGE_TOKEN_ID},
         encoder_outputs={"vision": vision_outputs},
     )
@@ -111,22 +112,23 @@ def _training_step(
     Without pipeline parallelism the encoder and language model are co-located on
     every rank, so the whole ``encoder -> merge -> language model`` plan runs
     locally per microbatch and gradients accumulate (no schedule). With pipeline
-    parallelism the encoder and language model are disaggregated onto separate
-    ranks and the microbatch list is driven by the schedule (wired in T008).
-    ``ctx.sync_gradients`` all-reduces the DP gradients before the optimizer step.
+    parallelism the encoder is the leading pipeline stage feeding the
+    language-model stages, and the schedule drives the microbatch list across the
+    cross-mesh seam. ``ctx.sync_gradients`` all-reduces the DP gradients before
+    the optimizer step.
     """
+    plan, output_future = _build_plan(language_model, modality_encoder)
+
     if not ctx.uses_pipeline_parallel:
         loss_total = None
         for mb in microbatches:
-            _, output_future = _build_plan(language_model, modality_encoder, mb)
-            output = output_future.execute()
+            output = output_future.execute(inputs=mb)
             loss = criterion(output, mb) / len(microbatches)
             loss.backward()
             loss_total = loss.detach() if loss_total is None else loss_total + loss.detach()
         ctx.sync_gradients()
         return {"loss": loss_total}
 
-    plan, output_future = _build_plan(language_model, modality_encoder, microbatches[0])
     schedule = ctx.create_schedule(plan, output_future)
     result = schedule.step(microbatches, criterion, optimizer, return_loss=True)
     ctx.sync_gradients()

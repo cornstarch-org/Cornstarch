@@ -6,7 +6,6 @@ Uses 2 ranks (1 PP stage per rank) with the gloo backend.  Verifies that:
 - The full 1F1B loop accumulates a non-None loss on rank 1 only.
 """
 import unittest
-from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -98,6 +97,7 @@ class TestPipelineP2P(GlooDistributedTestBase):
         """1F1B forward pass on CornstarchLanguageModel via the schedule API."""
         from cornstarch.distributed.pipeline_parallel.forward_spec_wrapper import PipelineParallelForwardSpec
         from cornstarch.distributed.pipeline_parallel.schedule import (
+            MeshLayout,
             OneForwardOneBackwardSchedule,
         )
         from cornstarch.models import CornstarchExecutionPlan, ExecutionFuture, from_hf_config
@@ -135,8 +135,16 @@ class TestPipelineP2P(GlooDistributedTestBase):
         )
         output_future = plan.run_language_model(module=model, inputs=merged)
 
+        layout = MeshLayout(
+            global_ranks=tuple(mesh._global_ranks),
+            dp_size=mesh.dp_size,
+            num_pp_stages=mesh.num_stages,
+            cp_size=mesh.cp_size,
+            tp_size=mesh.tp_size,
+            ep_size=mesh.ep_size,
+        )
         schedule = OneForwardOneBackwardSchedule(
-            plan, output_future, mesh, num_microbatches=2, microbatch_size=1,
+            plan, output_future, {id(model): layout}, {id(model): mesh}, mesh.dp_size,
         )
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
 
@@ -144,13 +152,14 @@ class TestPipelineP2P(GlooDistributedTestBase):
             "input_ids": torch.randint(0, 128, (2, 8)),
             "labels": torch.randint(0, 128, (2, 8)),
         }
+        microbatches = [{k: v[i : i + 1] for k, v in batch.items()} for i in range(2)]
 
         def criterion(output, batch):
             if isinstance(output, torch.Tensor):
                 return output
             return output.loss if hasattr(output, "loss") else output["loss"]
 
-        result = schedule.step(batch, criterion, optimizer, return_loss=True)
+        result = schedule.step(microbatches, criterion, optimizer, return_loss=True)
 
         if mesh.is_last_stage():
             self.assertIsNotNone(result["loss"])

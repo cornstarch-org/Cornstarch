@@ -31,9 +31,7 @@ from cornstarch.distributed.expert_parallel import apply_expert_parallel
 from cornstarch.distributed.parallel_config import ParallelConfig
 from cornstarch.distributed.pipeline_parallel import apply_pipeline_parallel
 from cornstarch.distributed.pipeline_parallel.schedule import (
-    CompiledSchedule,
     MeshLayout,
-    NonPipelineParallelSchedule,
     OneForwardOneBackwardSchedule,
     TrainingSchedule,
 )
@@ -215,47 +213,33 @@ class ParallelContext:
         self,
         plan: "CornstarchExecutionPlan",
         output_future: "ExecutionFuture",
-        num_microbatches: int = 1,
-        microbatch_size: int = 1,
     ) -> TrainingSchedule:
-        """Return a training schedule for the given execution plan.
+        """Return the pipeline-parallel training schedule for the plan.
 
-        Schedule construction is cheap (DAG inspection + a rank-local program, no
-        collectives), so the caller is free to rebuild it per step — recovering
-        the per-batch flexibility the non-distributed plan already has.
+        Only call this when pipeline parallelism is used (``uses_pipeline_parallel``);
+        without it there are no stages and the training loop runs the plan directly
+        (``output_future.execute()`` + ``backward()`` per microbatch). The returned
+        :class:`OneForwardOneBackwardSchedule` drives the global pipeline — the
+        modality encoder(s) as leading stage(s) feeding the language-model stages,
+        with the encoder→language-model boundary crossed by the cross-mesh seam.
 
-        Selection:
-
-        - **Multiple modalities on disjoint ranks** -> :class:`CompiledSchedule`,
-          which runs each node only on its owning mesh and compiles the cross-mesh
-          transfers that move a node's output to the ranks that consume it.  This
-          is what lets a VLM train with the vision encoder and the language model
-          on separate ranks (and lets a modality idle on a batch that omits it).
-        - **A single modality with pipeline parallelism** ->
-          :class:`OneForwardOneBackwardSchedule` (1F1B) driven by that mesh.
-        - **A single modality without pipeline parallelism** ->
-          :class:`NonPipelineParallelSchedule`, which runs the whole DAG locally.
+        Construction is cheap (DAG/stage analysis + a rank-local program, no
+        collectives), so the caller may rebuild it per step. The number of
+        microbatches comes from the list passed to ``schedule.step``.
         """
-        ranksets = {
-            self._layouts[id(module)].rankset
-            for module in self._modules
-            if id(module) in self._layouts
-        }
-        if len(ranksets) > 1:
-            return CompiledSchedule(
-                plan,
-                output_future,
-                {id(module): self._layouts[id(module)] for module in self._modules},
-                self._dp_size,
+        if not self._uses_pipeline_parallel:
+            raise ValueError(
+                "create_schedule() requires pipeline parallelism. With no pipeline "
+                "parallelism the modules are co-located; run the plan directly "
+                "(output_future.execute() + backward()) per microbatch instead."
             )
-
-        for module in self._modules:
-            mesh = self._meshes.get(id(module))
-            if mesh is not None and mesh.num_stages > 1:
-                return OneForwardOneBackwardSchedule(
-                    plan, output_future, mesh, num_microbatches, microbatch_size
-                )
-        return NonPipelineParallelSchedule(plan, output_future)
+        return OneForwardOneBackwardSchedule(
+            plan,
+            output_future,
+            {id(module): self._layouts[id(module)] for module in self._modules},
+            self._meshes,
+            self._dp_size,
+        )
 
     # ------------------------------------------------------------------
     # Gradient sync
