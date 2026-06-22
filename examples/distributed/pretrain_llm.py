@@ -36,7 +36,6 @@ from cornstarch.distributed import (
     ParallelConfig,
     ParallelContext,
     ParallelizationPlan,
-    TrainingSchedule,
 )
 from cornstarch.models import (
     CornstarchExecutionPlan,
@@ -46,21 +45,40 @@ from cornstarch.models import (
 
 
 def _training_step(
-    schedule: TrainingSchedule,
+    language_model: Any,
     ctx: ParallelContext,
     batch: dict[str, torch.Tensor],
     criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
     optimizer: torch.optim.Optimizer,
+    num_microbatches: int,
+    microbatch_size: int,
 ) -> dict[str, Any]:
-    """Run one schedule-driven training step and sync gradients across DP ranks.
+    """Build the plan for this batch, run one schedule step, and sync gradients.
 
-    ``schedule.step`` runs forward + criterion + backward (or the 1F1B
-    microbatch loop under PP); ``ctx.sync_gradients`` all-reduces the DP
-    gradients before the optimizer step.  Hiding both parallelism-specific calls
-    here keeps the training loop identical to the non-distributed
-    ``examples/pretrain_vlm.py``.  Returns the schedule result whose ``"loss"``
-    is the step loss (``None`` on non-last pipeline stages).
+    Just like the non-distributed ``examples/pretrain_vlm.py``, the execution
+    plan is rebuilt **every step** — schedule construction is cheap (DAG analysis
+    plus a rank-local program, no collectives).  ``schedule.step`` runs forward +
+    criterion + backward (or the 1F1B microbatch loop under PP); then
+    ``ctx.sync_gradients`` all-reduces the DP gradients before the optimizer step.
+    Returns the schedule result whose ``"loss"`` is the step loss (``None`` on
+    non-last pipeline stages).
     """
+    plan = CornstarchExecutionPlan()
+    merged = plan.merge_modality_encoder_outputs(
+        language_model=language_model,
+        input_ids=ExecutionFuture("input_ids"),
+        labels=ExecutionFuture("labels"),
+        modality_token_ids={},
+        encoder_outputs={},
+    )
+    output_future = plan.run_language_model(module=language_model, inputs=merged)
+
+    schedule = ctx.create_schedule(
+        plan,
+        output_future,
+        num_microbatches=num_microbatches,
+        microbatch_size=microbatch_size,
+    )
     result = schedule.step(batch, criterion, optimizer, return_loss=True)
     ctx.sync_gradients()
     return result
@@ -104,28 +122,6 @@ def pretrain(
     dataset = FakeTextDataset(language_model.hf_config.vocab_size, seq_len)
     dataloader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
 
-    def build_plan() -> tuple[CornstarchExecutionPlan, ExecutionFuture]:
-        exec_plan = CornstarchExecutionPlan()
-        merged = exec_plan.merge_modality_encoder_outputs(
-            language_model=language_model,
-            input_ids=ExecutionFuture("input_ids"),
-            labels=ExecutionFuture("labels"),
-            modality_token_ids={},
-            encoder_outputs={},
-        )
-        output_future = exec_plan.run_language_model(
-            module=language_model, inputs=merged
-        )
-        return exec_plan, output_future
-
-    exec_plan, output_future = build_plan()
-    schedule = ctx.create_schedule(
-        exec_plan,
-        output_future,
-        num_microbatches=num_microbatches if pp > 1 else 1,
-        microbatch_size=batch_size // num_microbatches if pp > 1 else 1,
-    )
-
     optimizer = torch.optim.Adam(language_model.parameters(), lr=lr)
     optimizer.zero_grad()
 
@@ -141,7 +137,13 @@ def pretrain(
         for _ in pbar:
             batch = next(dataloader_iter)
             outputs = _training_step(
-                schedule, ctx, batch, causal_lm_criterion, optimizer
+                language_model,
+                ctx,
+                batch,
+                causal_lm_criterion,
+                optimizer,
+                num_microbatches=num_microbatches if pp > 1 else 1,
+                microbatch_size=batch_size // num_microbatches if pp > 1 else 1,
             )
             loss = outputs["loss"]
             if loss is not None:
