@@ -202,3 +202,6 @@ The `execution.py` invariant is preserved: it imports nothing from
 
 ## HUMAN COMMENTS
 - When done, PR should target `feat/T002-parallelism` branch.
+
+## PR
+https://github.com/cornstarch-org/Cornstarch/pull/72 (base: feat/T002-parallelism)
