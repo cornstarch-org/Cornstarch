@@ -133,15 +133,15 @@ def _run_combo(test: GlooDistributedTestBase, combo, moe: bool) -> None:
     )
     output_future = exec_plan.run_language_model(module=model, inputs=merged)
 
-    if pp > 1:
-        num_microbatches = 2
-        schedule = ctx.create_schedule(
-            exec_plan, output_future,
-            num_microbatches=num_microbatches,
-            microbatch_size=batch_size // num_microbatches,
-        )
-    else:
-        schedule = ctx.create_schedule(exec_plan, output_future)
+    schedule = ctx.create_schedule(exec_plan, output_future)
+
+    # The microbatch list is the user's responsibility (collate_fn); here split
+    # the batch into 2 microbatches under PP, otherwise a single microbatch.
+    num_microbatches = 2 if pp > 1 else 1
+    microbatches = [
+        {k: v.chunk(num_microbatches, dim=0)[i] for k, v in batch.items()}
+        for i in range(num_microbatches)
+    ]
 
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
 
@@ -150,7 +150,7 @@ def _run_combo(test: GlooDistributedTestBase, combo, moe: bool) -> None:
             return output
         return output.loss if hasattr(output, "loss") else output["loss"]
 
-    result = schedule.step(batch, criterion, optimizer, return_loss=True)
+    result = schedule.step(microbatches, criterion, optimizer, return_loss=True)
     if result["loss"] is not None:
         test.assertTrue(result["loss"].isfinite().all())
 

@@ -46,6 +46,7 @@ from cornstarch.distributed.pipeline_parallel.forward_spec_wrapper import (
     PipelineParallelForwardSpec,
 )
 from cornstarch.distributed.pipeline_parallel.schedule import (
+    MeshLayout,
     OneForwardOneBackwardSchedule,
 )
 from cornstarch.distributed.process_group_mesh import ModalProcessGroupMesh
@@ -235,16 +236,25 @@ class TestPipelineParallelEquivalence(GlooDistributedTestBase):
             encoder_outputs={},
         )
         output_future = plan.run_language_model(module=model, inputs=merged)
-        schedule = OneForwardOneBackwardSchedule(
-            plan, output_future, mesh, num_microbatches=2, microbatch_size=2,
+        layout = MeshLayout(
+            global_ranks=tuple(mesh._global_ranks),
+            dp_size=mesh.dp_size,
+            num_pp_stages=mesh.num_stages,
+            cp_size=mesh.cp_size,
+            tp_size=mesh.tp_size,
+            ep_size=mesh.ep_size,
         )
+        schedule = OneForwardOneBackwardSchedule(
+            plan, output_future, {id(model): layout}, {id(model): mesh}, mesh.dp_size,
+        )
+        microbatches = [{k: v[i * 2 : i * 2 + 2] for k, v in batch.items()} for i in range(2)]
 
         def criterion(output, micro_batch):
             if isinstance(output, torch.Tensor):
                 return output
             return output.loss if hasattr(output, "loss") else output["loss"]
 
-        result = schedule.step(batch, criterion, optimizer=None, return_loss=True)
+        result = schedule.step(microbatches, criterion, optimizer=None, return_loss=True)
         if mesh.is_last_stage():
             torch.testing.assert_close(
                 result["loss"].reshape(()), ref_loss, atol=ATOL, rtol=RTOL
