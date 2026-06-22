@@ -118,3 +118,6 @@ disaggregated/PP) so T008's call sites can branch (schedule vs direct execute).
 ## HUMAN COMMENTS
 - PR targets `feat/T002-parallelism`; auto-merge into it after green so T007/T008
   build cleanly (the user authorized auto-merging the prerequisites).
+
+## PR
+https://github.com/cornstarch-org/Cornstarch/pull/73 (base: feat/T002-parallelism)
