@@ -17,6 +17,8 @@ wiring here.
 """
 from __future__ import annotations
 
+from typing import Any, Callable
+
 import tyro
 
 import torch
@@ -30,7 +32,12 @@ from common import (
     init_distributed,
 )
 
-from cornstarch.distributed import ParallelConfig, ParallelizationPlan
+from cornstarch.distributed import (
+    ParallelConfig,
+    ParallelContext,
+    ParallelizationPlan,
+    TrainingSchedule,
+)
 from cornstarch.models import (
     CornstarchExecutionPlan,
     ExecutionFuture,
@@ -38,7 +45,13 @@ from cornstarch.models import (
 )
 
 
-def _training_step(schedule, ctx, batch, criterion, optimizer):
+def _training_step(
+    schedule: TrainingSchedule,
+    ctx: ParallelContext,
+    batch: dict[str, torch.Tensor],
+    criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
+    optimizer: torch.optim.Optimizer,
+) -> dict[str, Any]:
     """Run one schedule-driven training step and sync gradients across DP ranks.
 
     ``schedule.step`` runs forward + criterion + backward (or the 1F1B
@@ -91,7 +104,7 @@ def pretrain(
     dataset = FakeTextDataset(language_model.hf_config.vocab_size, seq_len)
     dataloader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
 
-    def build_plan():
+    def build_plan() -> tuple[CornstarchExecutionPlan, ExecutionFuture]:
         exec_plan = CornstarchExecutionPlan()
         merged = exec_plan.merge_modality_encoder_outputs(
             language_model=language_model,

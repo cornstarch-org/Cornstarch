@@ -7,7 +7,7 @@ from typing import Iterator
 
 import torch
 from PIL import Image
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig, PreTrainedTokenizerBase
 
 from cornstarch.models import RepeatedLayerOffloadConfig
 from cornstarch.models import build_modality_encoder as build_modality_encoder
@@ -36,7 +36,7 @@ def generate_sine_wave(
     return audio_signal.astype(np.float32)
 
 
-def decoder_start_token_id(audio_config) -> int:
+def decoder_start_token_id(audio_config: PretrainedConfig) -> int:
     return int(
         getattr(audio_config, "decoder_start_token_id", None)
         or getattr(audio_config, "bos_token_id", None)
@@ -44,12 +44,12 @@ def decoder_start_token_id(audio_config) -> int:
     )
 
 
-def vision_config_from_pretrained(model_name_or_path: str):
+def vision_config_from_pretrained(model_name_or_path: str) -> PretrainedConfig:
     config = AutoConfig.from_pretrained(model_name_or_path)
     return getattr(config, "vision_config", config)
 
 
-def clip_vision_sequence_length(vision_config) -> int:
+def clip_vision_sequence_length(vision_config: PretrainedConfig) -> int:
     return (int(vision_config.image_size) // int(vision_config.patch_size)) ** 2 + 1
 
 
@@ -59,7 +59,9 @@ def expand_modality_tokens(text: str, token_counts: dict[str, int]) -> str:
     return text
 
 
-def configure_special_tokens(tokenizer, tokens: list[str]) -> dict[str, int]:
+def configure_special_tokens(
+    tokenizer: PreTrainedTokenizerBase, tokens: list[str]
+) -> dict[str, int]:
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_special_tokens({"additional_special_tokens": tokens})
     return {token: int(tokenizer.convert_tokens_to_ids(token)) for token in tokens}
@@ -67,7 +69,7 @@ def configure_special_tokens(tokenizer, tokens: list[str]) -> dict[str, int]:
 
 def tokenize_text_batch(
     texts: list[str],
-    tokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
     language_inputs = tokenizer(texts, padding=True, return_tensors="pt")

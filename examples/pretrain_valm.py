@@ -14,8 +14,12 @@ from transformers import (
     AutoFeatureExtractor,
     AutoImageProcessor,
     AutoTokenizer,
+    PreTrainedTokenizerBase,
+    SequenceFeatureExtractor,
     get_linear_schedule_with_warmup,
 )
+from transformers.image_processing_utils import BaseImageProcessor
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from common import (
     AUDIO_TOKEN,
@@ -36,6 +40,8 @@ from common import (
 )
 from cornstarch.models import (
     CornstarchExecutionPlan,
+    CornstarchLanguageModel,
+    CornstarchModalityEncoder,
     from_hf_config,
 )
 
@@ -45,7 +51,7 @@ class FakeDataset(Dataset):
         self,
         image_size: tuple[int, int] = (720, 480),
         audio_duration: float = 10.0,
-    ):
+    ) -> None:
         self.image = generate_random_image(image_size)
         self.audio = generate_sine_wave(DEFAULT_AUDIO_SAMPLE_RATE, audio_duration, 440.0)
         self.text = IMAGE_TOKEN + AUDIO_TOKEN + " text" * 256
@@ -53,16 +59,16 @@ class FakeDataset(Dataset):
     def __len__(self) -> int:
         return 65536
 
-    def __getitem__(self, index: int) -> dict:
+    def __getitem__(self, index: int) -> dict[str, object]:
         del index
         return {"image": self.image, "audio": self.audio, "text": self.text}
 
 
 def _collate_valm(
     batches: list[dict],
-    image_processor,
-    audio_processor,
-    tokenizer,
+    image_processor: BaseImageProcessor,
+    audio_processor: SequenceFeatureExtractor,
+    tokenizer: PreTrainedTokenizerBase,
     image_sequence_length: int,
     audio_sequence_length: int,
     audio_decoder_start_token_id: int,
@@ -104,13 +110,13 @@ def _collate_valm(
 
 
 def _training_step(
-    language_model,
-    vision_module,
-    audio_module,
+    language_model: CornstarchLanguageModel,
+    vision_module: CornstarchModalityEncoder,
+    audio_module: CornstarchModalityEncoder,
     batch: dict[str, torch.Tensor],
     image_token_id: int,
     audio_token_id: int,
-):
+) -> CausalLMOutputWithPast:
     plan = CornstarchExecutionPlan()
     vision_outputs = plan.run_modality_encoder(
         module=vision_module,
@@ -140,7 +146,7 @@ def pretrain(
     use_layer_offload: bool = False,
     profile_output_path: Path | None = None,
     max_train_steps: int = 10,
-):
+) -> None:
     """Randomly initialize a vision-audio-language model with the new API."""
     torch.cuda.set_device(0)
     device = torch.device("cuda")

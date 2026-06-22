@@ -12,6 +12,7 @@ materialize, and drive an explicit training loop with ``schedule.step``.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -54,13 +55,13 @@ class FakeTextDataset(Dataset):
     def __len__(self) -> int:
         return self.length
 
-    def __getitem__(self, index: int) -> dict:
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         g = torch.Generator().manual_seed(index)
         ids = torch.randint(0, self.vocab_size, (self.seq_len,), generator=g)
         return {"input_ids": ids, "labels": ids.clone()}
 
 
-def causal_lm_criterion(output, batch) -> torch.Tensor:
+def causal_lm_criterion(output: Any, batch: dict[str, torch.Tensor]) -> torch.Tensor:
     """Return the loss from a model output or a raw loss tensor (PP last stage)."""
     if isinstance(output, torch.Tensor):
         return output

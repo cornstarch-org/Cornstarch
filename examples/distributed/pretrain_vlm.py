@@ -21,6 +21,8 @@ automatically — there is no standalone projector setup in this script.
 """
 from __future__ import annotations
 
+from typing import Any, Callable
+
 import tyro
 
 import torch
@@ -30,7 +32,12 @@ from transformers import AutoConfig, get_linear_schedule_with_warmup
 
 from common import DTYPE, causal_lm_criterion, init_distributed
 
-from cornstarch.distributed import ParallelConfig, ParallelizationPlan
+from cornstarch.distributed import (
+    ParallelConfig,
+    ParallelContext,
+    ParallelizationPlan,
+    TrainingSchedule,
+)
 from cornstarch.models import (
     CornstarchExecutionPlan,
     ExecutionFuture,
@@ -45,7 +52,14 @@ IMAGE_TOKEN_ID = 0
 class FakeVLMDataset(Dataset):
     """Synthetic VLM batch: one image plus a caption with image placeholders."""
 
-    def __init__(self, vocab_size, seq_len, num_image_tokens, image_size, length=4096):
+    def __init__(
+        self,
+        vocab_size: int,
+        seq_len: int,
+        num_image_tokens: int,
+        image_size: tuple[int, int],
+        length: int = 4096,
+    ) -> None:
         self.vocab_size = vocab_size
         self.seq_len = seq_len
         self.num_image_tokens = num_image_tokens
@@ -63,7 +77,13 @@ class FakeVLMDataset(Dataset):
         return {"input_ids": ids, "labels": ids.clone(), "pixel_values": pixel_values}
 
 
-def _training_step(schedule, ctx, batch, criterion, optimizer):
+def _training_step(
+    schedule: TrainingSchedule,
+    ctx: ParallelContext,
+    batch: dict[str, torch.Tensor],
+    criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
+    optimizer: torch.optim.Optimizer,
+) -> dict[str, Any]:
     """Run one schedule-driven training step and sync gradients across DP ranks.
 
     ``schedule.step`` runs forward + criterion + backward (or the 1F1B
@@ -136,7 +156,7 @@ def pretrain(
     )
     dataloader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
 
-    def build_plan():
+    def build_plan() -> tuple[CornstarchExecutionPlan, ExecutionFuture]:
         exec_plan = CornstarchExecutionPlan()
         vision_outputs = exec_plan.run_modality_encoder(
             module=modality_encoder, pixel_values=ExecutionFuture("pixel_values")
