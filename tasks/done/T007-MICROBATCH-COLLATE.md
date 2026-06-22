@@ -80,3 +80,6 @@ parallelism; without PP it is plain gradient accumulation.
 ## HUMAN COMMENTS
 - PR targets `feat/T002-parallelism`; auto-merge into it after green (the user
   authorized auto-merging the prerequisites so T008 builds cleanly).
+
+## PR
+https://github.com/cornstarch-org/Cornstarch/pull/74 (base: feat/T002-parallelism)
