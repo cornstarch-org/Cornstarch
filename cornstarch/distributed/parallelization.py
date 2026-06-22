@@ -131,7 +131,7 @@ class ParallelContext:
         self,
         dataset: Dataset,
         batch_size: int,
-        collate_fn: Optional[Callable[[list], dict]] = None,
+        collate_fn: Optional[Callable[[list], "dict | list[dict]"]] = None,
         *,
         shuffle: bool = False,
         cp_split_keys: Sequence[str] = _DEFAULT_CP_SPLIT_KEYS,
@@ -144,6 +144,16 @@ class ParallelContext:
         becomes a ``collate_fn`` transform that slices the sequence dimension of
         ``cp_split_keys`` for the current CP rank.  The model is never touched —
         both parallelisms live entirely in the data pipeline.
+
+        **Microbatches.** ``collate_fn`` may return either a single batch ``dict``
+        or a ``list[dict]`` — the list of microbatches for one optimizer step.
+        Returning a list is how the user controls microbatching: Cornstarch never
+        splits modality tensors itself (only the user knows, e.g., how images map
+        to samples). The loader always yields a ``list[dict]`` (a bare ``dict`` is
+        wrapped as a single-element list), and the DP/CP transforms are applied to
+        each microbatch independently. Pipeline schedules consume this list as
+        their microbatches; without pipeline parallelism the training loop
+        iterates it with gradient accumulation.
         """
         sampler = None
         if self._dp_size > 1:
@@ -162,8 +172,7 @@ class ParallelContext:
             and id(m) in self._meshes
         ]
 
-        def wrapped_collate(samples: list) -> dict:
-            batch = collate_fn(samples) if collate_fn is not None else _default_collate(samples)
+        def apply_cp_split(batch: dict) -> dict:
             for splitter, cp_group in cp_targets:
                 mask = batch.get("attention_mask")
                 if mask is None:
@@ -177,6 +186,17 @@ class ParallelContext:
                     if isinstance(value, torch.Tensor) and value.ndim >= 2:
                         batch[key] = splitter.split(value, cp_group)
             return batch
+
+        def wrapped_collate(samples: list) -> list[dict]:
+            collated = (
+                collate_fn(samples)
+                if collate_fn is not None
+                else _default_collate(samples)
+            )
+            # Normalize to a microbatch list (a bare dict = a single microbatch),
+            # then apply the DP/CP transforms per microbatch.
+            microbatches = collated if isinstance(collated, list) else [collated]
+            return [apply_cp_split(mb) for mb in microbatches]
 
         return DataLoader(
             dataset,
