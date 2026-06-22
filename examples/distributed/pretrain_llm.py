@@ -30,6 +30,7 @@ from common import (
     FakeTextDataset,
     causal_lm_criterion,
     init_distributed,
+    microbatch_collate,
 )
 
 from cornstarch.distributed import (
@@ -44,25 +45,8 @@ from cornstarch.models import (
 )
 
 
-def _training_step(
-    language_model: Any,
-    ctx: ParallelContext,
-    batch: dict[str, torch.Tensor],
-    criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
-    optimizer: torch.optim.Optimizer,
-    num_microbatches: int,
-    microbatch_size: int,
-) -> dict[str, Any]:
-    """Build the plan for this batch, run one schedule step, and sync gradients.
-
-    Just like the non-distributed ``examples/pretrain_vlm.py``, the execution
-    plan is rebuilt **every step** — schedule construction is cheap (DAG analysis
-    plus a rank-local program, no collectives).  ``schedule.step`` runs forward +
-    criterion + backward (or the 1F1B microbatch loop under PP); then
-    ``ctx.sync_gradients`` all-reduces the DP gradients before the optimizer step.
-    Returns the schedule result whose ``"loss"`` is the step loss (``None`` on
-    non-last pipeline stages).
-    """
+def _build_plan(language_model: Any):
+    """Build the (parallelism-agnostic) execution plan for an LM step."""
     plan = CornstarchExecutionPlan()
     merged = plan.merge_modality_encoder_outputs(
         language_model=language_model,
@@ -72,14 +56,43 @@ def _training_step(
         encoder_outputs={},
     )
     output_future = plan.run_language_model(module=language_model, inputs=merged)
+    return plan, output_future
 
-    schedule = ctx.create_schedule(
-        plan,
-        output_future,
-        num_microbatches=num_microbatches,
-        microbatch_size=microbatch_size,
-    )
-    result = schedule.step(batch, criterion, optimizer, return_loss=True)
+
+def _training_step(
+    language_model: Any,
+    ctx: ParallelContext,
+    microbatches: list[dict[str, torch.Tensor]],
+    criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
+    optimizer: torch.optim.Optimizer,
+) -> dict[str, Any]:
+    """Run one optimizer step over the ``collate_fn`` microbatch list.
+
+    ``CornstarchExecutionPlan`` is parallelism-agnostic, so the only thing that
+    differs is how the microbatches are consumed:
+
+    - **No pipeline parallelism** (modules co-located on every rank): iterate the
+      microbatches, running the plan locally and accumulating gradients — exactly
+      gradient accumulation, no schedule.
+    - **Pipeline parallelism**: hand the microbatch list to the schedule (the
+      schedule wiring is completed in T008).
+
+    ``ctx.sync_gradients`` all-reduces the DP gradients before the optimizer step.
+    """
+    plan, output_future = _build_plan(language_model)
+
+    if not ctx.uses_pipeline_parallel:
+        loss_total = None
+        for mb in microbatches:
+            output = output_future.execute(inputs=mb)
+            loss = criterion(output, mb) / len(microbatches)
+            loss.backward()
+            loss_total = loss.detach() if loss_total is None else loss_total + loss.detach()
+        ctx.sync_gradients()
+        return {"loss": loss_total}
+
+    schedule = ctx.create_schedule(plan, output_future)
+    result = schedule.step(microbatches, criterion, optimizer, return_loss=True)
     ctx.sync_gradients()
     return result
 
@@ -87,7 +100,7 @@ def _training_step(
 def pretrain(
     model_name_or_path: str = "hf-internal-testing/tiny-random-LlamaForCausalLM",
     tp: int = 1,
-    pp: int = 1,
+    pp: int | None = None,
     cp: int = 1,
     ep: int = 1,
     dp: int = 1,
@@ -120,7 +133,13 @@ def pretrain(
     language_model.train()
 
     dataset = FakeTextDataset(language_model.hf_config.vocab_size, seq_len)
-    dataloader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
+    # collate_fn returns the microbatch list for one optimizer step.
+    dataloader = ctx.prepare_dataloader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=microbatch_collate(num_microbatches),
+        shuffle=True,
+    )
 
     optimizer = torch.optim.Adam(language_model.parameters(), lr=lr)
     optimizer.zero_grad()
@@ -135,15 +154,13 @@ def pretrain(
     dataloader_iter = iter(dataloader)
     with tqdm(range(steps), disable=rank != 0) as pbar:
         for _ in pbar:
-            batch = next(dataloader_iter)
+            microbatches = next(dataloader_iter)
             outputs = _training_step(
                 language_model,
                 ctx,
-                batch,
+                microbatches,
                 causal_lm_criterion,
                 optimizer,
-                num_microbatches=num_microbatches if pp > 1 else 1,
-                microbatch_size=batch_size // num_microbatches if pp > 1 else 1,
             )
             loss = outputs["loss"]
             if loss is not None:

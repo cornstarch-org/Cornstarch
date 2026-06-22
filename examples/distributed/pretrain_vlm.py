@@ -30,7 +30,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import AutoConfig, get_linear_schedule_with_warmup
 
-from common import DTYPE, causal_lm_criterion, init_distributed
+from common import DTYPE, causal_lm_criterion, init_distributed, microbatch_collate
 
 from cornstarch.distributed import (
     ParallelConfig,
@@ -75,48 +75,60 @@ class FakeVLMDataset(Dataset):
         return {"input_ids": ids, "labels": ids.clone(), "pixel_values": pixel_values}
 
 
-def _training_step(
-    language_model: Any,
-    modality_encoder: Any,
-    ctx: ParallelContext,
-    batch: dict[str, torch.Tensor],
-    criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
-    optimizer: torch.optim.Optimizer,
-) -> dict[str, Any]:
-    """Build the plan for this batch, run one schedule step, and sync gradients.
+def _build_plan(language_model: Any, modality_encoder: Any, mb: dict):
+    """Build the (parallelism-agnostic) plan for one VLM microbatch.
 
-    The execution plan is rebuilt **every step** — the three plan-construction
-    lines below are byte-identical to the non-distributed
-    ``examples/pretrain_vlm.py``; only the ``schedule.step`` tail differs from its
-    ``output_future.execute()``.  Because the plan is rebuilt per batch, a step
-    whose ``batch`` omits ``pixel_values`` would simply drop the
-    ``run_modality_encoder("vision")`` node, and the vision encoder's ranks idle
-    for that step while the language-model ranks still train — the per-batch
-    flexibility the non-distributed plan already has.  (See
-    ``tests/distributed/test_multimodal_distributed.py`` for that flexibility
-    case on disjoint ranks.)
-
-    ``ctx.create_schedule`` returns a ``CompiledSchedule`` here because the vision
-    encoder and the language model live on **disjoint** ranks: it runs each node
-    only on its owning mesh and compiles the cross-mesh transfer that moves the
-    projected vision features to the language-model ranks that consume them.
+    The three plan-construction lines match the non-distributed
+    ``examples/pretrain_vlm.py``; ``mb`` is one microbatch from the user's
+    ``collate_fn`` list.
     """
     plan = CornstarchExecutionPlan()
     vision_outputs = plan.run_modality_encoder(
         module=modality_encoder,
-        pixel_values=batch["pixel_values"],
+        pixel_values=mb["pixel_values"],
     )
     merged = plan.merge_modality_encoder_outputs(
         language_model=language_model,
-        input_ids=batch["input_ids"],
-        labels=batch["labels"],
+        input_ids=mb["input_ids"],
+        labels=mb["labels"],
         modality_token_ids={"vision": IMAGE_TOKEN_ID},
         encoder_outputs={"vision": vision_outputs},
     )
     output_future = plan.run_language_model(module=language_model, inputs=merged)
+    return plan, output_future
 
+
+def _training_step(
+    language_model: Any,
+    modality_encoder: Any,
+    ctx: ParallelContext,
+    microbatches: list[dict[str, torch.Tensor]],
+    criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
+    optimizer: torch.optim.Optimizer,
+) -> dict[str, Any]:
+    """Run one optimizer step over the ``collate_fn`` microbatch list.
+
+    Without pipeline parallelism the encoder and language model are co-located on
+    every rank, so the whole ``encoder -> merge -> language model`` plan runs
+    locally per microbatch and gradients accumulate (no schedule). With pipeline
+    parallelism the encoder and language model are disaggregated onto separate
+    ranks and the microbatch list is driven by the schedule (wired in T008).
+    ``ctx.sync_gradients`` all-reduces the DP gradients before the optimizer step.
+    """
+    if not ctx.uses_pipeline_parallel:
+        loss_total = None
+        for mb in microbatches:
+            _, output_future = _build_plan(language_model, modality_encoder, mb)
+            output = output_future.execute()
+            loss = criterion(output, mb) / len(microbatches)
+            loss.backward()
+            loss_total = loss.detach() if loss_total is None else loss_total + loss.detach()
+        ctx.sync_gradients()
+        return {"loss": loss_total}
+
+    plan, output_future = _build_plan(language_model, modality_encoder, microbatches[0])
     schedule = ctx.create_schedule(plan, output_future)
-    result = schedule.step(batch, criterion, optimizer, return_loss=True)
+    result = schedule.step(microbatches, criterion, optimizer, return_loss=True)
     ctx.sync_gradients()
     return result
 
@@ -126,7 +138,7 @@ def pretrain(
     llm_name_or_path: str = "hf-internal-testing/tiny-random-LlamaForCausalLM",
     vision_tp: int = 1,
     llm_tp: int = 1,
-    llm_pp: int = 1,
+    llm_pp: int | None = None,
     dp: int = 1,
     batch_size: int = 4,
     seq_len: int = 128,
@@ -151,19 +163,18 @@ def pretrain(
     language_model.set_random_init()
     modality_encoder.set_random_init()
 
-    # Per-modality declarative configs — vision and the LLM are parallelized
-    # independently; materialize() handles the cross-modality rank assignment and
-    # materializes each modality encoder's projector alongside its encoder.
+    # Per-modality declarative configs. All modules must agree on pipeline
+    # parallelism: when ``llm_pp`` is None there is no PP and the encoder + LLM are
+    # co-located on every rank (each rank runs the whole model); when ``llm_pp`` is
+    # a positive int the encoder becomes its own leading pipeline stage
+    # (``pipeline_parallel_size=1``) disaggregated from the pipelined LLM.
+    vision_pp = 1 if llm_pp is not None else None
     plan = ParallelizationPlan(global_ranks=list(range(world_size)))
     plan.parallelize(
         modality_encoder,
-        # pipeline_parallel_size=1 marks the encoder as its own pipeline stage so
-        # it is disaggregated onto its own ranks (one stage), feeding the language
-        # model — every registered module must agree on pipeline parallelism, so
-        # this is positive whenever the language model's is.
         ParallelConfig(
             tensor_parallel_size=vision_tp,
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=vision_pp,
             data_parallel_size=dp,
         ),
     )
@@ -185,7 +196,12 @@ def pretrain(
     dataset = FakeVLMDataset(
         language_model.hf_config.vocab_size, seq_len, num_image_tokens, image_size
     )
-    dataloader = ctx.prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = ctx.prepare_dataloader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=microbatch_collate(num_microbatches),
+        shuffle=True,
+    )
 
     params = list(language_model.parameters()) + list(modality_encoder.parameters())
     optimizer = torch.optim.Adam(params, lr=lr)
@@ -201,12 +217,12 @@ def pretrain(
     dataloader_iter = iter(dataloader)
     with tqdm(range(steps), disable=rank != 0) as pbar:
         for _ in pbar:
-            batch = next(dataloader_iter)
+            microbatches = next(dataloader_iter)
             outputs = _training_step(
                 language_model,
                 modality_encoder,
                 ctx,
-                batch,
+                microbatches,
                 causal_lm_criterion,
                 optimizer,
             )
