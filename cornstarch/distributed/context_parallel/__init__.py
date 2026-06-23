@@ -25,6 +25,7 @@ _CP_ATTN_KEY = "context_parallel"
 def apply_context_parallel(
     module: CornstarchModelBase,
     cp_group: dist.ProcessGroup,
+    causal: bool = False,
 ) -> None:
     """Inject CP all-gather flash attention into the module.
 
@@ -32,10 +33,16 @@ def apply_context_parallel(
     ``ALL_ATTENTION_FUNCTIONS["context_parallel"]`` and sets the module's
     ``hf_config._attn_implementation`` so all attention layers dispatch to
     the CP kernel.  Works on both meta and materialized modules.
+
+    ``causal=True`` binds the kernel to the causal per-run prefix+diagonal
+    decomposition; the per-rank global positions are recovered at call time by
+    all-gathering the ``position_ids`` HF forwards into the attention callable
+    (no splitter instance is threaded through).  The default (``causal=False``)
+    is full non-causal attention, unchanged from before.
     """
     from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
     ALL_ATTENTION_FUNCTIONS[_CP_ATTN_KEY] = functools.partial(
-        context_parallel_flash_attention, cp_group=cp_group
+        context_parallel_flash_attention, cp_group=cp_group, causal=causal
     )
     module.hf_config._attn_implementation = _CP_ATTN_KEY

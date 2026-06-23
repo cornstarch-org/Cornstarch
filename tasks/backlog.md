@@ -37,17 +37,3 @@ interface lands.
   layers is unsupported; `test_parallelism_integration` uses an all-full-
   attention MoE config for EP+PP, and `test_expert_parallel_qwen` covers
   linear-attention EP without PP.
-
-## B4 — Causal-LM context-parallel numerical equivalence
-- **Deferred from:** T003-CP-EQUIVALENCE.
-- **Reason:** the CP all-gather flash-attention kernel
-  (`cornstarch/distributed/context_parallel/attention.py`) hardcodes
-  `causal=False` (`_flash_attn_forward(..., causal=False)`) and splits the
-  sequence uniformly, so it cannot reproduce a causal language model under CP.
-  T003 therefore tests CP equivalence only at the **attention-function level**
-  against a non-causal full-sequence SDPA reference
-  (`tests/distributed/test_numerical_equivalence.py::TestContextParallelEquivalence`).
-- **Scope to resume:** add causal masking to the CP kernel and a load-balanced
-  causal split (zigzag / makespan-style assignment so each rank gets a balanced
-  share of the triangular work), then assert a full causal-LM forward+backward
-  CP equivalence vs the single-GPU reference.
