@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from cornstarch.models.encoder_base import CornstarchEncoderBase
+from cornstarch.models.encoder_base import CornstarchEncoder
 from cornstarch.models.multimodal.configuration import (
     CornstarchEncoderToLanguageProjectorConfig,
 )
@@ -35,7 +35,7 @@ class CornstarchModalityEncoder(nn.Module):
 
     def __init__(
         self,
-        encoder: CornstarchEncoderBase,
+        encoder: CornstarchEncoder,
         projector: CornstarchProjector,
         modality: str | None = None,
     ):
@@ -121,7 +121,7 @@ class CornstarchModalityEncoder(nn.Module):
 
 
 def build_modality_encoder(
-    encoder: CornstarchEncoderBase,
+    encoder: CornstarchEncoder,
     language_model: nn.Module,
     modality: str | None = None,
     projector_type: str = "linear",

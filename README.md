@@ -2,28 +2,68 @@
 
 ![Cornstarch Logo](https://cornstarch-org.github.io/assets/images/cornstarch.svg)
 
-<h1>Cornstarch<br>
-Build, Train, Run Your Own Multimodal Model</h1>
+# Cornstarch
+
+Build, compose, and parallelize multimodal language models.
+
 </div>
 
-Cornstarch is a multimodal model training framework, including distributed training features with 5D parallelism (PP, TP, CP, DP, and modality parallelism).
-You can create your own multimodal model with a set of HuggingFace unimodal models and train it.
+Cornstarch turns supported Hugging Face language and encoder configs into a
+small set of parallelization-aware module representations. Models are created
+on the `meta` device, independently connected as a user-defined execution DAG,
+and then materialized according to a per-module DP/PP/CP/TP/EP plan.
 
-Cornstarch provides
+Its design centers on five properties:
 
-- **Pipeline Template and Heterogeneous Pipeline Parallelism**: specify different pipeline templates and combine them to deploy heterogeneous pipeline parallel execution
-- **Composable multimodal model creation**: specify your own multimodal models from a set of HuggingFace transformers unimodal models
-- **MultimodalModel Generation and Parallelization**: specify your own multimodal model and parallelize it with 5D parallelism (DP+PP+TP+CP+and modality parallelism)
+- **Lazy initialization:** parallelism changes parameter ownership before real
+  storage is allocated or checkpoint values are assigned.
+- **Unified modules:** every supported LLM becomes
+  `CornstarchLanguageModel`; every supported vision or audio backbone becomes
+  `CornstarchEncoder`. Family converters translate leaf layouts but do not
+  create family-specific runtime wrappers.
+- **User-defined DAGs:** `ExecutionFuture` values connect modality encoders,
+  merges, and language-model calls without a fixed multimodal root model.
+- **Composable parallelism:** each module receives its own `ParallelConfig`.
+  Cornstarch assigns the whole world to module grids and routes activations at
+  grid boundaries.
+- **Clean data/model separation:** DP sampling and CP token ownership live in
+  the dataloader/training context. TP, PP, and EP operate through the unified
+  model structure; CP only injects token-mixer behavior during initialization.
 
-## Install and Run
+```python
+import torch
+from cornstarch.distributed import ParallelConfig, ParallelizationPlan
+from cornstarch.models import from_hf_config
 
-Please refer to [our document](https://cornstarch-org.github.io/getting_started/installation/)!
+language_model = from_hf_config(hf_text_config)
+language_model.set_checkpoint_init(model_name_or_path="org/model")
 
-## Research Papers
+plan = ParallelizationPlan()
+plan.parallelize(
+    language_model,
+    ParallelConfig(
+        data_parallel_size=2,
+        pipeline_parallel_size=2,
+        context_parallel_size=2,
+        tensor_parallel_size=2,
+        expert_parallel_size=2,
+    ),
+)
+
+# TP/CP/PP are applied while parameters are meta; only this rank's model
+# partition is materialized, followed by EP over concrete expert tensors.
+context = plan.materialize("cuda", dtype=torch.bfloat16)
+```
+
+See [Core architecture](docs/architecture.md), the
+[documentation](https://cornstarch-org.github.io), and the runnable examples in
+[`examples/`](examples/).
+
+## Research papers
 
 - [Cornstarch: Distributed Multimodal Training Must Be Multimodality-Aware](https://arxiv.org/abs/2503.11367)
 - [Oobleck: Resilient Distributed Training of Large Models Using Pipeline Templates](https://arxiv.org/abs/2309.08125)
 
 ## Contact
 
-- Insu Jang (insujang@umich.edu)
+Insu Jang (insujang@umich.edu)

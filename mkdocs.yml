@@ -42,6 +42,7 @@ markdown_extensions:
 
 nav:
   - Cornstarch: index.md
+  - Core Architecture: architecture.md
   - Installation: getting_started/installation.md
   - Using Cornstarch:
     - Creating a MLLM model: using_cornstarch/creating_mllm.md

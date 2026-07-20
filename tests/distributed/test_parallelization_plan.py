@@ -34,6 +34,22 @@ def test_parallelize_accepts_cornstarch_model_and_modality_encoder() -> None:
     plan.parallelize(modality_encoder, ParallelConfig())
 
 
+def test_plan_requires_every_world_rank_exactly_once(monkeypatch) -> None:
+    """A module grid cannot silently strand or duplicate a distributed rank."""
+    monkeypatch.setattr(
+        "cornstarch.distributed.parallelization.dist.get_world_size", lambda: 4
+    )
+
+    with pytest.raises(ValueError, match="every world rank exactly once"):
+        ParallelizationPlan(global_ranks=[0, 1, 1, 3])._resolve_global_ranks()
+    with pytest.raises(ValueError, match="every world rank exactly once"):
+        ParallelizationPlan(global_ranks=[0, 1, 2])._resolve_global_ranks()
+
+    assert ParallelizationPlan(
+        global_ranks=[3, 1, 0, 2]
+    )._resolve_global_ranks() == [3, 1, 0, 2]
+
+
 def test_parallel_config_pipeline_parallel_size_defaults_to_none() -> None:
     """``pipeline_parallel_size`` defaults to None (co-locate / no PP)."""
     config = ParallelConfig()

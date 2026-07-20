@@ -6,6 +6,9 @@ Run on one GPU per rank, for example::
         examples.distributed.benchmark_gated_delta_cp \
         --splitter head-tail --sequence-length 8192 --iterations 20
 
+For multiple nodes, add torchrun's rendezvous arguments. Each process binds
+``LOCAL_RANK`` to its node-local CUDA device before NCCL initialization.
+
 The report includes recurrent-summary bytes, collective time, peak CUDA
 memory, and forward/backward token throughput versus stock FLA contiguous CP
 at the same global sequence length. It intentionally benchmarks the recurrent
@@ -19,6 +22,8 @@ import time
 
 import torch
 import torch.distributed as dist
+
+from .common import init_distributed
 
 from cornstarch.distributed.context_parallel.gated_delta import (
     build_gated_delta_metadata,
@@ -54,14 +59,9 @@ def main() -> None:
     parser.add_argument("--splitter", choices=("uniform", "head-tail"), default="head-tail")
     args = parser.parse_args()
 
-    if not torch.cuda.is_available():
-        raise SystemExit("This benchmark requires CUDA, Triton, and FLA 0.5.")
-    dist.init_process_group("nccl")
-    rank, world_size = dist.get_rank(), dist.get_world_size()
+    rank, world_size, device = init_distributed()
     if args.sequence_length % (2 * world_size):
         raise SystemExit("sequence length must be divisible by 2 * world size")
-    torch.cuda.set_device(rank)
-    device = torch.device("cuda", rank)
     install_run_aware_fla_dispatch()
     from fla.ops.cp import build_cp_context
     from fla.ops.cp import chunk_delta_h as cp_delta_h

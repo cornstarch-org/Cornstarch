@@ -1,79 +1,50 @@
-!!! info
+# Training a multimodal model
 
-    [Cornstarch repository](https://github.com/cornstarch-org/Cornstarch) provides an end-to-end example
-    in [`examples/pretrain_vlm.py`](https://github.com/cornstarch-org/Cornstarch/blob/main/examples/pretrain_vlm.py).
-    
+Cornstarch modules remain ordinary `torch.nn.Module` objects and their parameters
+remain enumerable by stock PyTorch optimizers. The execution DAG replaces only
+the assumption that a multimodal model must have one fixed root `forward()`.
 
-## Training a Multimodal LLM
+## Unparallelized or co-located execution
 
-`MultimodalModel` inherits from `torch.nn.Module`, which has its own `forward()` function for inference and training.
-You can call the model as you do with a typical `torch.nn.Module` as:
-
-```py
-mllm = MultimodalModel(...)
-output = mllm(**inputs)
-loss = output.loss
-loss.backward()
-# optimizer step, zero_grad, etc.
+```python
+optimizer.zero_grad()
+for microbatch in microbatches:
+    output = language_output.execute(microbatch)
+    (output.loss / len(microbatches)).backward()
+optimizer.step()
 ```
 
-## Freezing Modules
+Modules can be frozen independently with normal `requires_grad_(False)` or by
+choosing which parameters enter the optimizer.
 
-Cornstarch supports freezing a portion of the `MultimodalModel`.
-For encoder (`ModalEncoderModule`), an encoder and a projector can individually be frozen:
+## Pipeline execution
 
-``` py
-mllm = MultimodalModule(
-    encoders={
-        "vision": ModalEncoderModule(...),
-        "audio": ModalEncoderModule(...),
-    },
-    langauge_model=llm,
-)
+When modules are disaggregated into PP stages, the `ParallelContext` derives a
+rank-local 1F1B program from the same DAG.
 
-mllm.train(
-    encoders_mode={
-        "vision": (False, True), # encoder and projector, respectively
-        "audio": (True, True),
-    },
-    llm_mode=False,
-)
-```
+```python
+schedule = context.create_schedule(graph, language_output)
 
-!!! info
-
-    if `encoders_mode` is not given, the train mode of all encoders including projectors' is set to `llm_mode`.
-
-    ```
-    mllm.train(llm_mode=True)
-    ```
-
-    is equivalent to:
-
-    ```
-    mllm.train(
-        {encoder: (True, True) for encoder in mllm.encoders},
-        llm_mode=True,
+for microbatches in loader:
+    optimizer.zero_grad()
+    result = schedule.step(
+        microbatches,
+        criterion=lambda output, batch: output.loss,
+        return_loss=True,
     )
-    ```
+    context.sync_gradients()  # CP sum, then DP average
+    optimizer.step()
+```
 
-If the given encoder key does not exist in the `MultimodalModel`, it raises a `ValueError`.
-For example, if you call `mllm.train("non_existing_encoder", mode=False)`, the encoder key `non_existing` does not exist in the `MultimodalModel` encoder dictionary, hence it raises an error.
+The optimizer is user-owned. A PP+TP stage may contain ordinary tensors and
+DTensors; optimizers whose CUDA default chooses a foreach update should be
+created with `foreach=False` unless their implementation separates those tensor
+kinds into compatible parameter groups.
 
-!!! note
+## Merge behavior
 
-    PyTorch `torch.nn.Module.train(mode=False)` API cannot be used.
-    It still computes gradients for frozen modules and you cannot get any benefits in computing time and memory consumption.
-
-## Merging Encoder Outputs to LLM Embedding Space
-
-When multimodal LLM forward is executed, modality encoders are executed first.
-After that, LLM input embedding layer is executed, the modality encoder outputs is embedded into the LLM embedding space, and then execute the remaining LLM layers with modality encoder outputs and LLM embedding outputs.
-Cornstarch follows HuggingFace's way of embedding: *injection mechanism* that injects modality encoder outputs to proper locations that user wants to put them to.
-To specify where to put the modality encoder outputs, custom tokens must be added before running the model.
-Cornstarch automatically adds the custom token information to the model when `MultimodalProcessor` is created, as described in [Preprocessing inputs page](../preprocessing_inputs).
-
-To maintain the language model's original embedding table, Cornstarch exploits a tricky way of executing the input embedding.
-If we execute the input embedding with `input_ids` where custom tokens are embedded, the embedding layer will raise an out of index exception.
-To avoid such exception, Cornstarch first masks all custom tokens with 0 and executes the input embedding.
-The result for the masked tokens will be replaced by the encoder outputs, thus we do not have to care about the result in the corresponding token indices.
+The DAG merge operation embeds safe text token ids, replaces modality
+placeholder positions with projected encoder features, carries optional language
+inputs forward, and produces `inputs_embeds`, `attention_mask`, and masked
+`labels`. It is part of the graph so PP can place it at the correct boundary and
+cross-mesh CP routing can transfer only locally owned feature rows.

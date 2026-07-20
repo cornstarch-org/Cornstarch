@@ -62,12 +62,10 @@ class TestExpertParallelDispatcher(GlooDistributedTestBase):
         """Dispatched tokens, processed locally, then collected should match reference."""
         ep_group = self._get_ep_group()
         ep_rank = dist.get_rank(ep_group)
-        ep_size = dist.get_world_size(ep_group)
 
         # 2 experts total, 1 per rank.
         experts = [ScaleExpert(scale=1.0), ScaleExpert(scale=2.0)]
         local_expert = experts[ep_rank]
-        local_expert_start = ep_rank
 
         dispatcher = ExpertParallelDispatcher()
         router = ExpertRouter(num_experts=2, top_k=1)

@@ -1,15 +1,17 @@
-"""Distributed language-model pretraining via the Option C surface.
+"""Distributed language-model pretraining with a per-module parallel plan.
 
-Run with torchrun, e.g. 8 GPUs as DP=2, PP=2, TP=2::
+Run with torchrun, for example eight GPUs as DP=2, PP=2, TP=2::
 
-    torchrun --nproc_per_node=8 examples/distributed/pretrain_llm.py \
+    torchrun --nproc-per-node=8 --module examples.distributed.pretrain_llm \
         --tp 2 --pp 2 --dp 2
 
-This script reads top-to-bottom like the non-distributed
-``examples/pretrain_vlm.py`` — the training loop is intentionally identical.
-The only distributed-specific calls are pushed into ``_training_step``: the
-schedule's ``step`` runs forward + criterion + backward (or the 1F1B microbatch
-loop under PP) and ``ctx.sync_gradients`` all-reduces gradients across DP ranks.
+For multiple nodes, add the normal ``--nnodes``, ``--node-rank``,
+``--master-addr``, and ``--master-port`` torchrun arguments. Each process binds
+``LOCAL_RANK`` with ``torch.cuda.set_device`` before initializing NCCL.
+
+This script reads top-to-bottom like the local examples. The schedule's
+``step`` runs forward + criterion + backward (or the 1F1B microbatch loop under
+PP), and ``ctx.sync_gradients`` all-reduces gradients across DP ranks.
 Building the model differs only in ``plan.parallelize`` + ``plan.materialize``
 (instead of ``model.materialize``) and ``ctx.prepare_dataloader`` (DP sampler +
 CP split folded in).  There is no rank math, no ordering rule, and no grad-sync
@@ -25,13 +27,15 @@ import torch
 from tqdm import tqdm
 from transformers import AutoConfig, get_linear_schedule_with_warmup
 
-from common import (
+from .common import (
     DTYPE,
     FakeTextDataset,
     causal_lm_criterion,
     context_parallel_language_inputs,
     init_distributed,
+    local_trainable_parameters,
     microbatch_collate,
+    move_microbatches_to_device,
 )
 
 from cornstarch.distributed import (
@@ -67,7 +71,6 @@ def _training_step(
     ctx: ParallelContext,
     microbatches: list[dict[str, torch.Tensor]],
     criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
-    optimizer: torch.optim.Optimizer,
 ) -> dict[str, Any]:
     """Run one optimizer step over the ``collate_fn`` microbatch list.
 
@@ -77,8 +80,8 @@ def _training_step(
     - **No pipeline parallelism** (modules co-located on every rank): iterate the
       microbatches, running the plan locally and accumulating gradients — exactly
       gradient accumulation, no schedule.
-    - **Pipeline parallelism**: hand the microbatch list to the schedule (the
-      schedule wiring is completed in T008).
+    - **Pipeline parallelism**: hand the microbatch list to the schedule, which
+      drives the same futures DAG over a 1F1B program.
 
     ``ctx.sync_gradients`` all-reduces the DP gradients before the optimizer step.
     """
@@ -98,7 +101,7 @@ def _training_step(
         return {"loss": loss_total}
 
     schedule = ctx.create_schedule(plan, output_future)
-    result = schedule.step(microbatches, criterion, optimizer, return_loss=True)
+    result = schedule.step(microbatches, criterion, return_loss=True)
     ctx.sync_gradients()
     return result
 
@@ -148,9 +151,10 @@ def pretrain(
         batch_size=batch_size,
         collate_fn=microbatch_collate(num_microbatches),
         shuffle=True,
+        pin_memory=True,
     )
 
-    optimizer = torch.optim.Adam(language_model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(local_trainable_parameters(language_model), lr=lr)
     optimizer.zero_grad()
 
     num_warmup_steps = int(steps * 0.1)
@@ -163,13 +167,12 @@ def pretrain(
     dataloader_iter = iter(dataloader)
     with tqdm(range(steps), disable=rank != 0) as pbar:
         for _ in pbar:
-            microbatches = next(dataloader_iter)
+            microbatches = move_microbatches_to_device(next(dataloader_iter), device)
             outputs = _training_step(
                 language_model,
                 ctx,
                 microbatches,
                 causal_lm_criterion,
-                optimizer,
             )
             loss = outputs["loss"]
             if loss is not None:

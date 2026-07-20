@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Callable, Mapping
 
-import torch
 import torch.nn as nn
 from transformers import PretrainedConfig, PreTrainedModel
 
@@ -75,21 +74,6 @@ class CornstarchLanguageModel(CornstarchModelBase):
             self.forward_spec,
             kwargs,
         )
-
-    def offload_layers_to_cpu(self, layer_indices: Iterable[int] | None = None) -> None:
-        """Move selected decoder layers to CPU after they have been materialized."""
-        self._offload_module_list_to_cpu(self.decoder_layers, layer_indices)
-
-    def materialize_layers(self, device: str | torch.device) -> None:
-        """Allocate or move decoder layers onto the requested device."""
-        if self.uses_layer_offload:
-            assert self.layer_offload_config is not None
-            device = self.layer_offload_config.cpu_torch_device
-        self._materialize_module_list(self.decoder_layers, torch.device(device))
-
-    def _repeated_layer_module_names(self) -> tuple[str, ...]:
-        """Return module names whose tensors are CPU masters under layer offload."""
-        return ("decoder_layers",)
 
     def _section_names(self) -> tuple[str, str, str]:
         """Three-section layout: pre-decoder, decoder layers, post-decoder."""

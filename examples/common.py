@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import numpy as np
 from pathlib import Path
 from typing import Iterator
 
+import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoConfig, PretrainedConfig, PreTrainedTokenizerBase
 
 from cornstarch.models import RepeatedLayerOffloadConfig
-from cornstarch.models import build_modality_encoder as build_modality_encoder
 
 
 IMAGE_TOKEN = "<image>"
@@ -60,11 +59,33 @@ def expand_modality_tokens(text: str, token_counts: dict[str, int]) -> str:
 
 
 def configure_special_tokens(
-    tokenizer: PreTrainedTokenizerBase, tokens: list[str]
+    language_config: PretrainedConfig,
+    tokenizer: PreTrainedTokenizerBase,
+    tokens: list[str],
 ) -> dict[str, int]:
-    tokenizer.pad_token = tokenizer.eos_token
+    """Add modality tokens before model construction and resize its config.
+
+    Cornstarch models are built directly from a config, so there is no later
+    ``resize_token_embeddings`` call on an HF root model. The tokenizer and
+    config must therefore agree before ``from_hf_config`` creates meta
+    embeddings. Otherwise newly added ``<image>``/``<audio>`` IDs can index past
+    the language model's original vocabulary.
+    """
+    if tokenizer.eos_token is None and tokenizer.pad_token is None:
+        raise ValueError("The tokenizer needs an EOS or padding token.")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_special_tokens({"additional_special_tokens": tokens})
-    return {token: int(tokenizer.convert_tokens_to_ids(token)) for token in tokens}
+    language_config.vocab_size = len(tokenizer)
+    token_ids = {
+        token: int(tokenizer.convert_tokens_to_ids(token)) for token in tokens
+    }
+    if any(
+        token_id < 0 or token_id >= language_config.vocab_size
+        for token_id in token_ids.values()
+    ):
+        raise ValueError("A modality token was not added to the language vocabulary.")
+    return token_ids
 
 
 def tokenize_text_batch(

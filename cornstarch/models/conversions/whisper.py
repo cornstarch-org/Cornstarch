@@ -10,7 +10,7 @@ from transformers.modeling_outputs import BaseModelOutput, Seq2SeqModelOutput
 from transformers.models.whisper.configuration_whisper import WhisperConfig
 from transformers.models.whisper.modeling_whisper import WhisperModel, _compute_mask_indices
 
-from cornstarch.models.audio_encoder import CornstarchAudioEncoder
+from cornstarch.models.encoder_base import CornstarchEncoder
 from cornstarch.models.forward_specs import (
     LayerContext,
     TransformerForwardSpec,
@@ -133,11 +133,11 @@ def convert_whisper_config(
     attn_implementation: str | None = None,
     layer_offload_config=None,
     layer_compile_config=None,
-) -> CornstarchAudioEncoder:
+) -> CornstarchEncoder:
     """Convert a Whisper config into a meta-initialized Cornstarch audio encoder."""
     with torch.device("meta"):
         hf_model = WhisperModel(copy.deepcopy(config))
-    return CornstarchAudioEncoder(
+    return CornstarchEncoder(
         config,
         pre_encoder={
             "conv1": hf_model.encoder.conv1,

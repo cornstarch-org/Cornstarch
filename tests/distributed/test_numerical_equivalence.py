@@ -362,7 +362,7 @@ class TestDataParallelEquivalence(GlooDistributedTestBase):
 # CP flash-attn accumulates over an all-gathered K/V sequence in a different
 # order than a single full-sequence SDPA matmul, so both forward and backward
 # parity hold at 5e-3 — looser than the project-wide 1e-3 target but matching
-# the legacy single-GPU CP flash-attn test (tests_old/.../test_context_parallel.py).
+# the original single-GPU CP flash-attention regression.
 CP_ATOL = 5e-3
 CP_RTOL = 5e-3
 
@@ -542,7 +542,7 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         # decomposition from cross-kernel bf16 noise — SDPA-vs-flash already
         # differs by ~1 bf16 ULP on isolated elements, which would mask whether
         # the prefix+diagonal merge is correct. This mirrors the legacy causal CP
-        # test (tests_old/.../test_context_parallel.py), which referenced the
+        # regression, which referenced the
         # single-GPU bitfield kernel rather than SDPA.
         ref_out = flash_attn_func(query, key, value, causal=True)
 

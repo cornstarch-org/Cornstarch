@@ -23,8 +23,10 @@ class InitializationPlan:
     filling them, ``random`` asks modules to run their default initialization, and
     ``checkpoint`` assigns weights from one of three sources: an already-loaded
     state dict, a local safetensors checkpoint path, or a Hugging Face Hub
-    identifier (``model_name_or_path``) whose ``*.safetensors`` shards are
-    downloaded and merged at materialization time. Keeping this choice separate
+    identifier (``model_name_or_path``) whose ``*.safetensors`` shards are read
+    lazily at materialization time. PP stages request only their global layer
+    keys, and TP transfers only rank-local slices to the materialization device.
+    Keeping this choice separate
     from construction lets callers stage HF weights before materialization and
     keeps model classes free of ad hoc loading flags.
     """
@@ -72,7 +74,7 @@ class InitializationPlan:
 
         Exactly one source is used: a pre-loaded ``state_dict``, a local
         ``checkpoint_path`` to a safetensors file, or a Hugging Face Hub
-        ``model_name_or_path`` to download and merge.
+        ``model_name_or_path`` to download and read lazily.
         """
         return cls(
             mode="checkpoint",

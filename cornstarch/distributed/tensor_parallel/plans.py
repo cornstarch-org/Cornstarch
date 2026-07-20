@@ -1,21 +1,21 @@
-"""Per-model-family DTensor TP plan dicts.
+"""Declarative DTensor plans for converted Cornstarch layer structures.
 
 Each dict maps submodule paths *within a single repeated layer* to a
 ``ParallelStyle`` that ``parallelize_module`` applies.  The caller iterates
 over the model's repeated layers and passes each layer plus this dict.
 
-Naming follows the HF config class name (e.g. ``LlamaConfig``) so the
-lookup stays dependency-free.
+Only converted, tested structures belong here. Keeping speculative plans for
+families that ``from_hf_config`` cannot construct creates a false promise: the
+plan is unreachable and cannot be validated through Cornstarch's unified model
+lifecycle. Hybrid models select a plan by semantic ``layer_type``; the TP
+implementation itself does not contain a family-specific branch ladder.
 """
 from __future__ import annotations
 
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
 
 
-# ---------------------------------------------------------------------------
-# Llama / Llama 2 / Llama 3
-# ---------------------------------------------------------------------------
-LLAMA_TP_PLAN: dict = {
+DENSE_ATTN_MLP_TP_PLAN: dict = {
     "self_attn.q_proj": ColwiseParallel(),
     "self_attn.k_proj": ColwiseParallel(),
     "self_attn.v_proj": ColwiseParallel(),
@@ -25,119 +25,62 @@ LLAMA_TP_PLAN: dict = {
     "mlp.down_proj": RowwiseParallel(),
 }
 
-# Mistral / Qwen2 / Gemma share the same projection names as Llama.
-MISTRAL_TP_PLAN: dict = LLAMA_TP_PLAN
-QWEN2_TP_PLAN: dict = LLAMA_TP_PLAN
-GEMMA_TP_PLAN: dict = LLAMA_TP_PLAN
-
-# ---------------------------------------------------------------------------
-# Mixtral (MoE: gate stays replicated; expert FFN uses EP — TP only on attn)
-# ---------------------------------------------------------------------------
-MIXTRAL_TP_PLAN: dict = {
+ATTENTION_ONLY_TP_PLAN: dict = {
     "self_attn.q_proj": ColwiseParallel(),
     "self_attn.k_proj": ColwiseParallel(),
     "self_attn.v_proj": ColwiseParallel(),
     "self_attn.o_proj": RowwiseParallel(),
 }
 
-# ---------------------------------------------------------------------------
-# Phi-3 (fused qkv_proj + gate_up_proj)
-# ---------------------------------------------------------------------------
-PHI3_TP_PLAN: dict = {
-    "self_attn.qkv_proj": ColwiseParallel(),
-    "self_attn.o_proj": RowwiseParallel(),
-    "mlp.gate_up_proj": ColwiseParallel(),
-    "mlp.down_proj": RowwiseParallel(),
-}
-
-# ---------------------------------------------------------------------------
-# GPT-2
-# ---------------------------------------------------------------------------
-GPT2_TP_PLAN: dict = {
-    "attn.c_attn": ColwiseParallel(),
-    "attn.c_proj": RowwiseParallel(),
-    "mlp.c_fc": ColwiseParallel(),
-    "mlp.c_proj": RowwiseParallel(),
-}
-
-# ---------------------------------------------------------------------------
-# BERT / RoBERTa
-# ---------------------------------------------------------------------------
-BERT_TP_PLAN: dict = {
-    "attention.self.query": ColwiseParallel(),
-    "attention.self.key": ColwiseParallel(),
-    "attention.self.value": ColwiseParallel(),
-    "attention.output.dense": RowwiseParallel(),
-    "intermediate.dense": ColwiseParallel(),
-    "output.dense": RowwiseParallel(),
-}
-
-# ---------------------------------------------------------------------------
-# Lookup: HF config class name → per-layer TP plan
-# ---------------------------------------------------------------------------
-# MoE families: shard attention only (expert FFNs use EP, the router/shared
-# expert stay replicated), exactly like the Mixtral plan.  This lets tensor
-# parallelism compose with expert parallelism on the same model.
-QWEN_GATED_DELTA_TP_PLAN: dict = {
+# MoE layers shard the token mixer over TP while their router and expert FFNs
+# remain replicated across TP lanes; EP independently owns expert placement.
+GATED_DELTA_TP_PLAN: dict = {
     "linear_attn.in_proj_z": ColwiseParallel(),
     "linear_attn.in_proj_a": ColwiseParallel(),
     "linear_attn.in_proj_b": ColwiseParallel(),
     "linear_attn.out_proj": RowwiseParallel(),
 }
 
-QWEN_DENSE_GATED_DELTA_TP_PLAN: dict = {
-    **QWEN_GATED_DELTA_TP_PLAN,
+DENSE_GATED_DELTA_TP_PLAN: dict = {
+    **GATED_DELTA_TP_PLAN,
     "mlp.gate_proj": ColwiseParallel(),
     "mlp.up_proj": ColwiseParallel(),
     "mlp.down_proj": RowwiseParallel(),
 }
-QWEN_DENSE_FULL_ATTN_TP_PLAN: dict = LLAMA_TP_PLAN
+_DEFAULT_PLANS: dict[str, dict] = {
+    "LlamaConfig": DENSE_ATTN_MLP_TP_PLAN,
+    "Qwen3_5MoeTextConfig": ATTENTION_ONLY_TP_PLAN,
+    "Qwen3_5TextConfig": DENSE_ATTN_MLP_TP_PLAN,
+}
 
-# MoE experts are replicated on TP lanes (and sharded only by EP); the router
-# and shared expert are replicated too. TP therefore shards only token mixing.
-QWEN_MOE_GATED_DELTA_TP_PLAN: dict = QWEN_GATED_DELTA_TP_PLAN
-QWEN_MOE_FULL_ATTN_TP_PLAN: dict = MIXTRAL_TP_PLAN
-
-_REGISTRY: dict[str, dict] = {
-    "LlamaConfig": LLAMA_TP_PLAN,
-    "Llama4Config": LLAMA_TP_PLAN,
-    "Qwen3_5MoeTextConfig": QWEN_MOE_FULL_ATTN_TP_PLAN,
-    "Qwen3_5TextConfig": QWEN_DENSE_FULL_ATTN_TP_PLAN,
-    "MistralConfig": MISTRAL_TP_PLAN,
-    "Qwen2Config": QWEN2_TP_PLAN,
-    "Qwen2_5Config": QWEN2_TP_PLAN,
-    "GemmaConfig": GEMMA_TP_PLAN,
-    "Gemma2Config": GEMMA_TP_PLAN,
-    "Gemma3Config": GEMMA_TP_PLAN,
-    "MixtralConfig": MIXTRAL_TP_PLAN,
-    "Phi3Config": PHI3_TP_PLAN,
-    "GPT2Config": GPT2_TP_PLAN,
-    "BertConfig": BERT_TP_PLAN,
-    "RobertaConfig": BERT_TP_PLAN,
+_LAYER_TYPE_PLANS: dict[str, dict[str, dict]] = {
+    "Qwen3_5TextConfig": {
+        "full_attention": DENSE_ATTN_MLP_TP_PLAN,
+        "linear_attention": DENSE_GATED_DELTA_TP_PLAN,
+    },
+    # MoE experts and routers remain replicated over TP lanes and are sharded
+    # only over EP, so TP owns the token mixer and nothing else.
+    "Qwen3_5MoeTextConfig": {
+        "full_attention": ATTENTION_ONLY_TP_PLAN,
+        "linear_attention": GATED_DELTA_TP_PLAN,
+    },
 }
 
 
 def get_tp_plan(config_class_name: str) -> dict | None:
     """Return the per-layer TP plan for ``config_class_name``, or ``None`` if unregistered."""
-    return _REGISTRY.get(config_class_name)
+    return _DEFAULT_PLANS.get(config_class_name)
 
 
 def get_layer_tp_plan(config_class_name: str, layer_type: str | None) -> dict | None:
-    """Return a layer-type-specific plan for hybrid Qwen3.5 models."""
-    if config_class_name == "Qwen3_5TextConfig":
-        if layer_type == "linear_attention":
-            return QWEN_DENSE_GATED_DELTA_TP_PLAN
-        if layer_type == "full_attention":
-            return QWEN_DENSE_FULL_ATTN_TP_PLAN
-        raise ValueError(
-            f"Unsupported Qwen3.5 layer type {layer_type!r}; refusing partial TP."
-        )
-    if config_class_name == "Qwen3_5MoeTextConfig":
-        if layer_type == "linear_attention":
-            return QWEN_MOE_GATED_DELTA_TP_PLAN
-        if layer_type == "full_attention":
-            return QWEN_MOE_FULL_ATTN_TP_PLAN
-        raise ValueError(
-            f"Unsupported Qwen3.5 layer type {layer_type!r}; refusing partial TP."
-        )
+    """Resolve a hybrid layer by semantic type, rejecting partial coverage."""
+    layer_plans = _LAYER_TYPE_PLANS.get(config_class_name)
+    if layer_plans is not None:
+        try:
+            return layer_plans[layer_type]
+        except KeyError as error:
+            raise ValueError(
+                f"Unsupported layer type {layer_type!r} for "
+                f"{config_class_name}; refusing partial TP."
+            ) from error
     return get_tp_plan(config_class_name)

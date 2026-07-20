@@ -21,12 +21,11 @@ from transformers import (
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from common import (
+from .common import (
     AUDIO_TOKEN,
     DEFAULT_AUDIO_SAMPLE_RATE,
     DTYPE,
     IMAGE_TOKEN,
-    build_modality_encoder,
     clip_vision_sequence_length,
     configure_special_tokens,
     decoder_start_token_id,
@@ -42,6 +41,8 @@ from cornstarch.models import (
     CornstarchExecutionPlan,
     CornstarchLanguageModel,
     CornstarchModalityEncoder,
+    RepeatedLayerCompileConfig,
+    build_modality_encoder,
     from_hf_config,
 )
 
@@ -65,7 +66,7 @@ class FakeDataset(Dataset):
 
 
 def _collate_valm(
-    batches: list[dict],
+    batches: list[dict[str, object]],
     image_processor: BaseImageProcessor,
     audio_processor: SequenceFeatureExtractor,
     tokenizer: PreTrainedTokenizerBase,
@@ -141,15 +142,17 @@ def _training_step(
 
 def pretrain(
     vision_encoder_name_or_path: str = "openai/clip-vit-base-patch32",
-    audio_encoder_name_or_path: str = "openai/whisper-large-v3",
-    llm_name_or_path: str = "meta-llama/Llama-3.2-3B-Instruct",
+    audio_encoder_name_or_path: str = "openai/whisper-tiny",
+    llm_name_or_path: str = "hf-internal-testing/tiny-random-LlamaForCausalLM",
     use_layer_offload: bool = False,
     profile_output_path: Path | None = None,
     max_train_steps: int = 10,
 ) -> None:
-    """Randomly initialize a vision-audio-language model with the new API."""
+    """Randomly initialize a vision-audio-language model from a user DAG."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("This training example requires a CUDA GPU.")
     torch.cuda.set_device(0)
-    device = torch.device("cuda")
+    device = torch.device("cuda", 0)
     print(
         "Pretraining a VALM with "
         f"{vision_encoder_name_or_path} + {audio_encoder_name_or_path} "
@@ -158,23 +161,34 @@ def pretrain(
 
     vision_config = vision_config_from_pretrained(vision_encoder_name_or_path)
     audio_config = AutoConfig.from_pretrained(audio_encoder_name_or_path)
-    language_config = AutoConfig.from_pretrained(llm_name_or_path)
+    language_root_config = AutoConfig.from_pretrained(llm_name_or_path)
+    language_config = getattr(language_root_config, "text_config", language_root_config)
+    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path, use_fast=True)
+    token_ids = configure_special_tokens(
+        language_config, tokenizer, [IMAGE_TOKEN, AUDIO_TOKEN]
+    )
+    image_token_id = token_ids[IMAGE_TOKEN]
+    audio_token_id = token_ids[AUDIO_TOKEN]
     offload_config = layer_offload_config(use_layer_offload, device)
+    compile_config = RepeatedLayerCompileConfig(enabled=False)
 
     language_model = from_hf_config(
         language_config,
         model_kind="language",
         layer_offload_config=offload_config,
+        layer_compile_config=compile_config,
     )
     vision_encoder = from_hf_config(
         vision_config,
         model_kind="vision",
         layer_offload_config=offload_config,
+        layer_compile_config=compile_config,
     )
     audio_encoder = from_hf_config(
         audio_config,
         model_kind="audio",
         layer_offload_config=offload_config,
+        layer_compile_config=compile_config,
     )
     vision_module = build_modality_encoder(
         vision_encoder,
@@ -190,19 +204,15 @@ def pretrain(
     language_model.set_random_init()
     vision_module.set_random_init()
     audio_module.set_random_init()
-    language_model.materialize(device).to(dtype=DTYPE)
-    vision_module.materialize(device).to(dtype=DTYPE)
-    audio_module.materialize(device).to(dtype=DTYPE)
+    language_model.materialize(device, dtype=DTYPE)
+    vision_module.materialize(device, dtype=DTYPE)
+    audio_module.materialize(device, dtype=DTYPE)
     language_model.train()
     vision_module.train()
     audio_module.train()
 
     image_processor = AutoImageProcessor.from_pretrained(vision_encoder_name_or_path)
     audio_processor = AutoFeatureExtractor.from_pretrained(audio_encoder_name_or_path)
-    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path, use_fast=True)
-    token_ids = configure_special_tokens(tokenizer, [IMAGE_TOKEN, AUDIO_TOKEN])
-    image_token_id = token_ids[IMAGE_TOKEN]
-    audio_token_id = token_ids[AUDIO_TOKEN]
     image_sequence_length = clip_vision_sequence_length(vision_encoder.config)
     audio_sequence_length = 1
     audio_decoder_start_token_id = decoder_start_token_id(audio_encoder.config)
