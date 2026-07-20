@@ -68,6 +68,24 @@ def causal_lm_criterion(output: Any, batch: dict[str, torch.Tensor]) -> torch.Te
     return output.loss if hasattr(output, "loss") else output["loss"]
 
 
+def context_parallel_language_inputs(enabled: bool) -> dict[str, Any]:
+    """Return the data-side CP metadata futures consumed by the LM merge node."""
+    if not enabled:
+        return {}
+    from cornstarch.models import ExecutionFuture
+
+    return {
+        key: ExecutionFuture(key)
+        for key in (
+            "attention_mask",
+            "position_ids",
+            "shift_labels",
+            "num_items_in_batch",
+            "cp_global_input_ids",
+        )
+    }
+
+
 def microbatch_collate(
     num_microbatches: int,
     collate_fn: Callable[[list], dict] | None = None,

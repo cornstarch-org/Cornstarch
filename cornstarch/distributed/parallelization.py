@@ -38,6 +38,7 @@ from cornstarch.distributed.pipeline_parallel.schedule import (
 from cornstarch.distributed.process_group_mesh import ModalProcessGroupMesh
 from cornstarch.distributed.tensor_parallel import apply_tensor_parallel
 from cornstarch.models.model_base import CornstarchModelBase
+from cornstarch.models.language_model import CornstarchLanguageModel
 from cornstarch.models.multimodal.modeling import CornstarchModalityEncoder
 
 if TYPE_CHECKING:
@@ -47,7 +48,13 @@ if TYPE_CHECKING:
     )
 
 
-_DEFAULT_CP_SPLIT_KEYS = ("input_ids", "labels", "attention_mask", "position_ids")
+_DEFAULT_CP_SPLIT_KEYS = (
+    "input_ids",
+    "labels",
+    "shift_labels",
+    "attention_mask",
+    "position_ids",
+)
 
 
 class ParallelContext:
@@ -70,6 +77,7 @@ class ParallelContext:
         dp_rank: int,
         dp_group: Optional[dist.ProcessGroup],
         gradient_synchronizer: Optional[GradientSynchronizer],
+        cp_gradient_synchronizers: Sequence[GradientSynchronizer] = (),
         uses_pipeline_parallel: bool = False,
     ) -> None:
         self._modules = modules
@@ -80,6 +88,7 @@ class ParallelContext:
         self._dp_rank = dp_rank
         self._dp_group = dp_group
         self._gradient_synchronizer = gradient_synchronizer
+        self._cp_gradient_synchronizers = list(cp_gradient_synchronizers)
         self._uses_pipeline_parallel = uses_pipeline_parallel
 
     # ------------------------------------------------------------------
@@ -171,18 +180,56 @@ class ParallelContext:
         ]
 
         def apply_cp_split(batch: dict) -> dict:
+            # Causal CP needs global token positions and globally shifted labels:
+            # synthesizing either after the sequence is split loses rank/run
+            # boundaries. Keep the unsplit ids as data-side metadata so a
+            # multimodal merge can select only the encoder features whose
+            # placeholder positions live on this CP rank.
+            input_ids = batch.get("input_ids")
+            if isinstance(input_ids, torch.Tensor) and input_ids.ndim >= 2:
+                batch.setdefault("cp_global_input_ids", input_ids)
+                batch.setdefault(
+                    "position_ids",
+                    torch.arange(input_ids.shape[1], device=input_ids.device)
+                    .unsqueeze(0)
+                    .expand(input_ids.shape[0], -1),
+                )
+                batch.setdefault(
+                    "attention_mask",
+                    torch.ones_like(input_ids, dtype=torch.bool),
+                )
+
+            labels = batch.get("labels")
+            if isinstance(labels, torch.Tensor) and labels.ndim >= 2:
+                shift_labels = torch.empty_like(labels)
+                shift_labels[..., :-1] = labels[..., 1:]
+                shift_labels[..., -1] = -100
+                batch.setdefault("shift_labels", shift_labels)
+                batch.setdefault(
+                    "num_items_in_batch",
+                    (batch["shift_labels"] != -100).sum(),
+                )
+
+            # Co-located modules may share one token sequence and CP layout.
+            # Compute each splitter from the original full batch, but split a
+            # given key only once rather than repeatedly shortening it.
+            source_batch = dict(batch)
+            split_keys_seen: set[str] = set()
             for splitter, cp_group in cp_targets:
-                mask = batch.get("attention_mask")
+                mask = source_batch.get("attention_mask")
                 if mask is None:
-                    ref = batch.get("input_ids")
+                    ref = source_batch.get("input_ids")
                     if ref is None:
                         continue
                     mask = torch.ones_like(ref, dtype=torch.float32)
                 splitter.compute_offsets(mask, cp_group)
                 for key in cp_split_keys:
-                    value = batch.get(key)
+                    if key in split_keys_seen:
+                        continue
+                    value = source_batch.get(key)
                     if isinstance(value, torch.Tensor) and value.ndim >= 2:
                         batch[key] = splitter.split(value, cp_group)
+                        split_keys_seen.add(key)
             return batch
 
         def wrapped_collate(samples: list) -> list[dict]:
@@ -246,11 +293,15 @@ class ParallelContext:
     # ------------------------------------------------------------------
 
     def sync_gradients(self) -> None:
-        """All-reduce gradients across DP ranks for every registered module.
+        """Synchronize CP partial gradients, then average DP replicas.
 
-        Call after ``loss.backward()`` and before ``optimizer.step()``.
-        Expert-parallel-sharded parameters are skipped automatically.
+        CP ranks own disjoint query/loss tokens, so their replicated parameter
+        gradients are summed first. DP replicas are then averaged. Both groups
+        fix the EP coordinate, so corresponding local expert shards are synced
+        just like dense parameters.
         """
+        for synchronizer in self._cp_gradient_synchronizers:
+            synchronizer.sync()
         if self._gradient_synchronizer is not None:
             self._gradient_synchronizer.sync()
 
@@ -411,7 +462,11 @@ class ParallelizationPlan:
             if config.tensor_parallel_size > 1:
                 apply_tensor_parallel(apply_target, mesh.tp_mesh)
             if config.context_parallel_size > 1:
-                apply_context_parallel(apply_target, mesh.cp_group)
+                apply_context_parallel(
+                    apply_target,
+                    mesh.cp_group,
+                    causal=isinstance(apply_target, CornstarchLanguageModel),
+                )
             if config.num_pp_stages > 1:
                 apply_pipeline_parallel(apply_target, mesh)
 
@@ -423,6 +478,7 @@ class ParallelizationPlan:
         dp_size_final, dp_rank, dp_group, grad_sync = self._build_dp_handles(
             meshes
         )
+        cp_grad_syncs = self._build_cp_gradient_synchronizers(meshes)
 
         return ParallelContext(
             modules=self._modules,
@@ -433,6 +489,7 @@ class ParallelizationPlan:
             dp_rank=dp_rank,
             dp_group=dp_group,
             gradient_synchronizer=grad_sync,
+            cp_gradient_synchronizers=cp_grad_syncs,
             uses_pipeline_parallel=pipelined,
         )
 
@@ -529,8 +586,29 @@ class ParallelizationPlan:
         except Exception:
             dp_rank = dist.get_rank(dp_group) if dp_size > 1 else 0
 
-        grad_sync = GradientSynchronizer(dp_group)
+        grad_sync = GradientSynchronizer(
+            dp_group,
+            skip_expert_parallel=False,
+        )
         for module in self._modules:
             if id(module) in meshes:
                 grad_sync.register(module)
         return dp_size, dp_rank, dp_group, grad_sync
+
+    def _build_cp_gradient_synchronizers(
+        self, meshes: dict[int, ModalProcessGroupMesh]
+    ) -> list[GradientSynchronizer]:
+        """Build one sum-reduction synchronizer per local CP module shard."""
+        synchronizers: list[GradientSynchronizer] = []
+        for module, config in zip(self._modules, self._configs):
+            mesh = meshes.get(id(module))
+            if mesh is None or config.context_parallel_size <= 1:
+                continue
+            synchronizer = GradientSynchronizer(
+                mesh.cp_group,
+                average=False,
+                skip_expert_parallel=False,
+            )
+            synchronizer.register(module)
+            synchronizers.append(synchronizer)
+        return synchronizers

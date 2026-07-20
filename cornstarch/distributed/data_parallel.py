@@ -56,14 +56,15 @@ class _GradientBucket:
     def empty(self) -> bool:
         return len(self._grads) == 0
 
-    def allreduce(self, dp_group: dist.ProcessGroup, dp_size: int) -> None:
-        """Flatten, all-reduce, average, and scatter back to original grads."""
+    def allreduce(self, group: dist.ProcessGroup, divisor: int) -> None:
+        """Flatten, all-reduce, optionally average, and scatter gradients back."""
         if not self._grads:
             return
 
         if len(self._grads) == 1:
-            dist.all_reduce(self._grads[0], op=dist.ReduceOp.SUM, group=dp_group)
-            self._grads[0].div_(dp_size)
+            dist.all_reduce(self._grads[0], op=dist.ReduceOp.SUM, group=group)
+            if divisor != 1:
+                self._grads[0].div_(divisor)
             return
 
         # Pack all grads into a contiguous flat buffer.
@@ -78,8 +79,9 @@ class _GradientBucket:
             flat[offset : offset + n].copy_(g.reshape(-1))
             offset += n
 
-        dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=dp_group)
-        flat.div_(dp_size)
+        dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=group)
+        if divisor != 1:
+            flat.div_(divisor)
 
         # Scatter averaged values back to original gradient tensors.
         offset = 0
@@ -93,6 +95,9 @@ def allreduce_gradients(
     model: nn.Module,
     dp_group: dist.ProcessGroup,
     bucket_size_mb: float = _DEFAULT_BUCKET_SIZE_MB,
+    *,
+    average: bool = True,
+    skip_expert_parallel: bool = True,
 ) -> None:
     """Average all parameter gradients across DP ranks using bucketed all-reduce.
 
@@ -102,10 +107,12 @@ def allreduce_gradients(
     parameters.  A final partial bucket handles any remaining gradients.
 
     Call this after ``loss.backward()`` and before ``optimizer.step()``.
-    Parameters without gradients are silently skipped.  Expert-parallel
-    parameters (tagged ``_is_expert_parallel`` by ``apply_expert_parallel``)
-    are also skipped: each expert lives on a single rank and its gradient must
-    not be averaged with the different experts held by other ranks.
+    Parameters without gradients are silently skipped. ``average=False`` is
+    used for context parallelism, where each rank's loss is already normalized
+    by the global token count and gradients must therefore be summed. Expert
+    parameters are skipped by default for an EP-axis collective, but callers
+    operating on an orthogonal DP/CP group set ``skip_expert_parallel=False``:
+    those groups contain replicas of the same local expert shard.
     """
     dp_size = dist.get_world_size(dp_group)
     if dp_size <= 1:
@@ -117,17 +124,17 @@ def allreduce_gradients(
     for param in model.parameters():
         if param.grad is None:
             continue
-        if getattr(param, "_is_expert_parallel", False):
+        if skip_expert_parallel and getattr(param, "_is_expert_parallel", False):
             continue
         grad = param.grad._local_tensor if hasattr(param.grad, "_local_tensor") else param.grad
 
         if not bucket.try_add(grad):
-            bucket.allreduce(dp_group, dp_size)
+            bucket.allreduce(dp_group, dp_size if average else 1)
             bucket = _GradientBucket(bucket_size_bytes)
             bucket.try_add(grad)
 
     if not bucket.empty:
-        bucket.allreduce(dp_group, dp_size)
+        bucket.allreduce(dp_group, dp_size if average else 1)
 
 
 class GradientSynchronizer:
@@ -157,9 +164,14 @@ class GradientSynchronizer:
         self,
         dp_group: dist.ProcessGroup,
         bucket_size_mb: float = _DEFAULT_BUCKET_SIZE_MB,
+        *,
+        average: bool = True,
+        skip_expert_parallel: bool = True,
     ) -> None:
         self._dp_group = dp_group
         self._bucket_size_mb = bucket_size_mb
+        self._average = average
+        self._skip_expert_parallel = skip_expert_parallel
         self._modules: list[nn.Module] = []
 
     def register(self, module: nn.Module) -> None:
@@ -169,4 +181,10 @@ class GradientSynchronizer:
     def sync(self) -> None:
         """All-reduce and average gradients for all registered modules."""
         for module in self._modules:
-            allreduce_gradients(module, self._dp_group, self._bucket_size_mb)
+            allreduce_gradients(
+                module,
+                self._dp_group,
+                self._bucket_size_mb,
+                average=self._average,
+                skip_expert_parallel=self._skip_expert_parallel,
+            )

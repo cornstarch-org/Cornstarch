@@ -27,7 +27,8 @@ tests call these directly; everything else is built on them.
 - **Expert parallelism** (``apply_expert_parallel``): shards a MoE layer's
   batched experts across the EP mesh axis and routes tokens via all-to-all.
 - **Data parallelism** (``GradientSynchronizer``): bucketed gradient all-reduce
-  called explicitly after ``backward()``; skips expert-parallel parameters.
+  called explicitly after ``backward()``. Orthogonal DP groups synchronize the
+  corresponding local expert shards as well as ordinary parameters.
 
 **Layer 2 — declarative per-modality plan (surface).**  Most users only touch
 this: describe each modality with a ``ParallelConfig``, register it on a

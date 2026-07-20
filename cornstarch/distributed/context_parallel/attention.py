@@ -79,6 +79,12 @@ def _allgather_kv(
     ]
 
     events: list[torch.cuda.Event] = []
+    # In a real model forward K/V are produced by projection + RoPE kernels on
+    # the current stream immediately before this call. The communication stream
+    # must observe those writes before reading K/V for all-gather. Attention-
+    # level tests happened to pass pre-materialized tensors and therefore did
+    # not expose this producer-side race.
+    stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         for hi in range(0, nheads, heads_stride):
             gi = hi // heads_stride
@@ -235,12 +241,15 @@ class ContextParallelFlashAttention(torch.autograd.Function):
         global positions) across the CP group.
         """
         stream = ContextParallelFlashAttention._get_stream()
-        batch, seqlen_q, nheads, d = q.shape
-        _, seqlen_kv, _, _ = k.shape
+        batch, seqlen_q, q_nheads, d = q.shape
+        _, seqlen_kv, kv_nheads, _ = k.shape
 
-        assert k.shape == (batch, seqlen_kv, nheads, d)
-        assert v.shape == (batch, seqlen_kv, nheads, d)
-        assert nheads % heads_stride == 0
+        assert k.shape == (batch, seqlen_kv, kv_nheads, d)
+        assert v.shape == (batch, seqlen_kv, kv_nheads, d)
+        assert q_nheads % kv_nheads == 0, (
+            "query head count must be divisible by key/value head count"
+        )
+        assert kv_nheads % heads_stride == 0
         assert q.dtype == k.dtype == v.dtype
         assert q.dtype in (torch.float16, torch.bfloat16)
         assert q.is_cuda and k.is_cuda and v.is_cuda
@@ -283,7 +292,7 @@ class ContextParallelFlashAttention(torch.autograd.Function):
         total_seqlen = sum(seqlen_per_rank)
 
         gathered_kv, per_head_events = _allgather_kv(
-            k, v, nheads, heads_stride, seqlen_per_rank, total_seqlen,
+            k, v, kv_nheads, heads_stride, seqlen_per_rank, total_seqlen,
             cp_group, stream,
         )
 
@@ -291,10 +300,13 @@ class ContextParallelFlashAttention(torch.autograd.Function):
         lses: list[torch.Tensor] = []
         softmax_scale = d ** (-0.5)
 
-        for hi in range(0, nheads, heads_stride):
-            gi = hi // heads_stride
+        q_heads_per_kv_head = q_nheads // kv_nheads
+        q_heads_stride = heads_stride * q_heads_per_kv_head
+        for kv_hi in range(0, kv_nheads, heads_stride):
+            gi = kv_hi // heads_stride
+            q_hi = kv_hi * q_heads_per_kv_head
             torch.cuda.current_stream().wait_event(per_head_events[gi])
-            q_g = q[:, :, hi : hi + heads_stride, :].contiguous()
+            q_g = q[:, :, q_hi : q_hi + q_heads_stride, :].contiguous()
 
             if not causal:
                 o, lse, _, _ = _flash_attn_forward(
@@ -378,12 +390,12 @@ class ContextParallelFlashAttention(torch.autograd.Function):
         cp_group: dist.ProcessGroup = ctx.cp_group
         causal: bool = ctx.causal
 
-        batch, seqlen_q, nheads, d = q.shape
-        _, seqlen_kv, _, _ = k.shape
+        batch, seqlen_q, q_nheads, d = q.shape
+        _, seqlen_kv, kv_nheads, _ = k.shape
         total_seqlen = sum(seqlen_per_rank)
 
         gathered_kv, per_head_events = _allgather_kv(
-            k, v, nheads, heads_stride, seqlen_per_rank, total_seqlen,
+            k, v, kv_nheads, heads_stride, seqlen_per_rank, total_seqlen,
             cp_group, stream,
         )
 
@@ -391,18 +403,21 @@ class ContextParallelFlashAttention(torch.autograd.Function):
         dks: list[torch.Tensor] = []
         dvs: list[torch.Tensor] = []
 
-        for hi in range(0, nheads, heads_stride):
-            gi = hi // heads_stride
+        q_heads_per_kv_head = q_nheads // kv_nheads
+        q_heads_stride = heads_stride * q_heads_per_kv_head
+        for kv_hi in range(0, kv_nheads, heads_stride):
+            gi = kv_hi // heads_stride
+            q_hi = kv_hi * q_heads_per_kv_head
             torch.cuda.current_stream().wait_event(per_head_events[gi])
 
             dkv = torch.empty((2, batch, seqlen_kv, heads_stride, d), dtype=k.dtype, device=k.device)
 
             if not causal:
-                dq = torch.empty((batch, seqlen_q, heads_stride, d), dtype=q.dtype, device=q.device)
+                dq = torch.empty((batch, seqlen_q, q_heads_stride, d), dtype=q.dtype, device=q.device)
                 dgkv = torch.zeros((2, batch, total_seqlen, heads_stride, d), dtype=k.dtype, device=k.device)
                 _flash_attn_backward(
-                    dout=do[:, :, hi : hi + heads_stride, :],
-                    q=q[:, :, hi : hi + heads_stride, :],
+                    dout=do[:, :, q_hi : q_hi + q_heads_stride, :],
+                    q=q[:, :, q_hi : q_hi + q_heads_stride, :],
                     k=gathered_kv[gi][0],
                     v=gathered_kv[gi][1],
                     out=os[gi],
@@ -430,7 +445,7 @@ class ContextParallelFlashAttention(torch.autograd.Function):
                 seg_start: int = ctx.seg_start
                 gathered_global_pos: torch.Tensor = ctx.gathered_global_pos
 
-                dq = torch.zeros((batch, seqlen_q, heads_stride, d), dtype=torch.float32, device=q.device)
+                dq = torch.zeros((batch, seqlen_q, q_heads_stride, d), dtype=torch.float32, device=q.device)
                 dgkv_f32 = torch.zeros((2, batch, total_seqlen, heads_stride, d), dtype=torch.float32, device=k.device)
 
                 for q_start, q_len, a, _b in runs:
@@ -444,12 +459,12 @@ class ContextParallelFlashAttention(torch.autograd.Function):
                     seqlen_k_run = k_run.shape[1]
                     p_len = seqlen_k_run - q_len
 
-                    dq_run = torch.empty((batch, q_len, heads_stride, d), dtype=q.dtype, device=q.device)
+                    dq_run = torch.empty((batch, q_len, q_heads_stride, d), dtype=q.dtype, device=q.device)
                     dk_run = torch.empty((batch, seqlen_k_run, heads_stride, d), dtype=k.dtype, device=k.device)
                     dv_run = torch.empty((batch, seqlen_k_run, heads_stride, d), dtype=k.dtype, device=k.device)
                     _flash_attn_backward(
-                        dout=do[:, q_start : q_start + q_len, hi : hi + heads_stride, :].contiguous(),
-                        q=q[:, q_start : q_start + q_len, hi : hi + heads_stride, :].contiguous(),
+                        dout=do[:, q_start : q_start + q_len, q_hi : q_hi + q_heads_stride, :].contiguous(),
+                        q=q[:, q_start : q_start + q_len, q_hi : q_hi + q_heads_stride, :].contiguous(),
                         k=k_run,
                         v=v_run,
                         out=os[gi][:, q_start : q_start + q_len].contiguous(),
@@ -534,6 +549,8 @@ def context_parallel_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    *,
     cp_group: dist.ProcessGroup,
     heads_stride: int = 1,
     causal: bool = False,
@@ -543,9 +560,11 @@ def context_parallel_flash_attention(
 ) -> tuple[torch.Tensor, None]:
     """Transpose from HF ``(b, h, s, d)`` to flash-attn ``(b, s, h, d)``, run CP attention, transpose back.
 
-    HF passes ``position_ids`` through to the attention interface as a kwarg; in
-    causal mode (and without an explicit ``offsets_per_rank``) it is all-gathered
-    inside the kernel to recover every rank's global positions.
+    The leading arguments intentionally match Hugging Face's attention-dispatch
+    protocol, including the positional ``attention_mask`` argument. The CP
+    kernel implements its causal/full mask structurally, so the already-local
+    mask is not passed to flash-attn. HF passes ``position_ids`` through as a
+    kwarg; in causal mode it is all-gathered to recover global positions.
     """
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)

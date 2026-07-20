@@ -7,6 +7,7 @@ import unittest
 
 import torch
 import torch.distributed as dist
+from torch.utils.data import Dataset
 
 from tests.distributed.distributed_base import GlooDistributedTestBase
 from cornstarch.distributed.context_parallel.splitters import (
@@ -14,11 +15,93 @@ from cornstarch.distributed.context_parallel.splitters import (
     UniformContextParallelSplitter,
     ZigzagContextParallelSplitter,
 )
+from cornstarch.distributed import ParallelConfig, ParallelizationPlan
+from cornstarch.distributed.context_parallel import apply_context_parallel
+from cornstarch.models import from_hf_config
+from tests.model.model_configs import llama_config
 
 
 def _make_mask(batch: int, seq: int) -> torch.Tensor:
     """Dense all-ones mask for splitter testing."""
     return torch.ones(batch, seq, dtype=torch.float32)
+
+
+def test_apply_context_parallel_updates_leaf_configs_and_isolates_modules() -> None:
+    """Real HF attention leaves dispatch to their own module-bound CP callable."""
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    config = llama_config()
+    first = from_hf_config(config, model_kind="language", attn_implementation="eager")
+    second = from_hf_config(config, model_kind="language", attn_implementation="eager")
+    first_group, second_group = object(), object()
+
+    first_key = apply_context_parallel(first, first_group, causal=True)
+    second_key = apply_context_parallel(second, second_group, causal=False)
+
+    assert first_key != second_key
+    assert first.decoder_layers[0].self_attn.config._attn_implementation == first_key
+    assert second.decoder_layers[0].self_attn.config._attn_implementation == second_key
+    assert ALL_ATTENTION_FUNCTIONS[first_key].keywords == {
+        "cp_group": first_group,
+        "causal": True,
+    }
+    assert ALL_ATTENTION_FUNCTIONS[second_key].keywords == {
+        "cp_group": second_group,
+        "causal": False,
+    }
+
+
+class _CPTextDataset(Dataset):
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        ids = torch.arange(8) + index * 10
+        return {"input_ids": ids, "labels": ids.clone()}
+
+
+class TestContextParallelDataloader(GlooDistributedTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def test_builds_global_causal_metadata_before_split(self) -> None:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        model = from_hf_config(
+            llama_config(), model_kind="language", attn_implementation="eager"
+        )
+        model.set_random_init()
+        plan = ParallelizationPlan(global_ranks=[0, 1])
+        plan.parallelize(
+            model,
+            ParallelConfig(
+                context_parallel_size=2,
+                context_parallel_splitter=UniformContextParallelSplitter(),
+                data_parallel_size=1,
+            ),
+        )
+        ctx = plan.materialize("cpu", dtype=torch.float32)
+        attention_key = model.decoder_layers[0].self_attn.config._attn_implementation
+        self.assertTrue(ALL_ATTENTION_FUNCTIONS[attention_key].keywords["causal"])
+        batch = next(iter(ctx.prepare_dataloader(_CPTextDataset(), batch_size=2)))[0]
+
+        rank = dist.get_rank()
+        offsets = torch.arange(rank * 4, (rank + 1) * 4)
+        expected_ids = batch["cp_global_input_ids"].index_select(1, offsets)
+        self.assertTrue(torch.equal(batch["input_ids"], expected_ids))
+        self.assertTrue(
+            torch.equal(batch["position_ids"], offsets.unsqueeze(0).expand(2, -1))
+        )
+
+        global_labels = batch["cp_global_input_ids"]
+        global_shift = torch.empty_like(global_labels)
+        global_shift[:, :-1] = global_labels[:, 1:]
+        global_shift[:, -1] = -100
+        self.assertTrue(
+            torch.equal(batch["shift_labels"], global_shift.index_select(1, offsets))
+        )
+        self.assertEqual(int(batch["num_items_in_batch"]), 14)
 
 
 class TestUniformSplitter(GlooDistributedTestBase):

@@ -220,15 +220,15 @@ test) rather than SDPA, to isolate the decomposition from cross-kernel bf16 nois
   `models/{gemma4,model_base}.py`, `models/multimodal/execution.py` are untouched
   by this task).
 
-### Pre-existing dispatch gap (NOT B4 — documented, not fixed)
-`apply_context_parallel` sets `module.hf_config._attn_implementation`, but the
-reused HF leaf attention modules hold a **different** config object
-(`leaf.self_attn.config is module.hf_config` → False), so the registered CP
-callable is **never invoked in a real model forward** — for non-causal *and*
-causal. This is why every CP test (T003 and B4) is at the attention-function
-level. The causal kernel is correct and one-flag-ready (`causal=True` +
-`position_ids`) the moment that propagation is fixed; fixing it is out of B4's
-causal-equivalence scope.
+### Integration follow-up: dispatch gap closed
+The parallelism-branch verification subsequently propagated each module's
+unique CP attention key to its reused HF leaf configs, bound the correct
+per-module process group and causal mode, and made the wrapper signature
+compatible with HF's positional `attention_mask` dispatch. The plan now
+synthesizes global causal positions and shifted labels before splitting, and
+real leaf dispatch is covered by a regression test. The attention-level
+forward/backward equivalence test also covers grouped-query attention (GQA/MQA)
+for the uniform and zigzag causal splitters.
 
 ### Per task decision
 Makespan splitter left untouched (not certified for causal CP); no makespan

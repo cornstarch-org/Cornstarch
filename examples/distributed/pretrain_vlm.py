@@ -30,12 +30,19 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import AutoConfig, get_linear_schedule_with_warmup
 
-from common import DTYPE, causal_lm_criterion, init_distributed, microbatch_collate
+from common import (
+    DTYPE,
+    causal_lm_criterion,
+    context_parallel_language_inputs,
+    init_distributed,
+    microbatch_collate,
+)
 
 from cornstarch.distributed import (
     ParallelConfig,
     ParallelContext,
     ParallelizationPlan,
+    ZigzagContextParallelSplitter,
 )
 from cornstarch.models import (
     CornstarchExecutionPlan,
@@ -72,11 +79,18 @@ class FakeVLMDataset(Dataset):
         g = torch.Generator().manual_seed(index)
         ids = torch.randint(1, self.vocab_size, (self.seq_len,), generator=g)
         ids[: self.num_image_tokens] = IMAGE_TOKEN_ID  # image placeholder tokens
+        labels = ids.clone()
+        labels[: self.num_image_tokens] = -100
         pixel_values = torch.randn(3, *self.image_size, generator=g)
-        return {"input_ids": ids, "labels": ids.clone(), "pixel_values": pixel_values}
+        return {"input_ids": ids, "labels": labels, "pixel_values": pixel_values}
 
 
-def _build_plan(language_model: Any, modality_encoder: Any):
+def _build_plan(
+    language_model: Any,
+    modality_encoder: Any,
+    *,
+    context_parallel: bool = False,
+):
     """Build the (parallelism-agnostic) VLM plan.
 
     The three plan-construction lines match the non-distributed
@@ -94,6 +108,7 @@ def _build_plan(language_model: Any, modality_encoder: Any):
         labels=ExecutionFuture("labels"),
         modality_token_ids={"vision": IMAGE_TOKEN_ID},
         encoder_outputs={"vision": vision_outputs},
+        language_model_inputs=context_parallel_language_inputs(context_parallel),
     )
     output_future = plan.run_language_model(module=language_model, inputs=merged)
     return plan, output_future
@@ -117,7 +132,11 @@ def _training_step(
     cross-mesh seam. ``ctx.sync_gradients`` all-reduces the DP gradients before
     the optimizer step.
     """
-    plan, output_future = _build_plan(language_model, modality_encoder)
+    plan, output_future = _build_plan(
+        language_model,
+        modality_encoder,
+        context_parallel=ctx.get_splitter(language_model) is not None,
+    )
 
     if not ctx.uses_pipeline_parallel:
         loss_total = None
@@ -141,6 +160,7 @@ def pretrain(
     vision_tp: int = 1,
     llm_tp: int = 1,
     llm_pp: int | None = None,
+    llm_cp: int = 1,
     dp: int = 1,
     batch_size: int = 4,
     seq_len: int = 128,
@@ -185,6 +205,10 @@ def pretrain(
         ParallelConfig(
             tensor_parallel_size=llm_tp,
             pipeline_parallel_size=llm_pp,
+            context_parallel_size=llm_cp,
+            context_parallel_splitter=(
+                ZigzagContextParallelSplitter() if llm_cp > 1 else None
+            ),
             data_parallel_size=dp,
         ),
     )

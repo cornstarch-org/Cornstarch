@@ -583,7 +583,7 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
             ZigzagContextParallelSplitter,
         )
 
-        nheads, dim, batch_size, seq_len = 8, 64, 2, 128
+        q_heads, kv_heads, dim, batch_size, seq_len = 8, 2, 64, 2, 128
         splitter = (
             UniformContextParallelSplitter()
             if splitter_name == "uniform"
@@ -594,11 +594,13 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         )
         off = offsets_per_rank[self.rank].to("cuda")
 
-        query, key, value = torch.unbind(
-            torch.randn(
-                (3, batch_size, seq_len, nheads, dim), device="cuda", dtype=DTYPE
-            ).normal_(mean=0, std=0.5),
-        )
+        query = torch.randn(
+            (batch_size, seq_len, q_heads, dim), device="cuda", dtype=DTYPE
+        ).normal_(mean=0, std=0.5)
+        key = torch.randn(
+            (batch_size, seq_len, kv_heads, dim), device="cuda", dtype=DTYPE
+        ).normal_(mean=0, std=0.5)
+        value = torch.randn_like(key).normal_(mean=0, std=0.5)
         for t in (query, key, value):
             t.requires_grad_()
         ref_out = flash_attn_func(query, key, value, causal=True)

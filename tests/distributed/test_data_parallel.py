@@ -111,6 +111,25 @@ class TestGradientSynchronizer(GlooDistributedTestBase):
                 f"Gradients differ for {model}",
             )
 
+    def test_dp_sync_includes_matching_expert_shards(self):
+        """DP groups fix the EP coordinate, so tagged local experts are replicas."""
+        mesh = self._make_mesh()
+        model = SimpleMLP(dim=4)
+        model.fc.weight._is_expert_parallel = True
+        sync = GradientSynchronizer(
+            mesh.dp_group,
+            skip_expert_parallel=False,
+        )
+        sync.register(model)
+
+        torch.manual_seed(dist.get_rank())
+        model(torch.randn(2, 4)).sum().backward()
+        sync.sync()
+
+        gathered = [torch.zeros_like(model.fc.weight.grad) for _ in range(2)]
+        dist.all_gather(gathered, model.fc.weight.grad)
+        self.assertTrue(torch.equal(gathered[0], gathered[1]))
+
 
 if __name__ == "__main__":
     unittest.main()

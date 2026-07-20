@@ -29,6 +29,7 @@ from common import (
     DTYPE,
     FakeTextDataset,
     causal_lm_criterion,
+    context_parallel_language_inputs,
     init_distributed,
     microbatch_collate,
 )
@@ -37,6 +38,7 @@ from cornstarch.distributed import (
     ParallelConfig,
     ParallelContext,
     ParallelizationPlan,
+    ZigzagContextParallelSplitter,
 )
 from cornstarch.models import (
     CornstarchExecutionPlan,
@@ -45,7 +47,7 @@ from cornstarch.models import (
 )
 
 
-def _build_plan(language_model: Any):
+def _build_plan(language_model: Any, *, context_parallel: bool = False):
     """Build the (parallelism-agnostic) execution plan for an LM step."""
     plan = CornstarchExecutionPlan()
     merged = plan.merge_modality_encoder_outputs(
@@ -54,6 +56,7 @@ def _build_plan(language_model: Any):
         labels=ExecutionFuture("labels"),
         modality_token_ids={},
         encoder_outputs={},
+        language_model_inputs=context_parallel_language_inputs(context_parallel),
     )
     output_future = plan.run_language_model(module=language_model, inputs=merged)
     return plan, output_future
@@ -79,7 +82,10 @@ def _training_step(
 
     ``ctx.sync_gradients`` all-reduces the DP gradients before the optimizer step.
     """
-    plan, output_future = _build_plan(language_model)
+    plan, output_future = _build_plan(
+        language_model,
+        context_parallel=ctx.get_splitter(language_model) is not None,
+    )
 
     if not ctx.uses_pipeline_parallel:
         loss_total = None
@@ -125,6 +131,9 @@ def pretrain(
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
             context_parallel_size=cp,
+            context_parallel_splitter=(
+                ZigzagContextParallelSplitter() if cp > 1 else None
+            ),
             expert_parallel_size=ep,
             data_parallel_size=dp,
         ),

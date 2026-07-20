@@ -21,9 +21,9 @@ shards.
    same path above.
 
 ``ep_size`` only has to divide ``num_experts``; a rank may own several experts.
-Sharded expert parameters are tagged ``_is_expert_parallel = True`` so that
-data-parallel gradient sync skips them (each expert lives on exactly one rank
-and must not be all-reduced).
+Sharded expert parameters are tagged ``_is_expert_parallel = True`` so callers
+can distinguish EP-axis collectives (which must skip them) from orthogonal
+DP/CP collectives (which synchronize corresponding local expert shards).
 
 ``apply_expert_parallel`` slices real tensors, so call it after
 ``module.materialize()``.
