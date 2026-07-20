@@ -23,7 +23,9 @@ tests call these directly; everything else is built on them.
   all-gather flash attention plus data-side sequence splitters.
 - **Pipeline parallelism** (``apply_pipeline_parallel`` + the
   ``TrainingSchedule`` hierarchy + P2P): explicit Megatron/ColossalAI-style
-  1F1B scheduling, not DTensor-based.
+  1F1B scheduling, not DTensor-based. Multimodal encoder-to-LLM seams use a
+  differentiable variable-split all-to-all so each projected row moves directly
+  between its source and destination CP owners.
 - **Expert parallelism** (``apply_expert_parallel``): shards a MoE layer's
   batched experts across the EP mesh axis and routes tokens via all-to-all.
 - **Data parallelism** (``GradientSynchronizer``): bucketed gradient all-reduce

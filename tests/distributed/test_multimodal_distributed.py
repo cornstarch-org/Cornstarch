@@ -12,14 +12,28 @@ path is covered by ``test_colocation``; the LM-only pipeline by
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
+from types import MethodType, SimpleNamespace
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 
 from tests.distributed.distributed_base import GlooDistributedTestBase
 from tests.model.model_configs import clip_vision_config, llama_config
 
 from cornstarch.distributed import ParallelConfig, ParallelizationPlan
+from cornstarch.distributed.context_parallel.splitters import (
+    HeadTailContextParallelSplitter,
+    UniformContextParallelSplitter,
+)
+from cornstarch.distributed.cross_mesh_routing import (
+    CP_MODALITY_MASKS_KEY,
+    CP_ROUTING_OFFSETS_KEY,
+    CrossMeshGroup,
+    build_route_plan,
+    route_autograd,
+)
 from cornstarch.models import (
     CornstarchExecutionPlan,
     ExecutionFuture,
@@ -284,6 +298,333 @@ class TestCrossMeshFlexibility(GlooDistributedTestBase):
             self.assertIsNotNone(result["loss"])
             self.assertTrue(result["loss"].isfinite().all())
             self.assertTrue(_has_grad(language_model))
+
+
+class TestCrossMeshCPRouting(GlooDistributedTestBase):
+    """The CP seam routes only owned rows and applies the transpose in backward."""
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def test_vision_cp2_to_llm_cp4_forward_backward(self) -> None:
+        rank = dist.get_rank()
+        token = 99
+        input_ids = torch.arange(16).unsqueeze(0)
+        input_ids[:, 4:10] = token
+        modality_mask = torch.ones(1, 6, dtype=torch.bool)
+        source_offsets = UniformContextParallelSplitter().offsets_for_size(
+            modality_mask, 2
+        )
+        destination_offsets = UniformContextParallelSplitter().offsets_for_size(
+            input_ids, 4
+        )
+        group = CrossMeshGroup(
+            ranks=(0, 1, 2, 3),
+            producer_ranks=(0, 1),
+            consumer_ranks=(0, 1, 2, 3),
+            process_group=dist.group.WORLD,
+            dp_rank=0,
+            producer_tp_rank=0,
+            producer_ep_rank=0,
+            consumer_tp_rank=0,
+            consumer_ep_rank=0,
+        )
+        plan = build_route_plan(
+            global_input_ids=input_ids,
+            token_id=token,
+            source_attention_mask=modality_mask,
+            source_offsets=source_offsets,
+            destination_offsets=destination_offsets,
+            seam_group=group,
+            global_rank=rank,
+        )
+        if rank == 0:
+            features = torch.tensor([[4.0], [5.0], [6.0]], requires_grad=True)
+        elif rank == 1:
+            features = torch.tensor([[7.0], [8.0], [9.0]], requires_grad=True)
+        else:
+            features = torch.empty((0, 1), requires_grad=True)
+
+        # The routing path is only a variable all-to-all. A full-feature
+        # gather/broadcast on either forward or backward is a test failure.
+        with (
+            patch.object(dist, "all_gather", side_effect=AssertionError("full gather")),
+            patch.object(dist, "broadcast", side_effect=AssertionError("broadcast")),
+        ):
+            received = route_autograd(features, plan, dist.group.WORLD)
+            (received * float(rank + 1)).sum().backward()
+
+        expected = {
+            0: torch.empty((0, 1)),
+            1: torch.tensor([[4.0], [5.0], [6.0], [7.0]]),
+            2: torch.tensor([[8.0], [9.0]]),
+            3: torch.empty((0, 1)),
+        }[rank]
+        torch.testing.assert_close(received, expected)
+        if rank == 0:
+            torch.testing.assert_close(features.grad, torch.full_like(features, 2.0))
+        elif rank == 1:
+            torch.testing.assert_close(
+                features.grad, torch.tensor([[2.0], [3.0], [3.0]])
+            )
+
+    def test_one_to_many_many_to_one_and_headtail(self) -> None:
+        rank = dist.get_rank()
+        token = 99
+        input_ids = torch.full((1, 8), token, dtype=torch.long)
+        modality_mask = torch.ones(1, 8, dtype=torch.bool)
+        cases = (
+            (1, 4, UniformContextParallelSplitter(), UniformContextParallelSplitter()),
+            (4, 1, UniformContextParallelSplitter(), UniformContextParallelSplitter()),
+            (2, 2, UniformContextParallelSplitter(), HeadTailContextParallelSplitter()),
+        )
+        for source_size, destination_size, source_splitter, destination_splitter in cases:
+            source_offsets = source_splitter.offsets_for_size(
+                modality_mask, source_size
+            )
+            destination_offsets = destination_splitter.offsets_for_size(
+                input_ids, destination_size
+            )
+            group = CrossMeshGroup(
+                ranks=(0, 1, 2, 3),
+                producer_ranks=tuple(range(source_size)),
+                consumer_ranks=tuple(range(destination_size)),
+                process_group=dist.group.WORLD,
+                dp_rank=0,
+                producer_tp_rank=0,
+                producer_ep_rank=0,
+                consumer_tp_rank=0,
+                consumer_ep_rank=0,
+            )
+            plan = build_route_plan(
+                global_input_ids=input_ids,
+                token_id=token,
+                source_attention_mask=modality_mask,
+                source_offsets=source_offsets,
+                destination_offsets=destination_offsets,
+                seam_group=group,
+                global_rank=rank,
+            )
+            if rank < source_size:
+                features = source_offsets[rank].float().unsqueeze(1).requires_grad_(True)
+            else:
+                features = torch.empty((0, 1), requires_grad=True)
+            received = route_autograd(features, plan, dist.group.WORLD)
+            (received * float(rank + 1)).sum().backward()
+
+            expected_received = (
+                destination_offsets[rank].float().unsqueeze(1)
+                if rank < destination_size
+                else torch.empty((0, 1))
+            )
+            torch.testing.assert_close(received, expected_received)
+            if rank < source_size:
+                destination_owner = {
+                    int(position): cp_rank
+                    for cp_rank, offsets in enumerate(destination_offsets)
+                    for position in offsets.tolist()
+                }
+                expected_grad = torch.tensor(
+                    [
+                        [float(destination_owner[int(position)] + 1)]
+                        for position in source_offsets[rank].tolist()
+                    ]
+                )
+                torch.testing.assert_close(features.grad, expected_grad)
+
+
+class TestCrossMeshCPCompiledSchedule(GlooDistributedTestBase):
+    """An actual ParallelContext routes CP2 projected rows into an LLM CP4."""
+
+    @property
+    def world_size(self) -> int:
+        return 6
+
+    def test_variable_count_loss_and_gradient_parity(self) -> None:
+        language_model, modality_encoder, _ = _build_models()
+        source_splitter = UniformContextParallelSplitter()
+        destination_splitter = UniformContextParallelSplitter()
+        parallel = ParallelizationPlan(global_ranks=list(range(self.world_size)))
+        parallel.parallelize(
+            modality_encoder,
+            ParallelConfig(
+                pipeline_parallel_size=1,
+                context_parallel_size=2,
+                context_parallel_splitter=source_splitter,
+            ),
+        )
+        parallel.parallelize(
+            language_model,
+            ParallelConfig(
+                pipeline_parallel_size=1,
+                context_parallel_size=4,
+                context_parallel_splitter=destination_splitter,
+            ),
+        )
+        ctx = parallel.materialize("cpu", dtype=torch.float32)
+
+        token = IMAGE_TOKEN_ID
+        input_ids = torch.tensor(
+            [
+                [token, token, token, 1, 2, 3, token, token, token, 4, 5, 6],
+                [7, token, token, 8, 9, token, 10, 11, token, 12, 13, 14],
+            ]
+        )
+        labels = input_ids.clone()
+        modality_mask = torch.tensor(
+            [[1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 0]], dtype=torch.bool
+        )
+        source_offsets = source_splitter.offsets_for_size(modality_mask, 2)
+        destination_offsets = destination_splitter.offsets_for_size(input_ids, 4)
+        vision_hidden = modality_encoder.projector.config.in_features
+        language_hidden = modality_encoder.projector.config.out_features
+        raw_full = (
+            torch.arange(2 * 6 * vision_hidden, dtype=torch.float32)
+            .reshape(2, 6, vision_hidden)
+            .div(100.0)
+        )
+
+        rank = dist.get_rank()
+        if rank < 2:
+            local_raw = raw_full[:, source_offsets[rank]].clone().requires_grad_(True)
+
+            def projected_forward(self, modality_features):
+                return self.projector(modality_features)
+
+            modality_encoder.forward = MethodType(projected_forward, modality_encoder)
+            proj = modality_encoder.projector.projection
+            with torch.no_grad():
+                proj.weight.copy_(
+                    torch.arange(proj.weight.numel()).reshape_as(proj.weight).div(10000)
+                )
+                proj.bias.copy_(torch.arange(proj.bias.numel()).div(10000))
+        else:
+            local_raw = torch.empty(0)
+            cp_rank = rank - 2
+
+            def local_language_forward(
+                self, input_ids=None, inputs_embeds=None, labels=None, **kwargs
+            ):
+                logits = self.post_decoder["lm_head"](inputs_embeds)
+                self._test_local_logits = logits.detach()
+                return SimpleNamespace(loss=logits.square().sum(), logits=logits)
+
+            language_model.forward = MethodType(
+                local_language_forward, language_model
+            )
+            embed = language_model.pre_decoder["embed_tokens"].weight
+            head = language_model.post_decoder["lm_head"].weight
+            with torch.no_grad():
+                embed.copy_(
+                    torch.arange(embed.numel()).reshape_as(embed).div(100000)
+                )
+                head.copy_(torch.arange(head.numel()).reshape_as(head).div(100000))
+
+        # An analytical non-CP reference uses the same deterministic seam
+        # parameters, full text sequence, and padded modality batch.
+        proj_weight = (
+            torch.arange(language_hidden * vision_hidden, dtype=torch.float32)
+            .reshape(language_hidden, vision_hidden)
+            .div(10000)
+            .requires_grad_(True)
+        )
+        proj_bias = (
+            torch.arange(language_hidden, dtype=torch.float32)
+            .div(10000)
+            .requires_grad_(True)
+        )
+        vocab_size = language_model.hf_config.vocab_size
+        embed_weight = (
+            torch.arange(vocab_size * language_hidden, dtype=torch.float32)
+            .reshape(vocab_size, language_hidden)
+            .div(100000)
+            .requires_grad_(True)
+        )
+        head_weight = embed_weight.detach().clone().requires_grad_(True)
+        reference_raw = raw_full.clone().requires_grad_(True)
+        projected = F.linear(reference_raw, proj_weight, proj_bias)
+        safe_ids = input_ids.masked_fill(input_ids == token, 0)
+        reference_embeds = F.embedding(safe_ids, embed_weight)
+        for batch_index in range(input_ids.shape[0]):
+            reference_embeds[batch_index, input_ids[batch_index] == token] = projected[
+                batch_index, modality_mask[batch_index]
+            ]
+        reference_logits = F.linear(reference_embeds, head_weight)
+        reference_loss = reference_logits.square().sum()
+        reference_loss.backward()
+
+        if rank >= 2:
+            offsets = destination_offsets[cp_rank]
+            local_ids = input_ids[:, offsets].contiguous()
+            local_labels = labels[:, offsets].contiguous()
+            local_positions = offsets.unsqueeze(0).expand(input_ids.shape[0], -1)
+        else:
+            local_ids = input_ids
+            local_labels = labels
+            local_positions = torch.arange(input_ids.shape[1]).unsqueeze(0).expand(
+                input_ids.shape[0], -1
+            )
+        microbatch = {
+            "input_ids": local_ids,
+            "labels": local_labels,
+            "position_ids": local_positions,
+            "cp_global_input_ids": input_ids,
+            CP_MODALITY_MASKS_KEY: {"vision": modality_mask},
+            CP_ROUTING_OFFSETS_KEY: {
+                id(modality_encoder): tuple(source_offsets),
+                id(language_model): tuple(destination_offsets),
+            },
+            "modality_features": local_raw,
+        }
+        exec_plan = CornstarchExecutionPlan()
+        vision_outputs = exec_plan.run_modality_encoder(
+            module=modality_encoder,
+            modality_features=ExecutionFuture("modality_features"),
+        )
+        merged = exec_plan.merge_modality_encoder_outputs(
+            language_model=language_model,
+            input_ids=ExecutionFuture("input_ids"),
+            labels=ExecutionFuture("labels"),
+            modality_token_ids={"vision": token},
+            encoder_outputs={"vision": vision_outputs},
+            language_model_inputs={"position_ids": ExecutionFuture("position_ids")},
+        )
+        output = exec_plan.run_language_model(language_model, merged)
+        with (
+            patch.object(dist, "all_gather", side_effect=AssertionError("full gather")),
+            patch.object(dist, "broadcast", side_effect=AssertionError("broadcast")),
+        ):
+            result = ctx.create_schedule(exec_plan, output).step(
+                [microbatch], _criterion, return_loss=True
+            )
+            ctx.sync_gradients()
+
+        distributed_loss = torch.zeros(1)
+        if result["loss"] is not None:
+            distributed_loss.copy_(result["loss"])
+        dist.all_reduce(distributed_loss)
+        torch.testing.assert_close(distributed_loss.squeeze(), reference_loss.detach())
+        if rank < 2:
+            proj = modality_encoder.projector.projection
+            torch.testing.assert_close(proj.weight.grad, proj_weight.grad)
+            torch.testing.assert_close(proj.bias.grad, proj_bias.grad)
+            torch.testing.assert_close(
+                local_raw.grad, reference_raw.grad[:, source_offsets[rank]]
+            )
+        else:
+            torch.testing.assert_close(
+                language_model._test_local_logits,
+                reference_logits.detach()[:, destination_offsets[cp_rank]],
+            )
+            torch.testing.assert_close(
+                language_model.pre_decoder["embed_tokens"].weight.grad,
+                embed_weight.grad,
+            )
+            torch.testing.assert_close(
+                language_model.post_decoder["lm_head"].weight.grad,
+                head_weight.grad,
+            )
 
 
 if __name__ == "__main__":

@@ -26,6 +26,12 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from cornstarch.distributed.context_parallel import apply_context_parallel
 from cornstarch.distributed.context_parallel.splitters import ContextParallelSplitter
+from cornstarch.distributed.cross_mesh_routing import (
+    CP_MODALITY_MASKS_KEY,
+    CP_ROUTING_OFFSETS_KEY,
+    CrossMeshGroup,
+    build_cross_mesh_groups,
+)
 from cornstarch.distributed.data_parallel import GradientSynchronizer
 from cornstarch.distributed.expert_parallel import apply_expert_parallel
 from cornstarch.distributed.parallel_config import ParallelConfig
@@ -78,6 +84,7 @@ class ParallelContext:
         dp_group: Optional[dist.ProcessGroup],
         gradient_synchronizer: Optional[GradientSynchronizer],
         cp_gradient_synchronizers: Sequence[GradientSynchronizer] = (),
+        cross_mesh_groups: dict[tuple[int, int], list[CrossMeshGroup]] | None = None,
         uses_pipeline_parallel: bool = False,
     ) -> None:
         self._modules = modules
@@ -89,6 +96,7 @@ class ParallelContext:
         self._dp_group = dp_group
         self._gradient_synchronizer = gradient_synchronizer
         self._cp_gradient_synchronizers = list(cp_gradient_synchronizers)
+        self._cross_mesh_groups = dict(cross_mesh_groups or {})
         self._uses_pipeline_parallel = uses_pipeline_parallel
 
     # ------------------------------------------------------------------
@@ -161,6 +169,16 @@ class ParallelContext:
         each microbatch independently. Pipeline schedules consume this list as
         their microbatches; without pipeline parallelism the training loop
         iterates it with gradient accumulation.
+
+        **Multimodal CP seam metadata.** A collator whose modality projector
+        emits padded context-sharded rows should include
+        ``cp_modality_attention_masks`` as a mapping from modality name to its
+        boolean ``(batch, projected_sequence)`` mask. The encoder splitter's
+        actual offsets are computed from that modality-specific mask, while the
+        LLM splitter's offsets come from the full text mask. If the mapping is
+        omitted, the schedule derives a left-packed mask from each sample's
+        placeholder count; non-left-packed or independently padded projectors
+        must provide the explicit mask.
         """
         sampler = None
         if self._dp_size > 1:
@@ -172,7 +190,7 @@ class ParallelContext:
             )
 
         cp_targets = [
-            (cfg.context_parallel_splitter, self._meshes[id(m)].cp_group)
+            (m, cfg, self._meshes[id(m)].cp_group)
             for m, cfg in zip(self._modules, self._configs)
             if cfg.context_parallel_size > 1
             and cfg.context_parallel_splitter is not None
@@ -199,6 +217,39 @@ class ParallelContext:
                     torch.ones_like(input_ids, dtype=torch.bool),
                 )
 
+            # Preserve both sides' exact ownership for the encoder->LLM seam.
+            # Every rank derives this pure metadata from the same global mask;
+            # membership in the other modality's CP process group is unnecessary.
+            global_ids = batch.get("cp_global_input_ids")
+            text_routing_mask = batch.get("attention_mask")
+            modality_masks = batch.get(CP_MODALITY_MASKS_KEY, {})
+            if (
+                self._cross_mesh_groups
+                and isinstance(global_ids, torch.Tensor)
+                and text_routing_mask is not None
+            ):
+                routing_offsets: dict[int, tuple[torch.Tensor, ...]] = {}
+                for module, config in zip(self._modules, self._configs):
+                    splitter = config.context_parallel_splitter
+                    if isinstance(module, CornstarchModalityEncoder):
+                        routing_mask = modality_masks.get(module.modality)
+                        if routing_mask is None:
+                            # The schedule can derive a validated one-row-per-
+                            # placeholder mask once it knows this plan's token ID.
+                            continue
+                    else:
+                        routing_mask = text_routing_mask
+                    if splitter is None:
+                        offsets = [
+                            torch.arange(routing_mask.shape[1], dtype=torch.long)
+                        ]
+                    else:
+                        offsets = splitter.offsets_for_size(
+                            routing_mask, config.context_parallel_size
+                        )
+                    routing_offsets[id(module)] = tuple(offsets)
+                batch[CP_ROUTING_OFFSETS_KEY] = routing_offsets
+
             labels = batch.get("labels")
             if isinstance(labels, torch.Tensor) and labels.ndim >= 2:
                 shift_labels = torch.empty_like(labels)
@@ -215,14 +266,30 @@ class ParallelContext:
             # given key only once rather than repeatedly shortening it.
             source_batch = dict(batch)
             split_keys_seen: set[str] = set()
-            for splitter, cp_group in cp_targets:
-                mask = source_batch.get("attention_mask")
+            for module, config, cp_group in cp_targets:
+                splitter = config.context_parallel_splitter
+                is_modality = isinstance(module, CornstarchModalityEncoder)
+                mask = (
+                    source_batch.get(CP_MODALITY_MASKS_KEY, {}).get(module.modality)
+                    if is_modality
+                    else source_batch.get("attention_mask")
+                )
                 if mask is None:
+                    if is_modality:
+                        # Modality inputs may already have been sharded by their
+                        # processor/collator. Their routing offsets are derived
+                        # at schedule time from placeholder counts.
+                        continue
                     ref = source_batch.get("input_ids")
                     if ref is None:
                         continue
                     mask = torch.ones_like(ref, dtype=torch.float32)
                 splitter.compute_offsets(mask, cp_group)
+                if is_modality:
+                    # Text fields belong to the LLM CP layout. Modality tensor
+                    # sharding remains processor-specific; only its actual
+                    # offsets/mask are retained here for seam routing.
+                    continue
                 for key in cp_split_keys:
                     if key in split_keys_seen:
                         continue
@@ -286,6 +353,11 @@ class ParallelContext:
             {id(module): self._layouts[id(module)] for module in self._modules},
             self._meshes,
             self._dp_size,
+            self._cross_mesh_groups,
+            {
+                id(module): (config.context_parallel_splitter, config.context_parallel_size)
+                for module, config in zip(self._modules, self._configs)
+            },
         )
 
     # ------------------------------------------------------------------
@@ -479,6 +551,7 @@ class ParallelizationPlan:
             meshes
         )
         cp_grad_syncs = self._build_cp_gradient_synchronizers(meshes)
+        cross_mesh_groups = self._build_cross_mesh_groups(layouts)
 
         return ParallelContext(
             modules=self._modules,
@@ -490,8 +563,35 @@ class ParallelizationPlan:
             dp_group=dp_group,
             gradient_synchronizer=grad_sync,
             cp_gradient_synchronizers=cp_grad_syncs,
+            cross_mesh_groups=cross_mesh_groups,
             uses_pipeline_parallel=pipelined,
         )
+
+    def _build_cross_mesh_groups(
+        self, layouts: dict[int, MeshLayout]
+    ) -> dict[tuple[int, int], list[CrossMeshGroup]]:
+        """Build every encoder->LLM seam group in registration order.
+
+        ``dist.new_group`` creation is a world-order-sensitive operation. Every
+        rank executes these nested loops over the identical module list, even
+        when it belongs to neither side of a particular seam.
+        """
+        encoders = [
+            module for module in self._modules
+            if isinstance(module, CornstarchModalityEncoder)
+        ]
+        language_models = [
+            module for module in self._modules
+            if isinstance(module, CornstarchLanguageModel)
+        ]
+        result: dict[tuple[int, int], list[CrossMeshGroup]] = {}
+        for encoder in encoders:
+            for language_model in language_models:
+                result[(id(encoder), id(language_model))] = build_cross_mesh_groups(
+                    producer_layout=layouts[id(encoder)],
+                    consumer_layout=layouts[id(language_model)],
+                )
+        return result
 
     def _assign_ranks(
         self, global_ranks: list[int], world_size: int
