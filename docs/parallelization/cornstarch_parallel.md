@@ -108,12 +108,12 @@ Context parallelism split sequeneces into subsets of tokens and distribute them 
 There are multiple ways of partitioning sequences and distributing tokens into ranks that Corntarch supports:
 
 - `uniform`: The simplest way of such partitioning. Chunk every sequence into `cp_world_size` chunks, and each rank takes one portion.
-- `zigzag`: For causal attention, the amount of computation becomes imbalanced if tokens are uniformly distributed. `zigzag` partitions the sequence into `2 * cp_world_size` and each rank gets one portion from the upper half and another from the lower half, the workload sum of which is always balanced in causal attention.
-- `makespan_min`: In multimodal LLM, attention should no longer be simple causal; vision tokens should attend each other regardless of their location (previous vision tokens can attend to the future vision tokens). In this form of attention, zigzag is no longer be balanced, `makespan_min` computes the amount of workloads per token block (128 tokens per block) and distributes them to minimize overall makespan (execution time). The number of tokens per rank may be different depending on the amount of workloads.
+- `headtail`: For causal attention, the amount of computation becomes imbalanced if tokens are uniformly distributed. `headtail` partitions the sequence into `2 * cp_world_size` chunks and gives each rank one head chunk and its mirrored tail chunk, balancing causal-attention work.
+- `makespan_min`: In multimodal LLM, attention should no longer be simple causal; vision tokens should attend each other regardless of their location (previous vision tokens can attend to the future vision tokens). In this form of attention, head-tail ownership is no longer necessarily balanced; `makespan_min` computes the amount of work per token block (128 tokens per block) and distributes blocks to minimize overall makespan (execution time). The number of tokens per rank may differ.
 
 ![](/assets/images/context_parallel_distribution_mode_illustration.png)
 
-The token distribution scheme can be configured by passing `cornstarch.shardformer.shard.shard_config.ContextParallelDistributionMode.[UNIFORM | ZIGZAG | MAKESPAN_MIN]` to LLM's `shard_config.context_parallel_distribution_mode`. Default is `MAKESPAN_MIN`.
+The current distributed API selects these layouts with `UniformContextParallelSplitter`, `HeadTailContextParallelSplitter`, or `MakespanMinContextParallelSplitter`. The former `ZigzagContextParallelSplitter` name remains a deprecated compatibility alias for head-tail ownership.
 
 ### Pipeline Parallelism
 

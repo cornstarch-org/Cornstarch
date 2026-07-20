@@ -42,7 +42,7 @@ from cornstarch.distributed import (
     ParallelConfig,
     ParallelContext,
     ParallelizationPlan,
-    ZigzagContextParallelSplitter,
+    HeadTailContextParallelSplitter,
 )
 from cornstarch.models import (
     CornstarchExecutionPlan,
@@ -207,7 +207,7 @@ def pretrain(
             pipeline_parallel_size=llm_pp,
             context_parallel_size=llm_cp,
             context_parallel_splitter=(
-                ZigzagContextParallelSplitter() if llm_cp > 1 else None
+                HeadTailContextParallelSplitter() if llm_cp > 1 else None
             ),
             data_parallel_size=dp,
         ),

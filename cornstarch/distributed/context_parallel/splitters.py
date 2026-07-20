@@ -14,6 +14,7 @@ Usage in a dataloader ``collate_fn`` or training loop::
 from __future__ import annotations
 
 import heapq
+import warnings
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -93,8 +94,8 @@ class UniformContextParallelSplitter(ContextParallelSplitter):
         return self._offsets_per_rank
 
 
-class ZigzagContextParallelSplitter(ContextParallelSplitter):
-    """Interleaved (zigzag) assignment for causal-attention load balance.
+class HeadTailContextParallelSplitter(ContextParallelSplitter):
+    """Head-tail assignment for causal-attention load balance.
 
     Divides positions into ``2 × cp_size`` chunks and pairs the first chunk
     with the last, the second with the second-to-last, and so on.  This gives
@@ -118,6 +119,28 @@ class ZigzagContextParallelSplitter(ContextParallelSplitter):
             torch.tensor(p, dtype=torch.long) for p in paired
         ]
         return self._offsets_per_rank
+
+
+class ZigzagContextParallelSplitter(HeadTailContextParallelSplitter):
+    """Deprecated alias for :class:`HeadTailContextParallelSplitter`.
+
+    The former ``zigzag`` name described this same head-and-mirrored-tail token
+    ownership.  It is retained for one compatibility cycle; new code should use
+    the canonical class name.
+    """
+
+    def __init__(self) -> None:
+        warnings.warn(
+            "ZigzagContextParallelSplitter is deprecated; use "
+            "HeadTailContextParallelSplitter instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__()
+
+    def __repr__(self) -> str:
+        """Use the canonical terminology in user-visible representations."""
+        return "HeadTailContextParallelSplitter()"
 
 
 class MakespanMinContextParallelSplitter(ContextParallelSplitter):
