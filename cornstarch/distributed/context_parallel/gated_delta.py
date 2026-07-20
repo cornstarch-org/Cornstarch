@@ -1,16 +1,14 @@
 """Run-aware context parallelism for Qwen3.5 Gated DeltaNet layers.
 
-The FLA Gated DeltaNet kernel accepts an explicit recurrent initial state, but
-its stock ``FLACPContext`` currently derives one contiguous interval from the
-physical rank.  That assumption is not valid for Cornstarch's head-tail token
-ownership.  This module therefore keeps ownership metadata outside the reused
-Hugging Face model, communicates only affine recurrent summaries and short
-convolution halos, and invokes the installed FLA kernel once per local run with
-the correct initial state.
+The stock ``FLACPContext`` derives one contiguous interval from the physical
+rank, which is not valid for Cornstarch's head-tail token ownership.  This
+module keeps ownership metadata outside the reused Hugging Face model and
+delegates recurrent summary generation/composition to FLA's optimized CP
+kernels through Cornstarch's run-aware FLA adapter.
 
-No token activation is gathered.  The two differentiable reductions carry
-``(M, S)`` summaries for ``state_out = M @ state_in + S``; convolution exchanges
-at most ``kernel_size - 1`` projected tokens per run.
+No token activation is gathered.  Recurrent collectives carry FLA's compact
+``(M, S)`` summaries; convolution exchanges at most ``kernel_size - 1``
+projected tokens per run.
 """
 from __future__ import annotations
 
@@ -205,7 +203,12 @@ def validate_gated_delta_backend(linear_attn: torch.nn.Module) -> None:
         parameters = inspect.signature(operator).parameters
     except (TypeError, ValueError):
         parameters = {}
-    required = {"initial_state", "output_final_state", "use_qk_l2norm_in_kernel"}
+    required = {
+        "initial_state",
+        "output_final_state",
+        "use_qk_l2norm_in_kernel",
+        "cp_context",
+    }
     if not module_name.startswith("fla.") or not required.issubset(parameters):
         raise GatedDeltaNetContextParallelNotSupportedError(
             "The installed flash-linear-attention backend does not expose the "
@@ -213,6 +216,18 @@ def validate_gated_delta_backend(linear_attn: torch.nn.Module) -> None:
             f"run-aware CP (detected version {version!r}, operator module "
             f"{module_name!r})."
         )
+    try:
+        from cornstarch.distributed.context_parallel.gated_delta_fla import (
+            RunAwareFLAContractError,
+            validate_run_aware_fla_contract,
+        )
+
+        validate_run_aware_fla_contract()
+    except RunAwareFLAContractError as exc:
+        raise GatedDeltaNetContextParallelNotSupportedError(
+            "The installed flash-linear-attention backend lacks Cornstarch's "
+            f"required run-aware forward/backward CP kernels: {exc}"
+        ) from exc
 
 
 def _all_reduce_autograd(tensor: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
@@ -227,10 +242,10 @@ def _run_summary(
     decay_log: torch.Tensor,
     beta: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the exact affine recurrent transition for one local run.
+    """Reference-only affine recurrence used by CPU algebra tests.
 
-    Inputs have ``[T, H, ...]`` layout and key is already L2-normalized.
-    Summary math stays in fp32, matching FLA's recurrent state accumulator.
+    Production CP must use :mod:`gated_delta_fla`; this intentionally slow
+    token loop is kept only to prove the summary algebra without CUDA/FLA.
     """
     key = key.float()
     value = value.float()
@@ -334,6 +349,45 @@ def _run_aware_convolution(
     return output
 
 
+def _flatten_local_runs(
+    tensor: torch.Tensor,
+    metadata: GatedDeltaCPMetadata,
+    rank: int,
+) -> torch.Tensor:
+    fragments = [
+        tensor[
+            run.batch_index,
+            run.local_start : run.local_start + run.length,
+        ]
+        for run in metadata.local_runs(rank)
+    ]
+    if not fragments:
+        raise GatedDeltaNetContextParallelNotSupportedError(
+            "This CP rank owns no non-padding Gated DeltaNet run. Empty local "
+            "run sets require a synchronized dummy-run path that FLA 0.5 does "
+            "not expose. Rebucket the microbatch so every CP rank owns at least "
+            "one valid token."
+        )
+    return torch.cat(fragments, dim=0).unsqueeze(0).contiguous()
+
+
+def _restore_local_runs(
+    flattened: torch.Tensor,
+    like: torch.Tensor,
+    metadata: GatedDeltaCPMetadata,
+    rank: int,
+) -> torch.Tensor:
+    output = torch.zeros_like(like)
+    offset = 0
+    for run in metadata.local_runs(rank):
+        output[
+            run.batch_index,
+            run.local_start : run.local_start + run.length,
+        ] = flattened[0, offset : offset + run.length]
+        offset += run.length
+    return output
+
+
 def _run_fla_fragments(
     operator: Callable[..., tuple[torch.Tensor, torch.Tensor | None]],
     query: torch.Tensor,
@@ -341,26 +395,42 @@ def _run_fla_fragments(
     value: torch.Tensor,
     decay_log: torch.Tensor,
     beta: torch.Tensor,
-    initial_states: torch.Tensor,
     metadata: GatedDeltaCPMetadata,
     cp_group: dist.ProcessGroup,
 ) -> torch.Tensor:
+    """Run all local fragments in one FLA varlen call with run-aware CP hooks."""
+    from cornstarch.distributed.context_parallel.gated_delta_fla import (
+        CornstarchRunAwareFLACPContext,
+        install_run_aware_fla_dispatch,
+    )
+
     rank = dist.get_rank(cp_group)
-    output = torch.zeros_like(value)
-    for run in metadata.local_runs(rank):
-        sl = slice(run.local_start, run.local_start + run.length)
-        run_output, _ = operator(
-            query[run.batch_index : run.batch_index + 1, sl],
-            key[run.batch_index : run.batch_index + 1, sl],
-            value[run.batch_index : run.batch_index + 1, sl],
-            g=decay_log[run.batch_index : run.batch_index + 1, sl],
-            beta=beta[run.batch_index : run.batch_index + 1, sl],
-            initial_state=initial_states[run.index : run.index + 1],
-            output_final_state=False,
-            use_qk_l2norm_in_kernel=True,
-        )
-        output[run.batch_index : run.batch_index + 1, sl] = run_output
-    return output
+    local_runs = metadata.local_runs(rank)
+    lengths = [run.length for run in local_runs]
+    cu_seqlens_cpu = torch.tensor(
+        [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
+    )
+    cu_seqlens = cu_seqlens_cpu.to(device=query.device, non_blocking=True)
+    context = CornstarchRunAwareFLACPContext(
+        group=cp_group,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        metadata=metadata,
+        local_run_indices=tuple(run.index for run in local_runs),
+    )
+    install_run_aware_fla_dispatch()
+    run_output, _ = operator(
+        _flatten_local_runs(query, metadata, rank),
+        _flatten_local_runs(key, metadata, rank),
+        _flatten_local_runs(value, metadata, rank),
+        g=_flatten_local_runs(decay_log, metadata, rank),
+        beta=_flatten_local_runs(beta, metadata, rank),
+        initial_state=None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=True,
+        cp_context=context,
+    )
+    return _restore_local_runs(run_output, value, metadata, rank)
 
 
 def _distributed_gated_delta_forward(
@@ -404,41 +474,6 @@ def _distributed_gated_delta_forward(
         query = query.repeat_interleave(repeat, dim=2)
         key = key.repeat_interleave(repeat, dim=2)
 
-    # FLA performs this normalization internally for outputs; summaries must use
-    # the identical normalized keys because they describe the same recurrence.
-    normalized_key = key * torch.rsqrt(
-        (key.float() * key.float()).sum(dim=-1, keepdim=True) + 1e-6
-    ).to(key.dtype)
-    rank = dist.get_rank(cp_group)
-    transitions = value.new_zeros(
-        (
-            len(metadata.runs),
-            linear_attn.num_v_heads,
-            linear_attn.head_k_dim,
-            linear_attn.head_k_dim,
-        ),
-        dtype=torch.float32,
-    )
-    extensions = value.new_zeros(
-        (
-            len(metadata.runs),
-            linear_attn.num_v_heads,
-            linear_attn.head_k_dim,
-            linear_attn.head_v_dim,
-        ),
-        dtype=torch.float32,
-    )
-    for run in metadata.local_runs(rank):
-        sl = slice(run.local_start, run.local_start + run.length)
-        transitions[run.index], extensions[run.index] = _run_summary(
-            normalized_key[run.batch_index, sl],
-            value[run.batch_index, sl],
-            decay_log[run.batch_index, sl],
-            beta[run.batch_index, sl],
-        )
-    transitions = _all_reduce_autograd(transitions, cp_group)
-    extensions = _all_reduce_autograd(extensions, cp_group)
-    initial_states = _compose_initial_states(transitions, extensions, metadata)
     core = _run_fla_fragments(
         linear_attn.chunk_gated_delta_rule,
         query,
@@ -446,7 +481,6 @@ def _distributed_gated_delta_forward(
         value,
         decay_log,
         beta,
-        initial_states,
         metadata,
         cp_group,
     )
