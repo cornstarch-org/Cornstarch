@@ -12,6 +12,7 @@ from cornstarch.models.hf_conversion import (
 from cornstarch.models.language_model import CornstarchLanguageModel
 from cornstarch.models.layer_compile import RepeatedLayerCompileConfig
 from cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
+from cornstarch.models.lora import attach_lora
 from cornstarch.models.multimodal import (
     CornstarchEncoderToLanguageProjectorConfig,
     CornstarchExecutionPlan,
@@ -38,6 +39,7 @@ __all__ = [
     "ExecutionFuture",
     "RepeatedLayerCompileConfig",
     "RepeatedLayerOffloadConfig",
+    "attach_lora",
     "build_modality_encoder",
     "from_hf_config",
     "from_pretrained_config",
