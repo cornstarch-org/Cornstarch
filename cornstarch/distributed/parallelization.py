@@ -25,6 +25,9 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from cornstarch.distributed.context_parallel import apply_context_parallel
+from cornstarch.distributed.context_parallel.gated_delta import (
+    build_gated_delta_metadata,
+)
 from cornstarch.distributed.context_parallel.splitters import ContextParallelSplitter
 from cornstarch.distributed.cross_mesh_routing import (
     CP_MODALITY_MASKS_KEY,
@@ -60,6 +63,7 @@ _DEFAULT_CP_SPLIT_KEYS = (
     "shift_labels",
     "attention_mask",
     "position_ids",
+    "document_ids",
 )
 
 
@@ -284,12 +288,22 @@ class ParallelContext:
                     if ref is None:
                         continue
                     mask = torch.ones_like(ref, dtype=torch.float32)
-                splitter.compute_offsets(mask, cp_group)
+                offsets_per_rank = splitter.compute_offsets(mask, cp_group)
                 if is_modality:
                     # Text fields belong to the LLM CP layout. Modality tensor
                     # sharding remains processor-specific; only its actual
                     # offsets/mask are retained here for seam routing.
                     continue
+                layer_types = getattr(getattr(module, "hf_config", None), "layer_types", ())
+                if "linear_attention" in layer_types:
+                    document_ids = source_batch.get("document_ids")
+                    if document_ids is None:
+                        document_ids = source_batch.get("cp_document_ids")
+                    batch["cp_sequence_metadata"] = build_gated_delta_metadata(
+                        offsets_per_rank,
+                        mask,
+                        document_ids=document_ids,
+                    )
                 for key in cp_split_keys:
                     if key in split_keys_seen:
                         continue
@@ -538,6 +552,7 @@ class ParallelizationPlan:
                     apply_target,
                     mesh.cp_group,
                     causal=isinstance(apply_target, CornstarchLanguageModel),
+                    splitter=config.context_parallel_splitter,
                 )
             if config.num_pp_stages > 1:
                 apply_pipeline_parallel(apply_target, mesh)
@@ -692,6 +707,7 @@ class ParallelizationPlan:
         )
         for module in self._modules:
             if id(module) in meshes:
+                module._dp_group = dp_group
                 grad_sync.register(module)
         return dp_size, dp_rank, dp_group, grad_sync
 

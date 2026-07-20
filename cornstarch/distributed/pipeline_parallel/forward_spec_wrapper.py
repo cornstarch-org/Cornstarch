@@ -127,4 +127,11 @@ class PipelineParallelForwardSpec(TransformerForwardSpec):
         if self._mesh.is_last_stage():
             return self._base.build_output(model, hidden_states, context, **kwargs)
         # Intermediate stages return hidden states in a dict for P2P transfer.
-        return {"hidden_states": hidden_states}
+        output = {"hidden_states": hidden_states}
+        router_statistics = context.get("router_aux_statistics")
+        if isinstance(router_statistics, torch.Tensor):
+            output["router_aux_statistics"] = router_statistics
+        router_logits = context.get("router_logits_tensor")
+        if isinstance(router_logits, torch.Tensor):
+            output["router_logits_tensor"] = router_logits
+        return output

@@ -33,6 +33,7 @@ from torch.testing._internal.common_utils import (
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
     Qwen3_5MoeTextConfig,
 )
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
 from tests.distributed.distributed_base import GlooDistributedTestBase
 from tests.model.model_configs import llama_config
@@ -61,13 +62,11 @@ def _name(combo: tuple[int, int, int, int, int]) -> str:
 
 
 def _moe_config() -> Qwen3_5MoeTextConfig:
-    """A tiny Qwen3.5-MoE config with only full-attention layers.
+    """A tiny hybrid Qwen3.5-MoE config (full attention followed by GDN).
 
-    The gated-delta-net *linear*-attention layer produces NaNs when isolated as
-    a pipeline boundary stage (a pre-existing model/PP interaction, tracked in
-    tasks/backlog.md). Using full-attention layers keeps EP-with-PP composition
-    testable; linear-attention EP (without PP) is covered by
-    ``test_expert_parallel_qwen``.
+    With two PP stages this intentionally leaves the linear-attention layer by
+    itself on the final stage, preserving the original NaN reproducer as an
+    always-on integration regression.
     """
     return Qwen3_5MoeTextConfig(
         vocab_size=VOCAB,
@@ -80,7 +79,7 @@ def _moe_config() -> Qwen3_5MoeTextConfig:
         shared_expert_intermediate_size=8,
         num_experts=4,
         num_experts_per_tok=2,
-        layer_types=["full_attention", "full_attention"],
+        layer_types=["full_attention", "linear_attention"],
         linear_key_head_dim=4,
         linear_value_head_dim=4,
         linear_num_key_heads=2,
@@ -89,8 +88,27 @@ def _moe_config() -> Qwen3_5MoeTextConfig:
     )
 
 
-def _build_model(moe: bool) -> object:
-    config = _moe_config() if moe else llama_config()
+def _dense_qwen_config() -> Qwen3_5TextConfig:
+    """Tiny dense hybrid for combined dense-MLP TP, GDN TP, and PP."""
+    return Qwen3_5TextConfig(
+        vocab_size=VOCAB,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        layer_types=["full_attention", "linear_attention"],
+        linear_key_head_dim=4,
+        linear_value_head_dim=4,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        tie_word_embeddings=False,
+    )
+
+
+def _build_model(moe: bool, config: object | None = None) -> object:
+    config = config or (_moe_config() if moe else llama_config())
     config.vocab_size = VOCAB
     config.tie_word_embeddings = False
     model = from_hf_config(config, model_kind="language", attn_implementation="eager")
@@ -98,11 +116,17 @@ def _build_model(moe: bool) -> object:
     return model
 
 
-def _run_combo(test: GlooDistributedTestBase, combo, moe: bool) -> None:
+def _run_combo(
+    test: GlooDistributedTestBase,
+    combo,
+    moe: bool,
+    *,
+    config: object | None = None,
+) -> None:
     dp, pp, cp, tp, ep = combo
     world_size = dp * pp * cp * tp * ep
 
-    model = _build_model(moe)
+    model = _build_model(moe, config=config)
     plan = ParallelizationPlan(global_ranks=list(range(world_size)))
     plan.parallelize(
         model,
@@ -200,6 +224,22 @@ class TestExpertParallelComposition(GlooDistributedTestBase):
     @parametrize("combo", _EP_COMBOS, name_fn=_name)
     def test(self, combo):
         _run_combo(self, combo, moe=True)
+
+
+class TestDenseQwenTensorPipelineComposition(GlooDistributedTestBase):
+    """Dense Qwen shards both MLP and token-mixer weights across TP lanes."""
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def test_dp1_pp2_cp1_tp2_ep1(self) -> None:
+        _run_combo(
+            self,
+            (1, 2, 1, 2, 1),
+            moe=False,
+            config=_dense_qwen_config(),
+        )
 
 
 if __name__ == "__main__":

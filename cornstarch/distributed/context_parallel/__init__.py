@@ -17,6 +17,10 @@ import torch.distributed as dist
 from cornstarch.distributed.context_parallel.attention import (
     context_parallel_flash_attention,
 )
+from cornstarch.distributed.context_parallel.gated_delta import (
+    inject_gated_delta_context_parallel,
+)
+from cornstarch.distributed.context_parallel.splitters import ContextParallelSplitter
 from cornstarch.models.model_base import CornstarchModelBase
 
 _CP_ATTN_KEY_PREFIX = "context_parallel"
@@ -26,6 +30,7 @@ def apply_context_parallel(
     module: CornstarchModelBase,
     cp_group: dist.ProcessGroup,
     causal: bool = False,
+    splitter: ContextParallelSplitter | None = None,
 ) -> str:
     """Inject CP all-gather flash attention into the module.
 
@@ -44,6 +49,8 @@ def apply_context_parallel(
     is full non-causal attention, unchanged from before.
     """
     from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    module._cp_group = cp_group
 
     attention_key = f"{_CP_ATTN_KEY_PREFIX}_{id(module):x}"
     ALL_ATTENTION_FUNCTIONS.register(
@@ -66,4 +73,16 @@ def apply_context_parallel(
             continue
         seen.add(id(config))
         config._attn_implementation = attention_key
+
+    has_linear_attention = any(
+        getattr(layer, "layer_type", None) == "linear_attention"
+        for layer in module.modules()
+    )
+    if has_linear_attention:
+        if splitter is None:
+            raise ValueError(
+                "Qwen3.5 linear-attention CP requires its configured splitter "
+                "during plan materialization."
+            )
+        inject_gated_delta_context_parallel(module, cp_group, splitter)
     return attention_key

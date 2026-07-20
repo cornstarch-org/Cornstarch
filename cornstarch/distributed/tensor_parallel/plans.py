@@ -78,12 +78,31 @@ BERT_TP_PLAN: dict = {
 # MoE families: shard attention only (expert FFNs use EP, the router/shared
 # expert stay replicated), exactly like the Mixtral plan.  This lets tensor
 # parallelism compose with expert parallelism on the same model.
-QWEN_MOE_TP_PLAN: dict = MIXTRAL_TP_PLAN
+QWEN_GATED_DELTA_TP_PLAN: dict = {
+    "linear_attn.in_proj_z": ColwiseParallel(),
+    "linear_attn.in_proj_a": ColwiseParallel(),
+    "linear_attn.in_proj_b": ColwiseParallel(),
+    "linear_attn.out_proj": RowwiseParallel(),
+}
+
+QWEN_DENSE_GATED_DELTA_TP_PLAN: dict = {
+    **QWEN_GATED_DELTA_TP_PLAN,
+    "mlp.gate_proj": ColwiseParallel(),
+    "mlp.up_proj": ColwiseParallel(),
+    "mlp.down_proj": RowwiseParallel(),
+}
+QWEN_DENSE_FULL_ATTN_TP_PLAN: dict = LLAMA_TP_PLAN
+
+# MoE experts are replicated on TP lanes (and sharded only by EP); the router
+# and shared expert are replicated too. TP therefore shards only token mixing.
+QWEN_MOE_GATED_DELTA_TP_PLAN: dict = QWEN_GATED_DELTA_TP_PLAN
+QWEN_MOE_FULL_ATTN_TP_PLAN: dict = MIXTRAL_TP_PLAN
 
 _REGISTRY: dict[str, dict] = {
     "LlamaConfig": LLAMA_TP_PLAN,
     "Llama4Config": LLAMA_TP_PLAN,
-    "Qwen3_5MoeTextConfig": QWEN_MOE_TP_PLAN,
+    "Qwen3_5MoeTextConfig": QWEN_MOE_FULL_ATTN_TP_PLAN,
+    "Qwen3_5TextConfig": QWEN_DENSE_FULL_ATTN_TP_PLAN,
     "MistralConfig": MISTRAL_TP_PLAN,
     "Qwen2Config": QWEN2_TP_PLAN,
     "Qwen2_5Config": QWEN2_TP_PLAN,
@@ -101,3 +120,24 @@ _REGISTRY: dict[str, dict] = {
 def get_tp_plan(config_class_name: str) -> dict | None:
     """Return the per-layer TP plan for ``config_class_name``, or ``None`` if unregistered."""
     return _REGISTRY.get(config_class_name)
+
+
+def get_layer_tp_plan(config_class_name: str, layer_type: str | None) -> dict | None:
+    """Return a layer-type-specific plan for hybrid Qwen3.5 models."""
+    if config_class_name == "Qwen3_5TextConfig":
+        if layer_type == "linear_attention":
+            return QWEN_DENSE_GATED_DELTA_TP_PLAN
+        if layer_type == "full_attention":
+            return QWEN_DENSE_FULL_ATTN_TP_PLAN
+        raise ValueError(
+            f"Unsupported Qwen3.5 layer type {layer_type!r}; refusing partial TP."
+        )
+    if config_class_name == "Qwen3_5MoeTextConfig":
+        if layer_type == "linear_attention":
+            return QWEN_MOE_GATED_DELTA_TP_PLAN
+        if layer_type == "full_attention":
+            return QWEN_MOE_FULL_ATTN_TP_PLAN
+        raise ValueError(
+            f"Unsupported Qwen3.5 layer type {layer_type!r}; refusing partial TP."
+        )
+    return get_tp_plan(config_class_name)

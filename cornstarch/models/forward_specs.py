@@ -215,5 +215,6 @@ def _filtered_layer_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "max_length_q",
         "max_length_k",
         "num_items_in_batch",
+        "cp_sequence_metadata",
     }
     return {key: value for key, value in kwargs.items() if key in allowed}

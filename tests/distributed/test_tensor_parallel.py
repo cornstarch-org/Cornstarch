@@ -14,6 +14,21 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel
 
 from tests.distributed.distributed_base import GlooDistributedTestBase
+from tests.model.model_configs import qwen3_5_moe_config
+
+from cornstarch.distributed.tensor_parallel import apply_tensor_parallel
+from cornstarch.distributed.tensor_parallel.plans import get_layer_tp_plan
+from cornstarch.models import from_hf_config
+
+
+def test_dense_qwen_plans_shard_mlp_for_both_layer_types() -> None:
+    for layer_type in ("full_attention", "linear_attention"):
+        plan = get_layer_tp_plan("Qwen3_5TextConfig", layer_type)
+        assert plan is not None
+        assert {"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"} <= plan.keys()
+    moe_plan = get_layer_tp_plan("Qwen3_5MoeTextConfig", "linear_attention")
+    assert moe_plan is not None
+    assert not any(path.startswith("mlp.") for path in moe_plan)
 
 
 class TestColwiseParallel(GlooDistributedTestBase):
@@ -24,7 +39,6 @@ class TestColwiseParallel(GlooDistributedTestBase):
     def test_colwise_forward_matches_reference(self):
         """Sharded forward should produce the same result as full forward."""
         tp_mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("tp",))
-        rank = dist.get_rank()
 
         in_features, out_features = 8, 16
         torch.manual_seed(0)
@@ -58,6 +72,59 @@ class TestColwiseParallel(GlooDistributedTestBase):
             torch.allclose(full_out, ref_out, atol=1e-5),
             f"Max diff: {(full_out - ref_out).abs().max():.6f}",
         )
+
+
+class TestQwenGatedDeltaTensorParallel(GlooDistributedTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def test_unequal_fused_sections_and_checkpoint_init(self):
+        """Every TP lane loads Q/K/V, conv, and state from its exact HF rows."""
+        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
+        rank = dist.get_rank()
+        config = qwen3_5_moe_config()
+        config.num_hidden_layers = 1
+        config.layer_types = ["linear_attention"]
+        config.linear_key_head_dim = 4
+        config.linear_value_head_dim = 3  # Q/K sections 8 rows, V section 6
+        config.linear_num_key_heads = 2
+        config.linear_num_value_heads = 2
+
+        reference = from_hf_config(
+            config, model_kind="language", attn_implementation="eager"
+        )
+        reference.set_random_init()
+        reference.materialize("cpu")
+        full = reference.state_dict()
+        hf_state = reference.to_hf_state_dict()
+
+        model = from_hf_config(
+            config, model_kind="language", attn_implementation="eager"
+        )
+        apply_tensor_parallel(model, mesh)
+        model.set_checkpoint_init(state_dict=hf_state)
+        model.materialize("cpu")
+        linear = model.decoder_layers[0].linear_attn
+
+        qkv_full = full["decoder_layers.0.linear_attn.in_proj_qkv.weight"]
+        expected_qkv = torch.cat(
+            [part.chunk(2, dim=0)[rank] for part in qkv_full.split((8, 8, 6), dim=0)]
+        )
+        torch.testing.assert_close(linear.in_proj_qkv.weight, expected_qkv)
+
+        conv_full = full["decoder_layers.0.linear_attn.conv1d.weight"]
+        expected_conv = torch.cat(
+            [part.chunk(2, dim=0)[rank] for part in conv_full.split((8, 8, 6), dim=0)]
+        )
+        torch.testing.assert_close(linear.conv1d.weight, expected_conv)
+        for name in ("A_log", "dt_bias"):
+            expected = full[f"decoder_layers.0.linear_attn.{name}"].chunk(2)[rank]
+            torch.testing.assert_close(getattr(linear, name), expected)
+
+        assert linear.key_dim == 4
+        assert linear.value_dim == 3
+        assert linear.conv1d.groups == 11
 
     def test_rowwise_forward_matches_reference(self):
         """RowwiseParallel output should match full-weight matmul."""

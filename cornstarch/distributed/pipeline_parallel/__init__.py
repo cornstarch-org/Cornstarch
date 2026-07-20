@@ -37,6 +37,28 @@ def apply_pipeline_parallel(
     total_layers = len(layers)
     start, end = mesh.distribute_layers(total_layers)
     setattr(module, layers_name, nn.ModuleList(list(layers)[start:end]))
+    # Materialization still maps this sliced ModuleList back to the original HF
+    # checkpoint/topology.  Preserve the global index so constant parameters
+    # owned directly by a repeated layer (notably Qwen GDN A_log/dt_bias) are
+    # copied from the correct source layer instead of being left uninitialized.
+    module._pipeline_layer_offset = start
+    local_specs = getattr(module, "_local_tp_shard_specs", None)
+    if local_specs:
+        reindexed: dict[str, tuple] = {}
+        prefix = f"{layers_name}."
+        for name, spec in local_specs.items():
+            if not name.startswith(prefix):
+                reindexed[name] = spec
+                continue
+            suffix = name[len(prefix):]
+            index_text, separator, rest = suffix.partition(".")
+            index = int(index_text)
+            if start <= index < end:
+                local_index = index - start
+                reindexed[
+                    f"{prefix}{local_index}.{rest}" if separator else f"{prefix}{local_index}"
+                ] = spec
+        module._local_tp_shard_specs = reindexed
 
     module.forward_spec = PipelineParallelForwardSpec(
         module.forward_spec, mesh, layer_offset=start

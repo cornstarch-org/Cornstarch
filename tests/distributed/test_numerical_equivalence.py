@@ -60,12 +60,18 @@ RTOL = 1e-3
 VOCAB = 128
 
 
-def _build_llm(dtype: torch.dtype = DTYPE, moe: bool = False):
+def _build_llm(
+    dtype: torch.dtype = DTYPE,
+    moe: bool = False,
+    output_router_logits: bool = False,
+):
     """Build a tiny LM with deterministic weights (seed reset before build)."""
     torch.manual_seed(0)
     config = qwen3_5_moe_config() if moe else llama_config()
     config.vocab_size = VOCAB
     config.tie_word_embeddings = False
+    if moe:
+        config.output_router_logits = output_router_logits
     model = from_hf_config(config, model_kind="language", attn_implementation="eager")
     model.set_random_init()
     model.materialize("cpu", dtype=dtype)
@@ -194,28 +200,39 @@ class TestTensorParallelCheckpointInit(GlooDistributedTestBase):
         torch.testing.assert_close(embed_grad, ref_embed_grad, atol=ATOL, rtol=RTOL)
 
 
+@instantiate_parametrized_tests
 class TestPipelineParallelEquivalence(GlooDistributedTestBase):
     @property
     def world_size(self) -> int:
         return 2
 
-    def test_pp_matches_single(self):
+    @parametrize("moe", [False, True], name_fn=lambda value: "qwen_hybrid" if value else "llama")
+    def test_pp_matches_single(self, moe: bool):
         mesh = ModalProcessGroupMesh(
             device_type="cpu", global_ranks=[0, 1],
             dp_size=1, cp_size=1, tp_size=1, num_pp_stages=2,
         )
 
-        ref_model = _build_llm()
+        ref_model = _build_llm(moe=moe, output_router_logits=moe)
         batch = _batch(batch_size=4)
         ref_loss = _loss(ref_model, batch)
+        ref_router_grads = None
+        if moe:
+            ref_loss.backward()
+            ref_router_grads = [
+                layer.mlp.gate.weight.grad.clone()
+                for layer in ref_model.decoder_layers
+            ]
         ref = _ref_params(ref_model)
 
         # Build the stage-local model: slice layers, wrap the forward spec.
-        model = _build_llm()
+        model = _build_llm(moe=moe, output_router_logits=moe)
         total = len(model.decoder_layers)
         start, end = mesh.distribute_layers(total)
         model.decoder_layers = nn.ModuleList(list(model.decoder_layers)[start:end])
-        model.forward_spec = PipelineParallelForwardSpec(model.forward_spec, mesh)
+        model.forward_spec = PipelineParallelForwardSpec(
+            model.forward_spec, mesh, layer_offset=start
+        )
 
         # Copy identical weights (decoder layers are re-indexed per stage).
         with torch.no_grad():
@@ -259,6 +276,15 @@ class TestPipelineParallelEquivalence(GlooDistributedTestBase):
             torch.testing.assert_close(
                 result["loss"].reshape(()), ref_loss, atol=ATOL, rtol=RTOL
             )
+        if moe:
+            assert ref_router_grads is not None
+            for local_index, layer in enumerate(model.decoder_layers):
+                torch.testing.assert_close(
+                    layer.mlp.gate.weight.grad,
+                    ref_router_grads[start + local_index],
+                    atol=ATOL,
+                    rtol=RTOL,
+                )
 
 
 class TestExpertParallelEquivalence(GlooDistributedTestBase):
