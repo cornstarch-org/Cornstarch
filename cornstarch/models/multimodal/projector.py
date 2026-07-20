@@ -56,14 +56,19 @@ class CornstarchProjector(nn.Module):
         else:
             raise ValueError(f"Unsupported projector_type: {config.projector_type}")
 
-    def materialize(self, device: str | torch.device = "cuda") -> CornstarchProjector:
+    def materialize(
+        self,
+        device: str | torch.device = "cuda",
+        dtype: torch.dtype | None = None,
+    ) -> CornstarchProjector:
         """Allocate meta projector tensors on a device and initialize them.
 
         Projectors are commonly generated while composing still-meta modality
         and language modules. This mirrors the Cornstarch model lifecycle for
         that smaller owned module: construction can remain allocation-free, and
         ``CornstarchModalityEncoder.materialize()`` later turns the projection
-        parameters into regular randomly initialized tensors.
+        parameters into regular randomly initialized tensors. When ``dtype`` is
+        given the projector is cast to it so it follows its encoder's dtype.
         """
         device = torch.device(device)
         tensors = list(self.parameters()) + list(self.buffers())
@@ -72,6 +77,8 @@ class CornstarchProjector(nn.Module):
             self.reset_parameters()
         else:
             self.to(device)
+        if dtype is not None:
+            self.to(dtype=dtype)
         return self
 
     def reset_parameters(self) -> None:

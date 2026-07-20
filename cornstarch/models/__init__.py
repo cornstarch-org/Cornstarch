@@ -19,6 +19,7 @@ from cornstarch.models.multimodal import (
     CornstarchMultimodalConfig,
     CornstarchProjector,
     ExecutionFuture,
+    build_modality_encoder,
 )
 from cornstarch.models.vision_encoder import CornstarchVisionEncoder
 
@@ -36,6 +37,7 @@ __all__ = [
     "ExecutionFuture",
     "RepeatedLayerCompileConfig",
     "RepeatedLayerOffloadConfig",
+    "build_modality_encoder",
     "from_hf_config",
     "from_pretrained_config",
     "load_hf_state_dict",

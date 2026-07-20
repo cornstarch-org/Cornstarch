@@ -90,3 +90,7 @@ class CornstarchLanguageModel(CornstarchModelBase):
     def _repeated_layer_module_names(self) -> tuple[str, ...]:
         """Return module names whose tensors are CPU masters under layer offload."""
         return ("decoder_layers",)
+
+    def _section_names(self) -> tuple[str, str, str]:
+        """Three-section layout: pre-decoder, decoder layers, post-decoder."""
+        return ("pre_decoder", "decoder_layers", "post_decoder")

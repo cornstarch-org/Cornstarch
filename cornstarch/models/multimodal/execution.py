@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Execution graph primitives for user-composed Cornstarch multimodal models.
 
 Cornstarch multimodal composition is intentionally not represented as a single
@@ -22,6 +20,8 @@ processor/model coupling. Users preprocess/tokenize inputs outside Cornstarch,
 pass concrete tensors and modules into the plan, and can inspect the resulting
 graph with ``describe()``, ``to_mermaid()``, or ``to_dot()`` before running it.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -145,6 +145,7 @@ class CornstarchExecutionPlan:
         labels: Any,
         modality_token_ids: Mapping[str, int],
         encoder_outputs: Mapping[str, Any] | None = None,
+        language_model_inputs: Mapping[str, Any] | None = None,
         name: str | None = None,
     ) -> ExecutionFuture:
         """Add a text/modality merge node and return its future output handle."""
@@ -158,6 +159,7 @@ class CornstarchExecutionPlan:
                     "labels": labels,
                     "encoder_outputs": dict(encoder_outputs or {}),
                     "modality_token_ids": dict(modality_token_ids),
+                    "language_model_inputs": dict(language_model_inputs or {}),
                 },
             )
         )
@@ -347,6 +349,10 @@ class CornstarchExecutionPlan:
                     for modality, value in node.params["encoder_outputs"].items()
                 },
                 modality_token_ids=node.params["modality_token_ids"],
+                language_model_inputs={
+                    key: _resolve_value(value, values)
+                    for key, value in node.params["language_model_inputs"].items()
+                },
             )
         if node.kind == "run_language_model":
             return node.params["module"](
@@ -397,6 +403,7 @@ def merge_modality_encoder_outputs(
     labels: torch.Tensor,
     encoder_outputs: Mapping[str, Any],
     modality_token_ids: Mapping[str, int],
+    language_model_inputs: Mapping[str, Any] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Build language-model inputs by replacing modality placeholder tokens.
 
@@ -420,6 +427,16 @@ def merge_modality_encoder_outputs(
     if labels.shape != input_ids.shape:
         raise ValueError("labels must have the same shape as input_ids.")
 
+    extra_inputs = dict(language_model_inputs or {})
+    forbidden = {"input_ids", "inputs_embeds", "labels"} & extra_inputs.keys()
+    if forbidden:
+        raise ValueError(
+            "language_model_inputs cannot override merge-owned keys: "
+            f"{sorted(forbidden)}"
+        )
+    global_input_ids = extra_inputs.pop("cp_global_input_ids", None)
+    position_ids = extra_inputs.get("position_ids")
+
     token_ids = {
         modality: int(token_id)
         for modality, token_id in modality_token_ids.items()
@@ -436,6 +453,13 @@ def merge_modality_encoder_outputs(
         if modality not in token_ids:
             raise ValueError(f"Token ID for modality {modality!r} was not provided.")
         features = _first_output_tensor(output)
+        features = _select_local_modality_features(
+            features,
+            token_id=token_ids[modality],
+            local_input_ids=input_ids,
+            global_input_ids=global_input_ids,
+            position_ids=position_ids,
+        )
         if features.ndim > 2:
             features = features.reshape(-1, features.shape[-1])
         if features.shape[-1] != inputs_embeds.shape[-1]:
@@ -457,15 +481,76 @@ def merge_modality_encoder_outputs(
             features.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype),
         )
 
-    return {
+    result = {
         "inputs_embeds": inputs_embeds,
-        "attention_mask": torch.ones(
-            inputs_embeds.shape[:2],
-            dtype=torch.bool,
-            device=inputs_embeds.device,
+        "attention_mask": extra_inputs.pop(
+            "attention_mask",
+            torch.ones(
+                inputs_embeds.shape[:2],
+                dtype=torch.bool,
+                device=inputs_embeds.device,
+            ),
         ),
         "labels": labels,
     }
+    result.update(extra_inputs)
+    return result
+
+
+def _select_local_modality_features(
+    features: torch.Tensor,
+    *,
+    token_id: int,
+    local_input_ids: torch.Tensor,
+    global_input_ids: torch.Tensor | None,
+    position_ids: torch.Tensor | None,
+) -> torch.Tensor:
+    """Select full encoder features for placeholder tokens owned by this CP rank."""
+    local_count = int((local_input_ids == token_id).sum().item())
+    flat_features = (
+        features.reshape(-1, features.shape[-1]) if features.ndim > 2 else features
+    )
+    if flat_features.shape[0] == local_count:
+        return flat_features
+    if global_input_ids is None or position_ids is None:
+        return flat_features
+
+    if position_ids.ndim != 2 or position_ids.shape != local_input_ids.shape:
+        raise ValueError(
+            "CP modality feature selection requires position_ids with the same "
+            "(batch, local_sequence) shape as input_ids."
+        )
+    full_count = int((global_input_ids == token_id).sum().item())
+    if flat_features.shape[0] != full_count:
+        return flat_features
+
+    selected_indices: list[int] = []
+    feature_base = 0
+    for batch_idx in range(global_input_ids.shape[0]):
+        full_positions = (global_input_ids[batch_idx] == token_id).nonzero(
+            as_tuple=True
+        )[0]
+        position_to_feature = {
+            int(position): feature_base + offset
+            for offset, position in enumerate(full_positions.tolist())
+        }
+        local_positions = position_ids[batch_idx][
+            local_input_ids[batch_idx] == token_id
+        ]
+        try:
+            selected_indices.extend(
+                position_to_feature[int(position)]
+                for position in local_positions.tolist()
+            )
+        except KeyError as error:
+            raise ValueError(
+                "A local modality placeholder position is absent from "
+                "cp_global_input_ids."
+            ) from error
+        feature_base += full_positions.numel()
+
+    index = torch.tensor(selected_indices, dtype=torch.long, device=flat_features.device)
+    return flat_features.index_select(0, index)
 
 
 def _first_output_tensor(output: Any) -> torch.Tensor:

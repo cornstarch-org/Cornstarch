@@ -13,8 +13,11 @@ from transformers import (
     AutoConfig,
     AutoImageProcessor,
     AutoTokenizer,
+    PreTrainedTokenizerBase,
     get_linear_schedule_with_warmup,
 )
+from transformers.image_processing_utils import BaseImageProcessor
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from common import (
     DTYPE,
@@ -31,28 +34,30 @@ from common import (
 )
 from cornstarch.models import (
     CornstarchExecutionPlan,
+    CornstarchLanguageModel,
+    CornstarchModalityEncoder,
     from_hf_config,
     RepeatedLayerCompileConfig,
 )
 
 
 class FakeDataset(Dataset):
-    def __init__(self, image_size: tuple[int, int]):
+    def __init__(self, image_size: tuple[int, int]) -> None:
         self.image = generate_random_image(image_size)
         self.text = IMAGE_TOKEN + " text" * 2048
 
     def __len__(self) -> int:
         return 65536
 
-    def __getitem__(self, index: int) -> dict:
+    def __getitem__(self, index: int) -> dict[str, object]:
         del index
         return {"image": self.image, "text": self.text}
 
 
 def _collate_vlm(
     batches: list[dict],
-    image_processor,
-    tokenizer,
+    image_processor: BaseImageProcessor,
+    tokenizer: PreTrainedTokenizerBase,
     image_sequence_length: int,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
@@ -72,11 +77,11 @@ def _collate_vlm(
 
 
 def _training_step(
-    language_model,
-    vision_module,
+    language_model: CornstarchLanguageModel,
+    vision_module: CornstarchModalityEncoder,
     batch: dict[str, torch.Tensor],
     image_token_id: int,
-):
+) -> CausalLMOutputWithPast:
     plan = CornstarchExecutionPlan()
     vision_outputs = plan.run_modality_encoder(
         module=vision_module,
@@ -99,7 +104,7 @@ def pretrain(
     use_layer_offload: bool = False,
     profile_output_path: Path | None = None,
     max_train_steps: int = 10,
-):
+) -> None:
     """Randomly initialize a VLM and pretrain it through the new Cornstarch API."""
     torch.cuda.set_device(0)
     device = torch.device("cuda")

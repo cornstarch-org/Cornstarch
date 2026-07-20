@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from cornstarch.models import CornstarchModalityEncoder, from_hf_config
+from cornstarch.models import build_modality_encoder, from_hf_config
 from tests.model.model_configs import clip_vision_config, llama_config
 
 
@@ -30,7 +30,7 @@ def test_modality_encoder_factory_preserves_lazy_materialization() -> None:
     _assert_all_meta(language_model)
     _assert_all_meta(vision_encoder)
 
-    vision_module = CornstarchModalityEncoder.from_encoder_and_language_model(
+    vision_module = build_modality_encoder(
         vision_encoder,
         language_model,
         modality="vision",
