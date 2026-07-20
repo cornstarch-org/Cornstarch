@@ -226,7 +226,10 @@ def _run(case: AcceptanceCase, args: argparse.Namespace) -> dict[str, object]:
     )
     output = execution.run_language_model(module=model, inputs=merged)
     schedule = context.create_schedule(execution, output)
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    # A PP stage contains both ordinary stage-local tensors and TP-sharded
+    # DTensors. CUDA's automatic foreach path cannot update that mixed list,
+    # while the scalar optimizer path supports both parameter kinds.
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, foreach=False)
 
     result = schedule.step(
         microbatches, _criterion, optimizer=None, return_loss=True
