@@ -80,7 +80,7 @@ class TestGatedDeltaContextParallelGloo(GlooDistributedTestBase):
             torch.randn(shape, generator=generator, device=device, dtype=torch.bfloat16)
             for shape in shapes
         ]
-        full[3] = -full[3].float().softplus().to(torch.bfloat16)
+        full[3] = -F.softplus(full[3].float()).to(torch.bfloat16)
         full[4] = full[4].sigmoid()
         valid = int(mask.sum())
         full_cu = [0]
