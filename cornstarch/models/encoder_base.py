@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Callable, Mapping
 
-import torch
 import torch.nn as nn
 from transformers import PretrainedConfig, PreTrainedModel
 
@@ -16,8 +15,8 @@ from cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from cornstarch.models.model_base import CornstarchModelBase
 
 
-class CornstarchEncoderBase(CornstarchModelBase):
-    """Shared structure for Cornstarch-owned non-language encoders.
+class CornstarchEncoder(CornstarchModelBase):
+    """Unified Cornstarch representation for every non-language encoder.
 
     Vision and audio encoders follow the same high-level layout even when their
     input preparation differs: a ``pre_encoder`` section builds hidden states, an
@@ -26,11 +25,11 @@ class CornstarchEncoderBase(CornstarchModelBase):
     other model-family tail work. Keeping this shape consistent lets Cornstarch
     expose the same materialization and offload controls across modalities.
 
-    Subclasses provide the modality label and converters provide the concrete
-    Hugging Face leaf modules plus a ``TransformerForwardSpec``. The spec owns
-    modality-specific forward details, while this base class preserves the common
-    module topology and Hugging Face checkpoint translation inherited from
-    ``CornstarchModelBase``.
+    Vision and audio are properties of inputs and converter-owned forward specs,
+    not different execution structures. All encoder converters therefore return
+    this same class. That lets lazy materialization and TP/PP/EP walk one stable
+    pre/layers/post representation, just as every language converter returns one
+    ``CornstarchLanguageModel``.
     """
 
     def __init__(
@@ -75,21 +74,11 @@ class CornstarchEncoderBase(CornstarchModelBase):
             kwargs,
         )
 
-    def offload_layers_to_cpu(self, layer_indices: Iterable[int] | None = None) -> None:
-        """Move selected encoder layers to CPU after they have been materialized."""
-        self._offload_module_list_to_cpu(self.encoder_layers, layer_indices)
-
-    def materialize_layers(self, device: str | torch.device) -> None:
-        """Allocate or move encoder layers onto the requested device."""
-        if self.uses_layer_offload:
-            assert self.layer_offload_config is not None
-            device = self.layer_offload_config.cpu_torch_device
-        self._materialize_module_list(self.encoder_layers, torch.device(device))
-
-    def _repeated_layer_module_names(self) -> tuple[str, ...]:
-        """Return module names whose tensors are CPU masters under layer offload."""
-        return ("encoder_layers",)
-
     def _section_names(self) -> tuple[str, str, str]:
         """Three-section layout: pre-encoder, encoder layers, post-encoder."""
         return ("pre_encoder", "encoder_layers", "post_encoder")
+
+
+# Compatibility for callers that imported the old implementation-oriented name.
+# It is an alias, not a second representation or subclass hierarchy.
+CornstarchEncoderBase = CornstarchEncoder

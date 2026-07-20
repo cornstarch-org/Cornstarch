@@ -11,9 +11,13 @@ hide:
 </div>
 ---
 
-Cornstarch is a multimodal model training framework that allows you to create your own multimodal model from a set of HuggingFace unimodal models, train, or use it.
+Cornstarch converts supported Hugging Face components into unified, lazily
+initialized modules; connects them through a user-defined execution DAG; and
+applies a distinct composable parallelism plan to each module.
 
 # Documentation Organization
+- [Core architecture](architecture.md): The five invariants behind models, DAGs,
+  lazy initialization, and per-module parallelism.
 - [Getting Started](getting_started/installation.md): Instructions on installation and setup.
 - [Creating a multimodal LLM](using_cornstarch/creating_mllm.md): How to create a multimodal LLM from unimodal models.
 - [Preprocessing multimodal inputs](using_cornstarch/preprocessing_inputs.md): How to preprocess muiltimodal inputs to run a multimodal LLM.

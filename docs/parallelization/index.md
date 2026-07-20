@@ -1,6 +1,10 @@
-# Distributed Training Overview
+# Distributed training
 
-Multimodal LLMs made by Cornstarch can be parallelized using either PyTorch Data Parallel (DDP or FSDP), ColossalAI plugins (for  tensor parallelism only), or Cornstarch plugins (for 4D parallelism).
+Cornstarch's native `ParallelizationPlan` composes data, pipeline, context,
+tensor, and expert parallelism independently for each module in a multimodal
+DAG. The plan is the supported distributed interface; legacy ColossalAI plugin
+and fixed `MultimodalModel` documentation does not describe the active package.
 
-- [Using DDP/FSDP](ddp_fsdp.md)
-- [Cornstarch 5D Parallelism](cornstarch_parallel.md)
+- [Core architecture](../architecture.md)
+- [Using Cornstarch parallelism](cornstarch_parallel.md)
+- [PyTorch DDP/FSDP notes](ddp_fsdp.md)

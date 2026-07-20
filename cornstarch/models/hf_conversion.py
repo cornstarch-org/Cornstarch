@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Literal, Mapping
 
 import torch
 from transformers import AutoConfig, PretrainedConfig
@@ -30,65 +31,97 @@ from cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from cornstarch.models.model_base import CornstarchModelBase
 
 
+ModelKind = Literal["language", "vision", "audio"]
+Converter = Callable[..., CornstarchModelBase]
+
+
+@dataclass(frozen=True)
+class _ConversionSpec:
+    """Bind one HF config identity to its converter and unified root kind.
+
+    Model-family knowledge belongs at this conversion boundary. A converter may
+    understand Hugging Face's concrete leaf layout, but its output is always one
+    of Cornstarch's unified roots. Lifecycle and parallelization code therefore
+    never dispatches on the original model family.
+    """
+
+    kind: ModelKind
+    converter: Converter
+
+
+_CONVERSION_BY_MODEL_TYPE: dict[str, _ConversionSpec] = {
+    "clip_vision_model": _ConversionSpec("vision", convert_clip_vision_config),
+    "deepseek_v3": _ConversionSpec("language", convert_deepseek_v3_config),
+    "deepseek_v4": _ConversionSpec("language", convert_deepseek_v4_config),
+    "gemma4_audio": _ConversionSpec("audio", convert_gemma4_audio_config),
+    "gemma4_text": _ConversionSpec("language", convert_gemma4_config),
+    "gemma4_vision": _ConversionSpec("vision", convert_gemma4_vision_config),
+    "glm_moe_dsa": _ConversionSpec("language", convert_glm_moe_dsa_config),
+    "llama": _ConversionSpec("language", convert_llama_config),
+    "llama4_text": _ConversionSpec("language", convert_llama4_config),
+    "nemotron_h": _ConversionSpec("language", convert_nemotron_h_config),
+    "qwen3_5_moe_text": _ConversionSpec("language", convert_qwen3_5_moe_config),
+    "qwen3_5_text": _ConversionSpec("language", convert_qwen3_5_config),
+    "qwen3_vl_vision": _ConversionSpec("vision", convert_qwen3_vl_vision_config),
+    "siglip2_vision_model": _ConversionSpec("vision", convert_siglip2_vision_config),
+    "whisper": _ConversionSpec("audio", convert_whisper_config),
+}
+
+# A few nested HF configs use a parent model_type that does not identify the
+# leaf encoder. Exact config types disambiguate those cases without teaching the
+# rest of Cornstarch about Hugging Face family names.
+_CONVERSION_BY_CONFIG_TYPE: tuple[tuple[type[PretrainedConfig], _ConversionSpec], ...] = (
+    (Siglip2VisionConfig, _ConversionSpec("vision", convert_siglip2_vision_config)),
+    (Qwen3VLVisionConfig, _ConversionSpec("vision", convert_qwen3_vl_vision_config)),
+)
+
+
+def _conversion_spec(config: PretrainedConfig) -> _ConversionSpec:
+    for config_type, spec in _CONVERSION_BY_CONFIG_TYPE:
+        if isinstance(config, config_type):
+            return spec
+    model_type = getattr(config, "model_type", None)
+    try:
+        return _CONVERSION_BY_MODEL_TYPE[model_type]
+    except KeyError as error:
+        raise ValueError(
+            f"Unsupported model architecture for Cornstarch conversion: {model_type}"
+        ) from error
+
+
 def from_hf_config(
     config: PretrainedConfig,
-    model_kind: str | None = None,
+    model_kind: ModelKind | None = None,
     attn_implementation: str | None = None,
     layer_offload_config: RepeatedLayerOffloadConfig | None = None,
     layer_compile_config: RepeatedLayerCompileConfig | None = None,
-    trust_remote_code: bool = False,
 ) -> CornstarchModelBase:
     """Create the matching Cornstarch model for a Hugging Face config.
 
-    The conversion builds a Cornstarch-owned module structure on the meta
-    device while preserving Hugging Face checkpoint import/export semantics.
+    The family converter only translates Hugging Face's leaf layout. Every
+    language family returns ``CornstarchLanguageModel`` and every encoder family
+    returns the unified Cornstarch encoder representation, all still on
+    ``meta``. ``model_kind`` is an optional assertion, not a fallback converter:
+    unsupported configs must provide an explicit converter rather than being
+    silently interpreted as Llama, CLIP, or Whisper.
     """
-    del trust_remote_code
-    model_type = getattr(config, "model_type", None)
-    if model_type == "clip_vision_model":
-        return convert_clip_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if isinstance(config, Siglip2VisionConfig) or model_type == "siglip2_vision_model":
-        return convert_siglip2_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if isinstance(config, Qwen3VLVisionConfig) or model_type == "qwen3_vl_vision":
-        return convert_qwen3_vl_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "gemma4_vision":
-        return convert_gemma4_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_kind == "vision":
-        return convert_clip_vision_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "whisper":
-        return convert_whisper_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "gemma4_audio":
-        return convert_gemma4_audio_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_kind == "audio":
-        return convert_whisper_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "llama":
-        return convert_llama_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "qwen3_5_text":
-        return convert_qwen3_5_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "qwen3_5_moe_text":
-        return convert_qwen3_5_moe_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "deepseek_v3":
-        return convert_deepseek_v3_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "deepseek_v4":
-        return convert_deepseek_v4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "gemma4_text":
-        return convert_gemma4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "glm_moe_dsa":
-        return convert_glm_moe_dsa_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "llama4_text":
-        return convert_llama4_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_type == "nemotron_h":
-        return convert_nemotron_h_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    if model_kind == "language":
-        return convert_llama_config(config, attn_implementation=attn_implementation, layer_offload_config=layer_offload_config, layer_compile_config=layer_compile_config)
-    raise ValueError(
-        f"Unsupported model architecture for Cornstarch conversion: {model_type}"
+    spec = _conversion_spec(config)
+    if model_kind is not None and model_kind != spec.kind:
+        raise ValueError(
+            f"Config {type(config).__name__} converts to a {spec.kind} model, "
+            f"not the requested {model_kind} model."
+        )
+    return spec.converter(
+        config,
+        attn_implementation=attn_implementation,
+        layer_offload_config=layer_offload_config,
+        layer_compile_config=layer_compile_config,
     )
 
 
 def from_pretrained_config(
     model_name_or_path: str | Path,
-    model_kind: str | None = None,
+    model_kind: ModelKind | None = None,
     attn_implementation: str | None = None,
     layer_offload_config: RepeatedLayerOffloadConfig | None = None,
     layer_compile_config: RepeatedLayerCompileConfig | None = None,
@@ -105,7 +138,6 @@ def from_pretrained_config(
         attn_implementation=attn_implementation,
         layer_offload_config=layer_offload_config,
         layer_compile_config=layer_compile_config,
-        trust_remote_code=trust_remote_code,
     )
 
 
@@ -123,30 +155,6 @@ def to_hf_state_dict(model: CornstarchModelBase) -> dict[str, torch.Tensor]:
     return model.to_hf_state_dict()
 
 
-def infer_model_kind(config: PretrainedConfig) -> str:
+def infer_model_kind(config: PretrainedConfig) -> ModelKind:
     """Infer whether a supported Hugging Face config is language, vision, or audio."""
-    model_type = getattr(config, "model_type", None)
-    if model_type in {
-        "clip_vision_model",
-        "gemma4_vision",
-        "qwen3_vl_vision",
-        "siglip2_vision_model",
-    }:
-        return "vision"
-    if model_type in {"gemma4_audio", "whisper"}:
-        return "audio"
-    if model_type in {
-        "deepseek_v3",
-        "deepseek_v4",
-        "gemma4_text",
-        "glm_moe_dsa",
-        "llama",
-        "llama4_text",
-        "nemotron_h",
-        "qwen3_5_moe_text",
-        "qwen3_5_text",
-    }:
-        return "language"
-    raise ValueError(
-        f"Unsupported model architecture for Cornstarch conversion: {model_type}"
-    )
+    return _conversion_spec(config).kind

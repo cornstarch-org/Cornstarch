@@ -19,7 +19,7 @@ classifiers = [
 dependencies = [
     "torch>=2.6.0",
     "triton",
-    "transformers>=4.50.0", # packages below this line are for colossalai
+    "transformers>=4.50.0",
     "loguru",
     "simple_parsing",
     "datasets",
@@ -65,6 +65,7 @@ dev = [
     "black>=23.0",
     "isort>=5.12",
     "pytest<=8.1",
+    "pytest-env",
     "pytest-mock",
     "expecttest",
     "accelerate",
@@ -76,12 +77,10 @@ docs = [
     "mkdocstrings",
 ]
 
-colossalai = [
-    "colossalai==0.4.6",
-]
-
 [tool.ruff]
 # Never enforce `E501` (line length violations).
+
+[tool.ruff.lint]
 ignore = ["E501"]
 
 [build-system]
@@ -91,4 +90,4 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cornstarch*"]
-exclude = ["cornstarch_old*", "examples*", "examples_old*", "tests*", "tests_oild*"]
+exclude = ["examples*", "tests*"]

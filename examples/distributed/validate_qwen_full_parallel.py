@@ -9,6 +9,9 @@ GPU with ``torchrun``.  For example, on a single 32-GPU node::
         examples.distributed.validate_qwen_full_parallel \
         --case moe-hybrid-5d
 
+For multiple nodes, add torchrun's rendezvous arguments. Each process binds
+``LOCAL_RANK`` to its node-local CUDA device before NCCL initialization.
+
 The test drives the public ``ParallelizationPlan`` surface, including its DP
 sampler, CP splitter, 1F1B schedule, CP/DP gradient synchronization, and an
 optimizer update.  Success therefore means every configured mesh axis took
@@ -19,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
 
@@ -39,6 +41,12 @@ from cornstarch.distributed import (
     UniformContextParallelSplitter,
 )
 from cornstarch.models import CornstarchExecutionPlan, ExecutionFuture, from_hf_config
+
+from .common import (
+    init_distributed,
+    local_trainable_parameters,
+    move_microbatches_to_device,
+)
 
 
 VOCAB_SIZE = 256
@@ -166,7 +174,11 @@ def _validate_environment(case: AcceptanceCase, args: argparse.Namespace) -> Non
             )
 
 
-def _run(case: AcceptanceCase, args: argparse.Namespace) -> dict[str, object]:
+def _run(
+    case: AcceptanceCase,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> dict[str, object]:
     rank = dist.get_rank()
     torch.manual_seed(0)
     torch.cuda.manual_seed_all(0)
@@ -194,7 +206,7 @@ def _run(case: AcceptanceCase, args: argparse.Namespace) -> dict[str, object]:
             context_parallel_splitter=splitter,
         ),
     )
-    context = plan.materialize("cuda", dtype=torch.bfloat16)
+    context = plan.materialize(device, dtype=torch.bfloat16)
     model.train()
 
     dataset = _TokenDataset(args.batch_size * case.dp, args.sequence_length)
@@ -205,16 +217,7 @@ def _run(case: AcceptanceCase, args: argparse.Namespace) -> dict[str, object]:
         shuffle=False,
     )
     microbatches = next(iter(loader))
-    device = torch.device("cuda", torch.cuda.current_device())
-    microbatches = [
-        {
-            key: value.to(device, non_blocking=True)
-            if isinstance(value, torch.Tensor)
-            else value
-            for key, value in microbatch.items()
-        }
-        for microbatch in microbatches
-    ]
+    microbatches = move_microbatches_to_device(microbatches, device)
 
     execution = CornstarchExecutionPlan()
     merged = execution.merge_modality_encoder_outputs(
@@ -229,7 +232,9 @@ def _run(case: AcceptanceCase, args: argparse.Namespace) -> dict[str, object]:
     # A PP stage contains both ordinary stage-local tensors and TP-sharded
     # DTensors. CUDA's automatic foreach path cannot update that mixed list,
     # while the scalar optimizer path supports both parameter kinds.
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, foreach=False)
+    optimizer = torch.optim.SGD(
+        local_trainable_parameters(model), lr=1e-3, foreach=False
+    )
 
     result = schedule.step(
         microbatches, _criterion, optimizer=None, return_loss=True
@@ -266,7 +271,7 @@ def _run(case: AcceptanceCase, args: argparse.Namespace) -> dict[str, object]:
             int(local_param_ok),
             int(owns_loss),
         ],
-        device="cuda",
+        device=device,
         dtype=torch.int64,
     )
     minima = status[:3].clone()
@@ -309,13 +314,11 @@ def main() -> None:
     parser.add_argument("--sequence-length", type=int, default=128)
     args = parser.parse_args()
 
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl")
+    _, _, device = init_distributed()
     try:
         case = CASES[args.case]
         _validate_environment(case, args)
-        report = _run(case, args)
+        report = _run(case, args, device)
         dist.barrier()
         if dist.get_rank() == 0:
             report.pop("rank")

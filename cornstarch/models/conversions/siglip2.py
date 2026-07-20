@@ -15,7 +15,7 @@ from cornstarch.models.forward_specs import (
     TransformerForwardSpec,
     _filtered_layer_kwargs,
 )
-from cornstarch.models.vision_encoder import CornstarchVisionEncoder
+from cornstarch.models.encoder_base import CornstarchEncoder
 
 
 class Siglip2VisionForwardSpec(TransformerForwardSpec):
@@ -64,11 +64,11 @@ def convert_siglip2_vision_config(
     attn_implementation: str | None = None,
     layer_offload_config=None,
     layer_compile_config=None,
-) -> CornstarchVisionEncoder:
+) -> CornstarchEncoder:
     """Convert a SigLIP2 vision config into a Cornstarch vision encoder."""
     with torch.device("meta"):
         hf_model = Siglip2VisionModel(copy.deepcopy(config))
-    return CornstarchVisionEncoder(
+    return CornstarchEncoder(
         config,
         pre_encoder={"embeddings": hf_model.embeddings},
         encoder_layers=hf_model.encoder.layers,

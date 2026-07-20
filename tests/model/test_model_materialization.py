@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 import torch
+import torch.nn as nn
 from transformers import PretrainedConfig
 
 from cornstarch.models import from_hf_config
@@ -183,9 +184,12 @@ def test_set_checkpoint_init_from_hub_id_round_trips(monkeypatch) -> None:
     """
     hf_state_dict = _reference_hf_state_dict()
 
-    def _fake_download(model_name_or_path, device):
+    def _fake_download(model_name_or_path, source_to_local):
         assert model_name_or_path == "fake/tiny-llama"
-        return {key: tensor.clone() for key, tensor in hf_state_dict.items()}
+        return {
+            local_key: hf_state_dict[source_key].clone()
+            for source_key, local_key in source_to_local.items()
+        }
 
     monkeypatch.setattr(
         "cornstarch.models.model_base.CornstarchModelBase._download_and_load_safetensors",
@@ -200,6 +204,23 @@ def test_set_checkpoint_init_from_hub_id_round_trips(monkeypatch) -> None:
     assert set(materialized) == set(hf_state_dict)
     for key, expected in hf_state_dict.items():
         torch.testing.assert_close(materialized[key], expected)
+
+
+def test_pipeline_local_checkpoint_keys_use_global_layer_indices() -> None:
+    """A PP-local layer zero loads the corresponding global checkpoint layer."""
+    hf_state_dict = _reference_hf_state_dict()
+    model = from_hf_config(llama_config(), attn_implementation=ATTN_IMPLEMENTATION)
+    model.set_checkpoint_init(state_dict=hf_state_dict)
+
+    # Mirror apply_pipeline_parallel without starting a process group: this
+    # stage owns original layer one, exposed locally as decoder_layers.0.
+    model.decoder_layers = nn.ModuleList([model.decoder_layers[1]])
+    model._pipeline_layer_offset = 1
+    model.materialize("cpu")
+
+    actual = model.state_dict()["decoder_layers.0.self_attn.q_proj.weight"]
+    expected = hf_state_dict["model.layers.1.self_attn.q_proj.weight"]
+    torch.testing.assert_close(actual, expected)
 
 
 def test_materialize_handles_duplicate_tied_parameter_names() -> None:

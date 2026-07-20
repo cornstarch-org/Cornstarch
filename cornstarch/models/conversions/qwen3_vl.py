@@ -18,7 +18,7 @@ from cornstarch.models.forward_specs import (
     TransformerForwardSpec,
     _filtered_layer_kwargs,
 )
-from cornstarch.models.vision_encoder import CornstarchVisionEncoder
+from cornstarch.models.encoder_base import CornstarchEncoder
 
 
 @dataclass(frozen=True)
@@ -200,11 +200,11 @@ def convert_qwen3_vl_vision_config(
     attn_implementation: str | None = None,
     layer_offload_config=None,
     layer_compile_config=None,
-) -> CornstarchVisionEncoder:
+) -> CornstarchEncoder:
     """Convert a Qwen3-VL vision config into a Cornstarch vision encoder."""
     with torch.device("meta"):
         hf_model = Qwen3VLVisionModel(copy.deepcopy(config))
-    return CornstarchVisionEncoder(
+    return CornstarchEncoder(
         config,
         pre_encoder={
             "patch_embed": hf_model.patch_embed,

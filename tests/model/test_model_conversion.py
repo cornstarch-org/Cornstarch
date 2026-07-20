@@ -23,7 +23,14 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 from transformers.models.siglip2.modeling_siglip2 import Siglip2VisionModel
 from transformers.models.whisper.modeling_whisper import WhisperModel
 
-from cornstarch.models import RepeatedLayerCompileConfig, from_hf_config
+from cornstarch.models import (
+    CornstarchAudioEncoder,
+    CornstarchEncoder,
+    CornstarchVisionEncoder,
+    RepeatedLayerCompileConfig,
+    from_hf_config,
+)
+from cornstarch.models.hf_conversion import infer_model_kind
 from tests.model.model_configs import (
     clip_vision_config,
     deepseek_v3_config,
@@ -46,9 +53,43 @@ from tests.model.model_configs import (
 ATTN_IMPLEMENTATION = "kernels-community/flash-attn3"
 
 
+class _UnsupportedConfig(PretrainedConfig):
+    model_type = "unsupported_test_model"
+
+
 def _materialize_device() -> torch.device:
     """Choose CUDA when available, otherwise fall back to CPU for tests."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def test_conversion_registry_rejects_implicit_family_fallbacks() -> None:
+    """A modality hint cannot substitute for an explicit family converter."""
+    config = _UnsupportedConfig()
+
+    with pytest.raises(ValueError, match="Unsupported model architecture"):
+        from_hf_config(config, model_kind="language")
+    with pytest.raises(ValueError, match="Unsupported model architecture"):
+        infer_model_kind(config)
+
+
+def test_conversion_registry_validates_model_kind() -> None:
+    """model_kind asserts the converter result instead of choosing a converter."""
+    with pytest.raises(ValueError, match="converts to a language model"):
+        from_hf_config(llama_config(), model_kind="vision")
+
+
+@pytest.mark.parametrize(
+    "config_factory",
+    (clip_vision_config, siglip2_vision_config, whisper_config, gemma4_audio_config),
+)
+def test_all_encoder_families_use_one_canonical_root(config_factory) -> None:
+    """Vision and audio converters differ only in leaves and forward specs."""
+    assert type(from_hf_config(config_factory())) is CornstarchEncoder
+
+
+def test_legacy_encoder_names_are_compatibility_aliases() -> None:
+    assert CornstarchVisionEncoder is CornstarchEncoder
+    assert CornstarchAudioEncoder is CornstarchEncoder
 
 
 def _assert_state_dict_equal(

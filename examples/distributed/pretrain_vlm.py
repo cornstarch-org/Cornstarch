@@ -1,10 +1,13 @@
-"""Distributed VLM pretraining via the Option C per-modality surface.
+"""Distributed VLM pretraining with distinct encoder and LLM grids.
 
-Run with torchrun, e.g. 4 GPUs with the vision encoder tensor-parallel and the
-language model tensor + pipeline parallel, all replicated once (dp=1)::
+This three-GPU example assigns one rank to the vision stage and a two-way TP
+grid to the language-model stage::
 
-    torchrun --nproc_per_node=4 examples/distributed/pretrain_vlm.py \
-        --vision-tp 2 --llm-tp 2 --llm-pp 1
+    torchrun --nproc-per-node=3 --module examples.distributed.pretrain_vlm \
+        --llm-tp 2 --llm-pp 1
+
+The same command scales across nodes with torchrun's rendezvous arguments.
+Every process binds its node-local GPU before NCCL initialization.
 
 This reads top-to-bottom like the non-distributed ``examples/pretrain_vlm.py`` —
 the training loop is intentionally identical.  The only distributed-specific
@@ -13,11 +16,10 @@ criterion + backward, and ``ctx.sync_gradients`` all-reduces DP gradients).
 Building the models differs only in the per-modality ``plan.parallelize`` +
 ``plan.materialize`` and ``ctx.prepare_dataloader``.
 
-Each modality is described independently: ``plan.parallelize`` is called once
-per modality with its own ``ParallelConfig`` (vision can be TP-only while the
-LLM is TP+PP), and ``plan.materialize`` resolves the per-modality + DP-offset
-rank math and materializes both models.  The projector follows its encoder
-automatically — there is no standalone projector setup in this script.
+Each module is described independently: the vision module owns its pipeline
+stage, while the LLM may use TP, CP, and PP. ``plan.materialize`` verifies that
+their grids consume the whole world and materializes only local ownership. The
+projector follows its encoder automatically.
 """
 from __future__ import annotations
 
@@ -30,12 +32,14 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import AutoConfig, get_linear_schedule_with_warmup
 
-from common import (
+from .common import (
     DTYPE,
     causal_lm_criterion,
     context_parallel_language_inputs,
     init_distributed,
+    local_trainable_parameters,
     microbatch_collate,
+    move_microbatches_to_device,
 )
 
 from cornstarch.distributed import (
@@ -120,7 +124,6 @@ def _training_step(
     ctx: ParallelContext,
     microbatches: list[dict[str, torch.Tensor]],
     criterion: Callable[[Any, dict[str, torch.Tensor]], torch.Tensor],
-    optimizer: torch.optim.Optimizer,
 ) -> dict[str, Any]:
     """Run one optimizer step over the ``collate_fn`` microbatch list.
 
@@ -149,7 +152,7 @@ def _training_step(
         return {"loss": loss_total}
 
     schedule = ctx.create_schedule(plan, output_future)
-    result = schedule.step(microbatches, criterion, optimizer, return_loss=True)
+    result = schedule.step(microbatches, criterion, return_loss=True)
     ctx.sync_gradients()
     return result
 
@@ -157,7 +160,6 @@ def _training_step(
 def pretrain(
     vision_name_or_path: str = "openai/clip-vit-base-patch32",
     llm_name_or_path: str = "hf-internal-testing/tiny-random-LlamaForCausalLM",
-    vision_tp: int = 1,
     llm_tp: int = 1,
     llm_pp: int | None = None,
     llm_cp: int = 1,
@@ -170,11 +172,10 @@ def pretrain(
 ) -> None:
     rank, world_size, device = init_distributed()
 
-    vision_config = getattr(
-        AutoConfig.from_pretrained(vision_name_or_path), "vision_config",
-        AutoConfig.from_pretrained(vision_name_or_path),
-    )
-    llm_config = AutoConfig.from_pretrained(llm_name_or_path)
+    vision_root_config = AutoConfig.from_pretrained(vision_name_or_path)
+    vision_config = getattr(vision_root_config, "vision_config", vision_root_config)
+    llm_root_config = AutoConfig.from_pretrained(llm_name_or_path)
+    llm_config = getattr(llm_root_config, "text_config", llm_root_config)
 
     vision_encoder = from_hf_config(vision_config, model_kind="vision")
     language_model = from_hf_config(llm_config, model_kind="language")
@@ -195,7 +196,6 @@ def pretrain(
     plan.parallelize(
         modality_encoder,
         ParallelConfig(
-            tensor_parallel_size=vision_tp,
             pipeline_parallel_size=vision_pp,
             data_parallel_size=dp,
         ),
@@ -227,10 +227,12 @@ def pretrain(
         batch_size=batch_size,
         collate_fn=microbatch_collate(num_microbatches),
         shuffle=True,
+        pin_memory=True,
     )
 
-    params = list(language_model.parameters()) + list(modality_encoder.parameters())
-    optimizer = torch.optim.Adam(params, lr=lr)
+    optimizer = torch.optim.Adam(
+        local_trainable_parameters(language_model, modality_encoder), lr=lr
+    )
     optimizer.zero_grad()
 
     num_warmup_steps = int(steps * 0.1)
@@ -243,14 +245,13 @@ def pretrain(
     dataloader_iter = iter(dataloader)
     with tqdm(range(steps), disable=rank != 0) as pbar:
         for _ in pbar:
-            microbatches = next(dataloader_iter)
+            microbatches = move_microbatches_to_device(next(dataloader_iter), device)
             outputs = _training_step(
                 language_model,
                 modality_encoder,
                 ctx,
                 microbatches,
                 causal_lm_criterion,
-                optimizer,
             )
             loss = outputs["loss"]
             if loss is not None:

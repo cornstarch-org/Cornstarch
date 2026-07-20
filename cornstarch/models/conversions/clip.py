@@ -14,7 +14,7 @@ from cornstarch.models.forward_specs import (
     TransformerForwardSpec,
     _filtered_layer_kwargs,
 )
-from cornstarch.models.vision_encoder import CornstarchVisionEncoder
+from cornstarch.models.encoder_base import CornstarchEncoder
 
 
 class ClipVisionForwardSpec(TransformerForwardSpec):
@@ -53,11 +53,11 @@ def convert_clip_vision_config(
     attn_implementation: str | None = None,
     layer_offload_config=None,
     layer_compile_config=None,
-) -> CornstarchVisionEncoder:
+) -> CornstarchEncoder:
     """Convert a CLIP vision config into a meta-initialized Cornstarch encoder."""
     with torch.device("meta"):
         hf_model = CLIPVisionModel(copy.deepcopy(config))
-    return CornstarchVisionEncoder(
+    return CornstarchEncoder(
         config,
         pre_encoder={
             "embeddings": hf_model.embeddings,

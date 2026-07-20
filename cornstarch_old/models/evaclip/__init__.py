@@ -1,2 +1,0 @@
-from .configuration_evaclip import EvaCLIPConfig, EvaCLIPVisionConfig
-from .modeling_evaclip import EvaCLIPPreTrainedModel, EvaCLIPVisionModel

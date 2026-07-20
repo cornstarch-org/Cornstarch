@@ -1,4 +1,4 @@
-"""Option C surface: declarative per-modality ``ParallelizationPlan``.
+"""Declarative per-module ``ParallelizationPlan``.
 
 This is the ergonomic layer that most users touch.  They describe each
 modality's parallel degrees with a :class:`ParallelConfig`, register the
@@ -9,7 +9,7 @@ CP sequence split) into ``prepare_dataloader``, builds the training schedule,
 and exposes gradient synchronization — so the training loop stays plain
 PyTorch.
 
-The plan is a thin orchestrator over the Option B primitives
+The plan is a thin orchestrator over the lower-level distributed primitives
 (``ModalProcessGroupMesh`` + the four ``apply_*`` + ``GradientSynchronizer`` +
 the schedule).  It hides the ordering rule (TP→CP→PP on the meta module, then
 materialize, then EP on real tensors) and the per-modality + DP-offset + EP
@@ -18,6 +18,7 @@ parallelisms remain independently togglable.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
 
 import torch
@@ -66,6 +67,169 @@ _DEFAULT_CP_SPLIT_KEYS = (
     "document_ids",
 )
 
+ParallelModule = CornstarchModelBase | CornstarchModalityEncoder
+
+
+@dataclass(frozen=True)
+class _ContextTarget:
+    """One local module whose input ownership is context parallel."""
+
+    module: ParallelModule
+    config: ParallelConfig
+    group: dist.ProcessGroup
+
+
+class _ContextBatchTransform:
+    """Apply every CP data transformation before model execution.
+
+    Context parallelism owns tokens, not parameters. Consequently global
+    positions, shifted labels, cross-mesh ownership, and rank-local sequence
+    slices are derived here in the collate path. The model only receives the
+    resulting local batch plus opaque token-mixer metadata injected by the CP
+    backend during materialization.
+    """
+
+    def __init__(
+        self,
+        modules: Sequence[ParallelModule],
+        configs: Sequence[ParallelConfig],
+        targets: Sequence[_ContextTarget],
+        cp_split_keys: Sequence[str],
+        has_cross_mesh_seams: bool,
+    ) -> None:
+        self._modules = modules
+        self._configs = configs
+        self._targets = targets
+        self._cp_split_keys = cp_split_keys
+        self._has_cross_mesh_seams = has_cross_mesh_seams
+
+    def __call__(self, batch: dict[str, Any]) -> dict[str, Any]:
+        self._add_global_sequence_metadata(batch)
+        self._add_cross_mesh_offsets(batch)
+        self._add_loss_metadata(batch)
+        self._split_local_sequences(batch)
+        return batch
+
+    @staticmethod
+    def _add_global_sequence_metadata(batch: dict[str, Any]) -> None:
+        """Preserve facts that cannot be reconstructed after CP slicing."""
+        input_ids = batch.get("input_ids")
+        if not isinstance(input_ids, torch.Tensor) or input_ids.ndim < 2:
+            return
+        batch.setdefault("cp_global_input_ids", input_ids)
+        batch.setdefault(
+            "position_ids",
+            torch.arange(input_ids.shape[1], device=input_ids.device)
+            .unsqueeze(0)
+            .expand(input_ids.shape[0], -1),
+        )
+        batch.setdefault("attention_mask", torch.ones_like(input_ids, dtype=torch.bool))
+
+    def _add_cross_mesh_offsets(self, batch: dict[str, Any]) -> None:
+        """Record both sides' ownership without moving activation rows."""
+        global_ids = batch.get("cp_global_input_ids")
+        text_mask = batch.get("attention_mask")
+        if (
+            not self._has_cross_mesh_seams
+            or not isinstance(global_ids, torch.Tensor)
+            or text_mask is None
+        ):
+            return
+
+        modality_masks = batch.get(CP_MODALITY_MASKS_KEY, {})
+        routing_offsets: dict[int, tuple[torch.Tensor, ...]] = {}
+        for module, config in zip(self._modules, self._configs):
+            routing_mask = text_mask
+            if isinstance(module, CornstarchModalityEncoder):
+                routing_mask = modality_masks.get(module.modality)
+                if routing_mask is None:
+                    # The schedule can derive a one-row-per-placeholder mask
+                    # once the DAG supplies this modality's token id.
+                    continue
+            splitter = config.context_parallel_splitter
+            offsets = (
+                [torch.arange(routing_mask.shape[1], dtype=torch.long)]
+                if splitter is None
+                else splitter.offsets_for_size(
+                    routing_mask, config.context_parallel_size
+                )
+            )
+            routing_offsets[id(module)] = tuple(offsets)
+        batch[CP_ROUTING_OFFSETS_KEY] = routing_offsets
+
+    @staticmethod
+    def _add_loss_metadata(batch: dict[str, Any]) -> None:
+        """Shift labels globally so CP run boundaries retain their next token."""
+        labels = batch.get("labels")
+        if not isinstance(labels, torch.Tensor) or labels.ndim < 2:
+            return
+        shift_labels = torch.empty_like(labels)
+        shift_labels[..., :-1] = labels[..., 1:]
+        shift_labels[..., -1] = -100
+        batch.setdefault("shift_labels", shift_labels)
+        batch.setdefault("num_items_in_batch", (batch["shift_labels"] != -100).sum())
+
+    def _split_local_sequences(self, batch: dict[str, Any]) -> None:
+        """Compute each ownership layout from the full batch, then slice once."""
+        source_batch = dict(batch)
+        split_keys_seen: set[str] = set()
+        for target in self._targets:
+            module, config, cp_group = target.module, target.config, target.group
+            splitter = config.context_parallel_splitter
+            assert splitter is not None
+            is_modality = isinstance(module, CornstarchModalityEncoder)
+            mask = (
+                source_batch.get(CP_MODALITY_MASKS_KEY, {}).get(module.modality)
+                if is_modality
+                else source_batch.get("attention_mask")
+            )
+            if mask is None:
+                if is_modality:
+                    # Modality processors may already own their sharding; the
+                    # seam derives missing offsets later from placeholders.
+                    continue
+                input_ids = source_batch.get("input_ids")
+                if input_ids is None:
+                    continue
+                mask = torch.ones_like(input_ids, dtype=torch.float32)
+
+            offsets_per_rank = splitter.compute_offsets(mask, cp_group)
+            if is_modality:
+                continue
+            self._add_token_mixer_metadata(
+                batch, source_batch, module, offsets_per_rank, mask
+            )
+            for key in self._cp_split_keys:
+                value = source_batch.get(key)
+                if (
+                    key not in split_keys_seen
+                    and isinstance(value, torch.Tensor)
+                    and value.ndim >= 2
+                ):
+                    batch[key] = splitter.split(value, cp_group)
+                    split_keys_seen.add(key)
+
+    @staticmethod
+    def _add_token_mixer_metadata(
+        batch: dict[str, Any],
+        source_batch: dict[str, Any],
+        module: ParallelModule,
+        offsets_per_rank: Sequence[torch.Tensor],
+        mask: torch.Tensor,
+    ) -> None:
+        """Describe recurrent runs for token mixers that cannot infer CP state."""
+        layer_types = getattr(getattr(module, "hf_config", None), "layer_types", ())
+        if "linear_attention" not in layer_types:
+            return
+        document_ids = source_batch.get("document_ids")
+        if document_ids is None:
+            document_ids = source_batch.get("cp_document_ids")
+        batch["cp_sequence_metadata"] = build_gated_delta_metadata(
+            offsets_per_rank,
+            mask,
+            document_ids=document_ids,
+        )
+
 
 class ParallelContext:
     """Runtime handle returned by :meth:`ParallelizationPlan.materialize`.
@@ -79,7 +243,7 @@ class ParallelContext:
     def __init__(
         self,
         *,
-        modules: list[CornstarchModelBase],
+        modules: list[ParallelModule],
         configs: list[ParallelConfig],
         meshes: dict[int, ModalProcessGroupMesh],
         layouts: dict[int, MeshLayout],
@@ -129,12 +293,12 @@ class ParallelContext:
     def dp_group(self) -> Optional[dist.ProcessGroup]:
         return self._dp_group
 
-    def get_mesh(self, module: CornstarchModelBase) -> Optional[ModalProcessGroupMesh]:
+    def get_mesh(self, module: ParallelModule) -> Optional[ModalProcessGroupMesh]:
         """Return the process-group mesh built for a parallelized module."""
         return self._meshes.get(id(module))
 
     def get_splitter(
-        self, module: CornstarchModelBase
+        self, module: ParallelModule
     ) -> Optional[ContextParallelSplitter]:
         """Return the configured CP splitter for a module."""
         for m, cfg in zip(self._modules, self._configs):
@@ -194,124 +358,20 @@ class ParallelContext:
             )
 
         cp_targets = [
-            (m, cfg, self._meshes[id(m)].cp_group)
+            _ContextTarget(m, cfg, self._meshes[id(m)].cp_group)
             for m, cfg in zip(self._modules, self._configs)
             if cfg.context_parallel_size > 1
             and cfg.context_parallel_splitter is not None
             and id(m) in self._meshes
         ]
 
-        def apply_cp_split(batch: dict) -> dict:
-            # Causal CP needs global token positions and globally shifted labels:
-            # synthesizing either after the sequence is split loses rank/run
-            # boundaries. Keep the unsplit ids as data-side metadata so a
-            # multimodal merge can select only the encoder features whose
-            # placeholder positions live on this CP rank.
-            input_ids = batch.get("input_ids")
-            if isinstance(input_ids, torch.Tensor) and input_ids.ndim >= 2:
-                batch.setdefault("cp_global_input_ids", input_ids)
-                batch.setdefault(
-                    "position_ids",
-                    torch.arange(input_ids.shape[1], device=input_ids.device)
-                    .unsqueeze(0)
-                    .expand(input_ids.shape[0], -1),
-                )
-                batch.setdefault(
-                    "attention_mask",
-                    torch.ones_like(input_ids, dtype=torch.bool),
-                )
-
-            # Preserve both sides' exact ownership for the encoder->LLM seam.
-            # Every rank derives this pure metadata from the same global mask;
-            # membership in the other modality's CP process group is unnecessary.
-            global_ids = batch.get("cp_global_input_ids")
-            text_routing_mask = batch.get("attention_mask")
-            modality_masks = batch.get(CP_MODALITY_MASKS_KEY, {})
-            if (
-                self._cross_mesh_groups
-                and isinstance(global_ids, torch.Tensor)
-                and text_routing_mask is not None
-            ):
-                routing_offsets: dict[int, tuple[torch.Tensor, ...]] = {}
-                for module, config in zip(self._modules, self._configs):
-                    splitter = config.context_parallel_splitter
-                    if isinstance(module, CornstarchModalityEncoder):
-                        routing_mask = modality_masks.get(module.modality)
-                        if routing_mask is None:
-                            # The schedule can derive a validated one-row-per-
-                            # placeholder mask once it knows this plan's token ID.
-                            continue
-                    else:
-                        routing_mask = text_routing_mask
-                    if splitter is None:
-                        offsets = [
-                            torch.arange(routing_mask.shape[1], dtype=torch.long)
-                        ]
-                    else:
-                        offsets = splitter.offsets_for_size(
-                            routing_mask, config.context_parallel_size
-                        )
-                    routing_offsets[id(module)] = tuple(offsets)
-                batch[CP_ROUTING_OFFSETS_KEY] = routing_offsets
-
-            labels = batch.get("labels")
-            if isinstance(labels, torch.Tensor) and labels.ndim >= 2:
-                shift_labels = torch.empty_like(labels)
-                shift_labels[..., :-1] = labels[..., 1:]
-                shift_labels[..., -1] = -100
-                batch.setdefault("shift_labels", shift_labels)
-                batch.setdefault(
-                    "num_items_in_batch",
-                    (batch["shift_labels"] != -100).sum(),
-                )
-
-            # Co-located modules may share one token sequence and CP layout.
-            # Compute each splitter from the original full batch, but split a
-            # given key only once rather than repeatedly shortening it.
-            source_batch = dict(batch)
-            split_keys_seen: set[str] = set()
-            for module, config, cp_group in cp_targets:
-                splitter = config.context_parallel_splitter
-                is_modality = isinstance(module, CornstarchModalityEncoder)
-                mask = (
-                    source_batch.get(CP_MODALITY_MASKS_KEY, {}).get(module.modality)
-                    if is_modality
-                    else source_batch.get("attention_mask")
-                )
-                if mask is None:
-                    if is_modality:
-                        # Modality inputs may already have been sharded by their
-                        # processor/collator. Their routing offsets are derived
-                        # at schedule time from placeholder counts.
-                        continue
-                    ref = source_batch.get("input_ids")
-                    if ref is None:
-                        continue
-                    mask = torch.ones_like(ref, dtype=torch.float32)
-                offsets_per_rank = splitter.compute_offsets(mask, cp_group)
-                if is_modality:
-                    # Text fields belong to the LLM CP layout. Modality tensor
-                    # sharding remains processor-specific; only its actual
-                    # offsets/mask are retained here for seam routing.
-                    continue
-                layer_types = getattr(getattr(module, "hf_config", None), "layer_types", ())
-                if "linear_attention" in layer_types:
-                    document_ids = source_batch.get("document_ids")
-                    if document_ids is None:
-                        document_ids = source_batch.get("cp_document_ids")
-                    batch["cp_sequence_metadata"] = build_gated_delta_metadata(
-                        offsets_per_rank,
-                        mask,
-                        document_ids=document_ids,
-                    )
-                for key in cp_split_keys:
-                    if key in split_keys_seen:
-                        continue
-                    value = source_batch.get(key)
-                    if isinstance(value, torch.Tensor) and value.ndim >= 2:
-                        batch[key] = splitter.split(value, cp_group)
-                        split_keys_seen.add(key)
-            return batch
+        apply_cp_split = _ContextBatchTransform(
+            self._modules,
+            self._configs,
+            cp_targets,
+            cp_split_keys,
+            has_cross_mesh_seams=bool(self._cross_mesh_groups),
+        )
 
         def wrapped_collate(samples: list) -> list[dict]:
             collated = (
@@ -431,7 +491,7 @@ class ParallelizationPlan:
     """
 
     def __init__(self, global_ranks: Optional[Iterable[int]] = None) -> None:
-        self._modules: list[CornstarchModelBase] = []
+        self._modules: list[ParallelModule] = []
         self._configs: list[ParallelConfig] = []
         self._global_ranks: Optional[list[int]] = (
             list(global_ranks) if global_ranks is not None else None
@@ -439,7 +499,7 @@ class ParallelizationPlan:
 
     def parallelize(
         self,
-        module: CornstarchModelBase | CornstarchModalityEncoder,
+        module: ParallelModule,
         config: ParallelConfig,
     ) -> None:
         """Record a module-to-config binding for later distribution.
@@ -474,93 +534,29 @@ class ParallelizationPlan:
         expert tensors and injecting all-to-all dispatch over the EP mesh axis).
         Returns a :class:`ParallelContext` for the training loop.
         """
-        device = torch.device(device)
-        global_ranks = (
-            self._global_ranks
-            if self._global_ranks is not None
-            else list(range(dist.get_world_size()))
-        )
-        world_size = len(global_ranks)
-
         if not self._configs:
             raise ValueError("No modules registered with parallelize().")
 
+        device = torch.device(device)
+        global_ranks = self._resolve_global_ranks()
         pipelined, dp_size, module_ranks = self._assign_ranks(
-            global_ranks, world_size
+            global_ranks, len(global_ranks)
         )
-
-        for cfg in self._configs:
-            if cfg.data_parallel_size != dp_size:
-                raise ValueError(
-                    f"ParallelConfig.data_parallel_size={cfg.data_parallel_size} "
-                    f"does not match the computed dp_size={dp_size}."
-                )
+        self._validate_dp_size(dp_size)
 
         meshes: dict[int, ModalProcessGroupMesh] = {}
         layouts: dict[int, MeshLayout] = {}
-
-        for mod_idx, (module, config) in enumerate(
-            zip(self._modules, self._configs)
+        for module, config, ranks in zip(
+            self._modules, self._configs, module_ranks
         ):
-            modality_ranks = module_ranks[mod_idx]
-
-            # Record every modality's rank layout on every rank (pure
-            # arithmetic, no collectives) so the cross-mesh schedule can pair
-            # producer and consumer ranks for meshes this rank is not part of.
-            layouts[id(module)] = MeshLayout(
-                global_ranks=tuple(modality_ranks),
-                dp_size=dp_size,
-                num_pp_stages=config.num_pp_stages,
-                cp_size=config.context_parallel_size,
-                tp_size=config.tensor_parallel_size,
-                ep_size=config.expert_parallel_size,
+            layout, mesh = self._build_module_mesh(
+                config, ranks, dp_size, device.type
             )
-
-            # Build the mesh on EVERY rank, not just members: a ``DeviceMesh``
-            # calls ``new_group`` (a world collective), so all ranks must
-            # construct every modality's mesh in the same order or process-group
-            # creation deadlocks. Non-members build it as a no-op and discard it;
-            # only members keep and use it.
-            mesh = ModalProcessGroupMesh(
-                device_type=device.type,
-                global_ranks=modality_ranks,
-                dp_size=dp_size,
-                cp_size=config.context_parallel_size,
-                tp_size=config.tensor_parallel_size,
-                num_pp_stages=config.num_pp_stages,
-                ep_size=config.expert_parallel_size,
-            )
+            layouts[id(module)] = layout
             if not mesh.is_member:
                 continue
             meshes[id(module)] = mesh
-
-            # The model-side parallelisms (TP/CP/PP/EP) walk a Cornstarch model's
-            # `_section_names()`/`hf_config`. For a modality encoder that lives on
-            # its inner `.encoder`; the projector stays replicated (no registered
-            # TP family) and CP/PP/EP do not apply to it. `materialize` is still
-            # called on the modality encoder so the projector follows along.
-            apply_target = (
-                module.encoder
-                if isinstance(module, CornstarchModalityEncoder)
-                else module
-            )
-
-            if config.tensor_parallel_size > 1:
-                apply_tensor_parallel(apply_target, mesh.tp_mesh)
-            if config.context_parallel_size > 1:
-                apply_context_parallel(
-                    apply_target,
-                    mesh.cp_group,
-                    causal=isinstance(apply_target, CornstarchLanguageModel),
-                    splitter=config.context_parallel_splitter,
-                )
-            if config.num_pp_stages > 1:
-                apply_pipeline_parallel(apply_target, mesh)
-
-            module.materialize(device, dtype=dtype)
-
-            if config.expert_parallel_size > 1:
-                apply_expert_parallel(apply_target, mesh.ep_group)
+            self._materialize_local_module(module, config, mesh, device, dtype)
 
         dp_size_final, dp_rank, dp_group, grad_sync = self._build_dp_handles(
             meshes
@@ -581,6 +577,107 @@ class ParallelizationPlan:
             cross_mesh_groups=cross_mesh_groups,
             uses_pipeline_parallel=pipelined,
         )
+
+    def _resolve_global_ranks(self) -> list[int]:
+        """Return a permutation of the whole world, rejecting partial plans.
+
+        Per-module grids may be distinct or overlap when co-located, but one
+        ``ParallelizationPlan`` is the authority for the current distributed
+        job. Silently omitting a world rank would leave that process outside the
+        deterministic process-group creation order and can deadlock later.
+        """
+        world_size = dist.get_world_size()
+        ranks = (
+            list(self._global_ranks)
+            if self._global_ranks is not None
+            else list(range(world_size))
+        )
+        if sorted(ranks) != list(range(world_size)):
+            raise ValueError(
+                "ParallelizationPlan.global_ranks must contain every world rank "
+                f"exactly once; expected 0..{world_size - 1}, got {ranks}."
+            )
+        return ranks
+
+    def _validate_dp_size(self, computed_dp_size: int) -> None:
+        for config in self._configs:
+            if config.data_parallel_size != computed_dp_size:
+                raise ValueError(
+                    f"ParallelConfig.data_parallel_size={config.data_parallel_size} "
+                    f"does not match the computed dp_size={computed_dp_size}."
+                )
+
+    @staticmethod
+    def _build_module_mesh(
+        config: ParallelConfig,
+        ranks: list[int],
+        dp_size: int,
+        device_type: str,
+    ) -> tuple[MeshLayout, ModalProcessGroupMesh]:
+        """Describe and collectively construct one module's five-axis grid.
+
+        Every world rank calls this helper for every module in registration
+        order. ``DeviceMesh`` creates process groups collectively, so skipping a
+        non-local module here would make ranks disagree on collective ordering.
+        The pure ``MeshLayout`` is retained everywhere for DAG seam routing;
+        only member ranks keep the operational mesh.
+        """
+        layout = MeshLayout(
+            global_ranks=tuple(ranks),
+            dp_size=dp_size,
+            num_pp_stages=config.num_pp_stages,
+            cp_size=config.context_parallel_size,
+            tp_size=config.tensor_parallel_size,
+            ep_size=config.expert_parallel_size,
+        )
+        mesh = ModalProcessGroupMesh(
+            device_type=device_type,
+            global_ranks=ranks,
+            dp_size=dp_size,
+            cp_size=config.context_parallel_size,
+            tp_size=config.tensor_parallel_size,
+            num_pp_stages=config.num_pp_stages,
+            ep_size=config.expert_parallel_size,
+        )
+        return layout, mesh
+
+    @staticmethod
+    def _materialize_local_module(
+        module: ParallelModule,
+        config: ParallelConfig,
+        mesh: ModalProcessGroupMesh,
+        device: torch.device,
+        dtype: torch.dtype | None,
+    ) -> None:
+        """Apply model-side axes around rank-local lazy materialization.
+
+        TP and PP change parameter ownership while tensors are still metadata;
+        CP injects token-mixer functions but does not own parameters. Only then
+        does ``materialize`` allocate/load this rank's tensors. EP slices real
+        expert stacks afterward because its dispatcher operates on concrete
+        batched weights. This ordering is the central lazy-initialization
+        invariant and is intentionally expressed once.
+        """
+        target = (
+            module.encoder
+            if isinstance(module, CornstarchModalityEncoder)
+            else module
+        )
+        if config.tensor_parallel_size > 1:
+            apply_tensor_parallel(target, mesh.tp_mesh)
+        if config.context_parallel_size > 1:
+            apply_context_parallel(
+                target,
+                mesh.cp_group,
+                causal=isinstance(target, CornstarchLanguageModel),
+                splitter=config.context_parallel_splitter,
+            )
+        if config.num_pp_stages > 1:
+            apply_pipeline_parallel(target, mesh)
+
+        module.materialize(device, dtype=dtype)
+        if config.expert_parallel_size > 1:
+            apply_expert_parallel(target, mesh.ep_group)
 
     def _build_cross_mesh_groups(
         self, layouts: dict[int, MeshLayout]

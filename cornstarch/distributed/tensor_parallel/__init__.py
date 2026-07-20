@@ -75,10 +75,10 @@ def apply_tensor_parallel(module: CornstarchModelBase, tp_mesh: DeviceMesh) -> N
         )
         assert layer_plan is not None
         if getattr(layer, "layer_type", None) == "linear_attention":
-            _validate_qwen_gated_delta_tp(layer.linear_attn, tp_size)
+            _validate_gated_delta_tp(layer.linear_attn, tp_size)
         parallelize_module(layer, tp_mesh, layer_plan)
         if getattr(layer, "layer_type", None) == "linear_attention":
-            relative_specs = _shard_qwen_gated_delta_state(
+            relative_specs = _shard_gated_delta_state(
                 layer.linear_attn, tp_rank, tp_size
             )
             local_specs.update(
@@ -90,7 +90,8 @@ def apply_tensor_parallel(module: CornstarchModelBase, tp_mesh: DeviceMesh) -> N
     module._local_tp_shard_specs = local_specs
 
 
-def _validate_qwen_gated_delta_tp(linear_attn: nn.Module, tp_size: int) -> None:
+def _validate_gated_delta_tp(linear_attn: nn.Module, tp_size: int) -> None:
+    """Validate the semantic GDN axes used by any compatible converted layer."""
     fields = {
         "linear_num_key_heads": int(linear_attn.num_k_heads),
         "linear_num_value_heads": int(linear_attn.num_v_heads),
@@ -101,14 +102,21 @@ def _validate_qwen_gated_delta_tp(linear_attn: nn.Module, tp_size: int) -> None:
     if invalid:
         details = ", ".join(f"{name}={size}" for name, size in invalid.items())
         raise ValueError(
-            f"Qwen3.5 GDN TP size {tp_size} does not divide {details}."
+            f"Gated DeltaNet TP size {tp_size} does not divide {details}."
         )
 
 
-def _shard_qwen_gated_delta_state(
+def _shard_gated_delta_state(
     linear_attn: nn.Module, tp_rank: int, tp_size: int
 ) -> dict[str, tuple]:
-    """Shard per-head state and depthwise-convolution channels on the TP lane."""
+    """Shard GDN state and convolution channels by semantic Q/K/V sections.
+
+    DTensor handles ordinary projection matrices declaratively. These tensors
+    need local replacement because a fused Q/K/V tensor contains unequal
+    semantic sections and the recurrent scalars/depthwise convolution follow
+    those head sections. The operation depends on the unified layer contract,
+    not on the original Hugging Face root model family.
+    """
     linear_attn._cornstarch_tp_rank = tp_rank
     linear_attn._cornstarch_tp_size = tp_size
     specs: dict[str, tuple] = {}

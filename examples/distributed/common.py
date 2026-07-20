@@ -1,10 +1,10 @@
-"""Shared scaffolding for the Option C distributed pretraining examples.
+"""Shared scaffolding for the distributed pretraining examples.
 
-The Option C surface keeps the per-script boilerplate the earlier trial
-duplicated — rank math, the TP->CP->PP-then-materialize-then-EP ordering rule,
-sampler/splitter wiring, the grad-sync registration — inside
+The public plan/context surface keeps rank math, the
+TP->CP->PP-then-materialize-then-EP ordering rule, sampler/splitter wiring, and
+gradient synchronization inside
 ``ParallelizationPlan`` / ``ParallelContext``.  What is left here is only the
-genuinely shared, non-parallelism scaffolding (process-group bring-up, a
+shared, non-parallelism scaffolding (NCCL bring-up, device transfer, a
 synthetic dataset, and the criterion).  Each ``pretrain_*`` script then reads
 top-to-bottom like ``examples/pretrain_vlm.py``: build the models, parallelize,
 materialize, and drive an explicit training loop with ``schedule.step``.
@@ -16,32 +16,59 @@ from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from torch.utils.data import Dataset
 
 DTYPE = torch.bfloat16
 
 
 def init_distributed() -> tuple[int, int, torch.device]:
-    """Initialize the default process group from torchrun env vars.
+    """Bind this torchrun process to its local GPU and initialize NCCL.
 
-    Returns ``(rank, world_size, device)``.  Uses NCCL on CUDA and gloo on CPU
-    so the same script runs in both.
+    ``LOCAL_RANK`` is node-local, unlike the global rank, so this works for both
+    single-node and multi-node launches. Cornstarch's correctness tests use
+    gloo where useful; training examples intentionally model the production
+    one-process-per-GPU NCCL setup.
     """
-    rank = int(os.environ.get("RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training examples require CUDA and NCCL.")
+    if local_rank >= torch.cuda.device_count():
+        raise RuntimeError(
+            f"LOCAL_RANK={local_rank} but this node exposes only "
+            f"{torch.cuda.device_count()} CUDA devices."
+        )
 
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
-        backend = "nccl"
-    else:
-        device = torch.device("cpu")
-        backend = "gloo"
-
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
     if not dist.is_initialized():
-        dist.init_process_group(backend=backend, world_size=world_size, rank=rank)
-    return rank, world_size, device
+        dist.init_process_group(backend="nccl", device_id=device)
+    return dist.get_rank(), dist.get_world_size(), device
+
+
+def move_microbatches_to_device(
+    microbatches: list[dict[str, Any]], device: torch.device
+) -> list[dict[str, Any]]:
+    """Transfer model inputs after DP sampling and CP collation are complete."""
+    return [
+        {
+            key: value.to(device, non_blocking=True)
+            if isinstance(value, torch.Tensor)
+            else value
+            for key, value in microbatch.items()
+        }
+        for microbatch in microbatches
+    ]
+
+
+def local_trainable_parameters(*modules: nn.Module) -> list[nn.Parameter]:
+    """Return concrete parameters owned by this rank, excluding remote meta roots."""
+    return [
+        parameter
+        for module in modules
+        for parameter in module.parameters()
+        if parameter.requires_grad and not parameter.is_meta
+    ]
 
 
 class FakeTextDataset(Dataset):
@@ -90,7 +117,7 @@ def microbatch_collate(
     num_microbatches: int,
     collate_fn: Callable[[list], dict] | None = None,
 ) -> Callable[[list], list[dict]]:
-    """Build a ``collate_fn`` that returns a **list of ``num_microbatches``** dicts.
+    """Build a collator returning exactly ``num_microbatches`` equal batches.
 
     Microbatching is the user's responsibility (Cornstarch never splits modality
     tensors itself), and the chosen interface is "``collate_fn`` returns a list of
@@ -104,14 +131,21 @@ def microbatch_collate(
     returned microbatch independently.
     """
 
+    if num_microbatches < 1:
+        raise ValueError("num_microbatches must be positive.")
+
     def collate(samples: list) -> list[dict]:
         batch = collate_fn(samples) if collate_fn is not None else _default_collate(samples)
         n = len(samples)
-        # ceil division so the last microbatch absorbs any remainder.
-        per = (n + num_microbatches - 1) // num_microbatches
+        if n == 0 or n % num_microbatches:
+            raise ValueError(
+                f"Batch size {n} must be nonzero and divisible by "
+                f"num_microbatches={num_microbatches}."
+            )
+        per = n // num_microbatches
         microbatches: list[dict] = []
         for start in range(0, n, per):
-            stop = min(start + per, n)
+            stop = start + per
             microbatches.append(
                 {
                     key: value[start:stop] if isinstance(value, torch.Tensor) else value

@@ -2,7 +2,7 @@
 
 from cornstarch.models.audio_encoder import CornstarchAudioEncoder
 from cornstarch.models.configuration_cornstarch import CornstarchConfig
-from cornstarch.models.encoder_base import CornstarchEncoderBase
+from cornstarch.models.encoder_base import CornstarchEncoder, CornstarchEncoderBase
 from cornstarch.models.hf_conversion import (
     from_hf_config,
     from_pretrained_config,
@@ -27,6 +27,7 @@ __all__ = [
     "CornstarchAudioEncoder",
     "CornstarchConfig",
     "CornstarchEncoderBase",
+    "CornstarchEncoder",
     "CornstarchEncoderToLanguageProjectorConfig",
     "CornstarchExecutionPlan",
     "CornstarchLanguageModel",

@@ -17,7 +17,6 @@ from transformers.loss.loss_utils import ForCausalLMLoss
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4AudioConfig,
-    Gemma4TextConfig,
     Gemma4VisionConfig,
 )
 from transformers.models.gemma4.modeling_gemma4 import (
@@ -28,7 +27,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
     sliding_window_mask_function,
 )
 
-from cornstarch.models.audio_encoder import CornstarchAudioEncoder
+from cornstarch.models.encoder_base import CornstarchEncoder
 from cornstarch.models.conversions.llama import (
     CausalLanguageForwardSpec,
     _validate_input_choice,
@@ -39,7 +38,6 @@ from cornstarch.models.forward_specs import (
     _filtered_layer_kwargs,
 )
 from cornstarch.models.language_model import CornstarchLanguageModel
-from cornstarch.models.vision_encoder import CornstarchVisionEncoder
 
 
 class _Gemma4AudioMaskConverter(nn.Module):
@@ -395,11 +393,11 @@ def convert_gemma4_vision_config(
     attn_implementation: str | None = None,
     layer_offload_config=None,
     layer_compile_config=None,
-) -> CornstarchVisionEncoder:
+) -> CornstarchEncoder:
     """Convert a Gemma4 vision config into a Cornstarch vision encoder."""
     with torch.device("meta"):
         hf_model = Gemma4VisionModel(copy.deepcopy(config))
-    return CornstarchVisionEncoder(
+    return CornstarchEncoder(
         config,
         pre_encoder={
             "patch_embedder": hf_model.patch_embedder,
@@ -426,11 +424,11 @@ def convert_gemma4_audio_config(
     attn_implementation: str | None = None,
     layer_offload_config=None,
     layer_compile_config=None,
-) -> CornstarchAudioEncoder:
+) -> CornstarchEncoder:
     """Convert a Gemma4 audio config into a Cornstarch audio encoder."""
     with torch.device("meta"):
         hf_model = Gemma4AudioModel(copy.deepcopy(config))
-    return CornstarchAudioEncoder(
+    return CornstarchEncoder(
         config,
         pre_encoder={
             "subsample_conv_projection": hf_model.subsample_conv_projection,

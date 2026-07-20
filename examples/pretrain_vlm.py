@@ -19,10 +19,9 @@ from transformers import (
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from common import (
+from .common import (
     DTYPE,
     IMAGE_TOKEN,
-    build_modality_encoder,
     clip_vision_sequence_length,
     configure_special_tokens,
     expand_modality_tokens,
@@ -36,15 +35,18 @@ from cornstarch.models import (
     CornstarchExecutionPlan,
     CornstarchLanguageModel,
     CornstarchModalityEncoder,
-    from_hf_config,
     RepeatedLayerCompileConfig,
+    build_modality_encoder,
+    from_hf_config,
 )
 
 
 class FakeDataset(Dataset):
     def __init__(self, image_size: tuple[int, int]) -> None:
         self.image = generate_random_image(image_size)
-        self.text = IMAGE_TOKEN + " text" * 2048
+        # Keep the example below the tiny default LLM's context window after the
+        # single placeholder expands to one token per vision feature row.
+        self.text = IMAGE_TOKEN + " text" * 128
 
     def __len__(self) -> int:
         return 65536
@@ -55,7 +57,7 @@ class FakeDataset(Dataset):
 
 
 def _collate_vlm(
-    batches: list[dict],
+    batches: list[dict[str, object]],
     image_processor: BaseImageProcessor,
     tokenizer: PreTrainedTokenizerBase,
     image_sequence_length: int,
@@ -100,18 +102,26 @@ def _training_step(
 
 def pretrain(
     vision_encoder_name_or_path: str = "openai/clip-vit-base-patch32",
-    llm_name_or_path: str = "meta-llama/Llama-3.2-1B-Instruct",
+    llm_name_or_path: str = "hf-internal-testing/tiny-random-LlamaForCausalLM",
     use_layer_offload: bool = False,
     profile_output_path: Path | None = None,
     max_train_steps: int = 10,
 ) -> None:
-    """Randomly initialize a VLM and pretrain it through the new Cornstarch API."""
+    """Randomly initialize a VLM and train it through Cornstarch's DAG API."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("This training example requires a CUDA GPU.")
     torch.cuda.set_device(0)
-    device = torch.device("cuda")
+    device = torch.device("cuda", 0)
     print(f"Pretraining a VLM with {vision_encoder_name_or_path} + {llm_name_or_path}.")
 
     vision_config = vision_config_from_pretrained(vision_encoder_name_or_path)
-    language_config = AutoConfig.from_pretrained(llm_name_or_path)
+    language_root_config = AutoConfig.from_pretrained(llm_name_or_path)
+    language_config = getattr(language_root_config, "text_config", language_root_config)
+    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path, use_fast=True)
+    token_ids = configure_special_tokens(
+        language_config, tokenizer, [IMAGE_TOKEN]
+    )
+    image_token_id = token_ids[IMAGE_TOKEN]
     offload_config = layer_offload_config(use_layer_offload, device)
     compile_config = RepeatedLayerCompileConfig(enabled=False)
 
@@ -135,15 +145,12 @@ def pretrain(
 
     language_model.set_random_init()
     vision_module.set_random_init()
-    language_model.materialize(device).to(dtype=DTYPE)
-    vision_module.materialize(device).to(dtype=DTYPE)
+    language_model.materialize(device, dtype=DTYPE)
+    vision_module.materialize(device, dtype=DTYPE)
     language_model.train()
     vision_module.train()
 
     image_processor = AutoImageProcessor.from_pretrained(vision_encoder_name_or_path)
-    tokenizer = AutoTokenizer.from_pretrained(llm_name_or_path, use_fast=True)
-    token_ids = configure_special_tokens(tokenizer, [IMAGE_TOKEN])
-    image_token_id = token_ids[IMAGE_TOKEN]
     image_sequence_length = clip_vision_sequence_length(vision_encoder.config)
 
     dataset = FakeDataset(image_size=(720, 480))
@@ -160,7 +167,10 @@ def pretrain(
     )
 
     optimizer = Adam(
-        param for param in list(language_model.parameters()) + list(vision_module.parameters())
+        param
+        for param in (
+            list(language_model.parameters()) + list(vision_module.parameters())
+        )
         if param.requires_grad
     )
     optimizer.zero_grad()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import logging
 import warnings
 from collections.abc import Iterable
 from pathlib import Path
@@ -9,7 +8,7 @@ from typing import Any, Callable, Mapping
 
 import torch
 import torch.nn as nn
-from safetensors.torch import load_file
+from safetensors import safe_open
 from transformers import PretrainedConfig, PreTrainedModel
 
 from cornstarch.models.kernel_provider import get_hf_kernel
@@ -17,9 +16,6 @@ from cornstarch.models.lazy_init import InitializationPlan
 from cornstarch.models.layer_compile import RepeatedLayerCompileConfig
 from cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from cornstarch.models.state_mapping import StateDictPrefixMap
-
-_logger = logging.getLogger(__name__)
-
 
 class CornstarchModelBase(nn.Module):
     """Common lifecycle and checkpoint surface for Cornstarch-owned models.
@@ -124,9 +120,9 @@ class CornstarchModelBase(nn.Module):
 
         Exactly one source is used: a pre-loaded Hugging Face ``state_dict``, a
         local safetensors ``checkpoint_path``, or a Hugging Face Hub
-        ``model_name_or_path`` whose ``*.safetensors`` shards are downloaded and
-        merged at ``materialize()`` time. The same materialize path serves a
-        plain model and a TP/PP-sharded (DTensor) one.
+        ``model_name_or_path``. Safetensors are opened lazily at
+        ``materialize()`` time: a PP stage reads only its global layer keys, and
+        TP moves only this rank's tensor slices to the target device.
         """
         if state_dict is not None:
             state_dict = self._state_mapper.hf_to_cornstarch_state_dict(state_dict)
@@ -153,7 +149,7 @@ class CornstarchModelBase(nn.Module):
 
         device = torch.device(device)
         if self._init_plan.mode == "checkpoint":
-            state_dict = self._load_checkpoint_state_dict(device, dtype)
+            state_dict = self._load_checkpoint_state_dict()
             self._load_checkpoint_into_model(state_dict, device, dtype)
             self._copy_deterministic_meta_buffers(device)
         elif self._init_plan.mode == "random":
@@ -239,26 +235,44 @@ class CornstarchModelBase(nn.Module):
         super().train(mode)
         return self
 
-    @staticmethod
-    def _offload_module_list_to_cpu(
-        layers: nn.ModuleList, layer_indices: Iterable[int] | None = None
+    def offload_layers_to_cpu(
+        self, layer_indices: Iterable[int] | None = None
     ) -> None:
-        """Move selected repeated layers to CPU without touching non-layer modules."""
+        """Move selected repeated layers to CPU without family-specific code.
+
+        Every unified Cornstarch transformer exposes exactly one repeated stack
+        through ``_section_names``. Memory policy operates on that structural
+        contract; it never needs to know whether the source checkpoint was
+        Llama, CLIP, Whisper, or another Hugging Face family.
+        """
+        layers = self._repeated_layers()
         indices = range(len(layers)) if layer_indices is None else layer_indices
         for index in indices:
             layer = layers[index]
             if not any(param.is_meta for param in layer.parameters(recurse=True)):
                 layer.to("cpu")
 
-    @staticmethod
-    def _materialize_module_list(layers: nn.ModuleList, device: torch.device) -> None:
-        """Allocate or move repeated layers onto the requested device."""
-        for layer in layers:
-            tensors = list(layer.parameters(recurse=True)) + list(layer.buffers(recurse=True))
+    def materialize_layers(self, device: str | torch.device) -> None:
+        """Allocate or move the unified repeated stack onto ``device``."""
+        if self.uses_layer_offload:
+            assert self.layer_offload_config is not None
+            device = self.layer_offload_config.cpu_torch_device
+        device = torch.device(device)
+        for layer in self._repeated_layers():
+            tensors = list(layer.parameters(recurse=True)) + list(
+                layer.buffers(recurse=True)
+            )
             if any(tensor.is_meta for tensor in tensors):
                 layer.to_empty(device=device)
             else:
                 layer.to(device)
+
+    def _repeated_layers(self) -> nn.ModuleList:
+        """Return the repeated section shared by lifecycle and parallelism."""
+        layers = getattr(self, self._section_names()[1])
+        if not isinstance(layers, nn.ModuleList):
+            raise TypeError("A Cornstarch repeated section must be an nn.ModuleList.")
+        return layers
 
     def _is_meta(self) -> bool:
         """Return whether any registered tensor still lives on the meta device."""
@@ -288,8 +302,8 @@ class CornstarchModelBase(nn.Module):
         return requested_device
 
     def _repeated_layer_module_names(self) -> tuple[str, ...]:
-        """Return root module names that contain independently scheduled layers."""
-        return ()
+        """Return the unified repeated-section name for device placement."""
+        return (self._section_names()[1],)
 
     def _section_names(self) -> tuple[str, str, str]:
         """Return ``(pre_section, repeated_layers, post_section)`` attribute names.
@@ -305,61 +319,89 @@ class CornstarchModelBase(nn.Module):
             f"distributed parallelism."
         )
 
-    def _load_checkpoint_state_dict(
-        self, device: torch.device, dtype: torch.dtype | None = None
-    ) -> Mapping[str, torch.Tensor]:
-        """Load staged checkpoint tensors onto the materialization device.
+    def _load_checkpoint_state_dict(self) -> Mapping[str, torch.Tensor]:
+        """Read only tensors owned by this PP stage, keyed by local model name.
 
-        Resolves the configured checkpoint source (a pre-mapped ``state_dict``, a
-        local safetensors ``checkpoint_path``, or a Hugging Face Hub
-        ``model_name_or_path``), translates Hugging Face keys to Cornstarch keys,
-        and moves the tensors onto the materialization device (in ``dtype`` for
-        floating-point tensors). The returned state dict holds *full* (non-DTensor)
-        tensors; sharding for parallelized models happens in
-        ``_load_checkpoint_into_model``.
+        Checkpoint files use global Hugging Face layer indices, while PP slices
+        the repeated ``ModuleList`` and renumbers it from zero.  Build the exact
+        local-to-global key map from the already-parallelized meta model before
+        touching storage.  TP slicing happens in ``_load_checkpoint_into_model``
+        so a full source tensor may exist briefly on CPU, but never on every
+        rank's accelerator.
+
+        Device and dtype placement is intentionally deferred until rank
+        ownership is known.
         """
+        local_to_global = {
+            local_key: self._global_cornstarch_key(local_key)
+            for local_key in self.state_dict()
+        }
         if self._init_plan.state_dict is not None:
-            return {
-                key: tensor.to(
-                    device=self._materialization_device_for_tensor(key, device),
-                    dtype=dtype if dtype is not None and tensor.is_floating_point() else None,
-                    non_blocking=True,
-                )
-                for key, tensor in self._init_plan.state_dict.items()
-            }
+            source = self._init_plan.state_dict
+            return self._select_checkpoint_tensors(source, local_to_global)
 
         if self._init_plan.model_name_or_path is not None:
-            raw = self._download_and_load_safetensors(
-                self._init_plan.model_name_or_path, device
+            hf_to_local = {
+                self._state_mapper.cornstarch_to_hf_key(global_key): local_key
+                for local_key, global_key in local_to_global.items()
+            }
+            return self._download_and_load_safetensors(
+                self._init_plan.model_name_or_path, hf_to_local
             )
-        elif self._init_plan.checkpoint_path is not None:
-            checkpoint_device = "cpu" if self.uses_layer_offload else str(device)
-            raw = load_file(str(self._init_plan.checkpoint_path), device=checkpoint_device)
-        else:
-            raise RuntimeError(
-                "Checkpoint initialization requires a state_dict, checkpoint_path, "
-                "or model_name_or_path."
+        if self._init_plan.checkpoint_path is not None:
+            hf_to_local = {
+                self._state_mapper.cornstarch_to_hf_key(global_key): local_key
+                for local_key, global_key in local_to_global.items()
+            }
+            return self._read_safetensors(
+                str(self._init_plan.checkpoint_path), hf_to_local
             )
+        raise RuntimeError(
+            "Checkpoint initialization requires a state_dict, checkpoint_path, "
+            "or model_name_or_path."
+        )
 
-        state_dict = self._state_mapper.hf_to_cornstarch_state_dict(raw)
+    @staticmethod
+    def _select_checkpoint_tensors(
+        source: Mapping[str, torch.Tensor],
+        local_to_source: Mapping[str, str],
+    ) -> dict[str, torch.Tensor]:
+        """Select a rank's local keys from an already-loaded checkpoint."""
+        missing = [
+            source_key
+            for source_key in local_to_source.values()
+            if source_key not in source
+        ]
+        if missing:
+            raise RuntimeError(f"Checkpoint is missing tensors: {missing[:5]}")
         return {
-            key: tensor.to(
-                device=self._materialization_device_for_tensor(key, device),
-                dtype=dtype if dtype is not None and tensor.is_floating_point() else None,
-                non_blocking=True,
-            )
-            for key, tensor in state_dict.items()
+            local_key: source[source_key]
+            for local_key, source_key in local_to_source.items()
         }
 
     @staticmethod
-    def _download_and_load_safetensors(
-        model_name_or_path: str, device: torch.device
+    def _read_safetensors(
+        path: str, source_to_local: Mapping[str, str]
     ) -> dict[str, torch.Tensor]:
-        """Download and merge all ``*.safetensors`` shards from the HF Hub.
+        """Read requested tensors from one safetensors file onto CPU."""
+        tensors: dict[str, torch.Tensor] = {}
+        with safe_open(path, framework="pt", device="cpu") as checkpoint:
+            available = set(checkpoint.keys())
+            for source_key, local_key in source_to_local.items():
+                if source_key in available:
+                    tensors[local_key] = checkpoint.get_tensor(source_key)
+        return tensors
 
-        Lists the repository's safetensors siblings, downloads each shard, and
-        merges them into a single Hugging Face-keyed state dict on the
-        materialization device (CPU when the requested device is ``meta``).
+    @staticmethod
+    def _download_and_load_safetensors(
+        model_name_or_path: str,
+        source_to_local: Mapping[str, str],
+    ) -> dict[str, torch.Tensor]:
+        """Download HF shards as needed and read only locally-owned tensors.
+
+        Files may still enter the shared Hub cache, but tensors not owned by this
+        PP stage are never materialized.  Reading on CPU also lets TP take its
+        local slice before transferring anything to the accelerator.
         """
         from huggingface_hub import HfApi, hf_hub_download
 
@@ -375,12 +417,21 @@ class CornstarchModelBase(nn.Module):
                 f"No .safetensors files found in '{model_name_or_path}'."
             )
 
-        load_device = "cpu" if device.type == "meta" else str(device)
-        merged: dict[str, torch.Tensor] = {}
+        selected: dict[str, torch.Tensor] = {}
         for filename in safetensor_files:
             local_path = hf_hub_download(model_name_or_path, filename)
-            merged.update(load_file(local_path, device=load_device))
-        return merged
+            remaining = {
+                source_key: local_key
+                for source_key, local_key in source_to_local.items()
+                if local_key not in selected
+            }
+            selected.update(CornstarchModelBase._read_safetensors(local_path, remaining))
+            if len(selected) == len(source_to_local):
+                break
+        missing = sorted(set(source_to_local.values()) - set(selected))
+        if missing:
+            raise RuntimeError(f"Checkpoint is missing tensors: {missing[:5]}")
+        return selected
 
     def _load_checkpoint_into_model(
         self,
@@ -395,37 +446,40 @@ class CornstarchModelBase(nn.Module):
         DTensor sharding specs on the meta parameters; a strict ``assign``-load of
         a *full* tensor would drop that wrapping and leave every rank with the
         whole weight. Instead each DTensor-owning module is materialized first via
-        ``to_empty`` (which preserves the sharding spec), then the
-        correctly-sharded slice of each full checkpoint tensor is copied in with
-        ``distribute_tensor``. The remaining plain params (and any persistent
+        ``to_empty`` (which preserves the sharding spec), then this rank's slice
+        is derived on CPU and only that slice is copied to the target device. The
+        remaining plain params (and any persistent
         buffers carried in the checkpoint) are ``assign``-loaded; non-persistent
         deterministic buffers are intentionally left meta so the caller's
         ``_copy_deterministic_meta_buffers`` can fill them just as on the plain
         path.
         """
-        from torch.distributed.tensor import DTensor, distribute_tensor
+        from torch.distributed.tensor import DTensor
 
         params = dict(self.named_parameters(remove_duplicate=False))
         local_specs: dict[str, tuple] = getattr(
             self, "_local_tp_shard_specs", {}
         )
-        # Preserve named_parameters() order: distribute_tensor() runs a collective
-        # and every rank must issue the calls in the same order.
         dtensor_keys = [
             name for name, param in params.items()
             if isinstance(param.data, DTensor)
         ]
         local_keys = [name for name in params if name in local_specs]
         if not dtensor_keys and not local_keys:
-            self.load_state_dict(state_dict, strict=True, assign=True)
+            local_state = {
+                key: self._move_checkpoint_tensor(key, tensor, device, dtype)
+                for key, tensor in state_dict.items()
+            }
+            self.load_state_dict(local_state, strict=True, assign=True)
             return
 
         dtensor_key_set = set(dtensor_keys)
         with torch.no_grad():
-            # Materialize each DTensor-owning module so to_empty keeps its
-            # sharding spec, then copy this rank's distribute_tensor() slice in.
-            for key in dtensor_keys:
-                module_path = key.rpartition(".")[0]
+            # ``to_empty`` preserves the DTensor wrapper. Deduplicate module
+            # paths before copying: calling it twice on one module would erase
+            # a parameter copied by an earlier iteration.
+            module_paths = dict.fromkeys(key.rpartition(".")[0] for key in dtensor_keys)
+            for module_path in module_paths:
                 module = self.get_submodule(module_path) if module_path else self
                 module.to_empty(
                     device=self._materialization_device_for_tensor(module_path, device)
@@ -434,33 +488,59 @@ class CornstarchModelBase(nn.Module):
                     module.to(dtype=dtype)
             for key in dtensor_keys:
                 target = params[key]
-                sharded = distribute_tensor(
+                local = self._local_dtensor_slice(
                     state_dict[key], target.data.device_mesh, target.data.placements
                 )
-                target.data.copy_(sharded)
+                local = self._move_checkpoint_tensor(key, local, device, dtype)
+                target.data.to_local().copy_(local)
             for key in local_keys:
                 full = state_dict[key]
                 local = self._slice_local_tp_tensor(full, local_specs[key])
                 target = params[key]
-                local = local.to(
-                    device=self._materialization_device_for_tensor(key, device),
-                    dtype=(
-                        dtype
-                        if dtype is not None and local.is_floating_point()
-                        else local.dtype
-                    ),
-                )
+                local = self._move_checkpoint_tensor(key, local, device, dtype)
                 self._set_tensor(key, local, target.requires_grad)
 
-        # Assign the remaining plain params and persistent buffers; the DTensor
-        # keys were just handled and the deterministic buffers stay meta.
+        # Assign remaining plain parameters and persistent buffers. DTensor and
+        # manual fused-section keys were installed above; deterministic,
+        # non-persistent buffers remain meta for reconstruction by the caller.
         distributed_key_set = dtensor_key_set | set(local_keys)
         remaining = {
-            key: value
+            key: self._move_checkpoint_tensor(key, value, device, dtype)
             for key, value in state_dict.items()
             if key not in distributed_key_set
         }
         self.load_state_dict(remaining, strict=False, assign=True)
+
+    def _move_checkpoint_tensor(
+        self,
+        key: str,
+        tensor: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype | None,
+    ) -> torch.Tensor:
+        """Move one already-selected local tensor to its owning device."""
+        return tensor.to(
+            device=self._materialization_device_for_tensor(key, device),
+            dtype=dtype if dtype is not None and tensor.is_floating_point() else None,
+            non_blocking=True,
+        )
+
+    @staticmethod
+    def _local_dtensor_slice(tensor: torch.Tensor, mesh, placements) -> torch.Tensor:
+        """Derive a DTensor rank's local shard without a full-device collective."""
+        from torch.distributed.tensor.placement_types import Replicate, Shard
+
+        local = tensor
+        for mesh_dim, placement in enumerate(placements):
+            if isinstance(placement, Replicate):
+                continue
+            if not isinstance(placement, Shard):
+                raise NotImplementedError(
+                    f"Checkpoint loading does not support {placement!r} placement."
+                )
+            rank = mesh.get_local_rank(mesh_dim)
+            local = local.chunk(mesh.size(mesh_dim), dim=placement.dim)[rank]
+        return local.contiguous()
 
     @staticmethod
     def _slice_local_tp_tensor(tensor: torch.Tensor, spec: tuple) -> torch.Tensor:
@@ -577,56 +657,90 @@ class CornstarchModelBase(nn.Module):
         for hf_prefix, cornstarch_prefix in self._state_mapper.pairs:
             hf_path = hf_prefix.rstrip(".")
             cs_path = cornstarch_prefix.rstrip(".")
-            if not hf_path or not cs_path:
+            cs_module = self._constant_parameter_module(hf_model, hf_path, cs_path)
+            if cs_module is None:
                 continue
-            try:
-                hf_model.get_submodule(hf_path)  # existence check
-                cs_module = self.get_submodule(cs_path)
-            except AttributeError:
-                continue
-
-            for rel_name, child in cs_module.named_modules():
-                if hasattr(child, "reset_parameters"):
-                    continue
-                for param_name, param in child.named_parameters(recurse=False):
-                    full_cs = f"{cs_path}.{rel_name}.{param_name}" if rel_name else f"{cs_path}.{param_name}"
-                    source_rel_name = self._global_repeated_layer_name(
-                        cs_path, rel_name
-                    )
-                    full_hf = f"{hf_path}.{source_rel_name}.{param_name}" if source_rel_name else f"{hf_path}.{param_name}"
-                    if full_cs in getattr(self, "_local_tp_shard_specs", {}):
-                        continue
-                    try:
-                        src = hf_model.get_parameter(full_hf)
-                    except AttributeError:
-                        continue
-                    target_device = self._materialization_device_for_tensor(full_cs, device)
-                    replacement = src.to(device=target_device, dtype=target_dtype or src.dtype)
-                    if replacement.shape != param.shape:
-                        tp_size = int(
-                            getattr(child, "_cornstarch_tp_size", 1)
-                        )
-                        tp_rank = int(
-                            getattr(child, "_cornstarch_tp_rank", 0)
-                        )
-                        if (
-                            tp_size > 1
-                            and replacement.ndim > 0
-                            and replacement.shape[0] % tp_size == 0
-                            and replacement.shape[1:] == param.shape[1:]
-                        ):
-                            replacement = replacement.chunk(tp_size, dim=0)[
-                                tp_rank
-                            ].contiguous()
-                        else:
-                            raise RuntimeError(
-                                f"Cannot copy constant parameter {full_hf!r} with "
-                                f"shape {tuple(replacement.shape)} into distributed "
-                                f"shape {tuple(param.shape)}."
-                            )
-                    self._set_tensor(full_cs, replacement, param.requires_grad)
+            self._copy_constant_module_parameters(
+                hf_model, cs_module, hf_path, cs_path, device, target_dtype
+            )
 
         del hf_model
+
+    def _constant_parameter_module(
+        self, hf_model: nn.Module, hf_path: str, cs_path: str
+    ) -> nn.Module | None:
+        """Resolve one mapped module pair, ignoring absent compatibility paths."""
+        if not hf_path or not cs_path:
+            return None
+        try:
+            hf_model.get_submodule(hf_path)
+            return self.get_submodule(cs_path)
+        except AttributeError:
+            return None
+
+    def _copy_constant_module_parameters(
+        self,
+        hf_model: nn.Module,
+        cs_module: nn.Module,
+        hf_path: str,
+        cs_path: str,
+        device: torch.device,
+        dtype: torch.dtype | None,
+    ) -> None:
+        """Copy constant-initialized leaves below one mapped model section."""
+        local_specs = getattr(self, "_local_tp_shard_specs", {})
+        for rel_name, child in cs_module.named_modules():
+            if hasattr(child, "reset_parameters"):
+                continue
+            source_rel = self._global_repeated_layer_name(cs_path, rel_name)
+            for param_name, param in child.named_parameters(recurse=False):
+                local_key = self._join_parameter_path(cs_path, rel_name, param_name)
+                if local_key in local_specs:
+                    continue
+                source_key = self._join_parameter_path(
+                    hf_path, source_rel, param_name
+                )
+                try:
+                    source = hf_model.get_parameter(source_key)
+                except AttributeError:
+                    continue
+                replacement = source.to(
+                    device=self._materialization_device_for_tensor(local_key, device),
+                    dtype=dtype or source.dtype,
+                )
+                replacement = self._fit_constant_parameter(
+                    replacement, param, child, source_key
+                )
+                self._set_tensor(local_key, replacement, param.requires_grad)
+
+    @staticmethod
+    def _join_parameter_path(root: str, relative: str, parameter: str) -> str:
+        return f"{root}.{relative}.{parameter}" if relative else f"{root}.{parameter}"
+
+    @staticmethod
+    def _fit_constant_parameter(
+        replacement: torch.Tensor,
+        target: nn.Parameter,
+        owner: nn.Module,
+        source_key: str,
+    ) -> torch.Tensor:
+        """Fit a constant source to a manually row-sharded parameter shape."""
+        if replacement.shape == target.shape:
+            return replacement
+        tp_size = int(getattr(owner, "_cornstarch_tp_size", 1))
+        tp_rank = int(getattr(owner, "_cornstarch_tp_rank", 0))
+        can_shard_rows = (
+            tp_size > 1
+            and replacement.ndim > 0
+            and replacement.shape[0] % tp_size == 0
+            and replacement.shape[1:] == target.shape[1:]
+        )
+        if can_shard_rows:
+            return replacement.chunk(tp_size, dim=0)[tp_rank].contiguous()
+        raise RuntimeError(
+            f"Cannot copy constant parameter {source_key!r} with shape "
+            f"{tuple(replacement.shape)} into distributed shape {tuple(target.shape)}."
+        )
 
     def _copy_local_tp_parameters(
         self, device: torch.device, dtype: torch.dtype | None
@@ -672,6 +786,17 @@ class CornstarchModelBase(nn.Module):
             return name
         global_index = int(first) + int(getattr(self, "_pipeline_layer_offset", 0))
         return f"{global_index}.{remainder}" if separator else str(global_index)
+
+    def _global_cornstarch_key(self, local_key: str) -> str:
+        """Map a PP-local state key back to the global Cornstarch topology."""
+        _, layers_name, _ = self._section_names()
+        prefix = f"{layers_name}."
+        if not local_key.startswith(prefix):
+            return local_key
+        suffix = self._global_repeated_layer_name(
+            layers_name, local_key[len(prefix):]
+        )
+        return f"{prefix}{suffix}"
 
     def _materialize_empty(
         self, device: torch.device, dtype: torch.dtype | None = None

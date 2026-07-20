@@ -62,6 +62,21 @@ class GatedDeltaCPMetadata:
         return tuple(run for run in self.runs if run.rank == rank)
 
 
+@dataclass
+class _RunDraft:
+    """Mutable run used only while predecessor links are being assembled."""
+
+    rank: int
+    batch_index: int
+    document_id: int
+    local_start: int
+    length: int
+    global_start: int
+    global_end: int
+    predecessor: int | None = None
+    successor: int | None = None
+
+
 def build_gated_delta_metadata(
     offsets_per_rank: Sequence[torch.Tensor],
     attention_mask: torch.Tensor,
@@ -74,36 +89,73 @@ def build_gated_delta_metadata(
     one document and the 2-D attention mask identifies padding.  Explicit IDs
     allow packed samples to reset both the recurrence and causal convolution.
     """
+    batch, seq_len = _validate_gated_delta_inputs(attention_mask, document_ids)
+    document_ids = _normalize_document_ids(attention_mask, document_ids)
+    offsets = _normalize_offsets(offsets_per_rank, seq_len)
+    drafts = _find_gated_delta_runs(offsets, document_ids, batch)
+    _link_gated_delta_runs(drafts)
+    return GatedDeltaCPMetadata(
+        offsets_per_rank=offsets,
+        document_ids=document_ids,
+        runs=tuple(
+            GatedDeltaRun(index=index, **vars(draft))
+            for index, draft in enumerate(drafts)
+        ),
+    )
+
+
+def _validate_gated_delta_inputs(
+    attention_mask: torch.Tensor,
+    document_ids: torch.Tensor | None,
+) -> tuple[int, int]:
     if attention_mask.ndim != 2:
         raise ValueError(
             "Gated DeltaNet CP requires a 2-D padding/document mask; "
             f"got shape {tuple(attention_mask.shape)}."
         )
     batch, seq_len = attention_mask.shape
+    if document_ids is not None and document_ids.shape != (batch, seq_len):
+        raise ValueError(
+            "document_ids must match the unsplit attention mask shape; "
+            f"got {tuple(document_ids.shape)} and {(batch, seq_len)}."
+        )
+    return batch, seq_len
+
+
+def _normalize_document_ids(
+    attention_mask: torch.Tensor,
+    document_ids: torch.Tensor | None,
+) -> torch.Tensor:
     if document_ids is None:
         document_ids = torch.where(
             attention_mask.to(dtype=torch.bool),
             torch.zeros_like(attention_mask, dtype=torch.long),
             torch.full_like(attention_mask, -1, dtype=torch.long),
         )
-    if document_ids.shape != (batch, seq_len):
-        raise ValueError(
-            "document_ids must match the unsplit attention mask shape; "
-            f"got {tuple(document_ids.shape)} and {(batch, seq_len)}."
-        )
-    document_ids = document_ids.detach().to(device="cpu", dtype=torch.long)
+    return document_ids.detach().to(device="cpu", dtype=torch.long)
+
+
+def _normalize_offsets(
+    offsets_per_rank: Sequence[torch.Tensor], seq_len: int
+) -> tuple[torch.Tensor, ...]:
     offsets = tuple(
         value.detach().to(device="cpu", dtype=torch.long).contiguous()
         for value in offsets_per_rank
     )
-    if offsets:
-        all_offsets = torch.cat(offsets)
-        if sorted(all_offsets.tolist()) != list(range(seq_len)):
-            raise ValueError(
-                "CP splitter offsets must assign every global token exactly once."
-            )
+    if offsets and sorted(torch.cat(offsets).tolist()) != list(range(seq_len)):
+        raise ValueError(
+            "CP splitter offsets must assign every global token exactly once."
+        )
+    return offsets
 
-    provisional: list[dict[str, int | None]] = []
+
+def _find_gated_delta_runs(
+    offsets: tuple[torch.Tensor, ...],
+    document_ids: torch.Tensor,
+    batch: int,
+) -> list[_RunDraft]:
+    """Scan each rank's ordered offsets into maximal document-local runs."""
+    drafts: list[_RunDraft] = []
     for batch_index in range(batch):
         for rank, rank_offsets in enumerate(offsets):
             values = rank_offsets.tolist()
@@ -124,47 +176,33 @@ def build_gated_delta_metadata(
                     ):
                         break
                     end += 1
-                provisional.append(
-                    {
-                        "rank": rank,
-                        "batch_index": batch_index,
-                        "document_id": document_id,
-                        "local_start": local_index,
-                        "length": end - local_index,
-                        "global_start": global_start,
-                        "global_end": values[end - 1] + 1,
-                        "predecessor": None,
-                        "successor": None,
-                    }
+                drafts.append(
+                    _RunDraft(
+                        rank=rank,
+                        batch_index=batch_index,
+                        document_id=document_id,
+                        local_start=local_index,
+                        length=end - local_index,
+                        global_start=global_start,
+                        global_end=values[end - 1] + 1,
+                    )
                 )
                 local_index = end
+    return drafts
 
-    provisional.sort(
-        key=lambda run: (
-            int(run["batch_index"]),
-            int(run["document_id"]),
-            int(run["global_start"]),
-        )
-    )
-    for index, run in enumerate(provisional):
-        if index > 0:
-            previous = provisional[index - 1]
-            same_document = (
-                previous["batch_index"] == run["batch_index"]
-                and previous["document_id"] == run["document_id"]
-            )
-            if same_document:
-                run["predecessor"] = index - 1
-                previous["successor"] = index
 
-    return GatedDeltaCPMetadata(
-        offsets_per_rank=offsets,
-        document_ids=document_ids,
-        runs=tuple(
-            GatedDeltaRun(index=index, **run)  # type: ignore[arg-type]
-            for index, run in enumerate(provisional)
-        ),
+def _link_gated_delta_runs(drafts: list[_RunDraft]) -> None:
+    """Order drafts globally and connect consecutive runs of one document."""
+    drafts.sort(
+        key=lambda run: (run.batch_index, run.document_id, run.global_start)
     )
+    for index, (previous, run) in enumerate(zip(drafts, drafts[1:]), start=1):
+        if (
+            previous.batch_index == run.batch_index
+            and previous.document_id == run.document_id
+        ):
+            run.predecessor = index - 1
+            previous.successor = index
 
 
 def validate_gated_delta_backend(linear_attn: torch.nn.Module) -> None:
