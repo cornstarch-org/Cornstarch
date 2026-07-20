@@ -240,6 +240,43 @@ def _gemma4_audio_inputs(config: PretrainedConfig) -> dict[str, object]:
     }
 
 
+def test_qwen3_5_moe_router_outputs_aux_loss_and_gradient_match_hf() -> None:
+    """Cornstarch retains the router tensors discarded by the reused decoder."""
+    torch.manual_seed(31)
+    config = qwen3_5_moe_config()
+    config.router_aux_loss_coef = 0.07
+    hf_model = Qwen3_5MoeForCausalLM(config)
+    model = from_hf_config(config, model_kind="language", attn_implementation="eager")
+    model.set_checkpoint_init(state_dict=hf_model.state_dict())
+    model.materialize("cpu")
+    input_ids = torch.arange(16).reshape(2, 8) % config.vocab_size
+    kwargs = {
+        "input_ids": input_ids,
+        "labels": input_ids.clone(),
+        "output_router_logits": True,
+    }
+    hf_output = hf_model(**kwargs)
+    output = model(**kwargs)
+    torch.testing.assert_close(output.logits, hf_output.logits, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(output.aux_loss, hf_output.aux_loss, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(output.loss, hf_output.loss, atol=1e-5, rtol=1e-5)
+    assert output.router_logits is not None
+    assert len(output.router_logits) == config.num_hidden_layers
+    for actual, expected in zip(
+        output.router_logits, hf_output.router_logits, strict=True
+    ):
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+    output.loss.backward()
+    hf_output.loss.backward()
+    torch.testing.assert_close(
+        model.decoder_layers[0].mlp.gate.weight.grad,
+        hf_model.model.layers[0].mlp.gate.weight.grad,
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+
 MODEL_CASES = [
     pytest.param(
         llama_config,

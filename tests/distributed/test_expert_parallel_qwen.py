@@ -21,6 +21,9 @@ from tests.model.model_configs import qwen3_5_moe_config
 from cornstarch.distributed.data_parallel import GradientSynchronizer
 from cornstarch.distributed.expert_parallel import apply_expert_parallel
 from cornstarch.models import from_hf_config
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeForCausalLM,
+)
 
 
 VOCAB_SIZE = 64
@@ -130,6 +133,53 @@ class TestQwenBatchedExpertParallel(GlooDistributedTestBase):
         dist.all_gather(gathered, router_grad.contiguous())
         for other in gathered:
             self.assertTrue(torch.allclose(other, router_grad, atol=1e-5))
+
+
+class TestQwenRouterAuxDataParallel(GlooDistributedTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def test_global_aux_loss_and_router_gradient_match_hf(self):
+        """DP ranks reduce sufficient token statistics, not router activations."""
+        config = qwen3_5_moe_config()
+        config.vocab_size = VOCAB_SIZE
+        config.router_aux_loss_coef = 0.03
+        torch.manual_seed(19)
+        hf_model = Qwen3_5MoeForCausalLM(config)
+        model = from_hf_config(
+            config, model_kind="language", attn_implementation="eager"
+        )
+        model.set_checkpoint_init(state_dict=hf_model.state_dict())
+        model.materialize("cpu")
+        model._dp_group = dist.group.WORLD
+
+        generator = torch.Generator().manual_seed(991)
+        full_ids = torch.randint(
+            0, VOCAB_SIZE, (4, 8), generator=generator
+        )
+        local_ids = full_ids.chunk(self.world_size, dim=0)[dist.get_rank()]
+        hf_output = hf_model(
+            input_ids=full_ids, output_router_logits=True
+        )
+        output = model(
+            input_ids=local_ids, output_router_logits=True
+        )
+        torch.testing.assert_close(
+            output.aux_loss, hf_output.aux_loss, atol=1e-5, rtol=1e-5
+        )
+
+        output.aux_loss.backward()
+        synchronizer = GradientSynchronizer(dist.group.WORLD)
+        synchronizer.register(model)
+        synchronizer.sync()
+        hf_output.aux_loss.backward()
+        torch.testing.assert_close(
+            model.decoder_layers[0].mlp.gate.weight.grad,
+            hf_model.model.layers[0].mlp.gate.weight.grad,
+            atol=1e-5,
+            rtol=1e-5,
+        )
 
 
 if __name__ == "__main__":

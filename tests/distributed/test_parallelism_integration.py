@@ -61,13 +61,11 @@ def _name(combo: tuple[int, int, int, int, int]) -> str:
 
 
 def _moe_config() -> Qwen3_5MoeTextConfig:
-    """A tiny Qwen3.5-MoE config with only full-attention layers.
+    """A tiny hybrid Qwen3.5-MoE config (full attention followed by GDN).
 
-    The gated-delta-net *linear*-attention layer produces NaNs when isolated as
-    a pipeline boundary stage (a pre-existing model/PP interaction, tracked in
-    tasks/backlog.md). Using full-attention layers keeps EP-with-PP composition
-    testable; linear-attention EP (without PP) is covered by
-    ``test_expert_parallel_qwen``.
+    With two PP stages this intentionally leaves the linear-attention layer by
+    itself on the final stage, preserving the original NaN reproducer as an
+    always-on integration regression.
     """
     return Qwen3_5MoeTextConfig(
         vocab_size=VOCAB,
@@ -80,7 +78,7 @@ def _moe_config() -> Qwen3_5MoeTextConfig:
         shared_expert_intermediate_size=8,
         num_experts=4,
         num_experts_per_tok=2,
-        layer_types=["full_attention", "full_attention"],
+        layer_types=["full_attention", "linear_attention"],
         linear_key_head_dim=4,
         linear_value_head_dim=4,
         linear_num_key_heads=2,

@@ -12,13 +12,13 @@ import torch.nn as nn
 from safetensors.torch import load_file
 from transformers import PretrainedConfig, PreTrainedModel
 
-_logger = logging.getLogger(__name__)
-
 from cornstarch.models.kernel_provider import get_hf_kernel
 from cornstarch.models.lazy_init import InitializationPlan
 from cornstarch.models.layer_compile import RepeatedLayerCompileConfig
 from cornstarch.models.layer_offload import RepeatedLayerOffloadConfig
 from cornstarch.models.state_mapping import StateDictPrefixMap
+
+_logger = logging.getLogger(__name__)
 
 
 class CornstarchModelBase(nn.Module):
@@ -160,6 +160,7 @@ class CornstarchModelBase(nn.Module):
             self._copy_deterministic_meta_buffers(device)
             self._materialize_empty(device, dtype)
             self._random_initialize()
+            self._copy_local_tp_parameters(device, dtype)
             self._copy_constant_parameters(device, dtype)
         elif self._init_plan.mode == "empty":
             self._copy_deterministic_meta_buffers(device)
@@ -405,13 +406,17 @@ class CornstarchModelBase(nn.Module):
         from torch.distributed.tensor import DTensor, distribute_tensor
 
         params = dict(self.named_parameters(remove_duplicate=False))
+        local_specs: dict[str, tuple] = getattr(
+            self, "_local_tp_shard_specs", {}
+        )
         # Preserve named_parameters() order: distribute_tensor() runs a collective
         # and every rank must issue the calls in the same order.
         dtensor_keys = [
             name for name, param in params.items()
             if isinstance(param.data, DTensor)
         ]
-        if not dtensor_keys:
+        local_keys = [name for name in params if name in local_specs]
+        if not dtensor_keys and not local_keys:
             self.load_state_dict(state_dict, strict=True, assign=True)
             return
 
@@ -433,13 +438,45 @@ class CornstarchModelBase(nn.Module):
                     state_dict[key], target.data.device_mesh, target.data.placements
                 )
                 target.data.copy_(sharded)
+            for key in local_keys:
+                full = state_dict[key]
+                local = self._slice_local_tp_tensor(full, local_specs[key])
+                target = params[key]
+                local = local.to(
+                    device=self._materialization_device_for_tensor(key, device),
+                    dtype=(
+                        dtype
+                        if dtype is not None and local.is_floating_point()
+                        else local.dtype
+                    ),
+                )
+                self._set_tensor(key, local, target.requires_grad)
 
         # Assign the remaining plain params and persistent buffers; the DTensor
         # keys were just handled and the deterministic buffers stay meta.
+        distributed_key_set = dtensor_key_set | set(local_keys)
         remaining = {
-            key: value for key, value in state_dict.items() if key not in dtensor_key_set
+            key: value
+            for key, value in state_dict.items()
+            if key not in distributed_key_set
         }
         self.load_state_dict(remaining, strict=False, assign=True)
+
+    @staticmethod
+    def _slice_local_tp_tensor(tensor: torch.Tensor, spec: tuple) -> torch.Tensor:
+        """Apply a recorded non-DTensor TP shard spec to a full HF tensor."""
+        kind, dim, *payload = spec
+        if kind == "chunk":
+            rank, size = payload
+            return tensor.chunk(size, dim=dim)[rank].contiguous()
+        if kind == "sections":
+            section_sizes, rank, size = payload
+            sections = tensor.split(tuple(section_sizes), dim=dim)
+            return torch.cat(
+                [section.chunk(size, dim=dim)[rank] for section in sections],
+                dim=dim,
+            ).contiguous()
+        raise ValueError(f"Unknown local TP shard spec {spec!r}.")
 
     def _copy_deterministic_meta_buffers(self, device: torch.device) -> None:
         """Materialize deterministic helper buffers that are not in checkpoints."""
@@ -501,7 +538,8 @@ class CornstarchModelBase(nn.Module):
         for name, target_buffer in target_module.named_buffers(recurse=True):
             if not target_buffer.is_meta:
                 continue
-            source_buffer = source_module.get_buffer(name)
+            source_name = self._global_repeated_layer_name(target_path, name)
+            source_buffer = source_module.get_buffer(source_name)
             full_name = f"{target_path}.{name}"
             replacement = source_buffer.to(
                 device=self._materialization_device_for_tensor(full_name, device),
@@ -552,16 +590,88 @@ class CornstarchModelBase(nn.Module):
                     continue
                 for param_name, param in child.named_parameters(recurse=False):
                     full_cs = f"{cs_path}.{rel_name}.{param_name}" if rel_name else f"{cs_path}.{param_name}"
-                    full_hf = f"{hf_path}.{rel_name}.{param_name}" if rel_name else f"{hf_path}.{param_name}"
+                    source_rel_name = self._global_repeated_layer_name(
+                        cs_path, rel_name
+                    )
+                    full_hf = f"{hf_path}.{source_rel_name}.{param_name}" if source_rel_name else f"{hf_path}.{param_name}"
+                    if full_cs in getattr(self, "_local_tp_shard_specs", {}):
+                        continue
                     try:
                         src = hf_model.get_parameter(full_hf)
                     except AttributeError:
                         continue
                     target_device = self._materialization_device_for_tensor(full_cs, device)
                     replacement = src.to(device=target_device, dtype=target_dtype or src.dtype)
+                    if replacement.shape != param.shape:
+                        tp_size = int(
+                            getattr(child, "_cornstarch_tp_size", 1)
+                        )
+                        tp_rank = int(
+                            getattr(child, "_cornstarch_tp_rank", 0)
+                        )
+                        if (
+                            tp_size > 1
+                            and replacement.ndim > 0
+                            and replacement.shape[0] % tp_size == 0
+                            and replacement.shape[1:] == param.shape[1:]
+                        ):
+                            replacement = replacement.chunk(tp_size, dim=0)[
+                                tp_rank
+                            ].contiguous()
+                        else:
+                            raise RuntimeError(
+                                f"Cannot copy constant parameter {full_hf!r} with "
+                                f"shape {tuple(replacement.shape)} into distributed "
+                                f"shape {tuple(param.shape)}."
+                            )
                     self._set_tensor(full_cs, replacement, param.requires_grad)
 
         del hf_model
+
+    def _copy_local_tp_parameters(
+        self, device: torch.device, dtype: torch.dtype | None
+    ) -> None:
+        """Initialize manually section-sharded TP tensors from full HF values."""
+        local_specs: dict[str, tuple] = getattr(
+            self, "_local_tp_shard_specs", {}
+        )
+        if not local_specs:
+            return
+        hf_model = self._hf_model_factory(copy.deepcopy(self.hf_config))
+        if dtype is None:
+            hf_model.to(device=device)
+        else:
+            hf_model.to(device=device, dtype=dtype)
+        _, layers_name, _ = self._section_names()
+        for local_name, spec in local_specs.items():
+            source_name = local_name
+            prefix = f"{layers_name}."
+            if local_name.startswith(prefix):
+                suffix = local_name[len(prefix):]
+                source_suffix = self._global_repeated_layer_name(
+                    layers_name, suffix
+                )
+                source_name = f"{prefix}{source_suffix}"
+            hf_name = self._state_mapper.cornstarch_to_hf_key(source_name)
+            source = hf_model.get_parameter(hf_name)
+            local = self._slice_local_tp_tensor(source, spec).to(
+                device=self._materialization_device_for_tensor(local_name, device),
+                dtype=dtype if dtype is not None and source.is_floating_point() else None,
+            )
+            target = self.get_parameter(local_name)
+            self._set_tensor(local_name, local, target.requires_grad)
+        del hf_model
+
+    def _global_repeated_layer_name(self, section_path: str, name: str) -> str:
+        """Translate a PP-local repeated-layer path back to its HF global index."""
+        _, layers_name, _ = self._section_names()
+        if section_path != layers_name or not name:
+            return name
+        first, separator, remainder = name.partition(".")
+        if not first.isdigit():
+            return name
+        global_index = int(first) + int(getattr(self, "_pipeline_layer_offset", 0))
+        return f"{global_index}.{remainder}" if separator else str(global_index)
 
     def _materialize_empty(
         self, device: torch.device, dtype: torch.dtype | None = None
