@@ -1,4 +1,10 @@
-"""Real FLA/NCCL acceptance tests for run-aware Gated DeltaNet CP."""
+"""Real FLA/Gloo acceptance tests for run-aware Gated DeltaNet CP.
+
+The processes share ``cuda:0``.  Gloo carries CUDA tensors directly where the
+backend supports the collective, while :class:`GlooDistributedTestBase`
+provides the repository's CPU bridges for unsupported collectives.  This keeps
+the real FLA kernels in coverage without requiring one GPU per rank.
+"""
 from __future__ import annotations
 
 import unittest
@@ -7,8 +13,6 @@ from importlib import metadata as importlib_metadata
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.testing._internal.common_utils import FILE_SCHEMA
-
 from tests.distributed.distributed_base import GlooDistributedTestBase
 
 from cornstarch.distributed.context_parallel.gated_delta import (
@@ -27,39 +31,19 @@ from cornstarch.distributed.context_parallel.splitters import (
 )
 
 
-def _has_fla_nccl() -> bool:
+def _has_fla_gloo() -> bool:
     try:
         return (
             torch.cuda.is_available()
-            and torch.cuda.device_count() >= 2
+            and torch.cuda.device_count() >= 1
             and importlib_metadata.version("flash-linear-attention") == "0.5.0"
         )
     except importlib_metadata.PackageNotFoundError:
         return False
 
 
-class _NCCLDistributedTestBase(GlooDistributedTestBase):
-    @classmethod
-    def _run(cls, rank: int, test_name: str, file_name: str, pipe, **kwargs) -> None:
-        self = cls(test_name)
-        self.rank = rank
-        self.file_name = file_name
-        torch.cuda.set_device(rank)
-        dist.init_process_group(
-            init_method=f"{FILE_SCHEMA}{file_name}",
-            backend="nccl",
-            world_size=self.world_size,
-            rank=rank,
-        )
-        try:
-            self.reset_seed()
-            self.run_test(test_name, pipe)
-        finally:
-            dist.destroy_process_group()
-
-
-@unittest.skipUnless(_has_fla_nccl(), "requires two CUDA GPUs and FLA 0.5.0")
-class TestGatedDeltaContextParallelNCCL(_NCCLDistributedTestBase):
+@unittest.skipUnless(_has_fla_gloo(), "requires one CUDA GPU and FLA 0.5.0")
+class TestGatedDeltaContextParallelGloo(GlooDistributedTestBase):
     @property
     def world_size(self) -> int:
         return 2
@@ -77,7 +61,7 @@ class TestGatedDeltaContextParallelNCCL(_NCCLDistributedTestBase):
     def _operator_parity(self, splitter, document_ids: torch.Tensor) -> None:
         from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 
-        device = torch.device("cuda", self.rank)
+        device = torch.device("cuda", 0)
         mask = document_ids >= 0
         offsets = tuple(splitter.offsets_for_size(mask.cpu(), self.world_size))
         metadata = build_gated_delta_metadata(
@@ -167,7 +151,7 @@ class TestGatedDeltaContextParallelNCCL(_NCCLDistributedTestBase):
         document_ids = torch.tensor([[0, 0, -1, -1, -1, -1, -1, -1]], device="cuda")
         self._operator_parity(HeadTailContextParallelSplitter(), document_ids)
 
-        device = torch.device("cuda", self.rank)
+        device = torch.device("cuda", 0)
         mask = torch.ones(1, 8, dtype=torch.bool)
         splitter = HeadTailContextParallelSplitter()
         offsets = tuple(splitter.offsets_for_size(mask, self.world_size))
