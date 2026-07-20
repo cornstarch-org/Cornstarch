@@ -28,6 +28,7 @@ from typing import Any, Callable
 import tyro
 
 import torch
+from peft import LoraConfig
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import AutoConfig, get_linear_schedule_with_warmup
@@ -51,7 +52,9 @@ from cornstarch.distributed import (
 from cornstarch.models import (
     CornstarchExecutionPlan,
     ExecutionFuture,
+    FinetuningMode,
     build_modality_encoder,
+    configure_finetuning,
     from_hf_config,
 )
 
@@ -157,6 +160,17 @@ def _training_step(
     return result
 
 
+def _lora_config(mode: FinetuningMode) -> LoraConfig | None:
+    if mode != "lora":
+        return None
+    return LoraConfig(
+        target_modules="all-linear",
+        r=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+    )
+
+
 def pretrain(
     vision_name_or_path: str = "openai/clip-vit-base-patch32",
     llm_name_or_path: str = "hf-internal-testing/tiny-random-LlamaForCausalLM",
@@ -164,6 +178,8 @@ def pretrain(
     llm_pp: int | None = None,
     llm_cp: int = 1,
     dp: int = 1,
+    vision_train_mode: FinetuningMode = "full",
+    llm_train_mode: FinetuningMode = "full",
     batch_size: int = 4,
     seq_len: int = 128,
     num_microbatches: int = 2,
@@ -185,6 +201,16 @@ def pretrain(
 
     language_model.set_random_init()
     modality_encoder.set_random_init()
+    configure_finetuning(
+        modality_encoder,
+        vision_train_mode,
+        lora_config=_lora_config(vision_train_mode),
+    )
+    configure_finetuning(
+        language_model,
+        llm_train_mode,
+        lora_config=_lora_config(llm_train_mode),
+    )
 
     # Per-modality declarative configs. All modules must agree on pipeline
     # parallelism: when ``llm_pp`` is None there is no PP and the encoder + LLM are

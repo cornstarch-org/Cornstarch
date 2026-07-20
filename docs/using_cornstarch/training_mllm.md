@@ -14,8 +14,49 @@ for microbatch in microbatches:
 optimizer.step()
 ```
 
-Modules can be frozen independently with normal `requires_grad_(False)` or by
-choosing which parameters enter the optimizer.
+## Full, frozen, and LoRA fine-tuning
+
+Use the same per-module configuration before local or distributed
+materialization. PEFT adapter injection is deferred automatically for lazy
+Cornstarch models, so checkpoint loading and parallel rank ownership are already
+resolved when the adapter is created.
+
+```python
+from peft import LoraConfig
+from cornstarch.models import configure_finetuning
+
+lora = LoraConfig(
+    target_modules="all-linear",
+    r=8,
+    lora_alpha=16,
+)
+
+configure_finetuning(vision_module, "lora", lora_config=lora)
+configure_finetuning(language_model, "frozen")
+
+# Local:
+vision_module.materialize(device)
+language_model.materialize(device)
+
+# Distributed uses the same configuration calls above:
+# context = parallelization_plan.materialize(device)
+```
+
+Each encoder and the language model accepts `full`, `frozen`, or `lora`
+independently. Passing a `CornstarchModalityEncoder` configures only its encoder;
+the modality projector remains trainable unless the caller freezes it explicitly.
+
+| Encoder mode | LLM mode | Result |
+| --- | --- | --- |
+| `lora` | `full` | encoder adapters plus full LLM fine-tuning |
+| `lora` | `frozen` | encoder adapters with a completely frozen LLM |
+| `full` | `lora` | full encoder fine-tuning plus LLM adapters |
+| `frozen` | `lora` | frozen encoder plus LLM adapters |
+
+In `lora` mode, PEFT freezes the base module and exposes only adapter parameters
+to the optimizer. In `frozen` mode, the whole selected base module has
+`requires_grad=False`. Optimizers remain ordinary PyTorch optimizers and should
+continue to select parameters with `requires_grad=True`.
 
 ## Pipeline execution
 
