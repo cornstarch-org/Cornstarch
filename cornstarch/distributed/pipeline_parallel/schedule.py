@@ -15,10 +15,9 @@ rank ranges and form a pipeline:
   stage; the language model is pipelined across the rest).
 
 The boundary between the encoder mesh and the language-model mesh is a
-pipeline-stage boundary — a *seam* — crossed with the same point-to-point
-transport as an ordinary stage hop, but with the cross-mesh rank pairing
-(producer representative broadcasts to the consumer's first-stage TP/EP group;
-mirrored on the backward).
+pipeline-stage boundary — a *seam*. Projected rows cross it through a DP-local,
+variable-split all-to-all that maps the encoder and language-model CP layouts;
+ordinary point-to-point transport remains in use for intra-model PP hops.
 
 ``TrainingSchedule``
     Abstract base: ``step(microbatches, criterion, optimizer)`` runs one
@@ -36,7 +35,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import torch
 import torch.distributed as dist
@@ -44,7 +43,14 @@ from torch.optim import Optimizer
 
 from cornstarch.distributed.pipeline_parallel.p2p import (
     PipelineP2PCommunication,
-    exchange_objects,
+)
+from cornstarch.distributed.cross_mesh_routing import (
+    CP_MODALITY_MASKS_KEY,
+    CP_ROUTING_OFFSETS_KEY,
+    CrossMeshGroup,
+    CrossMeshRouter,
+    SeamExchangeState,
+    routing_offsets_from_batch,
 )
 from cornstarch.distributed.process_group_mesh import ModalProcessGroupMesh
 from cornstarch.models.multimodal.execution import (
@@ -226,6 +232,8 @@ class BasePipelineSchedule(TrainingSchedule):
         layouts: dict[int, MeshLayout],
         meshes: dict[int, ModalProcessGroupMesh],
         dp_size: int,
+        cross_mesh_groups: dict[tuple[int, int], list[CrossMeshGroup]] | None = None,
+        routing_splitters: dict[int, tuple[Any, int]] | None = None,
     ) -> None:
         self._plan = plan
         self._output_future = output_future
@@ -233,6 +241,8 @@ class BasePipelineSchedule(TrainingSchedule):
         self._dp_size = dp_size
         self._my_rank = dist.get_rank()
         self._device: torch.device | None = None
+        self._seam_states: list[SeamExchangeState] = []
+        self._routing_splitters = dict(routing_splitters or {})
 
         nodes = plan._topological_nodes(output_future.name)
         self._encoder_nodes = [n for n in nodes if n.kind == "run_modality_encoder"]
@@ -279,6 +289,22 @@ class BasePipelineSchedule(TrainingSchedule):
             ]
             # The merge consumes the encoder output under this future name.
             self._encoder_output_name = self._encoder_nodes[0].name
+            producer_module = self._encoder_nodes[0].params["module"]
+            consumer_module = self._lm_node.params["module"]
+            self._seam_producer_module_id = id(producer_module)
+            self._seam_consumer_module_id = id(consumer_module)
+            seam_groups = (cross_mesh_groups or {}).get(
+                (self._seam_producer_module_id, self._seam_consumer_module_id)
+            )
+            if seam_groups is None:
+                raise ValueError(
+                    "A multimodal pipeline schedule requires cross-mesh seam "
+                    "groups. Construct it with ParallelContext.create_schedule()."
+                )
+            self._seam_router = CrossMeshRouter(seam_groups)
+            self._seam_modality = getattr(producer_module, "modality", None)
+            if self._seam_modality is None:
+                raise ValueError("A modality encoder seam must declare its modality name.")
 
         self._modality_token_ids: dict[str, int] = (
             dict(self._merge_node.params.get("modality_token_ids", {}))
@@ -442,96 +468,142 @@ class BasePipelineSchedule(TrainingSchedule):
     # Seam transport (encoder <-> language-model boundary)
     # ------------------------------------------------------------------
 
-    def _seam_send_forward(self, obj: Any) -> None:
-        prod, cons = self._seam_producer, self._lm_layout
-        for d in range(self._dp_size):
-            producer_rep = prod.rank_at(d, prod.last_stage, 0, 0, 0)
-            if self._my_rank == producer_rep:
-                exchange_objects(obj, cons.stage_ranks(d, 0), [], self._device)
+    def _seam_spec(self, obj: torch.Tensor | None) -> tuple[int, torch.dtype]:
+        hidden_size = int(self._lm_node.params["module"].hf_config.hidden_size)
+        if obj is not None:
+            if obj.shape[-1] != hidden_size:
+                raise ValueError(
+                    f"Projected modality hidden size {obj.shape[-1]} does not match "
+                    f"language-model hidden size {hidden_size}."
+                )
+            return hidden_size, obj.dtype
+        embedding = self._lm_node.params["module"].pre_decoder["embed_tokens"]
+        parameter = next(embedding.parameters())
+        return hidden_size, parameter.dtype
 
-    def _seam_recv_forward(self) -> Any | None:
-        prod, cons = self._seam_producer, self._lm_layout
-        for d in range(self._dp_size):
-            producer_rep = prod.rank_at(d, prod.last_stage, 0, 0, 0)
-            if self._my_rank in cons.stage_ranks(d, 0):
-                received = exchange_objects(None, [], [producer_rep], self._device)[0]
-                if isinstance(received, torch.Tensor):
-                    received.requires_grad_(True)
-                return received
-        return None
+    def _routing_offsets(self, microbatch: dict, module_id: int, layout: MeshLayout):
+        metadata = microbatch.get(CP_ROUTING_OFFSETS_KEY)
+        if isinstance(metadata, dict) and module_id in metadata:
+            return routing_offsets_from_batch(microbatch, module_id)
+        if module_id == self._seam_producer_module_id:
+            global_ids = microbatch.get("cp_global_input_ids", microbatch["input_ids"])
+            counts = (global_ids == self._modality_token_ids[self._seam_modality]).sum(
+                dim=1
+            )
+            modality_length = int(counts.max().item()) if counts.numel() else 0
+            mask = (
+                torch.arange(modality_length, device=global_ids.device).unsqueeze(0)
+                < counts.unsqueeze(1)
+            )
+            splitter, cp_size = self._routing_splitters[module_id]
+            if splitter is None:
+                return (torch.arange(modality_length, dtype=torch.long),)
+            return tuple(splitter.offsets_for_size(mask, cp_size))
+        if layout.cp_size == 1:
+            global_ids = microbatch.get("cp_global_input_ids", microbatch["input_ids"])
+            return (torch.arange(global_ids.shape[1], dtype=torch.long),)
+        raise ValueError(
+            "Context-sharded modality routing requires per-microbatch offsets; "
+            "build batches with ParallelContext.prepare_dataloader()."
+        )
+
+    def _seam_forward(
+        self, obj: torch.Tensor | None, microbatch: dict
+    ) -> torch.Tensor | None:
+        global_ids = microbatch.get("cp_global_input_ids", microbatch.get("input_ids"))
+        if not isinstance(global_ids, torch.Tensor):
+            raise ValueError("Cross-mesh routing requires global input_ids metadata.")
+        modality_masks = microbatch.get(CP_MODALITY_MASKS_KEY, {})
+        if not isinstance(modality_masks, Mapping):
+            raise ValueError("cp_modality_attention_masks must be a modality mapping.")
+        source_attention_mask = modality_masks.get(self._seam_modality)
+        if source_attention_mask is None:
+            counts = (global_ids == self._modality_token_ids[self._seam_modality]).sum(
+                dim=1
+            )
+            modality_length = int(counts.max().item()) if counts.numel() else 0
+            source_attention_mask = (
+                torch.arange(modality_length, device=global_ids.device).unsqueeze(0)
+                < counts.unsqueeze(1)
+            )
+        hidden_size, dtype = self._seam_spec(obj)
+        received, state = self._seam_router.forward(
+            obj,
+            global_input_ids=global_ids,
+            token_id=self._modality_token_ids[self._seam_modality],
+            source_attention_mask=source_attention_mask,
+            source_offsets=self._routing_offsets(
+                microbatch, self._seam_producer_module_id, self._seam_producer
+            ),
+            destination_offsets=self._routing_offsets(
+                microbatch, self._seam_consumer_module_id, self._lm_layout
+            ),
+            hidden_size=hidden_size,
+            dtype=dtype,
+            device=self._device,
+        )
+        self._seam_states.append(state)
+        if received is not None:
+            received.requires_grad_(True)
+        return received
+
+    def _seam_backward(self, grad: torch.Tensor | None) -> torch.Tensor | None:
+        if not self._seam_states:
+            raise RuntimeError("Cross-mesh backward has no matching forward state.")
+        state = self._seam_states.pop(0)
+        hidden_size, dtype = self._seam_spec(grad)
+        return self._seam_router.backward(
+            grad,
+            state,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            device=self._device,
+        )
+
+    def _seam_send_forward(self, obj: Any, microbatch: dict) -> None:
+        self._seam_forward(obj, microbatch)
+
+    def _seam_recv_forward(self, microbatch: dict) -> Any | None:
+        return self._seam_forward(None, microbatch)
 
     def _seam_send_backward(self, grad: Any) -> None:
-        prod, cons = self._seam_producer, self._lm_layout
-        for d in range(self._dp_size):
-            consumer_rep = cons.rank_at(d, 0, 0, 0, 0)
-            if self._my_rank == consumer_rep:
-                exchange_objects(grad, prod.stage_ranks(d, prod.last_stage), [], self._device)
+        self._seam_backward(grad)
 
     def _seam_recv_backward(self) -> Any | None:
-        prod, cons = self._seam_producer, self._lm_layout
-        for d in range(self._dp_size):
-            consumer_rep = cons.rank_at(d, 0, 0, 0, 0)
-            if self._my_rank in prod.stage_ranks(d, prod.last_stage):
-                return exchange_objects(None, [], [consumer_rep], self._device)[0]
-        return None
+        return self._seam_backward(None)
 
-    def _seam_send_forward_recv_backward(self, obj: Any) -> Any | None:
-        """Encoder side: send features forward and receive the gradient back.
+    def _seam_send_forward_recv_backward(
+        self, obj: Any, microbatch: dict
+    ) -> Any | None:
+        self._seam_forward(obj, microbatch)
+        return self._seam_backward(None)
 
-        Issued as a single ``batch_isend_irecv`` (send + recv together) so the
-        encoder and language-model meshes do not both block on a send.
-        """
-        prod, cons = self._seam_producer, self._lm_layout
-        grad = None
-        for d in range(self._dp_size):
-            producer_rep = prod.rank_at(d, prod.last_stage, 0, 0, 0)
-            consumer_rep = cons.rank_at(d, 0, 0, 0, 0)
-            if self._my_rank == producer_rep:
-                grad = exchange_objects(
-                    obj, cons.stage_ranks(d, 0), [consumer_rep], self._device
-                )[0]
-            elif self._my_rank in prod.stage_ranks(d, prod.last_stage):
-                grad = exchange_objects(None, [], [consumer_rep], self._device)[0]
-        return grad
-
-    def _seam_send_backward_recv_forward(self, grad: Any) -> Any | None:
-        """Language-model side: send the gradient back and receive features.
-
-        Mirror of :meth:`_seam_send_forward_recv_backward`; the consumer
-        representative ships the gradient to every producer rank and all consumer
-        ranks receive the next microbatch's features in the same exchange.
-        """
-        prod, cons = self._seam_producer, self._lm_layout
-        feat = None
-        for d in range(self._dp_size):
-            producer_rep = prod.rank_at(d, prod.last_stage, 0, 0, 0)
-            consumer_rep = cons.rank_at(d, 0, 0, 0, 0)
-            if self._my_rank == consumer_rep:
-                feat = exchange_objects(
-                    grad, prod.stage_ranks(d, prod.last_stage), [producer_rep], self._device
-                )[0]
-            elif self._my_rank in cons.stage_ranks(d, 0):
-                feat = exchange_objects(None, [], [producer_rep], self._device)[0]
-        if isinstance(feat, torch.Tensor):
-            feat.requires_grad_(True)
+    def _seam_send_backward_recv_forward(
+        self, grad: Any, microbatch: dict
+    ) -> Any | None:
+        # Both sides issue collectives in forward-then-backward order. This is
+        # the deterministic ordering required when adjacent 1F1B microbatches
+        # overlap at a cross-mesh seam.
+        feat = self._seam_forward(None, microbatch)
+        self._seam_backward(grad)
         return feat
 
     # ------------------------------------------------------------------
     # Neighbor communication (dispatch seam vs intra-mesh)
     # ------------------------------------------------------------------
 
-    def _recv_forward(self) -> Any | None:
+    def _recv_forward(self, microbatch: dict) -> Any | None:
         if self.is_first_stage():
             return None
         if self._seam_on_recv():
-            return self._seam_recv_forward()
+            return self._seam_recv_forward(microbatch)
         return self._lm_comm.recv_forward()
 
-    def _send_forward(self, obj: Any) -> None:
+    def _send_forward(self, obj: Any, microbatch: dict) -> None:
         if self.is_last_stage():
             return
         if self._seam_on_send():
-            self._seam_send_forward(obj)
+            self._seam_send_forward(obj, microbatch)
             return
         self._lm_comm.send_forward(obj)
 
@@ -550,18 +622,18 @@ class BasePipelineSchedule(TrainingSchedule):
             return
         self._lm_comm.send_backward(grad)
 
-    def _send_forward_recv_backward(self, obj: Any) -> Any | None:
+    def _send_forward_recv_backward(self, obj: Any, microbatch: dict) -> Any | None:
         if self.is_last_stage():
             return None
         if self._seam_on_send():
-            return self._seam_send_forward_recv_backward(obj)
+            return self._seam_send_forward_recv_backward(obj, microbatch)
         return self._lm_comm.send_forward_recv_backward(obj)
 
-    def _send_backward_recv_forward(self, grad: Any) -> Any | None:
+    def _send_backward_recv_forward(self, grad: Any, microbatch: dict) -> Any | None:
         if self.is_first_stage():
             return None
         if self._seam_on_recv():
-            return self._seam_send_backward_recv_forward(grad)
+            return self._seam_send_backward_recv_forward(grad, microbatch)
         return self._lm_comm.send_backward_recv_forward(grad)
 
 
@@ -606,28 +678,32 @@ class OneForwardOneBackwardSchedule(BasePipelineSchedule):
 
         # Warmup.
         for _ in range(num_warmup):
-            input_obj = self._recv_forward()
+            active_microbatch = microbatches[mb_index]
+            input_obj = self._recv_forward(active_microbatch)
             output_obj = self._forward_step(
-                microbatches[mb_index], input_obj, criterion,
+                active_microbatch, input_obj, criterion,
                 num_microbatches, accum_loss, outputs,
             )
             mb_index += 1
-            self._send_forward(output_obj)
+            self._send_forward(output_obj, active_microbatch)
             input_objs.append(input_obj)
             output_objs.append(output_obj)
 
         if num_steady > 0:
-            input_obj = self._recv_forward()
+            input_obj = self._recv_forward(microbatches[mb_index])
 
         # Steady state.
         for i in range(num_steady):
             last = i == num_steady - 1
+            active_microbatch = microbatches[mb_index]
             output_obj = self._forward_step(
-                microbatches[mb_index], input_obj, criterion,
+                active_microbatch, input_obj, criterion,
                 num_microbatches, accum_loss, outputs,
             )
             mb_index += 1
-            output_obj_grad = self._send_forward_recv_backward(output_obj)
+            output_obj_grad = self._send_forward_recv_backward(
+                output_obj, active_microbatch
+            )
             input_objs.append(input_obj)
             output_objs.append(output_obj)
 
@@ -638,7 +714,9 @@ class OneForwardOneBackwardSchedule(BasePipelineSchedule):
             if last:
                 self._send_backward(input_obj_grad)
             else:
-                input_obj = self._send_backward_recv_forward(input_obj_grad)
+                input_obj = self._send_backward_recv_forward(
+                    input_obj_grad, microbatches[mb_index]
+                )
 
         # Cooldown.
         for _ in range(num_warmup):

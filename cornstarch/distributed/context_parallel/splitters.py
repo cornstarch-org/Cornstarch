@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import heapq
 import warnings
-from abc import ABC, abstractmethod
+from abc import ABC
 
 import numpy as np
 import torch
@@ -25,16 +25,17 @@ import torch.distributed as dist
 class ContextParallelSplitter(ABC):
     """Abstract base for context-parallel sequence splitters.
 
-    Subclasses implement ``compute_offsets`` which determines, for each CP
-    rank, which sequence positions it owns.  After ``compute_offsets`` is
-    called once per batch the ``split`` method slices any ``(batch, seq, ...)``
-    tensor for the current rank.
+    Existing subclasses may implement ``compute_offsets`` which determines, for
+    each CP rank, which sequence positions it owns. Built-in splitters also
+    implement ``offsets_for_size`` so ranks outside a modality process group can
+    plan a cross-mesh route. Third-party subclasses remain constructible and
+    retain their original ``compute_offsets`` contract; multimodal cross-mesh
+    routing asks them to opt into the pure helper explicitly.
     """
 
     def __init__(self) -> None:
         self._offsets_per_rank: list[torch.Tensor] | None = None
 
-    @abstractmethod
     def compute_offsets(
         self,
         attention_mask: torch.Tensor,
@@ -47,6 +48,33 @@ class ContextParallelSplitter(ABC):
         one per CP rank, each containing the sequence indices assigned to
         that rank.
         """
+        self._offsets_per_rank = self.offsets_for_size(
+            attention_mask, dist.get_world_size(cp_group)
+        )
+        return self._offsets_per_rank
+
+    def offsets_for_size(
+        self,
+        attention_mask: torch.Tensor,
+        cp_size: int,
+    ) -> list[torch.Tensor]:
+        """Compute offsets without requiring membership in a CP process group.
+
+        Cross-mesh routing is planned identically on encoder and language-model
+        ranks.  A rank generally belongs to only one of those meshes, so it must
+        be able to derive the other mesh's ownership from the splitter and its
+        declared size without touching that mesh's process group.
+
+        Unlike :meth:`compute_offsets`, this pure helper does not replace the
+        offsets used by :meth:`split`.
+        """
+        if cp_size < 1:
+            raise ValueError("cp_size must be >= 1.")
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support cross-mesh routing. "
+            "Implement offsets_for_size(attention_mask, cp_size) without process-"
+            "group membership."
+        )
 
     def split(
         self,
@@ -80,18 +108,16 @@ class UniformContextParallelSplitter(ContextParallelSplitter):
     are distributed to the first ranks (numpy ``array_split`` behaviour).
     """
 
-    def compute_offsets(
+    def offsets_for_size(
         self,
         attention_mask: torch.Tensor,
-        cp_group: dist.ProcessGroup,
+        cp_size: int,
     ) -> list[torch.Tensor]:
-        cp_size = dist.get_world_size(cp_group)
+        if cp_size < 1:
+            raise ValueError("cp_size must be >= 1.")
         seq_len = attention_mask.shape[1]
         chunks = np.array_split(np.arange(seq_len), cp_size)
-        self._offsets_per_rank = [
-            torch.tensor(c, dtype=torch.long) for c in chunks
-        ]
-        return self._offsets_per_rank
+        return [torch.tensor(c, dtype=torch.long) for c in chunks]
 
 
 class HeadTailContextParallelSplitter(ContextParallelSplitter):
@@ -103,22 +129,20 @@ class HeadTailContextParallelSplitter(ContextParallelSplitter):
     late (cheaper) positions, roughly balancing FLOPs across ranks.
     """
 
-    def compute_offsets(
+    def offsets_for_size(
         self,
         attention_mask: torch.Tensor,
-        cp_group: dist.ProcessGroup,
+        cp_size: int,
     ) -> list[torch.Tensor]:
-        cp_size = dist.get_world_size(cp_group)
+        if cp_size < 1:
+            raise ValueError("cp_size must be >= 1.")
         seq_len = attention_mask.shape[1]
         halves = np.array_split(np.arange(seq_len), cp_size * 2)
         paired = [
             np.concatenate([halves[i], halves[2 * cp_size - 1 - i]])
             for i in range(cp_size)
         ]
-        self._offsets_per_rank = [
-            torch.tensor(p, dtype=torch.long) for p in paired
-        ]
-        return self._offsets_per_rank
+        return [torch.tensor(p, dtype=torch.long) for p in paired]
 
 
 class ZigzagContextParallelSplitter(HeadTailContextParallelSplitter):
@@ -160,18 +184,20 @@ class MakespanMinContextParallelSplitter(ContextParallelSplitter):
         super().__init__()
         self._block_size = block_size
 
-    def compute_offsets(
+    def offsets_for_size(
         self,
         attention_mask: torch.Tensor,
-        cp_group: dist.ProcessGroup,
+        cp_size: int,
     ) -> list[torch.Tensor]:
+        if cp_size < 1:
+            raise ValueError("cp_size must be >= 1.")
         assert attention_mask.ndim in (2, 3), (
             "attention_mask must be 2-D (batch, seq) or 3-D (batch, seq_q, seq_kv)"
         )
 
         if attention_mask.ndim == 2:
-            return self._compute_from_2d(attention_mask, cp_group)
-        return self._compute_from_3d(attention_mask, cp_group)
+            return self._compute_from_2d(attention_mask, cp_size)
+        return self._compute_from_3d(attention_mask, cp_size)
 
     def _assign_blocks_greedy(
         self,
@@ -204,10 +230,9 @@ class MakespanMinContextParallelSplitter(ContextParallelSplitter):
     def _compute_from_2d(
         self,
         mask: torch.Tensor,
-        cp_group: dist.ProcessGroup,
+        cp_size: int,
     ) -> list[torch.Tensor]:
         """Assign blocks by per-block attended-token count (2-D mask)."""
-        cp_size = dist.get_world_size(cp_group)
         seq_len = mask.shape[1]
         B = self._block_size
 
@@ -223,18 +248,14 @@ class MakespanMinContextParallelSplitter(ContextParallelSplitter):
             .sum(dim=(0, 2))
             .numpy()
         )
-        self._offsets_per_rank = self._assign_blocks_greedy(
-            block_workloads, cp_size, seq_len
-        )
-        return self._offsets_per_rank
+        return self._assign_blocks_greedy(block_workloads, cp_size, seq_len)
 
     def _compute_from_3d(
         self,
         mask: torch.Tensor,
-        cp_group: dist.ProcessGroup,
+        cp_size: int,
     ) -> list[torch.Tensor]:
         """Assign blocks by per-block attended-KV-cell count (3-D mask)."""
-        cp_size = dist.get_world_size(cp_group)
         seq_len = mask.shape[1]
         B = self._block_size
 
@@ -251,7 +272,4 @@ class MakespanMinContextParallelSplitter(ContextParallelSplitter):
             .sum(dim=(0, 2, 3))
             .numpy()
         )
-        self._offsets_per_rank = self._assign_blocks_greedy(
-            block_workloads, cp_size, seq_len
-        )
-        return self._offsets_per_rank
+        return self._assign_blocks_greedy(block_workloads, cp_size, seq_len)
