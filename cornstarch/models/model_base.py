@@ -261,9 +261,9 @@ class CornstarchModelBase(nn.Module):
                 layer.to(device)
 
     def _is_meta(self) -> bool:
-        """Return whether every registered tensor still lives on the meta device."""
+        """Return whether any registered tensor still lives on the meta device."""
         tensors = list(self.parameters()) + list(self.buffers())
-        return bool(tensors) and all(tensor.is_meta for tensor in tensors)
+        return any(tensor.is_meta for tensor in tensors)
 
     def _to_hf_keys(self, keys: Iterable[str]) -> list[str]:
         """Translate internal key names into sorted Hugging Face key names."""
