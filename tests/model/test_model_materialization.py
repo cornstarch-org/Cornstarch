@@ -217,3 +217,16 @@ def test_materialize_handles_duplicate_tied_parameter_names() -> None:
         if parameter.is_meta
     ]
     assert meta_parameters == []
+
+
+def test_materialize_handles_mixed_meta_and_materialized_tensors() -> None:
+    """A concrete buffer must not hide parameters that still need allocation."""
+    model = from_hf_config(llama_config(), attn_implementation=ATTN_IMPLEMENTATION)
+    model.register_buffer("materialized_sentinel", torch.ones(1), persistent=False)
+    model.set_random_init()
+
+    model.materialize("cpu")
+
+    tensors = list(model.parameters()) + list(model.buffers())
+    assert tensors
+    assert all(not tensor.is_meta for tensor in tensors)
