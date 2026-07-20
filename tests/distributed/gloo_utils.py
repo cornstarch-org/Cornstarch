@@ -123,9 +123,10 @@ def all_to_all_single_gloo(
         # isend/irecv take *global* ranks; translate the group-local peer ids so
         # this emulation also works for sub-groups (e.g. an EP group nested in a
         # larger DP/PP/TP mesh), not just the whole world.
-        global_peer = dist.get_global_rank(group, recv_from)
-        send_req = dist.isend(send_tensor, dst=global_peer, group=group)
-        recv_req = dist.irecv(recv_tensor, src=global_peer, group=group)
+        global_send_peer = dist.get_global_rank(group, send_to)
+        global_recv_peer = dist.get_global_rank(group, recv_from)
+        send_req = dist.isend(send_tensor, dst=global_send_peer, group=group)
+        recv_req = dist.irecv(recv_tensor, src=global_recv_peer, group=group)
         recv_req.wait()
         send_req.wait()
 
