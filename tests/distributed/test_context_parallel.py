@@ -13,6 +13,7 @@ from tests.distributed.distributed_base import GlooDistributedTestBase
 from cornstarch.distributed.context_parallel.splitters import (
     MakespanMinContextParallelSplitter,
     UniformContextParallelSplitter,
+    HeadTailContextParallelSplitter,
     ZigzagContextParallelSplitter,
 )
 from cornstarch.distributed import ParallelConfig, ParallelizationPlan
@@ -152,7 +153,7 @@ class TestUniformSplitter(GlooDistributedTestBase):
         )
 
 
-class TestZigzagSplitter(GlooDistributedTestBase):
+class TestHeadTailSplitter(GlooDistributedTestBase):
     @property
     def world_size(self) -> int:
         return 2
@@ -161,10 +162,10 @@ class TestZigzagSplitter(GlooDistributedTestBase):
         return dist.group.WORLD
 
     def test_coverage_and_no_overlap(self):
-        """Zigzag assignment should also cover the full sequence exactly once."""
+        """Head-tail assignment should cover the full sequence exactly once."""
         mask = _make_mask(1, 64)
         cp_group = self._get_cp_group()
-        splitter = ZigzagContextParallelSplitter()
+        splitter = HeadTailContextParallelSplitter()
         offsets_per_rank = splitter.compute_offsets(mask, cp_group)
 
         rank = dist.get_rank(cp_group)
@@ -182,10 +183,10 @@ class TestZigzagSplitter(GlooDistributedTestBase):
             self.assertEqual(combined.unique().numel(), 64)
 
     def test_rank0_gets_first_and_last_chunk(self):
-        """For 2 ranks, rank 0 should own the first and last quarter (zigzag pairing)."""
+        """For 2 ranks, rank 0 should own the first and last quarter."""
         mask = _make_mask(1, 64)
         cp_group = self._get_cp_group()
-        splitter = ZigzagContextParallelSplitter()
+        splitter = HeadTailContextParallelSplitter()
         offsets_per_rank = splitter.compute_offsets(mask, cp_group)
 
         rank = dist.get_rank(cp_group)
@@ -194,6 +195,19 @@ class TestZigzagSplitter(GlooDistributedTestBase):
             # Rank 0 pairs halves[0] + halves[3] = [0..15] ∪ [48..63]
             expected = torch.cat([torch.arange(0, 16), torch.arange(48, 64)])
             self.assertTrue(torch.equal(offsets_per_rank[0], expected))
+
+    def test_deprecated_alias_warns_and_preserves_offsets(self):
+        """The compatibility name warns and retains identical ownership."""
+        mask = _make_mask(1, 64)
+        cp_group = self._get_cp_group()
+        canonical = HeadTailContextParallelSplitter()
+        with self.assertWarnsRegex(DeprecationWarning, "HeadTail"):
+            compatibility = ZigzagContextParallelSplitter()
+
+        expected = canonical.compute_offsets(mask, cp_group)
+        actual = compatibility.compute_offsets(mask, cp_group)
+        self.assertTrue(all(torch.equal(a, b) for a, b in zip(actual, expected)))
+        self.assertEqual(repr(compatibility), "HeadTailContextParallelSplitter()")
 
 
 class TestMakespanMinSplitter(GlooDistributedTestBase):

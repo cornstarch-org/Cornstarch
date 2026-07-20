@@ -21,7 +21,7 @@ single ``cuda:0``, so the CP test runs on a one-GPU box (it only needs CUDA to
 be available, not >=2 devices).  CP equivalence is asserted at the
 attention-function level against a full-sequence SDPA reference, both
 *non-causal* (default kernel path) and *causal* (the per-run prefix+diagonal
-decomposition, exercised for the uniform and zigzag splitters).
+decomposition, exercised for the uniform and head-tail splitters).
 """
 from __future__ import annotations
 
@@ -461,7 +461,7 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         )
 
     @parametrize(
-        "splitter_name", ["uniform", "zigzag"], name_fn=lambda x: f"split={x}"
+        "splitter_name", ["uniform", "headtail"], name_fn=lambda x: f"split={x}"
     )
     @parametrize("batch_size", [1, 2], name_fn=lambda x: f"bs={x}")
     @parametrize("seq_len", [128, 256], name_fn=lambda x: f"seq={x}")
@@ -472,7 +472,7 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
 
         The splitter under test produces each rank's global positions; the CP
         kernel masks against exactly those offsets (uniform = 1 contiguous run
-        per rank, zigzag = 2). The rank's local out and dq/dk/dv must match the
+        per rank, head-tail = 2). The rank's local out and dq/dk/dv must match the
         reference rows gathered back by the same offsets — forward and backward.
         """
         from flash_attn import flash_attn_func
@@ -482,17 +482,17 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         )
         from cornstarch.distributed.context_parallel.splitters import (
             UniformContextParallelSplitter,
-            ZigzagContextParallelSplitter,
+            HeadTailContextParallelSplitter,
         )
 
         nheads, dim = 8, 64  # dim=64 / heads=8 are flash-attn-supported shapes
-        # seq must divide world_size (uniform) and 2*cp_size (zigzag chunking).
+        # seq must divide world_size (uniform) and 2*cp_size (head-tail chunking).
         assert seq_len % (2 * self.world_size) == 0
 
         splitter = (
             UniformContextParallelSplitter()
             if splitter_name == "uniform"
-            else ZigzagContextParallelSplitter()
+            else HeadTailContextParallelSplitter()
         )
         offsets_per_rank = splitter.compute_offsets(
             torch.ones(batch_size, seq_len), dist.GroupMember.WORLD
@@ -562,7 +562,7 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         )
 
     @parametrize(
-        "splitter_name", ["uniform", "zigzag"], name_fn=lambda x: f"split={x}"
+        "splitter_name", ["uniform", "headtail"], name_fn=lambda x: f"split={x}"
     )
     def test_cp_causal_attention_from_position_ids(self, splitter_name: str):
         """Causal CP parity when offsets are recovered from ``position_ids``.
@@ -580,14 +580,14 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         )
         from cornstarch.distributed.context_parallel.splitters import (
             UniformContextParallelSplitter,
-            ZigzagContextParallelSplitter,
+            HeadTailContextParallelSplitter,
         )
 
         q_heads, kv_heads, dim, batch_size, seq_len = 8, 2, 64, 2, 128
         splitter = (
             UniformContextParallelSplitter()
             if splitter_name == "uniform"
-            else ZigzagContextParallelSplitter()
+            else HeadTailContextParallelSplitter()
         )
         offsets_per_rank = splitter.compute_offsets(
             torch.ones(batch_size, seq_len), dist.GroupMember.WORLD
