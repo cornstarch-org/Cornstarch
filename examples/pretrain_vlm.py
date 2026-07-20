@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 import tyro
+from peft import LoraConfig
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
@@ -35,8 +36,10 @@ from cornstarch.models import (
     CornstarchExecutionPlan,
     CornstarchLanguageModel,
     CornstarchModalityEncoder,
+    FinetuningMode,
     RepeatedLayerCompileConfig,
     build_modality_encoder,
+    configure_finetuning,
     from_hf_config,
 )
 
@@ -100,10 +103,23 @@ def _training_step(
     return language_outputs.execute()
 
 
+def _lora_config(mode: FinetuningMode) -> LoraConfig | None:
+    if mode != "lora":
+        return None
+    return LoraConfig(
+        target_modules="all-linear",
+        r=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+    )
+
+
 def pretrain(
     vision_encoder_name_or_path: str = "openai/clip-vit-base-patch32",
     llm_name_or_path: str = "hf-internal-testing/tiny-random-LlamaForCausalLM",
     use_layer_offload: bool = False,
+    vision_train_mode: FinetuningMode = "full",
+    llm_train_mode: FinetuningMode = "full",
     profile_output_path: Path | None = None,
     max_train_steps: int = 10,
 ) -> None:
@@ -145,6 +161,16 @@ def pretrain(
 
     language_model.set_random_init()
     vision_module.set_random_init()
+    configure_finetuning(
+        vision_module,
+        vision_train_mode,
+        lora_config=_lora_config(vision_train_mode),
+    )
+    configure_finetuning(
+        language_model,
+        llm_train_mode,
+        lora_config=_lora_config(llm_train_mode),
+    )
     language_model.materialize(device, dtype=DTYPE)
     vision_module.materialize(device, dtype=DTYPE)
     language_model.train()
