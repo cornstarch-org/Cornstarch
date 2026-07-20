@@ -20,7 +20,7 @@ the kernel reproduces a causal language model under CP without a custom kernel.
 The gathered K/V buffer lays the global key columns out in **rank order**
 (rank 0's positions, then rank 1's, ...), so it is a permutation of global
 order (identity for the uniform splitter).  For each contiguous run ``[a, b)``
-of global positions a rank owns (uniform -> one run/rank; zigzag -> two), the
+of global positions a rank owns (uniform -> one run/rank; head-tail -> two), the
 run's queries must attend exactly the global positions ``[0, query_pos]``,
 i.e. every key with global position ``< a`` (the *prefix*) plus the run's own
 keys ``[a, query_pos]`` (the *diagonal*).  We build the per-run key/value as
@@ -116,7 +116,7 @@ def _contiguous_runs(local_offsets: torch.Tensor) -> list[tuple[int, int, int, i
     q_start+q_len)`` is the run's range in the rank's *local* Q order and
     ``[a, b)`` is the run's *global* position range (``b - a == q_len``).
 
-    Uniform splitting yields one run/rank; zigzag yields two (an early run and a
+    Uniform splitting yields one run/rank; head-tail yields two (an early run and a
     late run).
     """
     offs = local_offsets.tolist()

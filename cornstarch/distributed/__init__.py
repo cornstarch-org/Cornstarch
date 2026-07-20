@@ -39,6 +39,7 @@ that folds DP/CP into ``prepare_dataloader``, builds the schedule, and exposes
 from cornstarch.distributed.context_parallel import apply_context_parallel
 from cornstarch.distributed.context_parallel.splitters import (
     ContextParallelSplitter,
+    HeadTailContextParallelSplitter,
     MakespanMinContextParallelSplitter,
     UniformContextParallelSplitter,
     ZigzagContextParallelSplitter,
@@ -76,6 +77,7 @@ __all__ = [
     "apply_context_parallel",
     "ContextParallelSplitter",
     "UniformContextParallelSplitter",
+    "HeadTailContextParallelSplitter",
     "ZigzagContextParallelSplitter",
     "MakespanMinContextParallelSplitter",
     # pipeline parallel
