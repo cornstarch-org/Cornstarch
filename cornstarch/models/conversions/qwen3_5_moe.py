@@ -18,6 +18,43 @@ from cornstarch.models.forward_specs import LayerContext
 from cornstarch.models.language_model import CornstarchLanguageModel
 
 
+class _ForwardSumIdentityBackward(torch.autograd.Function):
+    """All-reduce values without duplicating gradients in the backward pass."""
+
+    @staticmethod
+    def forward(
+        ctx: Any, tensor: torch.Tensor, group: dist.ProcessGroup
+    ) -> torch.Tensor:
+        output = tensor.clone()
+        dist.all_reduce(output, op=dist.ReduceOp.SUM, group=group)
+        return output
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return grad_output, None
+
+
+def _reduce_router_statistics(
+    statistics: torch.Tensor,
+    *,
+    cp_group: dist.ProcessGroup | None,
+    dp_group: dist.ProcessGroup | None,
+) -> torch.Tensor:
+    """Reduce sufficient router statistics with axis-correct autograd."""
+    if cp_group is not None and dist.get_world_size(cp_group) > 1:
+        # CP parameters later receive a SUM gradient synchronization. Only the
+        # value reduction belongs here; an autograd reduction would count every
+        # token once per CP rank.
+        statistics = _ForwardSumIdentityBackward.apply(statistics, cp_group)
+    if dp_group is not None and dist.get_world_size(dp_group) > 1:
+        # DP gradients are averaged later, so the differentiable SUM's backward
+        # replication is intentionally cancelled by that AVG.
+        statistics = dist_nn.all_reduce(
+            statistics, op=dist.ReduceOp.SUM, group=dp_group
+        )
+    return statistics
+
+
 class QwenMoeLanguageForwardSpec(Qwen3_5LanguageForwardSpec):
     """Native forward spec for Qwen3.5 MoE text models."""
 
@@ -97,12 +134,11 @@ class QwenMoeLanguageForwardSpec(Qwen3_5LanguageForwardSpec):
         )
         aux_loss = None
         if statistics is not None:
-            for group_name in ("_cp_group", "_dp_group"):
-                group = getattr(model, group_name, None)
-                if group is not None and dist.get_world_size(group) > 1:
-                    statistics = dist_nn.all_reduce(
-                        statistics, op=dist.ReduceOp.SUM, group=group
-                    )
+            statistics = _reduce_router_statistics(
+                statistics,
+                cp_group=getattr(model, "_cp_group", None),
+                dp_group=getattr(model, "_dp_group", None),
+            )
             num_experts = model.config.num_experts
             top_k = model.config.num_experts_per_tok
             count_size = top_k * num_experts

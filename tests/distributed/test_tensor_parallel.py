@@ -17,7 +17,18 @@ from tests.distributed.distributed_base import GlooDistributedTestBase
 from tests.model.model_configs import qwen3_5_moe_config
 
 from cornstarch.distributed.tensor_parallel import apply_tensor_parallel
+from cornstarch.distributed.tensor_parallel.plans import get_layer_tp_plan
 from cornstarch.models import from_hf_config
+
+
+def test_dense_qwen_plans_shard_mlp_for_both_layer_types() -> None:
+    for layer_type in ("full_attention", "linear_attention"):
+        plan = get_layer_tp_plan("Qwen3_5TextConfig", layer_type)
+        assert plan is not None
+        assert {"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"} <= plan.keys()
+    moe_plan = get_layer_tp_plan("Qwen3_5MoeTextConfig", "linear_attention")
+    assert moe_plan is not None
+    assert not any(path.startswith("mlp.") for path in moe_plan)
 
 
 class TestColwiseParallel(GlooDistributedTestBase):

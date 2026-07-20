@@ -30,6 +30,7 @@ class CornstarchRunAwareFLACPContext:
     cu_seqlens: torch.Tensor
     cu_seqlens_cpu: torch.Tensor
     metadata: Any
+    # ``-1`` is a synchronized zero dummy for an empty/all-padding CP lane.
     local_run_indices: tuple[int, ...]
 
     @property
@@ -97,82 +98,61 @@ def validate_run_aware_fla_contract() -> None:
             )
 
 
-def _document_chains(metadata: Any) -> tuple[tuple[int, ...], ...]:
-    chains: list[list[int]] = []
-    for run in metadata.runs:
-        if run.predecessor is None:
-            chains.append([])
-        chains[-1].append(run.index)
-    return tuple(tuple(chain) for chain in chains)
-
-
-def _merge_prefixes(
+def _merge_logical_states(
     summaries: torch.Tensor,
-    chains: tuple[tuple[int, ...], ...],
+    context: CornstarchRunAwareFLACPContext,
     *,
+    forward: bool,
     transpose_state_layout: bool,
-) -> tuple[torch.Tensor | None, dict[int, int]]:
-    """Run FLA's intracard merge kernel and map each non-first run to a row."""
+) -> torch.Tensor:
+    """Merge predecessor/successor summaries using runs as logical ranks."""
     import triton
     from fla.ops.cp.chunk_delta_h import merge_fwd_bwd_kernel
-
-    non_first = sum(max(len(chain) - 1, 0) for chain in chains)
-    if non_first == 0:
-        return None, {}
-
-    sequence_offsets = [0]
-    initial_offsets = [0]
-    state_rows: dict[int, int] = {}
-    for chain in chains:
-        sequence_offsets.append(sequence_offsets[-1] + len(chain))
-        base = initial_offsets[-1]
-        for position, run_index in enumerate(chain[1:]):
-            state_rows[run_index] = base + position
-        initial_offsets.append(base + max(len(chain) - 1, 0))
-
-    device = summaries.device
-    integer_data = sequence_offsets + initial_offsets + list(range(len(chains)))
-    integer_tensor = torch.tensor(integer_data, dtype=torch.int32, device=device)
-    sequence_count = len(sequence_offsets)
-    initial_count = len(initial_offsets)
-    sequence_offsets_tensor = integer_tensor[:sequence_count]
-    initial_offsets_tensor = integer_tensor[
-        sequence_count : sequence_count + initial_count
-    ]
-    sequence_ids = integer_tensor[sequence_count + initial_count :]
 
     heads, key_dim = summaries.shape[1:3]
     value_dim = summaries.shape[3] - key_dim
     state_shape = (
-        (non_first, heads, value_dim, key_dim)
+        (len(context.local_run_indices), heads, value_dim, key_dim)
         if transpose_state_layout
-        else (non_first, heads, key_dim, value_dim)
+        else (len(context.local_run_indices), heads, key_dim, value_dim)
     )
-    states = summaries.new_empty(state_shape, dtype=torch.float32)
+    states = summaries.new_zeros(state_shape, dtype=torch.float32)
     block_key = triton.next_power_of_2(key_dim)
 
-    def grid(meta: dict[str, int]) -> tuple[int, int, int]:
-        return (triton.cdiv(value_dim, meta["BV"]), len(chains), heads)
+    def grid(meta: dict[str, int]) -> tuple[int, int]:
+        return (triton.cdiv(value_dim, meta["BV"]), heads)
 
-    merge_fwd_bwd_kernel[grid](
-        h=states,
-        ag_hm=summaries,
-        pre_or_post_num_ranks=len(chains),
-        rank=0,
-        seq_offsets=sequence_offsets_tensor,
-        init_offsets=initial_offsets_tensor,
-        h0_seq_ids=sequence_ids,
-        h0=None,
-        HV=heads,
-        K=key_dim,
-        V=value_dim,
-        BK=block_key,
-        FORWARD=True,
-        INTRACARD_MODE=True,
-        NUM_SEQ_ENTRIES=len(chains),
-        TRANSPOSE_STATE=transpose_state_layout,
-    )
-    return states, state_rows
+    for local_index, global_index in enumerate(context.local_run_indices):
+        if global_index < 0:
+            continue
+        run = context.metadata.runs[global_index]
+        linked_count = 0
+        linked = run.predecessor if forward else run.successor
+        while linked is not None:
+            linked_count += 1
+            linked_run = context.metadata.runs[linked]
+            linked = linked_run.predecessor if forward else linked_run.successor
+        if linked_count == 0:
+            continue
+        merge_fwd_bwd_kernel[grid](
+            h=states[local_index],
+            ag_hm=summaries,
+            pre_or_post_num_ranks=linked_count,
+            rank=global_index,
+            seq_offsets=None,
+            init_offsets=None,
+            h0_seq_ids=None,
+            h0=None,
+            HV=heads,
+            K=key_dim,
+            V=value_dim,
+            BK=block_key,
+            FORWARD=forward,
+            INTRACARD_MODE=False,
+            NUM_SEQ_ENTRIES=0,
+            TRANSPOSE_STATE=transpose_state_layout,
+        )
+    return states
 
 
 def _all_reduce_summaries(
@@ -180,49 +160,28 @@ def _all_reduce_summaries(
     context: CornstarchRunAwareFLACPContext,
 ) -> torch.Tensor:
     global_summaries = local.new_zeros(
-        len(context.metadata.runs), *local.shape[1:]
+        max(1, len(context.metadata.runs)), *local.shape[1:]
     )
-    if context.local_run_indices:
+    valid_local = [
+        (local_index, global_index)
+        for local_index, global_index in enumerate(context.local_run_indices)
+        if global_index >= 0
+    ]
+    if valid_local:
         indices = torch.tensor(
-            context.local_run_indices, dtype=torch.long, device=local.device
+            [global_index for _, global_index in valid_local],
+            dtype=torch.long,
+            device=local.device,
         )
-        global_summaries.index_copy_(0, indices, local)
+        local_indices = torch.tensor(
+            [local_index for local_index, _ in valid_local],
+            dtype=torch.long,
+            device=local.device,
+        )
+        global_summaries.index_copy_(0, indices, local[local_indices])
     if dist.get_world_size(context.group) > 1:
         dist.all_reduce(global_summaries, group=context.group)
     return global_summaries
-
-
-def _local_states(
-    merged: torch.Tensor | None,
-    state_rows: dict[int, int],
-    context: CornstarchRunAwareFLACPContext,
-    *,
-    heads: int,
-    key_dim: int,
-    value_dim: int,
-    transpose_state_layout: bool,
-    like: torch.Tensor,
-) -> torch.Tensor:
-    shape = (
-        (len(context.local_run_indices), heads, value_dim, key_dim)
-        if transpose_state_layout
-        else (len(context.local_run_indices), heads, key_dim, value_dim)
-    )
-    states = like.new_zeros(shape, dtype=torch.float32)
-    if merged is None:
-        return states
-    destination: list[int] = []
-    source: list[int] = []
-    for local_index, global_index in enumerate(context.local_run_indices):
-        row = state_rows.get(global_index)
-        if row is not None:
-            destination.append(local_index)
-            source.append(row)
-    if destination:
-        states[torch.tensor(destination, device=like.device)] = merged[
-            torch.tensor(source, device=like.device)
-        ]
-    return states
 
 
 def _run_aware_forward_preprocess(
@@ -285,21 +244,11 @@ def _run_aware_forward_preprocess(
         MULTI_SEQS=True,
     )
     global_summaries = _all_reduce_summaries(summaries, context)
-    chains = _document_chains(context.metadata)
-    merged, state_rows = _merge_prefixes(
+    return _merge_logical_states(
         global_summaries,
-        chains,
-        transpose_state_layout=transpose_state_layout,
-    )
-    return _local_states(
-        merged,
-        state_rows,
         context,
-        heads=value_heads,
-        key_dim=key_dim,
-        value_dim=value_dim,
+        forward=True,
         transpose_state_layout=transpose_state_layout,
-        like=k,
     )
 
 
@@ -364,41 +313,11 @@ def _run_aware_backward_preprocess(
         )
     global_summaries = _all_reduce_summaries(summaries, context)
 
-    # The merge kernel composes prefixes.  Reverse each document chain so those
-    # prefixes are precisely the recurrent-gradient suffixes needed by bwd.
-    forward_chains = _document_chains(context.metadata)
-    reverse_chains = tuple(tuple(reversed(chain)) for chain in forward_chains)
-    permutation = [run_index for chain in reverse_chains for run_index in chain]
-    reverse_summaries = global_summaries[
-        torch.tensor(permutation, dtype=torch.long, device=q.device)
-    ]
-    contiguous_reverse_chains: list[tuple[int, ...]] = []
-    offset = 0
-    original_for_contiguous: dict[int, int] = {}
-    for chain in reverse_chains:
-        contiguous = tuple(range(offset, offset + len(chain)))
-        contiguous_reverse_chains.append(contiguous)
-        for contiguous_index, original_index in zip(contiguous, chain):
-            original_for_contiguous[contiguous_index] = original_index
-        offset += len(chain)
-    merged, contiguous_rows = _merge_prefixes(
-        reverse_summaries,
-        tuple(contiguous_reverse_chains),
-        transpose_state_layout=transpose_state_layout,
-    )
-    state_rows = {
-        original_for_contiguous[index]: row
-        for index, row in contiguous_rows.items()
-    }
-    local_dht = _local_states(
-        merged,
-        state_rows,
+    local_dht = _merge_logical_states(
+        global_summaries,
         context,
-        heads=value_heads,
-        key_dim=key_dim,
-        value_dim=value_dim,
+        forward=False,
         transpose_state_layout=transpose_state_layout,
-        like=q,
     )
     return local_dht, None
 

@@ -14,12 +14,15 @@ import unittest
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
+from torch import nn
 
 from tests.distributed.distributed_base import GlooDistributedTestBase
 from tests.model.model_configs import qwen3_5_moe_config
 
 from cornstarch.distributed.data_parallel import GradientSynchronizer
 from cornstarch.distributed.expert_parallel import apply_expert_parallel
+from cornstarch.models.conversions.qwen3_5_moe import _reduce_router_statistics
 from cornstarch.models import from_hf_config
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeForCausalLM,
@@ -27,6 +30,30 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
 
 
 VOCAB_SIZE = 64
+
+
+def _router_statistics(logits: torch.Tensor, top_k: int = 2) -> torch.Tensor:
+    probabilities = F.softmax(logits, dim=-1)
+    selected = torch.topk(probabilities, top_k, dim=-1).indices
+    counts = F.one_hot(selected, num_classes=logits.shape[-1]).float().sum(0)
+    return torch.cat(
+        [counts.reshape(-1), probabilities.sum(0), logits.new_tensor([logits.shape[0]])]
+    )
+
+
+def _router_aux(statistics: torch.Tensor, experts: int = 4, top_k: int = 2) -> torch.Tensor:
+    count_size = experts * top_k
+    counts = statistics[:count_size].reshape(top_k, experts)
+    probability_sums = statistics[count_size : count_size + experts]
+    tokens = statistics[-1]
+    return experts * torch.sum((counts / tokens) * (probability_sums / tokens)[None])
+
+
+def _router_reference(inputs: torch.Tensor, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    reference_weight = nn.Parameter(weight.detach().clone())
+    loss = _router_aux(_router_statistics(inputs @ reference_weight))
+    loss.backward()
+    return loss.detach(), reference_weight.grad
 
 
 def _make_moe_llm():
@@ -180,6 +207,69 @@ class TestQwenRouterAuxDataParallel(GlooDistributedTestBase):
             atol=1e-5,
             rtol=1e-5,
         )
+
+
+class TestQwenRouterAuxContextParallel(GlooDistributedTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def test_cp_sum_sync_matches_global_router_gradient(self) -> None:
+        generator = torch.Generator().manual_seed(2027)
+        inputs = torch.randn(8, 3, generator=generator)
+        initial_weight = torch.randn(3, 4, generator=generator)
+        reference_loss, reference_grad = _router_reference(inputs, initial_weight)
+
+        weight = nn.Parameter(initial_weight.clone())
+        local_inputs = inputs.chunk(self.world_size)[dist.get_rank()]
+        statistics = _reduce_router_statistics(
+            _router_statistics(local_inputs @ weight),
+            cp_group=dist.group.WORLD,
+            dp_group=None,
+        )
+        loss = _router_aux(statistics)
+        loss.backward()
+        dist.all_reduce(weight.grad, op=dist.ReduceOp.SUM)
+
+        torch.testing.assert_close(loss, reference_loss, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(weight.grad, reference_grad, atol=1e-6, rtol=1e-6)
+
+
+class TestQwenRouterAuxContextAndDataParallel(GlooDistributedTestBase):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def test_cp_sum_then_dp_average_matches_global_router_gradient(self) -> None:
+        rank = dist.get_rank()
+        cp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+        dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+        cp_group = cp_groups[rank // 2]
+        dp_group = dp_groups[rank % 2]
+
+        generator = torch.Generator().manual_seed(2028)
+        inputs = torch.randn(2, 8, 3, generator=generator)
+        initial_weight = torch.randn(3, 4, generator=generator)
+        reference_loss, reference_grad = _router_reference(
+            inputs.flatten(0, 1), initial_weight
+        )
+
+        weight = nn.Parameter(initial_weight.clone())
+        dp_index, cp_index = divmod(rank, 2)
+        local_inputs = inputs[dp_index].chunk(2)[cp_index]
+        statistics = _reduce_router_statistics(
+            _router_statistics(local_inputs @ weight),
+            cp_group=cp_group,
+            dp_group=dp_group,
+        )
+        loss = _router_aux(statistics)
+        loss.backward()
+        dist.all_reduce(weight.grad, op=dist.ReduceOp.SUM, group=cp_group)
+        dist.all_reduce(weight.grad, op=dist.ReduceOp.SUM, group=dp_group)
+        weight.grad.div_(2)
+
+        torch.testing.assert_close(loss, reference_loss, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(weight.grad, reference_grad, atol=1e-6, rtol=1e-6)
 
 
 if __name__ == "__main__":

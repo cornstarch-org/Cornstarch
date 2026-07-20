@@ -181,7 +181,7 @@ def validate_gated_delta_backend(linear_attn: torch.nn.Module) -> None:
     if version is None:
         raise GatedDeltaNetContextParallelNotSupportedError(
             "Qwen3.5 linear-attention context parallelism requires "
-            "flash-linear-attention>=0.5.0,<0.6. Install Cornstarch with the "
+            "flash-linear-attention==0.5.0. Install Cornstarch with the "
             "FLA CUDA backend; independent local recurrent states are not a "
             "correct fallback."
         )
@@ -191,10 +191,11 @@ def validate_gated_delta_backend(linear_attn: torch.nn.Module) -> None:
         raise GatedDeltaNetContextParallelNotSupportedError(
             f"Cannot validate {distribution_name} version {version!r}."
         ) from exc
-    if not (Version("0.5.0") <= parsed_version < Version("0.6")):
+    if parsed_version != Version("0.5.0"):
         raise GatedDeltaNetContextParallelNotSupportedError(
-            "Qwen3.5 linear-attention CP supports flash-linear-attention "
-            f">=0.5.0,<0.6; detected {distribution_name}=={version}."
+            "Qwen3.5 linear-attention CP supports only the audited "
+            f"flash-linear-attention==0.5.0 contract; detected "
+            f"{distribution_name}=={version}."
         )
 
     operator = getattr(linear_attn, "chunk_gated_delta_rule", None)
@@ -316,7 +317,9 @@ def _run_aware_convolution(
         tails[run.index, -take:] = values[-take:]
     tails = _all_reduce_autograd(tails, cp_group)
 
-    output = mixed_qkv.new_zeros((batch, channels, local_seq))
+    # Keep empty/all-padding lanes connected to autograd so they enter the
+    # synchronized dummy FLA backward and execute collectives in rank order.
+    output = mixed_qkv * 0
     for run in metadata.local_runs(rank):
         prefix_parts: list[torch.Tensor] = []
         remaining = halo_size
@@ -362,12 +365,9 @@ def _flatten_local_runs(
         for run in metadata.local_runs(rank)
     ]
     if not fragments:
-        raise GatedDeltaNetContextParallelNotSupportedError(
-            "This CP rank owns no non-padding Gated DeltaNet run. Empty local "
-            "run sets require a synchronized dummy-run path that FLA 0.5 does "
-            "not expose. Rebucket the microbatch so every CP rank owns at least "
-            "one valid token."
-        )
+        # FLA varlen requires at least one sequence. A zero dummy remains in the
+        # graph but is excluded from the global logical summary table.
+        return tensor.sum(dim=(0, 1), keepdim=True) * 0
     return torch.cat(fragments, dim=0).unsqueeze(0).contiguous()
 
 
@@ -377,7 +377,9 @@ def _restore_local_runs(
     metadata: GatedDeltaCPMetadata,
     rank: int,
 ) -> torch.Tensor:
-    output = torch.zeros_like(like)
+    # The zero dependency is essential on an all-padding lane: backward must
+    # still traverse FLA and participate in summary collectives.
+    output = torch.zeros_like(like) + flattened.sum() * 0
     offset = 0
     for run in metadata.local_runs(rank):
         output[
@@ -406,7 +408,7 @@ def _run_fla_fragments(
 
     rank = dist.get_rank(cp_group)
     local_runs = metadata.local_runs(rank)
-    lengths = [run.length for run in local_runs]
+    lengths = [run.length for run in local_runs] or [1]
     cu_seqlens_cpu = torch.tensor(
         [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
     )
@@ -416,7 +418,9 @@ def _run_fla_fragments(
         cu_seqlens=cu_seqlens,
         cu_seqlens_cpu=cu_seqlens_cpu,
         metadata=metadata,
-        local_run_indices=tuple(run.index for run in local_runs),
+        local_run_indices=(
+            tuple(run.index for run in local_runs) if local_runs else (-1,)
+        ),
     )
     install_run_aware_fla_dispatch()
     run_output, _ = operator(
