@@ -19,9 +19,9 @@ test runs the collectives on gloo (CPU, bridged via ``gloo_utils``) while the
 flash-attention compute happens on the shared GPU.  Two gloo ranks share a
 single ``cuda:0``, so the CP test runs on a one-GPU box (it only needs CUDA to
 be available, not >=2 devices).  CP equivalence is asserted at the
-attention-function level against a *non-causal* full-sequence SDPA reference,
-because the CP kernel hardcodes ``causal=False`` (see ``tasks/backlog.md`` for
-the deferred causal-LM CP equivalence).
+attention-function level against a full-sequence SDPA reference, both
+*non-causal* (default kernel path) and *causal* (the per-run prefix+diagonal
+decomposition, exercised for the uniform and zigzag splitters).
 """
 from __future__ import annotations
 
@@ -340,26 +340,16 @@ class TestDataParallelEquivalence(GlooDistributedTestBase):
 CP_ATOL = 5e-3
 CP_RTOL = 5e-3
 
-
-def _serialize_cp_stream() -> None:
-    """Pin the CP kernel's overlap stream to the current stream.
-
-    The kernel overlaps its all-gather / reduce-scatter on a dedicated side CUDA
-    stream and only re-syncs at the very end of backward.  Under the gloo CPU
-    bridge that runs these collectives, the per-head ``dkv`` buffer (a
-    ``torch.empty``) is cloned on the default stream before the side stream's
-    reduce-scatter copy lands, so the clone races and reads uninitialized memory
-    (intermittent NaN / corrupted dk).  Forcing the kernel onto the current
-    stream serializes the collectives with the compute, which removes the race
-    without changing the kernel's math (the side stream is purely a perf
-    optimization).  This makes the single-GPU test deterministic and lets
-    backward parity hold at the same 5e-3 as forward.
-    """
-    from cornstarch.distributed.context_parallel.attention import (
-        ContextParallelFlashAttention,
-    )
-
-    ContextParallelFlashAttention._stream = torch.cuda.current_stream()
+# The causal path splits the sequence across ranks, so each rank's flash-attn
+# call accumulates the softmax over *fewer* keys (its prefix+diagonal) than the
+# single full-sequence reference. bf16 is order-sensitive: the two orderings can
+# differ by one bf16 ULP on an isolated element (e.g. 0.0156 at a magnitude-~2
+# output, a rel diff ~0.008 that no input scaling removes). The decomposition is
+# otherwise exact — with a single rank (one run spanning the whole sequence) it
+# matches single-pass flash bitwise. So the causal asserts use 1e-2 (still well
+# below a no-op; the project target is 1e-3) to admit that single-ULP slack.
+CP_CAUSAL_ATOL = 1e-2
+CP_CAUSAL_RTOL = 1e-2
 
 
 @unittest.skipUnless(
@@ -387,8 +377,6 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
         from cornstarch.distributed.context_parallel.attention import (
             ContextParallelFlashAttention,
         )
-
-        _serialize_cp_stream()
 
         nheads, dim = 8, 64  # dim=64 / heads=8 are flash-attn-supported shapes
         assert seq_len % self.world_size == 0
@@ -472,13 +460,232 @@ class TestContextParallelEquivalence(GlooDistributedTestBase):
             rtol=CP_RTOL,
         )
 
+    @parametrize(
+        "splitter_name", ["uniform", "zigzag"], name_fn=lambda x: f"split={x}"
+    )
+    @parametrize("batch_size", [1, 2], name_fn=lambda x: f"bs={x}")
+    @parametrize("seq_len", [128, 256], name_fn=lambda x: f"seq={x}")
+    def test_cp_causal_attention_matches_single(
+        self, splitter_name: str, batch_size: int, seq_len: int
+    ):
+        """Causal CP parity vs a full-sequence causal SDPA, per splitter.
+
+        The splitter under test produces each rank's global positions; the CP
+        kernel masks against exactly those offsets (uniform = 1 contiguous run
+        per rank, zigzag = 2). The rank's local out and dq/dk/dv must match the
+        reference rows gathered back by the same offsets — forward and backward.
+        """
+        from flash_attn import flash_attn_func
+
+        from cornstarch.distributed.context_parallel.attention import (
+            ContextParallelFlashAttention,
+        )
+        from cornstarch.distributed.context_parallel.splitters import (
+            UniformContextParallelSplitter,
+            ZigzagContextParallelSplitter,
+        )
+
+        nheads, dim = 8, 64  # dim=64 / heads=8 are flash-attn-supported shapes
+        # seq must divide world_size (uniform) and 2*cp_size (zigzag chunking).
+        assert seq_len % (2 * self.world_size) == 0
+
+        splitter = (
+            UniformContextParallelSplitter()
+            if splitter_name == "uniform"
+            else ZigzagContextParallelSplitter()
+        )
+        offsets_per_rank = splitter.compute_offsets(
+            torch.ones(batch_size, seq_len), dist.GroupMember.WORLD
+        )
+        off = offsets_per_rank[self.rank].to("cuda")
+
+        # Full-sequence Q/K/V, identical on every rank (seed reset in _run).
+        query, key, value = torch.unbind(
+            torch.randn(
+                (3, batch_size, seq_len, nheads, dim),
+                device="cuda",
+                dtype=DTYPE,
+            ).normal_(mean=0, std=0.5),
+        )
+        for t in (query, key, value):
+            t.requires_grad_()
+
+        # Reference: a single full-sequence causal flash-attn forward, in the
+        # CP kernel's own (b, s, h, d) layout. We compare against the *same*
+        # kernel family (not SDPA) so the assertion isolates the per-run
+        # decomposition from cross-kernel bf16 noise — SDPA-vs-flash already
+        # differs by ~1 bf16 ULP on isolated elements, which would mask whether
+        # the prefix+diagonal merge is correct. This mirrors the legacy causal CP
+        # test (tests_old/.../test_context_parallel.py), which referenced the
+        # single-GPU bitfield kernel rather than SDPA.
+        ref_out = flash_attn_func(query, key, value, causal=True)
+
+        # The rank's local Q/K/V are the reference rows at its global positions.
+        local_q = query.index_select(1, off).detach().contiguous().requires_grad_()
+        local_k = key.index_select(1, off).detach().contiguous().requires_grad_()
+        local_v = value.index_select(1, off).detach().contiguous().requires_grad_()
+
+        # WORLD group as the CP group (avoids DeviceMesh(device_type="cuda")
+        # under gloo). offsets_per_rank carries the causal masking info.
+        cp_out = ContextParallelFlashAttention.apply(
+            local_q, local_k, local_v, dist.GroupMember.WORLD, 1, True, offsets_per_rank
+        )
+
+        torch.testing.assert_close(
+            ref_out.index_select(1, off),
+            cp_out,
+            atol=CP_CAUSAL_ATOL,
+            rtol=CP_CAUSAL_RTOL,
+        )
+
+        # Backward parity: each rank's dq/dk/dv match the reference grads gathered
+        # back by its offsets (for the keys, the reduce-scattered slice sums the
+        # contributions of every rank's queries, exactly as the full ref grad).
+        dout = torch.randn_like(ref_out).normal_(mean=0, std=0.5)
+        ref_dq, ref_dk, ref_dv = torch.autograd.grad(
+            ref_out, [query, key, value], dout
+        )
+
+        cp_dout = dout.index_select(1, off).contiguous()
+        cp_dq, cp_dk, cp_dv = torch.autograd.grad(
+            cp_out, [local_q, local_k, local_v], cp_dout
+        )
+
+        torch.testing.assert_close(
+            ref_dq.index_select(1, off), cp_dq, atol=CP_CAUSAL_ATOL, rtol=CP_CAUSAL_RTOL
+        )
+        torch.testing.assert_close(
+            ref_dk.index_select(1, off), cp_dk, atol=CP_CAUSAL_ATOL, rtol=CP_CAUSAL_RTOL
+        )
+        torch.testing.assert_close(
+            ref_dv.index_select(1, off), cp_dv, atol=CP_CAUSAL_ATOL, rtol=CP_CAUSAL_RTOL
+        )
+
+    @parametrize(
+        "splitter_name", ["uniform", "zigzag"], name_fn=lambda x: f"split={x}"
+    )
+    def test_cp_causal_attention_from_position_ids(self, splitter_name: str):
+        """Causal CP parity when offsets are recovered from ``position_ids``.
+
+        Instead of passing ``offsets_per_rank`` explicitly, each rank passes only
+        its local ``position_ids`` (its global token positions); the kernel
+        all-gathers them across the CP group to rebuild the full offsets. This is
+        the end-to-end plumbing path (HF forwards ``position_ids`` to the
+        attention callable). Result must match the same flash causal reference.
+        """
+        from flash_attn import flash_attn_func
+
+        from cornstarch.distributed.context_parallel.attention import (
+            ContextParallelFlashAttention,
+        )
+        from cornstarch.distributed.context_parallel.splitters import (
+            UniformContextParallelSplitter,
+            ZigzagContextParallelSplitter,
+        )
+
+        nheads, dim, batch_size, seq_len = 8, 64, 2, 128
+        splitter = (
+            UniformContextParallelSplitter()
+            if splitter_name == "uniform"
+            else ZigzagContextParallelSplitter()
+        )
+        offsets_per_rank = splitter.compute_offsets(
+            torch.ones(batch_size, seq_len), dist.GroupMember.WORLD
+        )
+        off = offsets_per_rank[self.rank].to("cuda")
+
+        query, key, value = torch.unbind(
+            torch.randn(
+                (3, batch_size, seq_len, nheads, dim), device="cuda", dtype=DTYPE
+            ).normal_(mean=0, std=0.5),
+        )
+        for t in (query, key, value):
+            t.requires_grad_()
+        ref_out = flash_attn_func(query, key, value, causal=True)
+
+        local_q = query.index_select(1, off).detach().contiguous().requires_grad_()
+        local_k = key.index_select(1, off).detach().contiguous().requires_grad_()
+        local_v = value.index_select(1, off).detach().contiguous().requires_grad_()
+
+        # Local position_ids = this rank's global positions (what the splitter
+        # produces when it slices position_ids alongside the inputs). No explicit
+        # offsets_per_rank -> the kernel all-gathers position_ids to recover them.
+        position_ids = off.unsqueeze(0)
+        cp_out = ContextParallelFlashAttention.apply(
+            local_q, local_k, local_v, dist.GroupMember.WORLD, 1, True, None, position_ids
+        )
+
+        torch.testing.assert_close(
+            ref_out.index_select(1, off), cp_out, atol=CP_CAUSAL_ATOL, rtol=CP_CAUSAL_RTOL
+        )
+
+        dout = torch.randn_like(ref_out).normal_(mean=0, std=0.5)
+        ref_dq, ref_dk, ref_dv = torch.autograd.grad(ref_out, [query, key, value], dout)
+        cp_dq, cp_dk, cp_dv = torch.autograd.grad(
+            cp_out, [local_q, local_k, local_v], dout.index_select(1, off).contiguous()
+        )
+        torch.testing.assert_close(
+            ref_dq.index_select(1, off), cp_dq, atol=CP_CAUSAL_ATOL, rtol=CP_CAUSAL_RTOL
+        )
+        torch.testing.assert_close(
+            ref_dk.index_select(1, off), cp_dk, atol=CP_CAUSAL_ATOL, rtol=CP_CAUSAL_RTOL
+        )
+        torch.testing.assert_close(
+            ref_dv.index_select(1, off), cp_dv, atol=CP_CAUSAL_ATOL, rtol=CP_CAUSAL_RTOL
+        )
+
+    def test_cp_causal_hf_dispatch_wrapper(self):
+        """Cover the causal HF dispatch entry point (b, h, s, d) with position_ids."""
+        from flash_attn import flash_attn_func
+
+        from cornstarch.distributed.context_parallel.attention import (
+            context_parallel_flash_attention,
+        )
+
+        batch_size, nheads, seq_len, dim = 2, 8, 256, 64
+        assert seq_len % self.world_size == 0
+
+        # (b, h, s, d) for the wrapper; flash reference wants (b, s, h, d).
+        query, key, value = torch.unbind(
+            torch.randn(
+                (3, batch_size, nheads, seq_len, dim), device="cuda", dtype=DTYPE
+            ).normal_(mean=0, std=0.5),
+        )
+        ref_out = flash_attn_func(
+            query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), causal=True
+        ).transpose(1, 2)
+
+        # Uniform contiguous chunk per rank; position_ids carry global positions.
+        local_q = torch.chunk(query, self.world_size, dim=2)[self.rank].contiguous()
+        local_k = torch.chunk(key, self.world_size, dim=2)[self.rank].contiguous()
+        local_v = torch.chunk(value, self.world_size, dim=2)[self.rank].contiguous()
+        chunk = seq_len // self.world_size
+        position_ids = torch.arange(
+            self.rank * chunk, (self.rank + 1) * chunk, device="cuda"
+        ).unsqueeze(0)
+
+        cp_out, _ = context_parallel_flash_attention(
+            module=None,
+            query=local_q,
+            key=local_k,
+            value=local_v,
+            cp_group=dist.GroupMember.WORLD,
+            causal=True,
+            position_ids=position_ids,
+        )
+
+        torch.testing.assert_close(
+            torch.chunk(ref_out, self.world_size, dim=2)[self.rank],
+            cp_out,
+            atol=CP_CAUSAL_ATOL,
+            rtol=CP_CAUSAL_RTOL,
+        )
+
     def test_cp_attention_hf_dispatch_wrapper(self):
         """Cover the HF dispatch entry point (the (b, h, s, d) transpose path)."""
         from cornstarch.distributed.context_parallel.attention import (
             context_parallel_flash_attention,
         )
-
-        _serialize_cp_stream()
 
         batch_size, nheads, seq_len, dim = 2, 8, 256, 64
         assert seq_len % self.world_size == 0
