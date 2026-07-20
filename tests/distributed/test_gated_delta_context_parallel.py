@@ -294,6 +294,7 @@ def test_fla_adapter_uses_logical_run_prefixes_suffixes_and_boundaries() -> None
         [0, 2],
         [2, 4],
     ]
+    assert all(call["USE_BG"] is False for call in backward_kernel.calls)
     assert [
         (call["FORWARD"], call["rank"], call["pre_or_post_num_ranks"])
         for call in merge_kernel.calls

@@ -56,6 +56,7 @@ _REQUIRED_KERNEL_ARGUMENTS = {
         "init_offsets",
     },
     "pre_process_bwd_kernel_merged": {
+        "USE_BG",
         "USE_EXP2",
         "cu_seqlens",
         "dhm",
@@ -309,6 +310,7 @@ def _run_aware_backward_preprocess(
             BT=64,
             BK1=block_key,
             BLOCK_SIZE=block_size,
+            USE_BG=bg is not None,
             USE_EXP2=use_exp2,
         )
     global_summaries = _all_reduce_summaries(summaries, context)
