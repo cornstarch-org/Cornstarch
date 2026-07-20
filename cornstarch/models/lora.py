@@ -3,12 +3,55 @@
 from __future__ import annotations
 
 import copy
+from typing import Literal
 
 import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
 
 from cornstarch.models.model_base import CornstarchModelBase
 from cornstarch.models.multimodal.modeling import CornstarchModalityEncoder
+
+
+FinetuningMode = Literal["full", "frozen", "lora"]
+
+
+def configure_finetuning(
+    module: nn.Module,
+    mode: FinetuningMode,
+    *,
+    lora_config: LoraConfig | None = None,
+    adapter_name: str = "default",
+) -> nn.Module:
+    """Configure one encoder or language model for fine-tuning.
+
+    ``full`` trains every parameter, ``frozen`` trains none, and ``lora``
+    freezes base parameters while attaching trainable PEFT adapters.  A
+    :class:`CornstarchModalityEncoder` delegates to its encoder; the projector
+    is intentionally unaffected and can be configured independently with normal
+    PyTorch ``requires_grad_`` calls.
+
+    Calls are independent per module, so heterogeneous combinations such as a
+    LoRA encoder plus fully trainable LLM, or a frozen encoder plus LoRA LLM,
+    require no composite wrapper or distributed-specific configuration.
+    """
+    if mode not in {"full", "frozen", "lora"}:
+        raise ValueError(
+            f"Unsupported fine-tuning mode {mode!r}; expected 'full', "
+            "'frozen', or 'lora'."
+        )
+
+    target = _adapter_target(module)
+    if mode == "lora":
+        if lora_config is None:
+            raise ValueError("lora_config is required when mode='lora'.")
+        target.requires_grad_(False)
+        attach_lora(module, lora_config, adapter_name=adapter_name)
+        return module
+
+    if lora_config is not None:
+        raise ValueError("lora_config is only valid when mode='lora'.")
+    target.requires_grad_(mode == "full")
+    return module
 
 
 def attach_lora(
@@ -37,7 +80,7 @@ def attach_lora(
     if not adapter_name:
         raise ValueError("adapter_name must not be empty.")
 
-    target = module.encoder if isinstance(module, CornstarchModalityEncoder) else module
+    target = _adapter_target(module)
     adapter_names: set[str] = getattr(target, "_cornstarch_lora_adapter_names", set())
     if adapter_name in adapter_names:
         raise ValueError(
@@ -74,3 +117,9 @@ def _has_meta_tensors(module: nn.Module) -> bool:
     return any(tensor.is_meta for tensor in module.parameters()) or any(
         tensor.is_meta for tensor in module.buffers()
     )
+
+
+def _adapter_target(module: nn.Module) -> nn.Module:
+    if isinstance(module, CornstarchModalityEncoder):
+        return module.encoder
+    return module
