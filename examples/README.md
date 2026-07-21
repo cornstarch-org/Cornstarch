@@ -10,6 +10,13 @@ Run the local examples from the repository root on a CUDA GPU:
 ```bash
 python -m examples.pretrain_vlm
 python -m examples.pretrain_valm
+
+# One-device lazy base-checkpoint loading followed by LoRA initialization.
+python -m examples.finetune_llm_lora --steps 3
+
+# LoRA vision encoder with a frozen LLM; the projector remains trainable.
+python -m examples.pretrain_vlm \
+    --vision-train-mode lora --llm-train-mode frozen
 ```
 
 The distributed examples model a production one-process-per-GPU setup. They
@@ -25,6 +32,11 @@ torchrun --nproc-per-node=8 --module examples.distributed.pretrain_llm \
 # Three GPUs: one vision pipeline stage plus a two-way-TP language stage.
 torchrun --nproc-per-node=3 --module examples.distributed.pretrain_vlm \
     --llm-pp 1 --llm-tp 2
+
+# The same fine-tuning options work with the distributed plan.
+torchrun --nproc-per-node=3 --module examples.distributed.pretrain_vlm \
+    --llm-pp 1 --llm-tp 2 \
+    --vision-train-mode frozen --llm-train-mode lora
 ```
 
 For a multi-node launch, add torchrun's `--nnodes`, `--node-rank`,

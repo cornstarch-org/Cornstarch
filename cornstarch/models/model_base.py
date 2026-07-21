@@ -72,6 +72,9 @@ class CornstarchModelBase(nn.Module):
         self._init_plan = init_plan or InitializationPlan.empty()
         self._state_mapper = StateDictPrefixMap(hf_to_cornstarch_prefixes)
         self._hf_model_factory = hf_model_factory
+        self._post_materialize_callbacks: list[
+            Callable[[CornstarchModelBase], None]
+        ] = []
 
     @property
     def attention_kernel(self) -> Any:
@@ -145,6 +148,7 @@ class CornstarchModelBase(nn.Module):
         to materialize a sharded (DTensor) meta model in, e.g., bf16.
         """
         if not self._is_meta():
+            self._run_post_materialize_callbacks()
             return self
 
         device = torch.device(device)
@@ -164,7 +168,32 @@ class CornstarchModelBase(nn.Module):
         else:
             raise ValueError(f"Unknown initialization plan: {self._init_plan.mode}")
 
+        self._run_post_materialize_callbacks()
         return self
+
+    def _register_post_materialize_callback(
+        self, callback: Callable[[CornstarchModelBase], None]
+    ) -> None:
+        """Run ``callback`` after this model's base tensors materialize.
+
+        Structural extensions such as PEFT adapters must not wrap the lazy model
+        before checkpoint keys have been translated and loaded.  This private
+        lifecycle hook lets those extensions declare their intent while the
+        model is still on ``meta`` and apply the mutation at the safe boundary.
+        """
+        if self._is_meta():
+            self._post_materialize_callbacks.append(callback)
+        else:
+            callback(self)
+
+    def _run_post_materialize_callbacks(self) -> None:
+        """Apply and clear structural mutations queued for materialization."""
+        callbacks = self._post_materialize_callbacks
+        if not callbacks:
+            return
+        for callback in callbacks:
+            callback(self)
+        self._post_materialize_callbacks = []
 
     def load_hf_state_dict(
         self, state_dict: Mapping[str, torch.Tensor], strict: bool = True
