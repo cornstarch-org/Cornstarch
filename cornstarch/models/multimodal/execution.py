@@ -49,6 +49,7 @@ class ExecutionFuture:
 
     name: str
     _plan: CornstarchExecutionPlan | None = field(default=None, repr=False, compare=False)
+    optional: bool = False
 
     def execute(self, inputs: Mapping[str, Any] | None = None) -> Any:
         """Execute only this future's dependency subgraph and return its value."""
@@ -78,8 +79,13 @@ class ExecutionNode:
 
     @property
     def dependencies(self) -> set[str]:
-        """Return named tensor dependencies consumed by this node."""
+        """Return all named dependencies consumed by this node."""
         return _collect_future_names(self.params)
+
+    @property
+    def required_dependencies(self) -> set[str]:
+        """Return dependencies that must be supplied by the caller."""
+        return _collect_future_names(self.params, required_only=True)
 
 
 class CornstarchExecutionPlan:
@@ -346,7 +352,9 @@ class CornstarchExecutionPlan:
         values = dict(inputs or {})
         last_output = None
         for node in ordered_nodes:
-            missing = sorted(dep for dep in node.dependencies if dep not in values)
+            missing = sorted(
+                dep for dep in node.required_dependencies if dep not in values
+            )
             if missing:
                 raise ValueError(
                     f"Node {node.name!r} cannot run because inputs are missing: {missing}"
@@ -364,13 +372,11 @@ class CornstarchExecutionPlan:
             }
             return node.params["module"](**encoder_inputs)
         if node.kind == "run_fused_modality_encoder":
-            fused_inputs = {
-                modality: {
-                    key: _resolve_value(value, values)
-                    for key, value in modality_inputs.items()
-                }
-                for modality, modality_inputs in node.params["inputs"].items()
-            }
+            fused_inputs = {}
+            for modality, modality_inputs in node.params["inputs"].items():
+                resolved = _resolve_optional_modality_inputs(modality_inputs, values)
+                if resolved is not None:
+                    fused_inputs[modality] = resolved
             return node.params["module"](inputs=fused_inputs)
         if node.kind == "merge_modality_encoder_outputs":
             return merge_modality_encoder_outputs(
@@ -398,20 +404,40 @@ class CornstarchExecutionPlan:
         return "".join(char if char.isalnum() else "_" for char in name)
 
 
-def _collect_future_names(value: Any) -> set[str]:
+def _collect_future_names(value: Any, *, required_only: bool = False) -> set[str]:
     if isinstance(value, ExecutionFuture):
-        return {value.name}
+        return set() if required_only and value.optional else {value.name}
     if isinstance(value, Mapping):
         names: set[str] = set()
         for item in value.values():
-            names.update(_collect_future_names(item))
+            names.update(_collect_future_names(item, required_only=required_only))
         return names
     if isinstance(value, (list, tuple)):
         names: set[str] = set()
         for item in value:
-            names.update(_collect_future_names(item))
+            names.update(_collect_future_names(item, required_only=required_only))
         return names
     return set()
+
+
+def _resolve_optional_modality_inputs(
+    declared: Mapping[str, Any], values: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    all_dependencies = _collect_future_names(declared)
+    missing = all_dependencies - set(values)
+    if not missing:
+        return {
+            key: _resolve_value(value, values) for key, value in declared.items()
+        }
+    required_missing = _collect_future_names(declared, required_only=True) - set(values)
+    if required_missing:
+        raise KeyError(next(iter(sorted(required_missing))))
+    if missing != all_dependencies:
+        raise ValueError(
+            "Optional inputs for one fused modality must be present or absent "
+            f"together; missing {sorted(missing)}"
+        )
+    return None
 
 
 def _resolve_value(value: Any, values: Mapping[str, Any]) -> Any:

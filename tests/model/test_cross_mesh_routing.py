@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from unittest.mock import patch
 
 from cornstarch.distributed.context_parallel.splitters import (
     ContextParallelSplitter,
@@ -156,10 +157,24 @@ def test_incompatible_producer_hidden_shards_are_rejected() -> None:
     producer = MeshLayout((0, 1), 1, 1, 1, 2, 1)
     consumer = MeshLayout((2,), 1, 1, 1, 1, 1)
     try:
-        build_cross_mesh_groups(
-            producer_layout=producer, consumer_layout=consumer
-        )
+        build_cross_mesh_groups(producer_layout=producer, consumer_layout=consumer)
     except ValueError as error:
         assert "Incompatible TP layout" in str(error)
     else:
         raise AssertionError("expected incompatible TP seam validation failure")
+
+
+def test_divisible_producer_tp_fans_out_to_consumer_lanes() -> None:
+    producer = MeshLayout((0, 1), 1, 1, 1, 2, 1)
+    consumer = MeshLayout((2, 3, 4, 5), 1, 1, 1, 4, 1)
+    with patch("torch.distributed.new_group", side_effect=lambda ranks: tuple(ranks)):
+        groups = build_cross_mesh_groups(
+            producer_layout=producer, consumer_layout=consumer
+        )
+    assert [(group.producer_tp_rank, group.consumer_tp_rank) for group in groups] == [
+        (0, 0),
+        (1, 1),
+        (0, 2),
+        (1, 3),
+    ]
+    assert [group.producer_ranks for group in groups] == [(0,), (1,), (0,), (1,)]

@@ -4,6 +4,7 @@ import torch
 
 from cornstarch.models import (
     CornstarchExecutionPlan,
+    ExecutionFuture,
     build_fused_modality_encoder,
     build_modality_encoder,
     from_hf_config,
@@ -67,5 +68,24 @@ def test_fused_execution_node_runs_present_children_in_registry_order() -> None:
         inputs={"audio": {"value": torch.tensor(3)}},
     )
     result = future.execute()
+    assert tuple(result) == ("audio",)
+    assert torch.equal(result["audio"], torch.tensor(5))
+
+
+def test_optional_fused_inputs_skip_absent_children_atomically() -> None:
+    _, vision, audio = _modules()
+    fused = build_fused_modality_encoder({"vision": vision, "audio": audio})
+    vision.forward = lambda **kwargs: kwargs["value"] + 1
+    audio.forward = lambda **kwargs: kwargs["value"] + 2
+
+    plan = CornstarchExecutionPlan()
+    future = plan.run_fused_modality_encoder(
+        fused,
+        inputs={
+            "vision": {"value": ExecutionFuture("vision_value", optional=True)},
+            "audio": {"value": ExecutionFuture("audio_value", optional=True)},
+        },
+    )
+    result = future.execute({"audio_value": torch.tensor(3)})
     assert tuple(result) == ("audio",)
     assert torch.equal(result["audio"], torch.tensor(5))

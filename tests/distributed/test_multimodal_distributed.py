@@ -692,7 +692,7 @@ class TestFusedEncoderAndLanguagePipeline(GlooDistributedTestBase):
         input_ids = torch.randint(
             2,
             language_model.hf_config.vocab_size,
-            (2, seq_len),
+            (4, seq_len),
             generator=generator,
         )
         input_ids[:, :tokens_per_encoder] = 0
@@ -702,23 +702,46 @@ class TestFusedEncoderAndLanguagePipeline(GlooDistributedTestBase):
             "input_ids": input_ids,
             "labels": input_ids.clone(),
             "vision_pixels": torch.randn(
-                2, 3, image_size, image_size, generator=generator
+                4, 3, image_size, image_size, generator=generator
             ),
             "aux_pixels": torch.randn(
-                2, 3, image_size, image_size, generator=generator
+                4, 3, image_size, image_size, generator=generator
             ),
         }
         microbatches = [
-            {key: value.chunk(2, dim=0)[index] for key, value in batch.items()}
-            for index in range(2)
+            {key: value.chunk(4, dim=0)[index] for key, value in batch.items()}
+            for index in range(4)
         ]
+        microbatches[1].pop("aux_pixels")
+        microbatches[1]["input_ids"].masked_fill_(
+            microbatches[1]["input_ids"] == 1, 2
+        )
+        microbatches[1]["labels"] = microbatches[1]["input_ids"].clone()
+        microbatches[2].pop("vision_pixels")
+        microbatches[2]["input_ids"].masked_fill_(
+            microbatches[2]["input_ids"] == 0, 2
+        )
+        microbatches[2]["labels"] = microbatches[2]["input_ids"].clone()
+        microbatches[3].pop("vision_pixels")
+        microbatches[3].pop("aux_pixels")
+        microbatches[3]["input_ids"].masked_fill_(
+            (microbatches[3]["input_ids"] == 0)
+            | (microbatches[3]["input_ids"] == 1),
+            2,
+        )
+        microbatches[3]["labels"] = microbatches[3]["input_ids"].clone()
+
 
         execution = CornstarchExecutionPlan()
         fused_outputs = execution.run_fused_modality_encoder(
             fused,
             inputs={
-                "vision": {"pixel_values": ExecutionFuture("vision_pixels")},
-                "aux": {"pixel_values": ExecutionFuture("aux_pixels")},
+                "vision": {
+                    "pixel_values": ExecutionFuture("vision_pixels", optional=True)
+                },
+                "aux": {
+                    "pixel_values": ExecutionFuture("aux_pixels", optional=True)
+                },
             },
         )
         merged = execution.merge_modality_encoder_outputs(

@@ -481,17 +481,17 @@ def build_cross_mesh_groups(
 ) -> list[CrossMeshGroup]:
     """Collectively construct deterministic DP-local seam groups on all ranks.
 
-    The projected hidden dimension is replicated today. Equal TP/EP degrees pair
-    like lanes; a producer degree of one may fan out to replicated consumer
-    lanes. A producer-sharded layout cannot be collapsed implicitly and is
-    rejected rather than mixing incompatible hidden-dimension shards.
+    The projected hidden dimension is replicated. Equal TP/EP degrees pair like
+    lanes; a smaller producer degree may fan out evenly to a divisible consumer
+    degree. Collapsing more producer lanes into fewer consumer lanes is rejected
+    because it would require a distinct replicated-gradient reduction contract.
     """
     if producer_layout.dp_size != consumer_layout.dp_size:
         raise ValueError("Encoder and language-model seam layouts must have equal DP size.")
     for axis in ("tp_size", "ep_size"):
         producer_degree = getattr(producer_layout, axis)
         consumer_degree = getattr(consumer_layout, axis)
-        if producer_degree not in (1, consumer_degree):
+        if consumer_degree % producer_degree:
             label = axis.removesuffix("_size").upper()
             raise ValueError(
                 f"Incompatible {label} layout at modality seam: producer degree "
@@ -503,9 +503,9 @@ def build_cross_mesh_groups(
     groups: list[CrossMeshGroup] = []
     for dp_rank in range(producer_layout.dp_size):
         for consumer_tp in range(consumer_layout.tp_size):
-            producer_tp = 0 if producer_layout.tp_size == 1 else consumer_tp
+            producer_tp = consumer_tp % producer_layout.tp_size
             for consumer_ep in range(consumer_layout.ep_size):
-                producer_ep = 0 if producer_layout.ep_size == 1 else consumer_ep
+                producer_ep = consumer_ep % producer_layout.ep_size
                 producer_ranks = tuple(
                     producer_layout.rank_at(
                         dp_rank,

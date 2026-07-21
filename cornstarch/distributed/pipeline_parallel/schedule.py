@@ -57,6 +57,7 @@ from cornstarch.models.multimodal.execution import (
     CornstarchExecutionPlan,
     ExecutionFuture,
     _first_output_tensor,
+    _resolve_optional_modality_inputs,
     _resolve_value,
 )
 
@@ -243,7 +244,7 @@ class BasePipelineSchedule(TrainingSchedule):
         self._dp_size = dp_size
         self._my_rank = dist.get_rank()
         self._device: torch.device | None = None
-        self._seam_states: list[tuple[str, SeamExchangeState]] = []
+        self._seam_states: list[tuple[tuple[str, SeamExchangeState], ...]] = []
         self._routing_splitters = dict(routing_splitters or {})
 
         nodes = plan._topological_nodes(output_future.name)
@@ -407,14 +408,13 @@ class BasePipelineSchedule(TrainingSchedule):
                 stage_inputs: dict[str, dict[str, Any]] = {}
                 for modality, declared in self._encoder_node.params["inputs"].items():
                     if modality not in input_obj:
+                        continue
+                    kwargs = _resolve_optional_modality_inputs(declared, values)
+                    if kwargs is None:
                         raise ValueError(
-                            f"Missing {modality!r} activation at fused PP stage "
-                            f"{self._encoder_stage}."
+                            f"{modality!r} has a pipeline activation but its "
+                            "optional source inputs are absent."
                         )
-                    kwargs = {
-                        key: _resolve_value(value, values)
-                        for key, value in declared.items()
-                    }
                     activation = input_obj[modality]
                     if isinstance(activation, Mapping):
                         kwargs.update(activation)
@@ -511,7 +511,9 @@ class BasePipelineSchedule(TrainingSchedule):
                 grads = [
                     output_obj_grad[k] for k in keys if isinstance(output_obj[k], torch.Tensor)
                 ]
-                if len(tensors) == 1:
+                if not tensors:
+                    pass
+                elif len(tensors) == 1:
                     torch.autograd.backward(tensors[0], grads[0])
                 else:
                     torch.autograd.backward(tensors, grads)
@@ -543,6 +545,9 @@ class BasePipelineSchedule(TrainingSchedule):
                     f"language-model hidden size {hidden_size}."
                 )
             return hidden_size, obj.dtype
+        device_type = self._device.type
+        if torch.is_autocast_enabled(device_type):
+            return hidden_size, torch.get_autocast_dtype(device_type)
         embedding = self._lm_node.params["module"].pre_decoder["embed_tokens"]
         parameter = next(embedding.parameters())
         return hidden_size, parameter.dtype
@@ -597,8 +602,20 @@ class BasePipelineSchedule(TrainingSchedule):
         )
         if obj is not None and fused and not isinstance(obj, Mapping):
             raise TypeError("A fused seam sender must provide a modality mapping.")
+        active_modalities = tuple(
+            modality
+            for modality in self._seam_modalities
+            if bool((global_ids == self._modality_token_ids[modality]).any().item())
+        )
+        if isinstance(obj, Mapping) and set(obj) != set(active_modalities):
+            raise ValueError(
+                "Fused encoder outputs must exactly match modalities present in "
+                f"the language microbatch: outputs={sorted(obj)}, "
+                f"present={sorted(active_modalities)}"
+            )
         received_by_modality: dict[str, torch.Tensor] = {}
-        for modality in self._seam_modalities:
+        forward_states: list[tuple[str, SeamExchangeState]] = []
+        for modality in active_modalities:
             feature = obj.get(modality) if isinstance(obj, Mapping) else obj
             source_attention_mask = modality_masks.get(modality)
             if source_attention_mask is None:
@@ -630,13 +647,14 @@ class BasePipelineSchedule(TrainingSchedule):
                 dtype=dtype,
                 device=self._device,
             )
-            self._seam_states.append((modality, state))
+            forward_states.append((modality, state))
             if received is not None:
                 received.requires_grad_(True)
                 received_by_modality[modality] = received
 
+        self._seam_states.append(tuple(forward_states))
         if fused:
-            return received_by_modality if received_by_modality else None
+            return received_by_modality
         return received_by_modality.get(self._seam_modalities[0])
 
     def _seam_backward(self, grad: Any | None) -> Any | None:
@@ -645,15 +663,11 @@ class BasePipelineSchedule(TrainingSchedule):
         )
         if grad is not None and fused and not isinstance(grad, Mapping):
             raise TypeError("A fused seam receiver must provide modality gradients.")
+        if not self._seam_states:
+            raise RuntimeError("Cross-mesh backward has no matching forward state.")
+        forward_states = self._seam_states.pop(0)
         returned_by_modality: dict[str, torch.Tensor] = {}
-        for modality in self._seam_modalities:
-            if not self._seam_states:
-                raise RuntimeError("Cross-mesh backward has no matching forward state.")
-            state_modality, state = self._seam_states.pop(0)
-            if state_modality != modality:
-                raise RuntimeError(
-                    "Cross-mesh backward modality order differs from forward order."
-                )
+        for modality, state in forward_states:
             modality_grad = grad.get(modality) if isinstance(grad, Mapping) else grad
             hidden_size, dtype = self._seam_spec(modality_grad)
             returned = self._seam_router.backward(
@@ -667,7 +681,7 @@ class BasePipelineSchedule(TrainingSchedule):
                 returned_by_modality[modality] = returned
 
         if fused:
-            return returned_by_modality if returned_by_modality else None
+            return returned_by_modality
         return returned_by_modality.get(self._seam_modalities[0])
 
     def _seam_send_forward(self, obj: Any, microbatch: dict) -> None:
