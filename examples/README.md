@@ -11,6 +11,9 @@ Run the local examples from the repository root on a CUDA GPU:
 python -m examples.pretrain_vlm
 python -m examples.pretrain_valm
 
+# One-device lazy base-checkpoint loading followed by LoRA initialization.
+python -m examples.finetune_llm_lora --steps 3
+
 # LoRA vision encoder with a frozen LLM; the projector remains trainable.
 python -m examples.pretrain_vlm \
     --vision-train-mode lora --llm-train-mode frozen
