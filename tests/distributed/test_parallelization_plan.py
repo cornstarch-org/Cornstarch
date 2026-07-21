@@ -141,3 +141,47 @@ def test_assign_ranks_rejects_unequal_colocated_ranks_per_replica() -> None:
     )  # rpr=2
     with pytest.raises(ValueError, match="equal\\s+ranks_per_replica"):
         plan._assign_ranks([0, 1], 2)
+
+
+def test_fused_module_is_counted_once_and_accepts_per_child_partitions() -> None:
+    from cornstarch.distributed import PipelinePartitionSpec
+    from cornstarch.models import build_fused_modality_encoder
+    from tests.model.model_configs import whisper_config
+
+    language_model = from_hf_config(llama_config(), model_kind="language")
+    vision = build_modality_encoder(
+        from_hf_config(clip_vision_config(), model_kind="vision"),
+        language_model,
+        modality="vision",
+    )
+    audio = build_modality_encoder(
+        from_hf_config(whisper_config(), model_kind="audio"),
+        language_model,
+        modality="audio",
+    )
+    fused = build_fused_modality_encoder({"vision": vision, "audio": audio})
+    vision_layers = len(vision.encoder.encoder_layers)
+    audio_layers = len(audio.encoder.encoder_layers)
+    llm_layers = len(language_model.decoder_layers)
+
+    plan = ParallelizationPlan(global_ranks=[0, 1, 2, 3])
+    plan.parallelize(
+        fused,
+        ParallelConfig(pipeline_parallel_size=2, data_parallel_size=1),
+        pipeline_partitions={
+            "vision": PipelinePartitionSpec((1, vision_layers)),
+            "audio": PipelinePartitionSpec((1, audio_layers)),
+        },
+    )
+    plan.parallelize(
+        language_model,
+        ParallelConfig(pipeline_parallel_size=2, data_parallel_size=1),
+        pipeline_partitions=PipelinePartitionSpec((1, llm_layers)),
+    )
+
+    pipelined, dp_size, module_ranks = plan._assign_ranks([0, 1, 2, 3], 4)
+    assert pipelined is True
+    assert dp_size == 1
+    assert module_ranks == [[0, 1], [2, 3]]
+    assert len(plan._modules) == 2
+    assert len(plan._pipeline_partitions) == 2

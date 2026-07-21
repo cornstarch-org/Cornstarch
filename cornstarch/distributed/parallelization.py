@@ -19,7 +19,8 @@ parallelisms remain independently togglable.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -39,7 +40,10 @@ from cornstarch.distributed.cross_mesh_routing import (
 from cornstarch.distributed.data_parallel import GradientSynchronizer
 from cornstarch.distributed.expert_parallel import apply_expert_parallel
 from cornstarch.distributed.parallel_config import ParallelConfig
-from cornstarch.distributed.pipeline_parallel import apply_pipeline_parallel
+from cornstarch.distributed.pipeline_parallel import (
+    PipelinePartitionSpec,
+    apply_pipeline_parallel,
+)
 from cornstarch.distributed.pipeline_parallel.schedule import (
     MeshLayout,
     OneForwardOneBackwardSchedule,
@@ -49,7 +53,10 @@ from cornstarch.distributed.process_group_mesh import ModalProcessGroupMesh
 from cornstarch.distributed.tensor_parallel import apply_tensor_parallel
 from cornstarch.models.model_base import CornstarchModelBase
 from cornstarch.models.language_model import CornstarchLanguageModel
-from cornstarch.models.multimodal.modeling import CornstarchModalityEncoder
+from cornstarch.models.multimodal.modeling import (
+    CornstarchFusedModalityEncoder,
+    CornstarchModalityEncoder,
+)
 
 if TYPE_CHECKING:
     from cornstarch.models.multimodal.execution import (
@@ -67,7 +74,16 @@ _DEFAULT_CP_SPLIT_KEYS = (
     "document_ids",
 )
 
-ParallelModule = CornstarchModelBase | CornstarchModalityEncoder
+ParallelModule = (
+    CornstarchModelBase
+    | CornstarchModalityEncoder
+    | CornstarchFusedModalityEncoder
+)
+PipelinePartitions = (
+    PipelinePartitionSpec
+    | Mapping[str, PipelinePartitionSpec]
+    | None
+)
 
 
 @dataclass(frozen=True)
@@ -146,6 +162,23 @@ class _ContextBatchTransform:
                     # The schedule can derive a one-row-per-placeholder mask
                     # once the DAG supplies this modality's token id.
                     continue
+            elif isinstance(module, CornstarchFusedModalityEncoder):
+                splitter = config.context_parallel_splitter
+                modality_offsets = {}
+                for modality in module.modalities:
+                    modality_mask = modality_masks.get(modality)
+                    if modality_mask is None:
+                        continue
+                    offsets = (
+                        [torch.arange(modality_mask.shape[1], dtype=torch.long)]
+                        if splitter is None
+                        else splitter.offsets_for_size(
+                            modality_mask, config.context_parallel_size
+                        )
+                    )
+                    modality_offsets[modality] = tuple(offsets)
+                routing_offsets[id(module)] = modality_offsets
+                continue
             splitter = config.context_parallel_splitter
             offsets = (
                 [torch.arange(routing_mask.shape[1], dtype=torch.long)]
@@ -231,6 +264,33 @@ class _ContextBatchTransform:
         )
 
 
+@dataclass(frozen=True)
+class ScheduleContext:
+    """Public immutable inputs for a caller-supplied pipeline schedule."""
+
+    plan: "CornstarchExecutionPlan"
+    output_future: "ExecutionFuture"
+    layouts: Mapping[int, MeshLayout]
+    meshes: Mapping[int, ModalProcessGroupMesh]
+    data_parallel_size: int
+    cross_mesh_groups: Mapping[tuple[int, int], tuple[CrossMeshGroup, ...]]
+    routing_splitters: Mapping[int, tuple[Any, int]]
+
+    def create_default_1f1b(self) -> OneForwardOneBackwardSchedule:
+        return OneForwardOneBackwardSchedule(
+            self.plan,
+            self.output_future,
+            dict(self.layouts),
+            dict(self.meshes),
+            self.data_parallel_size,
+            {
+                key: list(groups)
+                for key, groups in self.cross_mesh_groups.items()
+            },
+            dict(self.routing_splitters),
+        )
+
+
 class ParallelContext:
     """Runtime handle returned by :meth:`ParallelizationPlan.materialize`.
 
@@ -313,10 +373,14 @@ class ParallelContext:
     def prepare_dataloader(
         self,
         dataset: Dataset,
-        batch_size: int,
+        batch_size: int | None = None,
         collate_fn: Optional[Callable[[list], "dict | list[dict]"]] = None,
         *,
         shuffle: bool = False,
+        sampler: Any | None = None,
+        batch_sampler: Any | None = None,
+        per_microbatch_transform: Callable[[Any], Any] | None = None,
+        microbatch_views: Callable[[Any], Iterable[dict[str, Any]]] | None = None,
         cp_split_keys: Sequence[str] = _DEFAULT_CP_SPLIT_KEYS,
         **loader_kwargs: Any,
     ) -> DataLoader:
@@ -338,6 +402,11 @@ class ParallelContext:
         their microbatches; without pipeline parallelism the training loop
         iterates it with gradient accumulation.
 
+        **Structured views.** Pass ``microbatch_views`` for a caller-owned
+        microbatch object. It must yield each mutable batch dictionary that needs
+        Cornstarch's CP metadata/slicing (for example separate encoder and LLM
+        views); the surrounding object is preserved and returned unchanged.
+
         **Multimodal CP seam metadata.** A collator whose modality projector
         emits padded context-sharded rows should include
         ``cp_modality_attention_masks`` as a mapping from modality name to its
@@ -348,8 +417,17 @@ class ParallelContext:
         placeholder count; non-left-packed or independently padded projectors
         must provide the explicit mask.
         """
-        sampler = None
-        if self._dp_size > 1:
+        if batch_sampler is not None:
+            if sampler is not None or shuffle:
+                raise ValueError(
+                    "batch_sampler is mutually exclusive with sampler and shuffle."
+                )
+            if batch_size is not None:
+                raise ValueError("Omit batch_size when providing batch_sampler.")
+        elif batch_size is None:
+            raise ValueError("batch_size is required when batch_sampler is absent.")
+
+        if sampler is None and batch_sampler is None and self._dp_size > 1:
             sampler = DistributedSampler(
                 dataset,
                 num_replicas=self._dp_size,
@@ -373,24 +451,48 @@ class ParallelContext:
             has_cross_mesh_seams=bool(self._cross_mesh_groups),
         )
 
-        def wrapped_collate(samples: list) -> list[dict]:
+        def wrapped_collate(samples: list) -> list[Any]:
             collated = (
                 collate_fn(samples)
                 if collate_fn is not None
                 else _default_collate(samples)
             )
-            # Normalize to a microbatch list (a bare dict = a single microbatch),
-            # then apply the DP/CP transforms per microbatch.
+            # Normalize to one optimizer-step list. A caller-owned view selector
+            # lets structured microbatches expose distinct encoder/LLM dictionaries
+            # without Cornstarch knowing the structure's concrete type.
             microbatches = collated if isinstance(collated, list) else [collated]
-            return [apply_cp_split(mb) for mb in microbatches]
+            result: list[Any] = []
+            for microbatch in microbatches:
+                if per_microbatch_transform is not None:
+                    microbatch = per_microbatch_transform(microbatch)
+                views = (
+                    tuple(microbatch_views(microbatch))
+                    if microbatch_views is not None
+                    else (microbatch,)
+                )
+                if not views:
+                    raise ValueError("A planned microbatch must expose at least one view.")
+                for view in views:
+                    if not isinstance(view, dict):
+                        raise TypeError(
+                            "Every context-parallel microbatch view must be a dict."
+                        )
+                    apply_cp_split(view)
+                result.append(microbatch)
+            return result
 
+        common_kwargs = dict(
+            dataset=dataset,
+            collate_fn=wrapped_collate,
+            **loader_kwargs,
+        )
+        if batch_sampler is not None:
+            return DataLoader(batch_sampler=batch_sampler, **common_kwargs)
         return DataLoader(
-            dataset,
             batch_size=batch_size,
             sampler=sampler,
             shuffle=shuffle if sampler is None else False,
-            collate_fn=wrapped_collate,
-            **loader_kwargs,
+            **common_kwargs,
         )
 
     # ------------------------------------------------------------------
@@ -401,6 +503,8 @@ class ParallelContext:
         self,
         plan: "CornstarchExecutionPlan",
         output_future: "ExecutionFuture",
+        *,
+        schedule_factory: Callable[[ScheduleContext], TrainingSchedule] | None = None,
     ) -> TrainingSchedule:
         """Return the pipeline-parallel training schedule for the plan.
 
@@ -421,18 +525,33 @@ class ParallelContext:
                 "parallelism the modules are co-located; run the plan directly "
                 "(output_future.execute() + backward()) per microbatch instead."
             )
-        return OneForwardOneBackwardSchedule(
-            plan,
-            output_future,
-            {id(module): self._layouts[id(module)] for module in self._modules},
-            self._meshes,
-            self._dp_size,
-            self._cross_mesh_groups,
-            {
-                id(module): (config.context_parallel_splitter, config.context_parallel_size)
-                for module, config in zip(self._modules, self._configs)
-            },
+        context = ScheduleContext(
+            plan=plan,
+            output_future=output_future,
+            layouts=MappingProxyType(
+                {id(module): self._layouts[id(module)] for module in self._modules}
+            ),
+            meshes=MappingProxyType(dict(self._meshes)),
+            data_parallel_size=self._dp_size,
+            cross_mesh_groups=MappingProxyType(
+                {
+                    key: tuple(groups)
+                    for key, groups in self._cross_mesh_groups.items()
+                }
+            ),
+            routing_splitters=MappingProxyType(
+                {
+                    id(module): (
+                        config.context_parallel_splitter,
+                        config.context_parallel_size,
+                    )
+                    for module, config in zip(self._modules, self._configs)
+                }
+            ),
         )
+        if schedule_factory is not None:
+            return schedule_factory(context)
+        return context.create_default_1f1b()
 
     # ------------------------------------------------------------------
     # Gradient sync
@@ -493,6 +612,7 @@ class ParallelizationPlan:
     def __init__(self, global_ranks: Optional[Iterable[int]] = None) -> None:
         self._modules: list[ParallelModule] = []
         self._configs: list[ParallelConfig] = []
+        self._pipeline_partitions: list[PipelinePartitions] = []
         self._global_ranks: Optional[list[int]] = (
             list(global_ranks) if global_ranks is not None else None
         )
@@ -501,6 +621,8 @@ class ParallelizationPlan:
         self,
         module: ParallelModule,
         config: ParallelConfig,
+        *,
+        pipeline_partitions: PipelinePartitions = None,
     ) -> None:
         """Record a module-to-config binding for later distribution.
 
@@ -510,15 +632,56 @@ class ParallelizationPlan:
         ``apply_*`` helpers to walk. Wrap such an encoder with
         ``build_modality_encoder(encoder, language_model, modality=...)`` first.
         """
-        if not isinstance(module, (CornstarchModelBase, CornstarchModalityEncoder)):
+        if not isinstance(
+            module,
+            (
+                CornstarchModelBase,
+                CornstarchModalityEncoder,
+                CornstarchFusedModalityEncoder,
+            ),
+        ):
             raise TypeError(
-                f"parallelize() requires a CornstarchModelBase or "
-                f"CornstarchModalityEncoder, got {type(module).__name__}. Wrap a "
+                f"parallelize() requires a CornstarchModelBase, "
+                f"CornstarchModalityEncoder, or CornstarchFusedModalityEncoder; "
+                f"got {type(module).__name__}. Wrap a "
                 f"raw Hugging Face encoder with build_modality_encoder(encoder, "
                 f"language_model, modality=...) before parallelizing it."
             )
+        if pipeline_partitions is not None and not config.uses_pipeline_parallel:
+            raise ValueError(
+                "pipeline_partitions requires a positive pipeline_parallel_size."
+            )
+        if isinstance(module, CornstarchFusedModalityEncoder):
+            if pipeline_partitions is not None:
+                if not isinstance(pipeline_partitions, Mapping):
+                    raise TypeError(
+                        "A fused module requires a modality-to-partition mapping."
+                    )
+                expected = set(module.modalities)
+                actual = set(pipeline_partitions)
+                if actual != expected:
+                    raise ValueError(
+                        "Fused partition keys must exactly match registered "
+                        f"modalities; expected {sorted(expected)}, got {sorted(actual)}."
+                    )
+                if any(
+                    len(spec.boundaries) != config.num_pp_stages
+                    for spec in pipeline_partitions.values()
+                ):
+                    raise ValueError(
+                        "Every fused partition must contain one boundary per PP stage."
+                    )
+        elif isinstance(pipeline_partitions, Mapping):
+            raise TypeError("A non-fused module accepts one PipelinePartitionSpec.")
+        elif (
+            pipeline_partitions is not None
+            and len(pipeline_partitions.boundaries) != config.num_pp_stages
+        ):
+            raise ValueError("Partition must contain one boundary per PP stage.")
+
         self._modules.append(module)
         self._configs.append(config)
+        self._pipeline_partitions.append(pipeline_partitions)
 
     def materialize(
         self,
@@ -546,8 +709,11 @@ class ParallelizationPlan:
 
         meshes: dict[int, ModalProcessGroupMesh] = {}
         layouts: dict[int, MeshLayout] = {}
-        for module, config, ranks in zip(
-            self._modules, self._configs, module_ranks
+        for module, config, ranks, partitions in zip(
+            self._modules,
+            self._configs,
+            module_ranks,
+            self._pipeline_partitions,
         ):
             layout, mesh = self._build_module_mesh(
                 config, ranks, dp_size, device.type
@@ -556,7 +722,14 @@ class ParallelizationPlan:
             if not mesh.is_member:
                 continue
             meshes[id(module)] = mesh
-            self._materialize_local_module(module, config, mesh, device, dtype)
+            self._materialize_local_module(
+                module,
+                config,
+                mesh,
+                device,
+                dtype,
+                pipeline_partitions=partitions,
+            )
 
         dp_size_final, dp_rank, dp_group, grad_sync = self._build_dp_handles(
             meshes
@@ -648,6 +821,8 @@ class ParallelizationPlan:
         mesh: ModalProcessGroupMesh,
         device: torch.device,
         dtype: torch.dtype | None,
+        *,
+        pipeline_partitions: PipelinePartitions = None,
     ) -> None:
         """Apply model-side axes around rank-local lazy materialization.
 
@@ -658,26 +833,48 @@ class ParallelizationPlan:
         batched weights. This ordering is the central lazy-initialization
         invariant and is intentionally expressed once.
         """
-        target = (
-            module.encoder
-            if isinstance(module, CornstarchModalityEncoder)
-            else module
-        )
-        if config.tensor_parallel_size > 1:
-            apply_tensor_parallel(target, mesh.tp_mesh)
-        if config.context_parallel_size > 1:
-            apply_context_parallel(
-                target,
-                mesh.cp_group,
-                causal=isinstance(target, CornstarchLanguageModel),
-                splitter=config.context_parallel_splitter,
+        if isinstance(module, CornstarchFusedModalityEncoder):
+            partition_map = dict(pipeline_partitions or {})
+            targets = [
+                (name, child.encoder, partition_map.get(name))
+                for name, child in module.encoders.items()
+            ]
+        else:
+            target = (
+                module.encoder
+                if isinstance(module, CornstarchModalityEncoder)
+                else module
             )
-        if config.num_pp_stages > 1:
-            apply_pipeline_parallel(target, mesh)
+            partition = (
+                pipeline_partitions
+                if isinstance(pipeline_partitions, PipelinePartitionSpec)
+                else None
+            )
+            targets = [(None, target, partition)]
+
+        for _, target, partition in targets:
+            if config.tensor_parallel_size > 1:
+                apply_tensor_parallel(target, mesh.tp_mesh)
+            if config.context_parallel_size > 1:
+                apply_context_parallel(
+                    target,
+                    mesh.cp_group,
+                    causal=isinstance(target, CornstarchLanguageModel),
+                    splitter=config.context_parallel_splitter,
+                )
+            if config.num_pp_stages > 1:
+                apply_pipeline_parallel(target, mesh, partition=partition)
+
+        if isinstance(module, CornstarchFusedModalityEncoder):
+            for child in module.encoders.values():
+                child._pipeline_mesh = mesh
+        elif isinstance(module, CornstarchModalityEncoder):
+            module._pipeline_mesh = mesh
 
         module.materialize(device, dtype=dtype)
         if config.expert_parallel_size > 1:
-            apply_expert_parallel(target, mesh.ep_group)
+            for _, target, _ in targets:
+                apply_expert_parallel(target, mesh.ep_group)
 
     def _build_cross_mesh_groups(
         self, layouts: dict[int, MeshLayout]
@@ -689,8 +886,12 @@ class ParallelizationPlan:
         when it belongs to neither side of a particular seam.
         """
         encoders = [
-            module for module in self._modules
-            if isinstance(module, CornstarchModalityEncoder)
+            module
+            for module in self._modules
+            if isinstance(
+                module,
+                (CornstarchModalityEncoder, CornstarchFusedModalityEncoder),
+            )
         ]
         language_models = [
             module for module in self._modules

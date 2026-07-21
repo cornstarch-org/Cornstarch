@@ -22,7 +22,11 @@ import torch.nn.functional as F
 from tests.distributed.distributed_base import GlooDistributedTestBase
 from tests.model.model_configs import clip_vision_config, llama_config
 
-from cornstarch.distributed import ParallelConfig, ParallelizationPlan
+from cornstarch.distributed import (
+    ParallelConfig,
+    ParallelizationPlan,
+    PipelinePartitionSpec,
+)
 from cornstarch.distributed.context_parallel.splitters import (
     HeadTailContextParallelSplitter,
     UniformContextParallelSplitter,
@@ -37,6 +41,7 @@ from cornstarch.distributed.cross_mesh_routing import (
 from cornstarch.models import (
     CornstarchExecutionPlan,
     ExecutionFuture,
+    build_fused_modality_encoder,
     build_modality_encoder,
     from_hf_config,
 )
@@ -629,3 +634,112 @@ class TestCrossMeshCPCompiledSchedule(GlooDistributedTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFusedEncoderAndLanguagePipeline(GlooDistributedTestBase):
+    """Two fused encoders span PP=2 before an independently PP=2 LLM."""
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def test_fused_pp2_to_llm_pp2_forward_backward(self) -> None:
+        vision_config = _tiny_vision_config()
+        language_model = from_hf_config(
+            llama_config(), model_kind="language", attn_implementation="eager"
+        )
+        children = {}
+        for modality in ("vision", "aux"):
+            encoder = from_hf_config(
+                vision_config, model_kind="vision", attn_implementation="eager"
+            )
+            children[modality] = build_modality_encoder(
+                encoder, language_model, modality=modality
+            )
+        fused = build_fused_modality_encoder(children)
+        language_model.set_random_init()
+        fused.set_random_init()
+
+        parallel = ParallelizationPlan(global_ranks=list(range(self.world_size)))
+        encoder_partition = PipelinePartitionSpec((1, 2))
+        parallel.parallelize(
+            fused,
+            ParallelConfig(
+                tensor_parallel_size=1,
+                pipeline_parallel_size=2,
+                data_parallel_size=1,
+            ),
+            pipeline_partitions={
+                "vision": encoder_partition,
+                "aux": encoder_partition,
+            },
+        )
+        llm_layers = language_model.hf_config.num_hidden_layers
+        parallel.parallelize(
+            language_model,
+            ParallelConfig(
+                tensor_parallel_size=1,
+                pipeline_parallel_size=2,
+                data_parallel_size=1,
+            ),
+            pipeline_partitions=PipelinePartitionSpec((1, llm_layers)),
+        )
+        context = parallel.materialize("cpu", dtype=torch.float32)
+
+        tokens_per_encoder = _num_vision_tokens(vision_config)
+        seq_len = tokens_per_encoder * 2 + 3
+        generator = torch.Generator().manual_seed(7)
+        input_ids = torch.randint(
+            2,
+            language_model.hf_config.vocab_size,
+            (2, seq_len),
+            generator=generator,
+        )
+        input_ids[:, :tokens_per_encoder] = 0
+        input_ids[:, tokens_per_encoder : 2 * tokens_per_encoder] = 1
+        image_size = vision_config.image_size
+        batch = {
+            "input_ids": input_ids,
+            "labels": input_ids.clone(),
+            "vision_pixels": torch.randn(
+                2, 3, image_size, image_size, generator=generator
+            ),
+            "aux_pixels": torch.randn(
+                2, 3, image_size, image_size, generator=generator
+            ),
+        }
+        microbatches = [
+            {key: value.chunk(2, dim=0)[index] for key, value in batch.items()}
+            for index in range(2)
+        ]
+
+        execution = CornstarchExecutionPlan()
+        fused_outputs = execution.run_fused_modality_encoder(
+            fused,
+            inputs={
+                "vision": {"pixel_values": ExecutionFuture("vision_pixels")},
+                "aux": {"pixel_values": ExecutionFuture("aux_pixels")},
+            },
+        )
+        merged = execution.merge_modality_encoder_outputs(
+            language_model=language_model,
+            input_ids=ExecutionFuture("input_ids"),
+            labels=ExecutionFuture("labels"),
+            modality_token_ids={"vision": 0, "aux": 1},
+            encoder_outputs=fused_outputs,
+        )
+        output = execution.run_language_model(language_model, inputs=merged)
+        schedule = context.create_schedule(execution, output)
+        self.assertEqual(schedule.num_stages, 4)
+        result = schedule.step(microbatches, _criterion, return_loss=True)
+
+        rank = dist.get_rank()
+        if rank == 3:
+            self.assertIsNotNone(result["loss"])
+            self.assertTrue(result["loss"].isfinite().all())
+        else:
+            self.assertIsNone(result["loss"])
+        if rank in (0, 1):
+            self.assertTrue(_has_grad(fused), "fused encoder stage got no grad")
+        else:
+            self.assertTrue(_has_grad(language_model), "language stage got no grad")

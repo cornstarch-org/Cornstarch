@@ -9,10 +9,10 @@ schedule is involved.
 When pipeline parallelism is used the modules are disaggregated onto disjoint
 rank ranges and form a pipeline:
 
-- each **modality encoder is a leading pipeline stage** (one stage; intra-encoder
-  pipelining is out of scope), feeding
-- the **language-model stages** (``merge`` runs on the first language-model
-  stage; the language model is pipelined across the rest).
+- one ordinary or fused **modality encoder pipeline** leads the graph; every
+  fused child spans the same encoder stages and moves in registry order, feeding
+- the independently configured **language-model pipeline** (``merge`` runs on
+  its first stage).
 
 The boundary between the encoder mesh and the language-model mesh is a
 pipeline-stage boundary — a *seam*. Projected rows cross it through a DP-local,
@@ -57,6 +57,7 @@ from cornstarch.models.multimodal.execution import (
     CornstarchExecutionPlan,
     ExecutionFuture,
     _first_output_tensor,
+    _resolve_value,
 )
 
 
@@ -211,13 +212,14 @@ class MeshLayout:
 class BasePipelineSchedule(TrainingSchedule):
     """Drive an execution plan across a pipeline that may span several meshes.
 
-    The global pipeline is ``[encoder stages..., language-model stages...]``. This
-    rank owns exactly one global stage (the meshes are disjoint): an encoder rank
-    owns its encoder's leading stage; a language-model rank owns its language-model
-    pipeline stage. The base class resolves that placement, runs this rank's stage
+    The global pipeline is ``[encoder PP stages..., language-model PP stages...]``.
+    This rank owns exactly one global stage because the module meshes are disjoint.
+    For a fused producer, every registered child runs its corresponding local
+    partition on every encoder stage. The base class resolves that placement,
+    runs this rank's stage
     forward/backward per microbatch, and moves activations to its neighbors —
-    using ordinary pipeline P2P for an intra-mesh hop and the cross-mesh *seam*
-    transport for the encoder→language-model boundary. Subclasses choose the
+    using ordinary pipeline P2P for intra-mesh hops and the cross-mesh *seam*
+    transport once per modality at the encoder→language-model boundary. Subclasses choose the
     microbatch ordering (1F1B, etc.).
 
     The plan stays parallelism-agnostic; all rank/stage/transport knowledge lives
@@ -241,56 +243,65 @@ class BasePipelineSchedule(TrainingSchedule):
         self._dp_size = dp_size
         self._my_rank = dist.get_rank()
         self._device: torch.device | None = None
-        self._seam_states: list[SeamExchangeState] = []
+        self._seam_states: list[tuple[str, SeamExchangeState]] = []
         self._routing_splitters = dict(routing_splitters or {})
 
         nodes = plan._topological_nodes(output_future.name)
-        self._encoder_nodes = [n for n in nodes if n.kind == "run_modality_encoder"]
+        self._encoder_nodes = [
+            node
+            for node in nodes
+            if node.kind in {"run_modality_encoder", "run_fused_modality_encoder"}
+        ]
+        if len(self._encoder_nodes) > 1:
+            raise ValueError(
+                "Pipeline schedules accept one encoder producer. Compose multiple "
+                "modalities with CornstarchFusedModalityEncoder."
+            )
+        self._encoder_node = self._encoder_nodes[0] if self._encoder_nodes else None
         self._merge_node = next(
-            (n for n in nodes if n.kind == "merge_modality_encoder_outputs"), None
+            (node for node in nodes if node.kind == "merge_modality_encoder_outputs"),
+            None,
         )
-        self._lm_node = next(n for n in nodes if n.kind == "run_language_model")
+        self._lm_node = next(node for node in nodes if node.kind == "run_language_model")
+        self._modality_token_ids: dict[str, int] = (
+            dict(self._merge_node.params.get("modality_token_ids", {}))
+            if self._merge_node is not None
+            else {}
+        )
 
         self._lm_layout = layouts[id(self._lm_node.params["module"])]
-        self._num_encoders = len(self._encoder_nodes)
-        self._num_stages = self._num_encoders + self._lm_layout.num_pp_stages
+        self._has_encoder = self._encoder_node is not None
+        self._num_encoder_stages = 0
+        if self._has_encoder:
+            producer_module = self._encoder_node.params["module"]
+            self._encoder_layout = layouts[id(producer_module)]
+            self._num_encoder_stages = self._encoder_layout.num_pp_stages
+        self._num_stages = self._num_encoder_stages + self._lm_layout.num_pp_stages
 
-        # Resolve this rank's role and global stage index.
+        # Resolve this rank's one local role in the disaggregated global pipeline.
         self._role: str | None = None
-        self._encoder_index = -1
-        for index, node in enumerate(self._encoder_nodes):
-            if self._my_rank in layouts[id(node.params["module"])].rankset:
-                self._role = "encoder"
-                self._encoder_index = index
-                self._encoder_node = node
-                self._encoder_layout = layouts[id(node.params["module"])]
-                self._stage = index
-                break
-        if self._role is None and self._my_rank in self._lm_layout.rankset:
+        if self._has_encoder and self._my_rank in self._encoder_layout.rankset:
+            self._role = "encoder"
+            self._encoder_mesh = meshes[id(self._encoder_node.params["module"])]
+            self._encoder_comm = PipelineP2PCommunication(self._encoder_mesh)
+            self._encoder_stage = self._encoder_mesh.stage
+            self._stage = self._encoder_stage
+        elif self._my_rank in self._lm_layout.rankset:
             self._role = "llm"
             self._lm_mesh = meshes[id(self._lm_node.params["module"])]
             self._lm_comm = PipelineP2PCommunication(self._lm_mesh)
             self._lm_stage = self._lm_mesh.stage
-            self._stage = self._num_encoders + self._lm_stage
+            self._stage = self._num_encoder_stages + self._lm_stage
 
-        # A rank with no stage in *this* batch's plan idles (e.g. the encoder
-        # ranks on a text-only step, whose plan has no run_modality_encoder node).
-        # Every rank derives the same plan from the same batch, so the active
-        # ranks never wait on a transfer from an idle one.
+        # A rank with no node in this batch's plan idles (for example encoder
+        # ranks on a text-only step).
         self._idle = self._role is None
 
-        # Cross-mesh seam between the (single) leading encoder and LM stage 0.
-        # The seam pairs the producing encoder with the language model; multiple
-        # encoders feeding one merge as parallel leading stages is out of scope.
-        self._has_encoder = self._num_encoders > 0
         if self._has_encoder:
-            self._seam_producer = layouts[
-                id(self._encoder_nodes[0].params["module"])
-            ]
-            # The merge consumes the encoder output under this future name.
-            self._encoder_output_name = self._encoder_nodes[0].name
-            producer_module = self._encoder_nodes[0].params["module"]
+            producer_module = self._encoder_node.params["module"]
             consumer_module = self._lm_node.params["module"]
+            self._seam_producer = self._encoder_layout
+            self._encoder_output_name = self._encoder_node.name
             self._seam_producer_module_id = id(producer_module)
             self._seam_consumer_module_id = id(consumer_module)
             seam_groups = (cross_mesh_groups or {}).get(
@@ -302,15 +313,26 @@ class BasePipelineSchedule(TrainingSchedule):
                     "groups. Construct it with ParallelContext.create_schedule()."
                 )
             self._seam_router = CrossMeshRouter(seam_groups)
-            self._seam_modality = getattr(producer_module, "modality", None)
-            if self._seam_modality is None:
-                raise ValueError("A modality encoder seam must declare its modality name.")
-
-        self._modality_token_ids: dict[str, int] = (
-            dict(self._merge_node.params.get("modality_token_ids", {}))
-            if self._merge_node is not None
-            else {}
-        )
+            if self._encoder_node.kind == "run_fused_modality_encoder":
+                provided = self._encoder_node.params["inputs"]
+                self._seam_modalities = tuple(
+                    modality
+                    for modality in producer_module.modalities
+                    if modality in provided
+                )
+            else:
+                modality = getattr(producer_module, "modality", None)
+                if modality is None:
+                    raise ValueError(
+                        "A modality encoder seam must declare its modality name."
+                    )
+                self._seam_modalities = (modality,)
+            missing_tokens = set(self._seam_modalities) - set(self._modality_token_ids)
+            if missing_tokens:
+                raise ValueError(
+                    "Missing modality token IDs for fused seam outputs: "
+                    f"{sorted(missing_tokens)}"
+                )
 
     # ------------------------------------------------------------------
     # Stage semantics
@@ -338,8 +360,11 @@ class BasePipelineSchedule(TrainingSchedule):
         return self._at_llm_first_stage() and self._has_encoder
 
     def _seam_on_send(self) -> bool:
-        """This rank sends its forward output across the seam (the encoder)."""
-        return self._role == "encoder"
+        """This rank sends across the seam only at the encoder's final stage."""
+        return (
+            self._role == "encoder"
+            and self._encoder_stage == self._num_encoder_stages - 1
+        )
 
     # ------------------------------------------------------------------
     # Forward computation for this rank's stage
@@ -369,9 +394,50 @@ class BasePipelineSchedule(TrainingSchedule):
     def _forward_compute(self, microbatch: dict, input_obj: Any | None) -> Any:
         """Run this rank's stage forward and return its output activation/result."""
         if self._role == "encoder":
-            output = CornstarchExecutionPlan._execute_node(
-                self._encoder_node, dict(microbatch)
-            )
+            values = dict(microbatch)
+            if self._encoder_stage == 0:
+                output = CornstarchExecutionPlan._execute_node(
+                    self._encoder_node, values
+                )
+            elif self._encoder_node.kind == "run_fused_modality_encoder":
+                if not isinstance(input_obj, Mapping):
+                    raise TypeError(
+                        "A fused encoder PP stage expects a modality activation mapping."
+                    )
+                stage_inputs: dict[str, dict[str, Any]] = {}
+                for modality, declared in self._encoder_node.params["inputs"].items():
+                    if modality not in input_obj:
+                        raise ValueError(
+                            f"Missing {modality!r} activation at fused PP stage "
+                            f"{self._encoder_stage}."
+                        )
+                    kwargs = {
+                        key: _resolve_value(value, values)
+                        for key, value in declared.items()
+                    }
+                    activation = input_obj[modality]
+                    if isinstance(activation, Mapping):
+                        kwargs.update(activation)
+                    else:
+                        kwargs["hidden_states"] = activation
+                    stage_inputs[modality] = kwargs
+                output = self._encoder_node.params["module"](inputs=stage_inputs)
+            else:
+                kwargs = {
+                    key: _resolve_value(value, values)
+                    for key, value in self._encoder_node.params["inputs"].items()
+                }
+                if isinstance(input_obj, Mapping):
+                    kwargs.update(input_obj)
+                elif input_obj is not None:
+                    kwargs["hidden_states"] = input_obj
+                output = self._encoder_node.params["module"](**kwargs)
+
+            if self._encoder_node.kind == "run_fused_modality_encoder":
+                return {
+                    modality: _first_output_tensor(modality_output)
+                    for modality, modality_output in output.items()
+                }
             return _first_output_tensor(output)
 
         # Language-model role.
@@ -481,15 +547,26 @@ class BasePipelineSchedule(TrainingSchedule):
         parameter = next(embedding.parameters())
         return hidden_size, parameter.dtype
 
-    def _routing_offsets(self, microbatch: dict, module_id: int, layout: MeshLayout):
+    def _routing_offsets(
+        self,
+        microbatch: dict,
+        module_id: int,
+        layout: MeshLayout,
+        modality: str,
+    ):
         metadata = microbatch.get(CP_ROUTING_OFFSETS_KEY)
-        if isinstance(metadata, dict) and module_id in metadata:
+        if isinstance(metadata, Mapping) and module_id in metadata:
+            module_offsets = metadata[module_id]
+            if isinstance(module_offsets, Mapping):
+                if modality not in module_offsets:
+                    raise ValueError(
+                        f"Missing CP routing offsets for fused modality {modality!r}."
+                    )
+                return module_offsets[modality]
             return routing_offsets_from_batch(microbatch, module_id)
         if module_id == self._seam_producer_module_id:
             global_ids = microbatch.get("cp_global_input_ids", microbatch["input_ids"])
-            counts = (global_ids == self._modality_token_ids[self._seam_modality]).sum(
-                dim=1
-            )
+            counts = (global_ids == self._modality_token_ids[modality]).sum(dim=1)
             modality_length = int(counts.max().item()) if counts.numel() else 0
             mask = (
                 torch.arange(modality_length, device=global_ids.device).unsqueeze(0)
@@ -507,58 +584,91 @@ class BasePipelineSchedule(TrainingSchedule):
             "build batches with ParallelContext.prepare_dataloader()."
         )
 
-    def _seam_forward(
-        self, obj: torch.Tensor | None, microbatch: dict
-    ) -> torch.Tensor | None:
+    def _seam_forward(self, obj: Any | None, microbatch: dict) -> Any | None:
         global_ids = microbatch.get("cp_global_input_ids", microbatch.get("input_ids"))
         if not isinstance(global_ids, torch.Tensor):
             raise ValueError("Cross-mesh routing requires global input_ids metadata.")
         modality_masks = microbatch.get(CP_MODALITY_MASKS_KEY, {})
         if not isinstance(modality_masks, Mapping):
             raise ValueError("cp_modality_attention_masks must be a modality mapping.")
-        source_attention_mask = modality_masks.get(self._seam_modality)
-        if source_attention_mask is None:
-            counts = (global_ids == self._modality_token_ids[self._seam_modality]).sum(
-                dim=1
-            )
-            modality_length = int(counts.max().item()) if counts.numel() else 0
-            source_attention_mask = (
-                torch.arange(modality_length, device=global_ids.device).unsqueeze(0)
-                < counts.unsqueeze(1)
-            )
-        hidden_size, dtype = self._seam_spec(obj)
-        received, state = self._seam_router.forward(
-            obj,
-            global_input_ids=global_ids,
-            token_id=self._modality_token_ids[self._seam_modality],
-            source_attention_mask=source_attention_mask,
-            source_offsets=self._routing_offsets(
-                microbatch, self._seam_producer_module_id, self._seam_producer
-            ),
-            destination_offsets=self._routing_offsets(
-                microbatch, self._seam_consumer_module_id, self._lm_layout
-            ),
-            hidden_size=hidden_size,
-            dtype=dtype,
-            device=self._device,
-        )
-        self._seam_states.append(state)
-        if received is not None:
-            received.requires_grad_(True)
-        return received
 
-    def _seam_backward(self, grad: torch.Tensor | None) -> torch.Tensor | None:
-        if not self._seam_states:
-            raise RuntimeError("Cross-mesh backward has no matching forward state.")
-        state = self._seam_states.pop(0)
-        hidden_size, dtype = self._seam_spec(grad)
-        return self._seam_router.backward(
-            grad,
-            state,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            device=self._device,
+        fused = len(self._seam_modalities) > 1 or (
+            self._encoder_node.kind == "run_fused_modality_encoder"
         )
+        if obj is not None and fused and not isinstance(obj, Mapping):
+            raise TypeError("A fused seam sender must provide a modality mapping.")
+        received_by_modality: dict[str, torch.Tensor] = {}
+        for modality in self._seam_modalities:
+            feature = obj.get(modality) if isinstance(obj, Mapping) else obj
+            source_attention_mask = modality_masks.get(modality)
+            if source_attention_mask is None:
+                counts = (global_ids == self._modality_token_ids[modality]).sum(dim=1)
+                modality_length = int(counts.max().item()) if counts.numel() else 0
+                source_attention_mask = (
+                    torch.arange(modality_length, device=global_ids.device).unsqueeze(0)
+                    < counts.unsqueeze(1)
+                )
+            hidden_size, dtype = self._seam_spec(feature)
+            received, state = self._seam_router.forward(
+                feature,
+                global_input_ids=global_ids,
+                token_id=self._modality_token_ids[modality],
+                source_attention_mask=source_attention_mask,
+                source_offsets=self._routing_offsets(
+                    microbatch,
+                    self._seam_producer_module_id,
+                    self._seam_producer,
+                    modality,
+                ),
+                destination_offsets=self._routing_offsets(
+                    microbatch,
+                    self._seam_consumer_module_id,
+                    self._lm_layout,
+                    modality,
+                ),
+                hidden_size=hidden_size,
+                dtype=dtype,
+                device=self._device,
+            )
+            self._seam_states.append((modality, state))
+            if received is not None:
+                received.requires_grad_(True)
+                received_by_modality[modality] = received
+
+        if fused:
+            return received_by_modality if received_by_modality else None
+        return received_by_modality.get(self._seam_modalities[0])
+
+    def _seam_backward(self, grad: Any | None) -> Any | None:
+        fused = len(self._seam_modalities) > 1 or (
+            self._encoder_node.kind == "run_fused_modality_encoder"
+        )
+        if grad is not None and fused and not isinstance(grad, Mapping):
+            raise TypeError("A fused seam receiver must provide modality gradients.")
+        returned_by_modality: dict[str, torch.Tensor] = {}
+        for modality in self._seam_modalities:
+            if not self._seam_states:
+                raise RuntimeError("Cross-mesh backward has no matching forward state.")
+            state_modality, state = self._seam_states.pop(0)
+            if state_modality != modality:
+                raise RuntimeError(
+                    "Cross-mesh backward modality order differs from forward order."
+                )
+            modality_grad = grad.get(modality) if isinstance(grad, Mapping) else grad
+            hidden_size, dtype = self._seam_spec(modality_grad)
+            returned = self._seam_router.backward(
+                modality_grad,
+                state,
+                hidden_size=hidden_size,
+                dtype=dtype,
+                device=self._device,
+            )
+            if returned is not None:
+                returned_by_modality[modality] = returned
+
+        if fused:
+            return returned_by_modality if returned_by_modality else None
+        return returned_by_modality.get(self._seam_modalities[0])
 
     def _seam_send_forward(self, obj: Any, microbatch: dict) -> None:
         self._seam_forward(obj, microbatch)
@@ -597,6 +707,8 @@ class BasePipelineSchedule(TrainingSchedule):
             return None
         if self._seam_on_recv():
             return self._seam_recv_forward(microbatch)
+        if self._role == "encoder":
+            return self._encoder_comm.recv_forward()
         return self._lm_comm.recv_forward()
 
     def _send_forward(self, obj: Any, microbatch: dict) -> None:
@@ -605,6 +717,9 @@ class BasePipelineSchedule(TrainingSchedule):
         if self._seam_on_send():
             self._seam_send_forward(obj, microbatch)
             return
+        if self._role == "encoder":
+            self._encoder_comm.send_forward(obj)
+            return
         self._lm_comm.send_forward(obj)
 
     def _recv_backward(self) -> Any | None:
@@ -612,6 +727,8 @@ class BasePipelineSchedule(TrainingSchedule):
             return None
         if self._seam_on_send():
             return self._seam_recv_backward()
+        if self._role == "encoder":
+            return self._encoder_comm.recv_backward()
         return self._lm_comm.recv_backward()
 
     def _send_backward(self, grad: Any) -> None:
@@ -620,6 +737,9 @@ class BasePipelineSchedule(TrainingSchedule):
         if self._seam_on_recv():
             self._seam_send_backward(grad)
             return
+        if self._role == "encoder":
+            self._encoder_comm.send_backward(grad)
+            return
         self._lm_comm.send_backward(grad)
 
     def _send_forward_recv_backward(self, obj: Any, microbatch: dict) -> Any | None:
@@ -627,6 +747,8 @@ class BasePipelineSchedule(TrainingSchedule):
             return None
         if self._seam_on_send():
             return self._seam_send_forward_recv_backward(obj, microbatch)
+        if self._role == "encoder":
+            return self._encoder_comm.send_forward_recv_backward(obj)
         return self._lm_comm.send_forward_recv_backward(obj)
 
     def _send_backward_recv_forward(self, grad: Any, microbatch: dict) -> Any | None:
@@ -634,6 +756,8 @@ class BasePipelineSchedule(TrainingSchedule):
             return None
         if self._seam_on_recv():
             return self._seam_send_backward_recv_forward(grad, microbatch)
+        if self._role == "encoder":
+            return self._encoder_comm.send_backward_recv_forward(grad)
         return self._lm_comm.send_backward_recv_forward(grad)
 
 
@@ -643,6 +767,20 @@ class BasePipelineSchedule(TrainingSchedule):
 
 class OneForwardOneBackwardSchedule(BasePipelineSchedule):
     """One-forward-one-backward pipeline schedule over the global pipeline."""
+
+    def extra_warmup_microbatches(
+        self,
+        microbatches: list[dict[str, torch.Tensor]],
+        required_warmup: int,
+    ) -> int:
+        """Return coordinated eager forwards beyond the deadlock-safe minimum.
+
+        Subclasses may override this public extension hook. The returned value
+        must be identical on every active pipeline stage (coordinate it with a
+        collective when it depends on rank-local memory); negative values are
+        rejected and the total is capped by the iteration's microbatch count.
+        """
+        return 0
 
     def step(
         self,
@@ -662,7 +800,15 @@ class OneForwardOneBackwardSchedule(BasePipelineSchedule):
         num_microbatches = len(microbatches)
         self._device = _first_tensor_device(microbatches) or _default_device()
 
-        num_warmup = min(self._num_stages - self._stage - 1, num_microbatches)
+        required_warmup = min(
+            self._num_stages - self._stage - 1, num_microbatches
+        )
+        extra_warmup = self.extra_warmup_microbatches(
+            microbatches, required_warmup
+        )
+        if not isinstance(extra_warmup, int) or extra_warmup < 0:
+            raise ValueError("extra_warmup_microbatches must return a nonnegative int")
+        num_warmup = min(required_warmup + extra_warmup, num_microbatches)
         num_steady = num_microbatches - num_warmup
 
         accum_loss: torch.Tensor | None = None

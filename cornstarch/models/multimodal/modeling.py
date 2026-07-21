@@ -116,8 +116,114 @@ class CornstarchModalityEncoder(nn.Module):
         merge code receives a standard ``BaseModelOutput`` from the projector.
         """
         encoder_outputs = self.encoder(**kwargs)
+        # The projector is the encoder tail. Intermediate PP stages hand their
+        # raw activation to the next stage and only the final stage projects.
+        pipeline_mesh = getattr(self, "_pipeline_mesh", None)
+        if pipeline_mesh is not None and not pipeline_mesh.is_last_stage():
+            return encoder_outputs
         hidden_states = _first_output_tensor(encoder_outputs)
         return self.projector(hidden_states)
+
+
+class CornstarchFusedModalityEncoder(nn.Module):
+    """Ordered group of modality encoders sharing one parallel configuration."""
+
+    def __init__(self, encoders: Mapping[str, CornstarchModalityEncoder]):
+        super().__init__()
+        if not encoders:
+            raise ValueError("A fused modality encoder requires at least one child.")
+        ordered: dict[str, CornstarchModalityEncoder] = {}
+        output_widths: set[int] = set()
+        for name, module in encoders.items():
+            if not name:
+                raise ValueError("Fused modality names must be nonempty.")
+            if not isinstance(module, CornstarchModalityEncoder):
+                raise TypeError(
+                    "Fused children must be CornstarchModalityEncoder instances; "
+                    f"got {type(module).__name__} for {name!r}."
+                )
+            if module.modality is not None and module.modality != name:
+                raise ValueError(
+                    f"Registry name {name!r} does not match child modality "
+                    f"{module.modality!r}."
+                )
+            module.modality = name
+            ordered[name] = module
+            output_widths.add(int(module.projector.config.out_features))
+        if len(output_widths) != 1:
+            raise ValueError(
+                "Every fused child projector must target the same language hidden size."
+            )
+        self.encoders = nn.ModuleDict(ordered)
+
+    @property
+    def modalities(self) -> tuple[str, ...]:
+        return tuple(self.encoders.keys())
+
+    @property
+    def config(
+        self,
+    ) -> Mapping[str, tuple[PretrainedConfig, CornstarchEncoderToLanguageProjectorConfig]]:
+        return {name: module.config for name, module in self.encoders.items()}
+
+    @property
+    def output_hidden_size(self) -> int:
+        first = next(iter(self.encoders.values()))
+        return int(first.projector.config.out_features)
+
+    def set_empty_init(self) -> None:
+        for module in self.encoders.values():
+            module.set_empty_init()
+
+    def set_random_init(self) -> None:
+        for module in self.encoders.values():
+            module.set_random_init()
+
+    def set_checkpoint_init(
+        self,
+        checkpoints: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        unknown = set(checkpoints) - set(self.encoders)
+        if unknown:
+            raise ValueError(f"Unknown fused checkpoint modalities: {sorted(unknown)}")
+        for name, module in self.encoders.items():
+            if name in checkpoints:
+                module.set_checkpoint_init(**dict(checkpoints[name]))
+
+    def materialize(
+        self,
+        device: str | torch.device = "cuda",
+        dtype: torch.dtype | None = None,
+    ) -> CornstarchFusedModalityEncoder:
+        for module in self.encoders.values():
+            module.materialize(device, dtype=dtype)
+        return self
+
+    def forward(
+        self,
+        inputs: Mapping[str, Mapping[str, Any]] | None = None,
+        **modality_inputs: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        provided = dict(inputs or {})
+        duplicates = set(provided) & set(modality_inputs)
+        if duplicates:
+            raise ValueError(f"Duplicate fused modality inputs: {sorted(duplicates)}")
+        provided.update(modality_inputs)
+        unknown = set(provided) - set(self.encoders)
+        if unknown:
+            raise ValueError(f"Unknown fused modalities: {sorted(unknown)}")
+        return {
+            name: module(**dict(provided[name]))
+            for name, module in self.encoders.items()
+            if name in provided
+        }
+
+
+def build_fused_modality_encoder(
+    encoders: Mapping[str, CornstarchModalityEncoder],
+) -> CornstarchFusedModalityEncoder:
+    """Build one ordered fused producer from already wrapped modality encoders."""
+    return CornstarchFusedModalityEncoder(encoders)
 
 
 def build_modality_encoder(
@@ -155,7 +261,11 @@ def _first_output_tensor(output: Any) -> torch.Tensor:
     if hasattr(output, "last_hidden_state"):
         return output.last_hidden_state
     if isinstance(output, Mapping):
-        return output["last_hidden_state"]
+        if "last_hidden_state" in output:
+            return output["last_hidden_state"]
+        if "hidden_states" in output:
+            return output["hidden_states"]
+        raise KeyError("Output mapping has neither last_hidden_state nor hidden_states.")
     if isinstance(output, tuple):
         return output[0]
     raise TypeError(f"Cannot extract hidden states from output of type {type(output).__name__}.")

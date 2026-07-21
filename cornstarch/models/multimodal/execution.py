@@ -138,13 +138,34 @@ class CornstarchExecutionPlan:
             )
         )
 
+    def run_fused_modality_encoder(
+        self,
+        module: Any,
+        inputs: Mapping[str, Mapping[str, Any]] | None = None,
+        name: str | None = None,
+        **modality_inputs: Mapping[str, Any],
+    ) -> ExecutionFuture:
+        """Add one fused producer node returning a modality-keyed output mapping."""
+        provided = dict(inputs or {})
+        duplicates = set(provided) & set(modality_inputs)
+        if duplicates:
+            raise ValueError(f"Duplicate fused modality inputs: {sorted(duplicates)}")
+        provided.update(modality_inputs)
+        return self._add_node(
+            ExecutionNode(
+                name=name or "fused_encoder_outputs",
+                kind="run_fused_modality_encoder",
+                params={"module": module, "inputs": provided},
+            )
+        )
+
     def merge_modality_encoder_outputs(
         self,
         language_model: Any,
         input_ids: Any,
         labels: Any,
         modality_token_ids: Mapping[str, int],
-        encoder_outputs: Mapping[str, Any] | None = None,
+        encoder_outputs: Mapping[str, Any] | ExecutionFuture | None = None,
         language_model_inputs: Mapping[str, Any] | None = None,
         name: str | None = None,
     ) -> ExecutionFuture:
@@ -157,7 +178,10 @@ class CornstarchExecutionPlan:
                     "language_model": language_model,
                     "input_ids": input_ids,
                     "labels": labels,
-                    "encoder_outputs": dict(encoder_outputs or {}),
+                    "encoder_outputs": (
+                        encoder_outputs if isinstance(encoder_outputs, ExecutionFuture)
+                        else dict(encoder_outputs or {})
+                    ),
                     "modality_token_ids": dict(modality_token_ids),
                     "language_model_inputs": dict(language_model_inputs or {}),
                 },
@@ -339,15 +363,23 @@ class CornstarchExecutionPlan:
                 for arg_name, value in node.params["inputs"].items()
             }
             return node.params["module"](**encoder_inputs)
+        if node.kind == "run_fused_modality_encoder":
+            fused_inputs = {
+                modality: {
+                    key: _resolve_value(value, values)
+                    for key, value in modality_inputs.items()
+                }
+                for modality, modality_inputs in node.params["inputs"].items()
+            }
+            return node.params["module"](inputs=fused_inputs)
         if node.kind == "merge_modality_encoder_outputs":
             return merge_modality_encoder_outputs(
                 language_model=node.params["language_model"],
                 input_ids=_resolve_value(node.params["input_ids"], values),
                 labels=_resolve_value(node.params["labels"], values),
-                encoder_outputs={
-                    modality: _resolve_value(value, values)
-                    for modality, value in node.params["encoder_outputs"].items()
-                },
+                encoder_outputs=_resolve_value(
+                    node.params["encoder_outputs"], values
+                ),
                 modality_token_ids=node.params["modality_token_ids"],
                 language_model_inputs={
                     key: _resolve_value(value, values)
@@ -559,7 +591,11 @@ def _first_output_tensor(output: Any) -> torch.Tensor:
     if hasattr(output, "last_hidden_state"):
         return output.last_hidden_state
     if isinstance(output, Mapping):
-        return output["last_hidden_state"]
+        if "last_hidden_state" in output:
+            return output["last_hidden_state"]
+        if "hidden_states" in output:
+            return output["hidden_states"]
+        raise KeyError("Output mapping has neither last_hidden_state nor hidden_states.")
     if isinstance(output, tuple):
         return output[0]
     raise TypeError(f"Cannot extract hidden states from output of type {type(output).__name__}.")
