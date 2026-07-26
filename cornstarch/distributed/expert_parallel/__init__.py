@@ -39,6 +39,9 @@ from cornstarch.distributed.expert_parallel.routing import (
     ExpertParallelDispatcher,
     ExpertRouter,
 )
+from cornstarch.distributed.pipeline_parallel.deferred_weight_grad import (
+    deferred_expert_linear,
+)
 from cornstarch.models.model_base import CornstarchModelBase
 
 
@@ -79,8 +82,12 @@ class _BatchedExperts(nn.Module):
             expert_idx = expert_idx[0]
             top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current = hidden_states[token_idx]
-            gate, up = F.linear(current, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
-            current = F.linear(self.act_fn(gate) * up, self.down_proj[expert_idx])
+            gate, up = deferred_expert_linear(
+                current, self.gate_up_proj, expert_idx
+            ).chunk(2, dim=-1)
+            current = deferred_expert_linear(
+                self.act_fn(gate) * up, self.down_proj, expert_idx
+            )
             current = current * top_k_weights[token_idx, top_k_pos, None]
             final = final.index_add(0, token_idx, current.to(final.dtype))
         return final

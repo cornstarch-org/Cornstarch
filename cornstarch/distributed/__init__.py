@@ -22,8 +22,8 @@ tests call these directly; everything else is built on them.
 - **Context parallelism** (``apply_context_parallel`` + ``splitters``):
   all-gather flash attention plus data-side sequence splitters.
 - **Pipeline parallelism** (``apply_pipeline_parallel`` + the
-  ``TrainingSchedule`` hierarchy + P2P): explicit Megatron/ColossalAI-style
-  1F1B scheduling, not DTensor-based. Multimodal encoder-to-LLM seams use a
+  ``TrainingSchedule`` hierarchy + P2P): explicit 1F1B and count-heuristic
+  ZB-H2 scheduling, not DTensor-based. Multimodal encoder-to-LLM seams use a
   differentiable variable-split all-to-all so each projected row moves directly
   between its source and destination CP owners.
 - **Expert parallelism** (``apply_expert_parallel``): shards a MoE layer's
@@ -60,8 +60,13 @@ from cornstarch.distributed.pipeline_parallel import apply_pipeline_parallel
 from cornstarch.distributed.pipeline_parallel.schedule import (
     BasePipelineSchedule,
     MeshLayout,
-    OneForwardOneBackwardSchedule,
     TrainingSchedule,
+)
+from cornstarch.distributed.pipeline_parallel.schedule_1f1b import (
+    OneForwardOneBackwardSchedule,
+)
+from cornstarch.distributed.pipeline_parallel.schedule_zbpp import (
+    ZeroBubblePipelineSchedule,
 )
 from cornstarch.distributed.process_group_mesh import ModalProcessGroupMesh
 from cornstarch.distributed.tensor_parallel import (
@@ -87,6 +92,7 @@ __all__ = [
     "TrainingSchedule",
     "BasePipelineSchedule",
     "OneForwardOneBackwardSchedule",
+    "ZeroBubblePipelineSchedule",
     "MeshLayout",
     # expert parallel
     "apply_expert_parallel",

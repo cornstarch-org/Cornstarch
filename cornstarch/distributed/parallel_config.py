@@ -30,6 +30,9 @@ class ParallelConfig:
       (all ``None`` ⇒ no pipeline parallelism; all positive ⇒ pipeline
       parallelism); a mix is rejected by ``materialize()``. Cornstarch never
       infers a stage count — the user states it.
+    - ``pipeline_schedule``: ``"1f1b"`` (default) or count-heuristic ZB-H2
+      (``"zbpp"``). Every pipelined module in one plan must select the same
+      schedule.
     - ``context_parallel_size`` (``cp``): sequence is split across these ranks
       (data-side); requires a ``context_parallel_splitter``.
     - ``data_parallel_size`` (``dp``): replicas trained on different data shards.

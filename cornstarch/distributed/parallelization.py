@@ -40,10 +40,12 @@ from cornstarch.distributed.data_parallel import GradientSynchronizer
 from cornstarch.distributed.expert_parallel import apply_expert_parallel
 from cornstarch.distributed.parallel_config import ParallelConfig
 from cornstarch.distributed.pipeline_parallel import apply_pipeline_parallel
-from cornstarch.distributed.pipeline_parallel.schedule import (
-    MeshLayout,
+from cornstarch.distributed.pipeline_parallel.deferred_weight_grad import (
+    apply_deferred_weight_gradients,
+)
+from cornstarch.distributed.pipeline_parallel.schedule import MeshLayout, TrainingSchedule
+from cornstarch.distributed.pipeline_parallel.schedule_1f1b import (
     OneForwardOneBackwardSchedule,
-    TrainingSchedule,
 )
 from cornstarch.distributed.process_group_mesh import ModalProcessGroupMesh
 from cornstarch.distributed.tensor_parallel import apply_tensor_parallel
@@ -407,9 +409,10 @@ class ParallelContext:
         Only call this when pipeline parallelism is used (``uses_pipeline_parallel``);
         without it there are no stages and the training loop runs the plan directly
         (``output_future.execute()`` + ``backward()`` per microbatch). The returned
-        :class:`OneForwardOneBackwardSchedule` drives the global pipeline — the
-        modality encoder(s) as leading stage(s) feeding the language-model stages,
-        with the encoder→language-model boundary crossed by the cross-mesh seam.
+        The schedule selected by ``ParallelConfig.pipeline_schedule`` drives the
+        global pipeline — modality encoder(s) as leading stage(s) feeding the
+        language-model stages, with the encoder→language-model boundary crossed
+        by the cross-mesh seam.
 
         Construction is cheap (DAG/stage analysis + a rank-local program, no
         collectives), so the caller may rebuild it per step. The number of
@@ -421,7 +424,27 @@ class ParallelContext:
                 "parallelism the modules are co-located; run the plan directly "
                 "(output_future.execute() + backward()) per microbatch instead."
             )
-        return OneForwardOneBackwardSchedule(
+        schedules = {
+            config.pipeline_schedule
+            for config in self._configs
+            if config.uses_pipeline_parallel
+        }
+        if len(schedules) != 1:
+            raise ValueError(
+                "All pipelined modules in one plan must select the same "
+                "pipeline_schedule."
+            )
+        schedule_name = schedules.pop()
+        if schedule_name == "1f1b":
+            schedule_cls = OneForwardOneBackwardSchedule
+        else:
+            from cornstarch.distributed.pipeline_parallel.schedule_zbpp import (
+                ZeroBubblePipelineSchedule,
+            )
+
+            schedule_cls = ZeroBubblePipelineSchedule
+
+        return schedule_cls(
             plan,
             output_future,
             {id(module): self._layouts[id(module)] for module in self._modules},
@@ -678,6 +701,8 @@ class ParallelizationPlan:
         module.materialize(device, dtype=dtype)
         if config.expert_parallel_size > 1:
             apply_expert_parallel(target, mesh.ep_group)
+        if config.uses_pipeline_parallel and config.pipeline_schedule == "zbpp":
+            apply_deferred_weight_gradients(target)
 
     def _build_cross_mesh_groups(
         self, layouts: dict[int, MeshLayout]
@@ -723,6 +748,17 @@ class ParallelizationPlan:
         pp_flags = [cfg.uses_pipeline_parallel for cfg in self._configs]
         if all(pp_flags):
             pipelined = True
+            schedules = {cfg.pipeline_schedule for cfg in self._configs}
+            if len(schedules) != 1:
+                named = ", ".join(
+                    f"{type(module).__name__}(pipeline_schedule="
+                    f"{config.pipeline_schedule!r})"
+                    for module, config in zip(self._modules, self._configs)
+                )
+                raise ValueError(
+                    "All pipelined modules in one plan must select the same "
+                    f"pipeline_schedule; got {named}."
+                )
         elif not any(pp_flags):
             pipelined = False
         else:
