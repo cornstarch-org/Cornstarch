@@ -1,4 +1,4 @@
-"""Pipeline parallelism: P2P communication, forward spec wrapper, and 1F1B schedule."""
+"""Pipeline parallelism: stage partitioning, P2P, and training schedules."""
 from __future__ import annotations
 
 import torch.nn as nn

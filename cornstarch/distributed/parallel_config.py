@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from cornstarch.distributed.context_parallel.splitters import ContextParallelSplitter
@@ -43,6 +43,7 @@ class ParallelConfig:
 
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int | None = None
+    pipeline_schedule: Literal["1f1b", "zbpp"] = "1f1b"
     context_parallel_size: int = 1
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
@@ -61,6 +62,10 @@ class ParallelConfig:
         # stage count (disaggregate); it is never < 1.
         if self.pipeline_parallel_size is not None and self.pipeline_parallel_size < 1:
             raise ValueError("pipeline_parallel_size must be None or >= 1.")
+        if self.pipeline_schedule not in ("1f1b", "zbpp"):
+            raise ValueError(
+                "pipeline_schedule must be either '1f1b' or 'zbpp'."
+            )
         if self.context_parallel_size > 1 and self.context_parallel_splitter is None:
             raise ValueError(
                 "context_parallel_splitter must be provided when "
