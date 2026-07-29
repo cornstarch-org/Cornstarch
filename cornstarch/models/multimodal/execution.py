@@ -49,6 +49,7 @@ class ExecutionFuture:
 
     name: str
     _plan: CornstarchExecutionPlan | None = field(default=None, repr=False, compare=False)
+    optional: bool = False
 
     def execute(self, inputs: Mapping[str, Any] | None = None) -> Any:
         """Execute only this future's dependency subgraph and return its value."""
@@ -78,8 +79,13 @@ class ExecutionNode:
 
     @property
     def dependencies(self) -> set[str]:
-        """Return named tensor dependencies consumed by this node."""
+        """Return all named dependencies consumed by this node."""
         return _collect_future_names(self.params)
+
+    @property
+    def required_dependencies(self) -> set[str]:
+        """Return dependencies that must be supplied by the caller."""
+        return _collect_future_names(self.params, required_only=True)
 
 
 class CornstarchExecutionPlan:
@@ -138,13 +144,34 @@ class CornstarchExecutionPlan:
             )
         )
 
+    def run_fused_modality_encoder(
+        self,
+        module: Any,
+        inputs: Mapping[str, Mapping[str, Any]] | None = None,
+        name: str | None = None,
+        **modality_inputs: Mapping[str, Any],
+    ) -> ExecutionFuture:
+        """Add one fused producer node returning a modality-keyed output mapping."""
+        provided = dict(inputs or {})
+        duplicates = set(provided) & set(modality_inputs)
+        if duplicates:
+            raise ValueError(f"Duplicate fused modality inputs: {sorted(duplicates)}")
+        provided.update(modality_inputs)
+        return self._add_node(
+            ExecutionNode(
+                name=name or "fused_encoder_outputs",
+                kind="run_fused_modality_encoder",
+                params={"module": module, "inputs": provided},
+            )
+        )
+
     def merge_modality_encoder_outputs(
         self,
         language_model: Any,
         input_ids: Any,
         labels: Any,
         modality_token_ids: Mapping[str, int],
-        encoder_outputs: Mapping[str, Any] | None = None,
+        encoder_outputs: Mapping[str, Any] | ExecutionFuture | None = None,
         language_model_inputs: Mapping[str, Any] | None = None,
         name: str | None = None,
     ) -> ExecutionFuture:
@@ -157,7 +184,10 @@ class CornstarchExecutionPlan:
                     "language_model": language_model,
                     "input_ids": input_ids,
                     "labels": labels,
-                    "encoder_outputs": dict(encoder_outputs or {}),
+                    "encoder_outputs": (
+                        encoder_outputs if isinstance(encoder_outputs, ExecutionFuture)
+                        else dict(encoder_outputs or {})
+                    ),
                     "modality_token_ids": dict(modality_token_ids),
                     "language_model_inputs": dict(language_model_inputs or {}),
                 },
@@ -322,7 +352,9 @@ class CornstarchExecutionPlan:
         values = dict(inputs or {})
         last_output = None
         for node in ordered_nodes:
-            missing = sorted(dep for dep in node.dependencies if dep not in values)
+            missing = sorted(
+                dep for dep in node.required_dependencies if dep not in values
+            )
             if missing:
                 raise ValueError(
                     f"Node {node.name!r} cannot run because inputs are missing: {missing}"
@@ -339,15 +371,21 @@ class CornstarchExecutionPlan:
                 for arg_name, value in node.params["inputs"].items()
             }
             return node.params["module"](**encoder_inputs)
+        if node.kind == "run_fused_modality_encoder":
+            fused_inputs = {}
+            for modality, modality_inputs in node.params["inputs"].items():
+                resolved = _resolve_optional_modality_inputs(modality_inputs, values)
+                if resolved is not None:
+                    fused_inputs[modality] = resolved
+            return node.params["module"](inputs=fused_inputs)
         if node.kind == "merge_modality_encoder_outputs":
             return merge_modality_encoder_outputs(
                 language_model=node.params["language_model"],
                 input_ids=_resolve_value(node.params["input_ids"], values),
                 labels=_resolve_value(node.params["labels"], values),
-                encoder_outputs={
-                    modality: _resolve_value(value, values)
-                    for modality, value in node.params["encoder_outputs"].items()
-                },
+                encoder_outputs=_resolve_value(
+                    node.params["encoder_outputs"], values
+                ),
                 modality_token_ids=node.params["modality_token_ids"],
                 language_model_inputs={
                     key: _resolve_value(value, values)
@@ -366,20 +404,40 @@ class CornstarchExecutionPlan:
         return "".join(char if char.isalnum() else "_" for char in name)
 
 
-def _collect_future_names(value: Any) -> set[str]:
+def _collect_future_names(value: Any, *, required_only: bool = False) -> set[str]:
     if isinstance(value, ExecutionFuture):
-        return {value.name}
+        return set() if required_only and value.optional else {value.name}
     if isinstance(value, Mapping):
         names: set[str] = set()
         for item in value.values():
-            names.update(_collect_future_names(item))
+            names.update(_collect_future_names(item, required_only=required_only))
         return names
     if isinstance(value, (list, tuple)):
         names: set[str] = set()
         for item in value:
-            names.update(_collect_future_names(item))
+            names.update(_collect_future_names(item, required_only=required_only))
         return names
     return set()
+
+
+def _resolve_optional_modality_inputs(
+    declared: Mapping[str, Any], values: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    all_dependencies = _collect_future_names(declared)
+    missing = all_dependencies - set(values)
+    if not missing:
+        return {
+            key: _resolve_value(value, values) for key, value in declared.items()
+        }
+    required_missing = _collect_future_names(declared, required_only=True) - set(values)
+    if required_missing:
+        raise KeyError(next(iter(sorted(required_missing))))
+    if missing != all_dependencies:
+        raise ValueError(
+            "Optional inputs for one fused modality must be present or absent "
+            f"together; missing {sorted(missing)}"
+        )
+    return None
 
 
 def _resolve_value(value: Any, values: Mapping[str, Any]) -> Any:
@@ -559,7 +617,11 @@ def _first_output_tensor(output: Any) -> torch.Tensor:
     if hasattr(output, "last_hidden_state"):
         return output.last_hidden_state
     if isinstance(output, Mapping):
-        return output["last_hidden_state"]
+        if "last_hidden_state" in output:
+            return output["last_hidden_state"]
+        if "hidden_states" in output:
+            return output["hidden_states"]
+        raise KeyError("Output mapping has neither last_hidden_state nor hidden_states.")
     if isinstance(output, tuple):
         return output[0]
     raise TypeError(f"Cannot extract hidden states from output of type {type(output).__name__}.")

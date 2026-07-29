@@ -4,6 +4,7 @@ from cornstarch.models import (
     CornstarchAudioEncoder,
     CornstarchEncoder,
     CornstarchEncoderBase,
+    CornstarchFusedModalityEncoder,
     CornstarchLanguageModel,
     CornstarchVisionEncoder,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "CornstarchAudioEncoder",
     "CornstarchEncoder",
     "CornstarchEncoderBase",
+    "CornstarchFusedModalityEncoder",
     "CornstarchLanguageModel",
     "CornstarchVisionEncoder",
 ]

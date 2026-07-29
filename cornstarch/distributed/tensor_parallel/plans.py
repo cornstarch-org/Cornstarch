@@ -10,6 +10,7 @@ plan is unreachable and cannot be validated through Cornstarch's unified model
 lifecycle. Hybrid models select a plan by semantic ``layer_type``; the TP
 implementation itself does not contain a family-specific branch ladder.
 """
+
 from __future__ import annotations
 
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
@@ -32,6 +33,32 @@ ATTENTION_ONLY_TP_PLAN: dict = {
     "self_attn.o_proj": RowwiseParallel(),
 }
 
+ENCODER_ATTN_MLP_TP_PLAN: dict = {
+    "self_attn.q_proj": ColwiseParallel(),
+    "self_attn.k_proj": ColwiseParallel(),
+    "self_attn.v_proj": ColwiseParallel(),
+    "self_attn.out_proj": RowwiseParallel(),
+    "mlp.fc1": ColwiseParallel(),
+    "mlp.fc2": RowwiseParallel(),
+}
+
+GEMMA4_VISION_TP_PLAN: dict = {
+    "self_attn.q_proj.linear": ColwiseParallel(),
+    "self_attn.k_proj.linear": ColwiseParallel(),
+    "self_attn.v_proj.linear": ColwiseParallel(),
+    "self_attn.o_proj.linear": RowwiseParallel(),
+    "mlp.gate_proj.linear": ColwiseParallel(),
+    "mlp.up_proj.linear": ColwiseParallel(),
+    "mlp.down_proj.linear": RowwiseParallel(),
+}
+WHISPER_TP_PLAN: dict = {
+    "self_attn.q_proj": ColwiseParallel(),
+    "self_attn.k_proj": ColwiseParallel(),
+    "self_attn.v_proj": ColwiseParallel(),
+    "self_attn.out_proj": RowwiseParallel(),
+    "fc1": ColwiseParallel(),
+    "fc2": RowwiseParallel(),
+}
 # MoE layers shard the token mixer over TP while their router and expert FFNs
 # remain replicated across TP lanes; EP independently owns expert placement.
 GATED_DELTA_TP_PLAN: dict = {
@@ -50,6 +77,11 @@ DENSE_GATED_DELTA_TP_PLAN: dict = {
 _DEFAULT_PLANS: dict[str, dict] = {
     "LlamaConfig": DENSE_ATTN_MLP_TP_PLAN,
     "Qwen3_5MoeTextConfig": ATTENTION_ONLY_TP_PLAN,
+    "CLIPVisionConfig": ENCODER_ATTN_MLP_TP_PLAN,
+    "Gemma4VisionConfig": GEMMA4_VISION_TP_PLAN,
+    "Llama4TextConfig": ATTENTION_ONLY_TP_PLAN,
+    "Siglip2VisionConfig": ENCODER_ATTN_MLP_TP_PLAN,
+    "WhisperConfig": WHISPER_TP_PLAN,
     "Qwen3_5TextConfig": DENSE_ATTN_MLP_TP_PLAN,
 }
 

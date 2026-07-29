@@ -16,10 +16,12 @@ from cornstarch.models.lora import FinetuningMode, attach_lora, configure_finetu
 from cornstarch.models.multimodal import (
     CornstarchEncoderToLanguageProjectorConfig,
     CornstarchExecutionPlan,
+    CornstarchFusedModalityEncoder,
     CornstarchModalityEncoder,
     CornstarchMultimodalConfig,
     CornstarchProjector,
     ExecutionFuture,
+    build_fused_modality_encoder,
     build_modality_encoder,
 )
 from cornstarch.models.vision_encoder import CornstarchVisionEncoder
@@ -31,6 +33,7 @@ __all__ = [
     "CornstarchEncoder",
     "CornstarchEncoderToLanguageProjectorConfig",
     "CornstarchExecutionPlan",
+    "CornstarchFusedModalityEncoder",
     "CornstarchLanguageModel",
     "CornstarchModalityEncoder",
     "CornstarchMultimodalConfig",
@@ -41,6 +44,7 @@ __all__ = [
     "RepeatedLayerCompileConfig",
     "RepeatedLayerOffloadConfig",
     "attach_lora",
+    "build_fused_modality_encoder",
     "build_modality_encoder",
     "configure_finetuning",
     "from_hf_config",

@@ -55,8 +55,12 @@ from cornstarch.distributed.parallel_config import ParallelConfig
 from cornstarch.distributed.parallelization import (
     ParallelContext,
     ParallelizationPlan,
+    ScheduleContext,
 )
-from cornstarch.distributed.pipeline_parallel import apply_pipeline_parallel
+from cornstarch.distributed.pipeline_parallel import (
+    PipelinePartitionSpec,
+    apply_pipeline_parallel,
+)
 from cornstarch.distributed.pipeline_parallel.schedule import (
     BasePipelineSchedule,
     MeshLayout,
@@ -84,6 +88,7 @@ __all__ = [
     "MakespanMinContextParallelSplitter",
     # pipeline parallel
     "apply_pipeline_parallel",
+    "PipelinePartitionSpec",
     "TrainingSchedule",
     "BasePipelineSchedule",
     "OneForwardOneBackwardSchedule",
@@ -97,4 +102,5 @@ __all__ = [
     "ParallelConfig",
     "ParallelizationPlan",
     "ParallelContext",
+    "ScheduleContext",
 ]

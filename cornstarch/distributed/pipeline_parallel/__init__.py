@@ -6,6 +6,7 @@ import torch.nn as nn
 from cornstarch.distributed.pipeline_parallel.forward_spec_wrapper import (
     PipelineParallelForwardSpec,
 )
+from cornstarch.distributed.pipeline_parallel.partition import PipelinePartitionSpec
 from cornstarch.distributed.process_group_mesh import ModalProcessGroupMesh
 from cornstarch.models.model_base import CornstarchModelBase
 
@@ -13,6 +14,7 @@ from cornstarch.models.model_base import CornstarchModelBase
 def apply_pipeline_parallel(
     module: CornstarchModelBase,
     mesh: ModalProcessGroupMesh,
+    partition: PipelinePartitionSpec | None = None,
 ) -> None:
     """Distribute a model across pipeline stages.
 
@@ -35,7 +37,15 @@ def apply_pipeline_parallel(
 
     layers = getattr(module, layers_name)
     total_layers = len(layers)
-    start, end = mesh.distribute_layers(total_layers)
+    start, end = (
+        mesh.distribute_layers(total_layers)
+        if partition is None
+        else partition.layer_range(
+            total_layers=total_layers,
+            stage=mesh.stage,
+            num_stages=mesh.num_stages,
+        )
+    )
     setattr(module, layers_name, nn.ModuleList(list(layers)[start:end]))
     # Materialization still maps this sliced ModuleList back to the original HF
     # checkpoint/topology.  Preserve the global index so constant parameters
