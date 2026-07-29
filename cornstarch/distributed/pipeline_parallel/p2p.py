@@ -161,19 +161,24 @@ class PipelineP2PCommunication:
     def send_forward_recv_backward(
         self, output: Any, send_first: bool = True
     ) -> Any | None:
-        """Simultaneously send forward activations and receive backward gradients."""
-        next_ranks = self._mesh.get_next_ranks()
-        if not next_ranks:
-            return None
-        received = self._exchange(output, next_ranks, next_ranks, send_first)
-        return received[0] if len(received) == 1 else received
+        """Send forward activations, then receive backward gradients.
+
+        The object protocol has separate size and payload phases. Completing the
+        forward object before starting the backward object prevents those phases
+        from crossing when an H2 neighbor is still in its deeper warmup.
+        """
+        self.send_forward(output)
+        return self.recv_backward()
 
     def send_backward_recv_forward(
-        self, grad: Any, send_first: bool = True
+        self, grad: Any, send_first: bool = False
     ) -> Any | None:
-        """Simultaneously send backward gradients and receive forward activations."""
-        prev_ranks = self._mesh.get_prev_ranks()
-        if not prev_ranks:
-            return None
-        received = self._exchange(grad, prev_ranks, prev_ranks, send_first)
-        return received[0] if len(received) == 1 else received
+        """Receive forward activations while sending backward gradients.
+
+        Receive-first ordering is required by the deeper H2 warmup: the previous
+        stage may still be in a forward-only warmup send and cannot receive this
+        gradient until that activation transfer completes.
+        """
+        forward = self.recv_forward()
+        self.send_backward(grad)
+        return forward

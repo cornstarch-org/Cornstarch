@@ -434,8 +434,8 @@ class TestCrossMeshCPRouting(GlooDistributedTestBase):
                 torch.testing.assert_close(features.grad, expected_grad)
 
 
-class TestCrossMeshCPCompiledSchedule(GlooDistributedTestBase):
-    """An actual ParallelContext routes CP2 projected rows into an LLM CP4."""
+class TestCrossMeshCPZeroBubbleSchedule(GlooDistributedTestBase):
+    """ZB-H2 routes CP2 projected rows into an LLM CP4 without stale seam state."""
 
     @property
     def world_size(self) -> int:
@@ -450,6 +450,7 @@ class TestCrossMeshCPCompiledSchedule(GlooDistributedTestBase):
             modality_encoder,
             ParallelConfig(
                 pipeline_parallel_size=1,
+                pipeline_schedule="zbpp",
                 context_parallel_size=2,
                 context_parallel_splitter=source_splitter,
             ),
@@ -458,6 +459,7 @@ class TestCrossMeshCPCompiledSchedule(GlooDistributedTestBase):
             language_model,
             ParallelConfig(
                 pipeline_parallel_size=1,
+                pipeline_schedule="zbpp",
                 context_parallel_size=4,
                 context_parallel_splitter=destination_splitter,
             ),
@@ -596,7 +598,7 @@ class TestCrossMeshCPCompiledSchedule(GlooDistributedTestBase):
             patch.object(dist, "broadcast", side_effect=AssertionError("broadcast")),
         ):
             result = ctx.create_schedule(exec_plan, output).step(
-                [microbatch], _criterion, return_loss=True
+                [microbatch, microbatch, microbatch], _criterion, return_loss=True
             )
             ctx.sync_gradients()
 

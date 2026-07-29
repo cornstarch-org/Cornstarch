@@ -122,6 +122,7 @@ def _run_combo(
     moe: bool,
     *,
     config: object | None = None,
+    pipeline_schedule: str = "1f1b",
 ) -> None:
     dp, pp, cp, tp, ep = combo
     world_size = dp * pp * cp * tp * ep
@@ -136,6 +137,7 @@ def _run_combo(
             context_parallel_size=cp,
             data_parallel_size=dp,
             expert_parallel_size=ep,
+            pipeline_schedule=pipeline_schedule,
         ),
     )
     ctx = plan.materialize("cpu", dtype=torch.float32)
@@ -161,9 +163,13 @@ def _run_combo(
 
     # The microbatch list is the user's responsibility (collate_fn); here split
     # the batch into 2 microbatches under PP, otherwise a single microbatch.
-    num_microbatches = 2 if pp > 1 else 1
+    num_microbatches = (
+        2 * pp - 1
+        if pp > 1 and pipeline_schedule == "zbpp"
+        else 2 if pp > 1 else 1
+    )
     microbatches = [
-        {k: v.chunk(num_microbatches, dim=0)[i] for k, v in batch.items()}
+        {k: v.tensor_split(num_microbatches, dim=0)[i] for k, v in batch.items()}
         for i in range(num_microbatches)
     ]
 
@@ -239,6 +245,39 @@ class TestDenseQwenTensorPipelineComposition(GlooDistributedTestBase):
             (1, 2, 1, 2, 1),
             moe=False,
             config=_dense_qwen_config(),
+        )
+
+
+@instantiate_parametrized_tests
+class TestZeroBubbleDenseComposition(GlooDistributedTestBase):
+    """ZB-H2 through the declarative PP and PP+TP materialization paths."""
+
+    @property
+    def world_size(self) -> int:
+        return _world_size_from_name(self._testMethodName)
+
+    @parametrize(
+        "combo",
+        [(1, 2, 1, 1, 1), (1, 2, 1, 2, 1)],
+        name_fn=_name,
+    )
+    def test(self, combo):
+        _run_combo(self, combo, moe=False, pipeline_schedule="zbpp")
+
+
+class TestZeroBubbleExpertComposition(GlooDistributedTestBase):
+    """ZB-H2 split expert gradients compose with PP and EP routing."""
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def test_dp1_pp2_cp1_tp1_ep2(self) -> None:
+        _run_combo(
+            self,
+            (1, 2, 1, 1, 2),
+            moe=True,
+            pipeline_schedule="zbpp",
         )
 
 
